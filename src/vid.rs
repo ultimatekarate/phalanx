@@ -12,9 +12,9 @@ use nokhwa::Camera;
 use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::pixel_format::RgbFormat;
 
-use ed25519_dalek::{Keypair, Signer, Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{SigningKey, Signer, Signature, Verifier, VerifyingKey};
 
-pub fn sign_witness_data(keypair: &Keypair, shard: &VideoShard) -> Vec<u8> {
+pub fn sign_witness_data(keypair: &SigningKey, shard: &VideoShard) -> Vec<u8> {
     // 1. Serialize the shard to bytes so we can sign it
     let shard_bytes = postcard::to_stdvec(shard).unwrap();
     
