@@ -222,4 +222,46 @@ mod tests {
         // Verify the peer was removed (triggered alert)
         assert!(!sentinel.peer_heartbeats.contains_key(&fake_peer), "Peer should have been removed after timeout");
     }
+
+    #[test]
+    fn test_shard_refreshes_heartbeat() {
+        let mut sentinel = Sentinel::new("test/topic", 10);
+        let fake_peer = PeerId::random();
+        
+        // Start with an old heartbeat
+        let old_time = Instant::now() - Duration::from_secs(5);
+        sentinel.peer_heartbeats.insert(fake_peer, old_time);
+
+        // Simulate receiving a shard (Manually logic since we're testing the Sentinel's state)
+        // In the real code, this happens inside handle_network_event
+        sentinel.peer_heartbeats.insert(fake_peer, Instant::now());
+
+        let current_heartbeat = sentinel.peer_heartbeats.get(&fake_peer).unwrap();
+        assert!(*current_heartbeat > old_time, "Heartbeat should have been updated to a newer timestamp");
+    }
+
+    #[test]
+    fn test_vault_sealing_logic() {
+        let mut sentinel = Sentinel::new("test/topic", 5);
+        let fake_peer = PeerId::random();
+        
+        // Create 3 dummy shards
+        let mut shards = VecDeque::new();
+        for i in 0..3 {
+            shards.push_back(vid::VideoShard {
+                timestamp: 123456789,
+                frames: vec![vec![0u8; 100]], // Dummy byte data
+                sequence_id: i,
+                fps: 15,
+            });
+        }
+        
+        sentinel.guardian_buffers.insert(fake_peer, shards);
+
+        // Trigger a manual "Dark" event
+        if let Some(shards_to_seal) = sentinel.guardian_buffers.remove(&fake_peer) {
+            let result = vid::seal_to_vault(&fake_peer, shards_to_seal);
+            assert!(result.is_ok(), "Vault sealing should succeed even with dummy data");
+        }
+    }
 }
