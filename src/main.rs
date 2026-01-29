@@ -103,59 +103,59 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Timers
     let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(1));
     let mut cleanup_timer = tokio::time::interval(Duration::from_secs(5));
-    const PULSE_TIMEOUT: Duration = Duration::from_secs(5); // 5 seconds of silence = Seizure/Crash
+    const PULSE_TIMEOUT: Duration = Duration::from_secs(10); // 5 seconds of silence = Seizure/Crash
     
 
-// 1. Define the communication channel
-let (video_tx, mut video_rx) = tokio::sync::mpsc::channel::<vid::VideoShard>(100);
+    // Define the communication channel
+    let (video_tx, mut video_rx) = tokio::sync::mpsc::channel::<vid::VideoShard>(100);
 
-// 2. Spawn the "Eyes" Task
-std::thread::spawn(async move || {
-    let mut shredder = vid::Shredder::new();
-    
-    // Move camera initialization INSIDE the task
-    let mut camera = Camera::new(
-        CameraIndex::Index(0), 
-        RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate)
-    ).expect("Webcam not found");
-    camera.open_stream().expect("Camera lock failed");
+    // 2. Spawn the "Eyes" Task
+    std::thread::spawn(move || {
+        let mut shredder = vid::Shredder::new();
+        
+        // Move camera initialization INSIDE the task
+        let mut camera = Camera::new(
+            CameraIndex::Index(0), 
+            RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate)
+        ).expect("Webcam not found");
+        camera.open_stream().expect("Camera lock failed");
 
-    let mut frame_bundle = Vec::new();
-    let frame_duration = std::time::Duration::from_millis(66); // ~15 FPS
+        let mut frame_bundle = Vec::new();
+        let frame_duration = std::time::Duration::from_millis(66); // ~15 FPS
 
-    loop {
-        if let Ok(frame) = camera.frame() {
-            if let Ok(decoded) = frame.decode_image::<RgbFormat>() {
-                let (w, h) = (decoded.width(), decoded.height());
-                
-                // Compress individual frame
-                if let Ok(jpeg) = vid::compress_frame(decoded.into_raw(), w, h) {
-                    frame_bundle.push(jpeg);
+        loop {
+            if let Ok(frame) = camera.frame() {
+                if let Ok(decoded) = frame.decode_image::<RgbFormat>() {
+                    let (w, h) = (decoded.width(), decoded.height());
+                    
+                    // Compress individual frame
+                    if let Ok(jpeg) = vid::compress_frame(decoded.into_raw(), w, h) {
+                        frame_bundle.push(jpeg);
+                    }
                 }
             }
-        }
 
-        // Once we have 15 frames (1 second of footage), send the bundle
-        if frame_bundle.len() >= 15 {
-            let shard = vid::VideoShard {
-                timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-                frames: frame_bundle.split_off(0), // Clears the bundle for the next second
-                sequence_id: shredder.next_id(), // You'll need a small helper method for this
-                fps: 15,
-            };
-            
-            if video_tx.blocking_send(shard).is_err() {
-                break; // Exit if the main loop closed
+            // Once we have 15 frames (1 second of footage), send the bundle
+            if frame_bundle.len() >= 15 {
+
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                let shard = vid::VideoShard {
+                    timestamp: now,
+                    frames: frame_bundle.split_off(0), // Clears the bundle for the next second
+                    sequence_id: shredder.next_id(), // You'll need a small helper method for this
+                    fps: 15,
+                };
+                
+                if video_tx.blocking_send(shard).is_err() {
+                    break; // Exit if the main loop closed
+                }
             }
+            std::thread::sleep(frame_duration);
         }
-        std::thread::sleep(frame_duration)
-    }
-});
+    });
 
     loop {
         select! {
-
-
             Some(shard) = video_rx.recv() => {
                 let payload = postcard::to_stdvec(&shard).unwrap();
                 swarm.behaviour_mut().gossipsub.publish(topic.clone(), payload).ok();
@@ -164,6 +164,7 @@ std::thread::spawn(async move || {
 
             // BRANCH B: The Dead Man's Pulse (The Heartbeat)
             _ = heartbeat_timer.tick() => {
+                println!("Pulse sent.");
                 let pulse = format!("ALIVE|{}", swarm.local_peer_id());
                 let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), pulse.as_bytes());
             }
@@ -180,12 +181,29 @@ std::thread::spawn(async move || {
             // make sure that what they are recording is still uploaded.
             _ = cleanup_timer.tick() => {
                 let now = Instant::now();
+                let local_id = *swarm.local_peer_id(); // Get our own ID
+
                 peer_heartbeats.retain(|id, &mut last| {
+
+                    // Don't check on yourself!
+                    if id == &local_id { return true; }
+
                     if now.duration_since(last) > PULSE_TIMEOUT {
                         println!("[!!!] ALERT: Witness {} has gone dark. Finalizing evidence.", id);
 
                         if let Some(shards) = guardian_buffers.remove(id) {
-                            let _ = vid::seal_to_vault(id, shards);
+                            if let Err(e) = vid::seal_to_vault(id, shards) {
+                                eprintln!("Vault sealing failed: {}", e);
+                            } else {
+                                // 2. TRIGGER RECOVERY: Turn those shards into JPEGs in ./recovered/
+                                let peer_id_str = id.to_string();
+                                if let Err(e) = vid::recover_vault_to_images(&peer_id_str) {
+                                    eprintln!("Recovery failed: {}", e);
+                                } else {
+                                    // 3. OPTIONAL: Generate the contact sheet proof
+                                    let _ = vid::verify_video_motion(&peer_id_str);
+                                }
+                            }
                         }
                         false 
                     } else { true }
@@ -196,8 +214,11 @@ std::thread::spawn(async move || {
             event = swarm.select_next_some() => match event {
                 libp2p::swarm::SwarmEvent::Behaviour(PhalanxEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, _multiaddr) in list {
-                        println!("Shield Overlapped: {peer_id}");
-                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                        if !peer_heartbeats.contains_key(&peer_id) {
+                            println!("Shield Overlapped: {peer_id}");
+                            swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                            peer_heartbeats.entry(peer_id).or_insert(Instant::now());
+                        }
                     }
                 },
                 libp2p::swarm::SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(gossipsub::Event::Message { propagation_source, message, .. })) => {

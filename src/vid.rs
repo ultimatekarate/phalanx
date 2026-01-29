@@ -24,6 +24,7 @@ pub struct VideoShard {
     pub fps: u8
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WitnessEnvelope {
     pub original_shard: VideoShard, // The data from the uploader
     pub witness_peer_id: String,   // PeerID
@@ -49,25 +50,16 @@ impl Shredder {
         id
     }
 
-    /// This is a single image fallback
     pub fn create_shard(&mut self, buffer: Vec<Vec<u8>>) -> VideoShard {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
 
-        let shard = VideoShard {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        VideoShard {
             timestamp: now,
             frames: buffer,
-            sequence_id: self.current_sequence,
+            sequence_id: self.next_id(),
             fps: 15
-        };
-
-        self.current_sequence += 1;
-        shard
+        }
     }
-
-
 }
 
 pub fn compress_frame(raw_pixels: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, String> {
@@ -175,6 +167,52 @@ pub fn seal_to_vault(peer_id: &libp2p::PeerId, shards: VecDeque<VideoShard>) -> 
     Ok(())
 }
 
+pub fn verify_video_motion(peer_id: &str) -> std::io::Result<()> {
+    use image::{GenericImage, RgbImage, imageops};
+
+    let input_dir = format!("./recovered/{}/", peer_id);
+    let output_file = format!("./recovered/{}_contact_sheet.jpg", peer_id);
+
+    // 1. Collect all recovered JPEGs
+    let mut entries: Vec<_> = fs::read_dir(&input_dir)?
+        .filter_map(|e| e.ok())
+        .collect();
+    
+    // Sort them so they appear in order
+    entries.sort_by_key(|e| e.path());
+
+    if entries.is_empty() {
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No recovered frames found."));
+    }
+
+    // 2. Create a 3x3 grid (9 frames total)
+    // Assuming 1080p frames, this will be a large image.
+    let frame_w = 1920;
+    let frame_h = 1080;
+    let mut contact_sheet = RgbImage::new(frame_w * 3, frame_h * 3);
+
+    println!("Stitching contact sheet for {}...", peer_id);
+
+    for (idx, entry) in entries.iter().take(9).enumerate() {
+        let img = image::open(entry.path())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+            .to_rgb8();
+        
+        let x = (idx % 3) as u32 * frame_w;
+        let y = (idx / 3) as u32 * frame_h;
+        
+        // Copy the frame into the grid
+        contact_sheet.copy_from(&img, x, y)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    }
+
+    // 3. Save the proof
+    contact_sheet.save(&output_file)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+    println!("Evidence Verified! View the grid at: {}", output_file);
+    Ok(())
+}
 
 // ===============
 //  HARDWARE TEST
@@ -295,6 +333,13 @@ mod tests {
         // Cleanup
         let _ = std::fs::remove_dir_all("./vault/test_peer_recovery");
         let _ = std::fs::remove_dir_all("./recovered/test_peer_recovery");
+    }
+
+    #[test]
+    fn manual_verify_motion() {
+        // Replace with the PeerID folder currently in your ./recovered/ directory
+        let peer_id = "12D3KooWRm8rukdtBLihH9U7mnJ6GGGxAaGBMvNBjtZWsrNiyAUS"; 
+        let _ = verify_video_motion(peer_id);
     }
 }
 
