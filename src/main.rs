@@ -76,6 +76,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .validation_mode(gossipsub::ValidationMode::Permissive)
                 .message_id_fn(message_id_fn)
                 .max_transmit_size(8 * 1024 * 1024)// 8MB per shard
+                .do_px()
                 .build()
                 .map_err(|msg| io::Error::new(io::ErrorKind::Other, msg))?;
 
@@ -93,7 +94,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // topic subscription and listening
     let topic = gossipsub::IdentTopic::new("phalanx/emergency/the-thing");
     swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+
+    let port = std::env::args().nth(1).unwrap_or("0".to_string());
+    let listen_addr = format!("/ip4/0.0.0.0/tcp/{}", port);
+    swarm.listen_on(listen_addr.parse()?)?;
 
     // Define the local state
     // let mut stdin = io::BufReader::new(io::stdin()).lines();
@@ -158,14 +162,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         select! {
             Some(shard) = video_rx.recv() => {
                 let payload = postcard::to_stdvec(&shard).unwrap();
-                swarm.behaviour_mut().gossipsub.publish(topic.clone(), payload).ok();
-                println!("✔ Video Clip sent: Shard #{}", shard.sequence_id);
+                match swarm.behaviour_mut().gossipsub.publish(topic.clone(), payload) {
+                    Ok(id) => println!("Shard #{} broadcasted (ID: {:?})", shard.sequence_id, id),
+                    Err(e) => eprintln!("BROADCAST ERROR: {:?}", e),
+                }
             }
 
             // BRANCH B: The Dead Man's Pulse (The Heartbeat)
             _ = heartbeat_timer.tick() => {
-                println!("Pulse sent.");
-                let pulse = format!("ALIVE|{}", swarm.local_peer_id());
+    
+                let mesh_peers = swarm.behaviour_mut().gossipsub.all_peers().count();
+    
+                if mesh_peers > 0 {
+                    // If this prints, Node B is sending pulses to NO ONE.
+                    println!("{} peers are listening",mesh_peers);
+                }
+                let pulse = format!("ALIVE|{}|{:?}", swarm.local_peer_id(), Instant::now());
                 let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), pulse.as_bytes());
             }
 
@@ -208,25 +220,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // BRANCH E: Network Events
             event = swarm.select_next_some() => match event {
                 libp2p::swarm::SwarmEvent::Behaviour(PhalanxEvent::Mdns(mdns::Event::Discovered(list))) => {
-                    for (peer_id, _multiaddr) in list {
+                    
+                    for (peer_id, multiaddr) in list {
                         if peer_id != *swarm.local_peer_id() {
-                            if !peer_heartbeats.contains_key(&peer_id) {
-                                println!("Shield Overlapped: {peer_id}");
-                                swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                                peer_heartbeats.entry(peer_id).or_insert((Instant::now()) + Duration::from_secs(10));
-                            }
+                            println!("Shield Overlapped: {peer_id}");
+                            let _ = swarm.dial(multiaddr.clone());
+                            swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                            peer_heartbeats.insert(peer_id,Instant::now() + Duration::from_secs(30));
+                        
                         }
                     }
                 },
                 libp2p::swarm::SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(gossipsub::Event::Message { propagation_source, message, .. })) => {
+                    
                     peer_heartbeats.insert(propagation_source, Instant::now());
-                    let msg_content = String::from_utf8_lossy(&message.data);
+                    let msg_data=&message.data;
                     
                     // Try to parse the heartbeat, if that fails try to parse shards
-                    if msg_content.starts_with("ALIVE|") {
-                        peer_heartbeats.insert(propagation_source, Instant::now());
-                    } 
-                    else if let Ok(shard) = postcard::from_bytes::<vid::VideoShard>(&message.data) {
+                    if let Ok(shard) = postcard::from_bytes::<vid::VideoShard>(msg_data) {
                         println!("Received Shard #{} from {}", shard.sequence_id, propagation_source);
             
                         // 3. Store in the Guardian Buffer
@@ -235,6 +246,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                         // 4. Protection: Only keep the last 30 shards (~1 minute of evidence)
                         if buffer.len() > 30 { buffer.pop_front(); }
+                    } else {
+                        let msg_content = String::from_utf8_lossy(msg_data);
+
+                        if msg_content.starts_with("ALIVE|") {
+                            // Clock was already reset at step 1, so we just acknowledge the pulse
+                            println!("Heartbeat from {}", propagation_source);
+                        }
                     }
                 },
                 _ => {}
