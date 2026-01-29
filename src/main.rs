@@ -9,7 +9,7 @@ use libp2p::{
 use std::error::Error;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
-use tokio::{io, io::AsyncBufReadExt, select};
+use tokio::{io, select};
 
 // Hardware and Media crates
 use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
@@ -97,48 +97,69 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Define the local state
     // let mut stdin = io::BufReader::new(io::stdin()).lines();
-    let mut shredder = vid::Shredder::new();
     let mut peer_heartbeats: HashMap<libp2p::PeerId, Instant> = HashMap::new();
     let mut guardian_buffers: HashMap<libp2p::PeerId, std::collections::VecDeque<vid::VideoShard>> = HashMap::new();
 
     // Timers
-    let mut shred_timer = tokio::time::interval(Duration::from_secs(2));
     let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(1));
     let mut cleanup_timer = tokio::time::interval(Duration::from_secs(5));
     const PULSE_TIMEOUT: Duration = Duration::from_secs(5); // 5 seconds of silence = Seizure/Crash
     
-    // Initialize the video stream
+
+// 1. Define the communication channel
+let (video_tx, mut video_rx) = tokio::sync::mpsc::channel::<vid::VideoShard>(100);
+
+// 2. Spawn the "Eyes" Task
+std::thread::spawn(async move || {
+    let mut shredder = vid::Shredder::new();
+    
+    // Move camera initialization INSIDE the task
     let mut camera = Camera::new(
         CameraIndex::Index(0), 
         RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate)
     ).expect("Webcam not found");
-    camera.open_stream().expect("Could not open camera stream.");
+    camera.open_stream().expect("Camera lock failed");
 
-    println!("Phalanx Sentinel Active: Hardware capture online. Peer ID: {}", swarm.local_peer_id());
+    let mut frame_bundle = Vec::new();
+    let frame_duration = std::time::Duration::from_millis(66); // ~15 FPS
+
+    loop {
+        if let Ok(frame) = camera.frame() {
+            if let Ok(decoded) = frame.decode_image::<RgbFormat>() {
+                let (w, h) = (decoded.width(), decoded.height());
+                
+                // Compress individual frame
+                if let Ok(jpeg) = vid::compress_frame(decoded.into_raw(), w, h) {
+                    frame_bundle.push(jpeg);
+                }
+            }
+        }
+
+        // Once we have 15 frames (1 second of footage), send the bundle
+        if frame_bundle.len() >= 15 {
+            let shard = vid::VideoShard {
+                timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                frames: frame_bundle.split_off(0), // Clears the bundle for the next second
+                sequence_id: shredder.next_id(), // You'll need a small helper method for this
+                fps: 15,
+            };
+            
+            if video_tx.blocking_send(shard).is_err() {
+                break; // Exit if the main loop closed
+            }
+        }
+        std::thread::sleep(frame_duration)
+    }
+});
 
     loop {
         select! {
-            // BRANCH A: The Video Shredder- Capture, Compress, Shred, and Publish
-            _ = shred_timer.tick() => {
-                // 1. Grab a frame from the hardware
-                if let Ok(frame) = camera.frame() {
-                    if let Ok(decoded) = frame.decode_image::<RgbFormat>() {
-                        let (w, h) = (decoded.width(), decoded.height());
 
-                        // Compress the captured frame
-                        if let Ok(jpeg_bytes) = vid::compress_frame(decoded.into_raw(), w, h) {
-                            // 4. Shred and Publish
-                            let shard = shredder.create_shard(jpeg_bytes);
-                            let payload = postcard::to_stdvec(&shard).unwrap();
-                        
-                            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), payload) {
-                                eprintln!("Broadcast Error: {e:?}");
-                            } else {
-                                println!("Snapshot sent: Shard {} ({} KB)", shard.sequence_id, shard.data.len() / 1024);
-                            }
-                        }
-                    }
-                }
+
+            Some(shard) = video_rx.recv() => {
+                let payload = postcard::to_stdvec(&shard).unwrap();
+                swarm.behaviour_mut().gossipsub.publish(topic.clone(), payload).ok();
+                println!("✔ Video Clip sent: Shard #{}", shard.sequence_id);
             }
 
             // BRANCH B: The Dead Man's Pulse (The Heartbeat)

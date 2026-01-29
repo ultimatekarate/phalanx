@@ -19,9 +19,9 @@ use ed25519_dalek::{SigningKey, Signer};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoShard {
     pub timestamp: u64,
-    pub data: Vec<u8>,
+    pub frames: Vec<Vec<u8>>,
     pub sequence_id: u32,
-    pub is_final: bool,
+    pub fps: u8
 }
 
 pub struct WitnessEnvelope {
@@ -34,7 +34,6 @@ pub struct WitnessEnvelope {
 pub struct Shredder {
     current_sequence: u32,
 }
-
 // =============
 //   CORE LOGIC
 // =============
@@ -44,8 +43,14 @@ impl Shredder {
         Self { current_sequence: 0 }
     }
 
-    /// Takes a raw buffer (from the camera) and "shreds" it into a Phalanx Shard
-    pub fn create_shard(&mut self, buffer: Vec<u8>) -> VideoShard {
+    pub fn next_id(&mut self) -> u32 {
+        let id = self.current_sequence;
+        self.current_sequence += 1;
+        id
+    }
+
+    /// This is a single image fallback
+    pub fn create_shard(&mut self, buffer: Vec<Vec<u8>>) -> VideoShard {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -53,14 +58,16 @@ impl Shredder {
 
         let shard = VideoShard {
             timestamp: now,
-            data: buffer,
+            frames: buffer,
             sequence_id: self.current_sequence,
-            is_final: false,
+            fps: 15
         };
 
         self.current_sequence += 1;
         shard
     }
+
+
 }
 
 pub fn compress_frame(raw_pixels: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, String> {
@@ -127,28 +134,23 @@ pub fn recover_vault_to_images(peer_id_str: &str) -> std::io::Result<()> {
 
     fs::create_dir_all(&recovery_path)?;
 
-    let entries = fs::read_dir(&vault_path)?;
-
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-
+    for entry in fs::read_dir(&vault_path)? {
+        let path = entry?.path();
         if path.extension().and_then(|s| s.to_str()) == Some("phlx") {
-            // 1. Read the binary shard
             let encoded_data = fs::read(&path)?;
             
-            // 2. Deserialize back into a VideoShard
             if let Ok(shard) = postcard::from_bytes::<VideoShard>(&encoded_data) {
-                // save as a standard JPG
-                let filename = format!("recovered_{}.jpg", shard.sequence_id);
-                let save_path = recovery_path.join(filename);
-                let mut file = File::create(save_path)?;
-                file.write_all(&shard.data)?;
-                
+                // Loop through all frames in this shard
+                for (i, frame_data) in shard.frames.iter().enumerate() {
+                    let filename = format!("recovered_shard{}_frame{}.jpg", shard.sequence_id, i);
+                    let save_path = recovery_path.join(filename);
+                    
+                    let mut file = File::create(save_path)?;
+                    file.write_all(frame_data)?;
+                }
             }
         }
     }
-
     println!("Recovered: {}", pure_id);
     Ok(())
 }
@@ -215,6 +217,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_shredder_id_increment() {
+        let mut shredder = Shredder::new();
+        assert_eq!(shredder.next_id(), 0);
+        assert_eq!(shredder.next_id(), 1);
+        assert_eq!(shredder.next_id(), 2);
+    }
+    #[test]
+    fn test_video_shard_structure() {
+        let mut shredder = Shredder::new();
+        
+        // Create a shard with two "frames"
+        let frames = vec![b"frame_one".to_vec(), b"frame_two".to_vec()];
+        let shard = VideoShard {
+            timestamp: 123456789,
+            frames: frames.clone(),
+            sequence_id: shredder.next_id(),
+            fps: 15,
+        };
+
+        assert_eq!(shard.sequence_id, 0);
+        assert_eq!(shard.frames.len(), 2);
+        assert_eq!(shard.frames[0], b"frame_one".to_vec());
+    }
+
+    #[test]
+    fn test_vault_creation_multi_frame() {
+        let test_id = libp2p::PeerId::random();
+        let mut shards = VecDeque::new();
+        
+        // Create a test shard with 3 dummy frames
+        shards.push_back(VideoShard {
+            timestamp: 100,
+            frames: vec![vec![1], vec![2], vec![3]],
+            sequence_id: 99,
+            fps: 15,
+        });
+
+        // Seal to disk
+        let result = seal_to_vault(&test_id, shards);
+        assert!(result.is_ok());
+
+        // Verify file exists
+        let path = format!("./vault/{}/shard_99.phlx", test_id);
+        assert!(Path::new(&path).exists(), "Vault file was not created");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(format!("./vault/{}", test_id));
+    }
+
+    #[test]
+    fn test_recovery_logic_alignment() {
+        // This test ensures that the recovery tool can handle the new Vec<Vec<u8>> structure
+        // We'll create a manual vault, run recovery, and check for output files.
+        let test_id_str = "test_peer_recovery";
+        let vault_dir = format!("./vault/{}", test_id_str);
+        fs::create_dir_all(&vault_dir).unwrap();
+
+        let shard = VideoShard {
+            timestamp: 100,
+            frames: vec![b"fake_jpg_data".to_vec()],
+            sequence_id: 1,
+            fps: 15,
+        };
+
+        let data = postcard::to_stdvec(&shard).unwrap();
+        fs::write(format!("{}/shard_1.phlx", vault_dir), data).unwrap();
+
+        // Run recovery
+        let result = recover_vault_to_images(test_id_str);
+        assert!(result.is_ok());
+
+        // Check if the recovered folder has our frame
+        let recovered_file = format!("./recovered/{}/recovered_shard1_frame0.jpg", test_id_str);
+        assert!(Path::new(&recovered_file).exists());
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all("./vault/test_peer_recovery");
+        let _ = std::fs::remove_dir_all("./recovered/test_peer_recovery");
+    }
+    /*
+    #[test]
     fn test_shredder_behavior() {
         let mut shredder = Shredder::new();
         let data = b"test_frame".to_vec();
@@ -253,14 +336,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(format!("./vault/{}", test_id));
     }
 
-/*     #[test]
+     #[test]
     fn test_camera_ingress() {
         let result = test_single_capture();
         assert!(result.is_ok(), "Camera failed: {:?}", result.err());
         let bytes = result.unwrap();
         println!("Captured frame size: {} bytes", bytes);
         assert!(bytes > 0);
-    } */
+    } 
 
     #[test]
     fn test_capture_and_save_image() {
@@ -297,6 +380,7 @@ mod tests {
         let folder_name = "12D3KooWRm8rukdtBLihH9U7mnJ6GGGxAaGBMvNBjtZWsrNiyAUS"; 
         let result = recover_vault_to_images(folder_name);
         assert!(result.is_ok());
-    }
+    }*/
 }
+
 
