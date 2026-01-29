@@ -17,6 +17,10 @@ use std::collections::HashMap;
 
 use tokio::{io, io::AsyncBufReadExt, select};
 
+use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
+use nokhwa::pixel_format::RgbFormat;
+use nokhwa::Camera;
+
 use phalanx::vid;
 
 // Define how Phalanx behaves on the network
@@ -49,6 +53,12 @@ impl From<mdns::Event> for PhalanxEvent {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+
+    match phalanx::vid::test_single_capture() {
+        Ok(size) => println!("Success! Captured a frame of {} bytes.", size),
+        Err(e) => println!("Hardware Error: {}", e),
+    }
+
     env_logger::init();
     println!("--- PHALANX: OVERLAPPING SHIELD INITIALIZING ---");
 
@@ -96,8 +106,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
     const PULSE_TIMEOUT: Duration = Duration::from_secs(5); // 5 seconds of silence = Seizure/Crash
     
     // STUB: Imagine this is a stream of data coming from the camera
-    let dummy_camera_data = vec![0u8; 1024];
+    let _dummy_camera_data = vec![0u8; 1024];
 
+    // 1. Pick the first available camera
+    let index = CameraIndex::Index(0); 
+
+    // 2. Request a standard format (High FPS isn't needed for evidence, stability is)
+    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
+
+    // 3. Open the camera
+    let mut camera = Camera::new(index, requested)
+        .expect("Could not find a webcam. Is it plugged in?");
+
+    camera.open_stream().expect("Could not open camera stream.");
+    println!("📷 Phalanx Sentinel Active: Hardware capture online.");
     let mut shred_timer = tokio::time::interval(Duration::from_secs(2));
     let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(1));
     let mut cleanup_timer = tokio::time::interval(Duration::from_secs(5));
@@ -107,13 +129,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // BRANCH A: The Video Shredder (The Spear)
             // This ticks every 2 seconds regardless of other network traffic
             _ = shred_timer.tick() => {
-                let shard = shredder.create_shard(dummy_camera_data.clone());
-                let payload = format!("SHARD|{}|{}", shard.sequence_id, shard.timestamp);
-                
-                if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), payload.as_bytes()) {
-                    eprintln!("Broadcast Failure: {e:?}");
-                } else {
-                    println!("✔ Shard {} pushed to Phalanx.", shard.sequence_id);
+                // 1. Grab a frame from the hardware
+                if let Ok(frame) = camera.frame() {
+                    // 2. Convert the raw frame to an image buffer
+                    let buffer = frame.decode_image::<RgbFormat>().unwrap();
+                    
+                    // 3. For now, let's just use the raw bytes (we'll add compression next)
+                    let raw_bytes = buffer.into_raw(); 
+                    
+                    // 4. Shred and Publish
+                    let shard = shredder.create_shard(raw_bytes);
+                    let payload = postcard::to_stdvec(&shard).unwrap();
+                    
+                    if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), payload) {
+                        eprintln!("Broadcast Error: {e:?}");
+                    } else {
+                        println!("✔ Snapshot sent: Shard {} ({} KB)", shard.sequence_id, shard.data.len() / 1024);
+                    }
                 }
             }
 

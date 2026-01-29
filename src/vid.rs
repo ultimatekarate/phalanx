@@ -3,6 +3,11 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::collections::VecDeque;
 use serde::{Serialize, Deserialize};
+
+use nokhwa::Camera;
+use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
+use nokhwa::pixel_format::RgbFormat;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoShard {
     pub timestamp: u64,
@@ -67,6 +72,35 @@ pub fn seal_to_vault(peer_id: &libp2p::PeerId, shards: VecDeque<VideoShard>) -> 
     Ok(())
 }
 
+pub fn test_single_capture() -> Result<usize, String> {
+    // 1. Identify the first camera
+    let index = CameraIndex::Index(0);
+    
+    // 2. Request a standard RGB format
+    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
+    
+    // 3. Initialize the hardware
+    let mut camera = Camera::new(index, requested)
+        .map_err(|e| format!("Failed to find camera: {}", e))?;
+
+    // 4. Open the stream
+    camera.open_stream()
+        .map_err(|e| format!("Failed to open stream: {}", e))?;
+
+    // 5. Capture one frame
+    // Note: Some cameras need a moment to "warm up" (auto-exposure), 
+    // but for a raw pixel test, the first frame is fine.
+    let frame = camera.frame()
+        .map_err(|e| format!("Failed to capture frame: {}", e))?;
+
+    let decoded = frame.decode_image::<RgbFormat>()
+        .map_err(|e| format!("Failed to decode pixels: {}", e))?;
+
+    let bytes = decoded.into_raw();
+    
+    Ok(bytes.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +142,39 @@ mod tests {
 
         // Cleanup: remove the test vault folder
         let _ = std::fs::remove_dir_all(format!("./vault/{}", test_id));
+    }
+
+    #[test]
+    fn test_camera_ingress() {
+        let result = test_single_capture();
+        assert!(result.is_ok(), "Camera failed: {:?}", result.err());
+        let bytes = result.unwrap();
+        println!("Captured frame size: {} bytes", bytes);
+        assert!(bytes > 0);
+    }
+
+    #[test]
+    fn test_capture_and_save_image() {
+        // 1. Capture the 6.2MB raw frame
+        let index = nokhwa::utils::CameraIndex::Index(0);
+        let requested = nokhwa::utils::RequestedFormat::new::<nokhwa::pixel_format::RgbFormat>(
+            nokhwa::utils::RequestedFormatType::AbsoluteHighestFrameRate
+        );
+        let mut camera = nokhwa::Camera::new(index, requested).unwrap();
+        camera.open_stream().unwrap();
+        let frame = camera.frame().unwrap();
+        let decoded = frame.decode_image::<nokhwa::pixel_format::RgbFormat>().unwrap();
+        
+        let (width, height) = (decoded.width(), decoded.height());
+        let raw_bytes = decoded.into_raw();
+
+        // 2. Compress it
+        let jpeg_bytes = compress_frame(raw_bytes, width, height).expect("Compression failed");
+
+        // 3. Save to disk in your project root
+        std::fs::write("sentinel_test_capture.jpg", &jpeg_bytes).unwrap();
+        
+        println!("📸 Saved compressed image ({} bytes) to sentinel_test_capture.jpg", jpeg_bytes.len());
     }
 }
 
