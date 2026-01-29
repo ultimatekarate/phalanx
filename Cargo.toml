@@ -1,0 +1,17 @@
+[package]
+name = "phalanx"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# The Networking Engine
+libp2p = { version = "0.53", features = ["tcp", "quic", "gossipsub", "mdns", "tokio","noise", "yamux", "macros"] }
+# Async Runtime (The heartbeat of the app)
+tokio = { version = "1.0", features = ["full"] }
+# Logging (To see the "Shield" forming in your terminal)
+env_logger = "0.11"
+log = "0.4"
+# Security
+ring = "0.17"
+serde = { version = "1.0", features = ["derive"] } 
+postcard = { version = "1.1.3", features = ["use-std"] }
