@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # The Networking Engine
-libp2p = { version = "0.53", features = ["tcp", "quic", "gossipsub", "mdns", "tokio","noise", "yamux", "macros"] }
+libp2p = { version = "0.56.0", features = ["tcp", "quic", "gossipsub", "mdns", "tokio","noise", "yamux", "macros"] }
 # Async Runtime (The heartbeat of the app)
 tokio = { version = "1.0", features = ["full"] }
 # Logging (To see the "Shield" forming in your terminal)
