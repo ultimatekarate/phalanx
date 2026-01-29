@@ -14,14 +14,14 @@ use nokhwa::pixel_format::RgbFormat;
 
 use ed25519_dalek::{SigningKey, Signer, Signature, Verifier, VerifyingKey};
 
-pub fn sign_witness_data(keypair: &SigningKey, shard: &VideoShard) -> Vec<u8> {
-    // 1. Serialize the shard to bytes so we can sign it
+pub fn sign_witness_data(signing_key: &SigningKey, shard: &VideoShard) -> Vec<u8> {
+    // Serialize the shard to bytes so we can sign it
     let shard_bytes = postcard::to_stdvec(shard).unwrap();
     
-    // 2. Sign the bytes with your private key
-    let signature = keypair.sign(&shard_bytes);
+    // Sign the bytes with  private key
+    let signature = signing_key.sign(&shard_bytes);
     
-    // 3. Return the signature as bytes
+    // Return the signature as bytes
     signature.to_bytes().to_vec()
 }
 
@@ -35,9 +35,9 @@ pub struct VideoShard {
 
 pub struct WitnessEnvelope {
     pub original_shard: VideoShard, // The data from the uploader
-    pub witness_peer_id: String,   // Your PeerID
+    pub witness_peer_id: String,   // PeerID
     pub receipt_timestamp: u64,    // When YOU received it
-    pub witness_signature: Vec<u8>, // Your cryptographic signature
+    pub witness_signature: Vec<u8>, // cryptographic signature
 }
 
 pub struct Shredder {
@@ -246,7 +246,7 @@ mod tests {
         // 2. Compress it
         let jpeg_bytes = compress_frame(raw_bytes, width, height).expect("Compression failed");
 
-        // 3. Save to disk in your project root
+        // 3. Save to disk in project root
         std::fs::write("sentinel_test_capture.jpg", &jpeg_bytes).unwrap();
         
         println!("Saved compressed image ({} bytes) to sentinel_test_capture.jpg", jpeg_bytes.len());
