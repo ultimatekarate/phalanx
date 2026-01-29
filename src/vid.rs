@@ -168,7 +168,7 @@ pub fn seal_to_vault(peer_id: &libp2p::PeerId, shards: VecDeque<VideoShard>) -> 
 }
 
 pub fn verify_video_motion(peer_id: &str) -> std::io::Result<()> {
-    use image::{GenericImage, RgbImage, imageops};
+    use image::{GenericImage, RgbImage};
 
     let input_dir = format!("./recovered/{}/", peer_id);
     let output_file = format!("./recovered/{}_contact_sheet.jpg", peer_id);
