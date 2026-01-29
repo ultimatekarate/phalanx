@@ -44,6 +44,10 @@ impl Shredder {
         Self { current_sequence: 0 }
     }
 
+    pub fn current_id(&self) -> u32 {
+        self.current_sequence
+    }
+
     pub fn next_id(&mut self) -> u32 {
         let id = self.current_sequence;
         self.current_sequence += 1;

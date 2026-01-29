@@ -33,34 +33,41 @@ impl PhalanxCamera {
             camera.open_stream().expect("CRITICAL: Camera stream lock failed");
 
             let mut frames = Vec::new();
-            println!("📸 Camera Thread: Hardware online at index {}", index);
+            println!("Camera Thread: Hardware online at index {}", index);
 
             loop {
-                if let Ok(frame) = camera.frame() {
-                    if let Ok(img_buf) = frame.decode_image::<RgbFormat>() {
-                        let width = img_buf.width();
-                        let height = img_buf.height();
-                        let raw_data = img_buf.into_raw();
-
-                        if let Ok(jpeg) = vid::compress_frame(raw_data, width, height) {
-                            frames.push(jpeg);
+                match camera.frame() {
+                    Ok(f) => {
+                        if let Ok(d) = f.decode_image::<RgbFormat>() {
+                            let (w, h) = (d.width(), d.height());
+                            match vid::compress_frame(d.into_raw(), w, h) {
+                                Ok(jpeg) => {
+                                    frames.push(jpeg);
+                                    // DEBUG: Print every 5 frames captured
+                                    if frames.len() % 5 == 0 {
+                                        println!("Camera: Captured {}/{}", frames.len(), fps);
+                                    }
+                                },
+                                Err(e) => eprintln!("Compression error: {}", e),
+                            }
                         }
                     }
+                    Err(e) => eprintln!("Frame error: {}", e),
                 }
 
-                // If we've collected enough frames for 1 second of footage
                 if frames.len() >= fps as usize {
+                    println!("Camera: Packaging Shard #{}...", shredder.current_id());
                     let shard = shredder.create_shard(frames.split_off(0));
                     
-                    // Use blocking_send because we are in a standard thread, not an async task
-                    if tx.blocking_send(shard).is_err() {
-                        println!("Camera thread exiting: Receiver dropped.");
-                        break;
+                    if let Err(e) = tx.blocking_send(shard) {
+                        eprintln!("Send Error: Main loop is not listening! {}", e);
+                        break; 
                     }
+                    println!("Camera: Shard handed to Network.");
                 }
-
                 std::thread::sleep(frame_duration);
             }
+            
         });
     }
 }

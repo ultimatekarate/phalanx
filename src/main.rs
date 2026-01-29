@@ -48,6 +48,15 @@ impl From<mdns::Event> for PhalanxEvent {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    env_logger::init();
+
+    ctrlc::set_handler(move || {
+        println!("\n[PHALANX] Manual Shutdown Signal Received.");
+        println!("[PHALANX] Releasing hardware and flushing buffers...");
+        std::process::exit(0);
+    }).expect("Error setting Ctrl-C handler");
+
+
     println!("--- PHALANX: INITIALIZING ---");
     let mut sentinel = Sentinel::new("phalanx/emergency/the-thing", 10);
 

@@ -54,7 +54,7 @@ impl Sentinel {
                 self.peer_heartbeats.insert(propagation_source, Instant::now());
 
                 if let Ok(shard) = postcard::from_bytes::<VideoShard>(&message.data) {
-                    println!("📸 Received Shard #{} from {}", shard.sequence_id, propagation_source);
+                    println!("Received Shard #{} from {}", shard.sequence_id, propagation_source);
                     let buffer = self.guardian_buffers.entry(propagation_source).or_insert_with(VecDeque::new);
                     buffer.push_back(shard);
                     if buffer.len() > 30 { buffer.pop_front(); }
