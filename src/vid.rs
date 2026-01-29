@@ -1,8 +1,11 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Write, Cursor};
 use std::collections::VecDeque;
 use serde::{Serialize, Deserialize};
+
+use image::codecs::jpeg::JpegEncoder;
+use image::{DynamicImage, ExtendedColorType};
 
 use nokhwa::Camera;
 use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
@@ -25,6 +28,19 @@ pub struct WitnessEnvelope {
 
 pub struct Shredder {
     current_sequence: u32,
+}
+
+pub fn compress_frame(raw_pixels: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let mut compressed_data = Vec::new();
+    
+    // 1. Point an encoder at our empty vector
+    let mut encoder = JpegEncoder::new_with_quality(&mut compressed_data, 60); // 60% quality is the 'sweet spot' for evidence
+    
+    // 2. Encode the raw RGB pixels into JPEG format
+    encoder.encode(&raw_pixels, width, height, ExtendedColorType::Rgb8)
+        .map_err(|e| format!("Compression failed: {}", e))?;
+    
+    Ok(compressed_data)
 }
 
 impl Shredder {
@@ -161,8 +177,13 @@ mod tests {
             nokhwa::utils::RequestedFormatType::AbsoluteHighestFrameRate
         );
         let mut camera = nokhwa::Camera::new(index, requested).unwrap();
-        camera.open_stream().unwrap();
-        let frame = camera.frame().unwrap();
+        camera.open_stream().expect("Could not open stream - Check if another app is using the cam!");
+        let frame = match camera.frame() {
+            Ok(f) => f,
+            Err(e) => {
+                panic!("ERROR: The camera is being used by another app! (Details: {:?})", e);
+            }
+        };
         let decoded = frame.decode_image::<nokhwa::pixel_format::RgbFormat>().unwrap();
         
         let (width, height) = (decoded.width(), decoded.height());
@@ -174,7 +195,7 @@ mod tests {
         // 3. Save to disk in your project root
         std::fs::write("sentinel_test_capture.jpg", &jpeg_bytes).unwrap();
         
-        println!("📸 Saved compressed image ({} bytes) to sentinel_test_capture.jpg", jpeg_bytes.len());
+        println!("Saved compressed image ({} bytes) to sentinel_test_capture.jpg", jpeg_bytes.len());
     }
 }
 

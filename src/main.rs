@@ -53,6 +53,10 @@ impl From<mdns::Event> for PhalanxEvent {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    ctrlc::set_handler(move || {
+        println!("\nSentinel shutting down. Releasing hardware...");
+        std::process::exit(0);
+    }).expect("Error setting Ctrl-C handler");
 
     match phalanx::vid::test_single_capture() {
         Ok(size) => println!("Success! Captured a frame of {} bytes.", size),
@@ -105,9 +109,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut guardian_buffers: HashMap<libp2p::PeerId, std::collections::VecDeque<vid::VideoShard>> = HashMap::new();
     const PULSE_TIMEOUT: Duration = Duration::from_secs(5); // 5 seconds of silence = Seizure/Crash
     
-    // STUB: Imagine this is a stream of data coming from the camera
-    let _dummy_camera_data = vec![0u8; 1024];
-
     // 1. Pick the first available camera
     let index = CameraIndex::Index(0); 
 
@@ -119,7 +120,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .expect("Could not find a webcam. Is it plugged in?");
 
     camera.open_stream().expect("Could not open camera stream.");
-    println!("📷 Phalanx Sentinel Active: Hardware capture online.");
+    println!("Phalanx Sentinel Active: Hardware capture online.");
+
     let mut shred_timer = tokio::time::interval(Duration::from_secs(2));
     let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(1));
     let mut cleanup_timer = tokio::time::interval(Duration::from_secs(5));
@@ -191,12 +193,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                 },
                 libp2p::swarm::SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(gossipsub::Event::Message { propagation_source, message, .. })) => {
+                    // try to parse heartbeat
                     let msg_content = String::from_utf8_lossy(&message.data);
-                    
+    
                     if msg_content.starts_with("ALIVE|") {
                         peer_heartbeats.insert(propagation_source, Instant::now());
-                    } else {
-                        println!("Fragment from {}: '{}'", propagation_source, msg_content);
+                    } 
+                    // Try to parse a video shard (binary)
+                    else if let Ok(shard) = postcard::from_bytes::<vid::VideoShard>(&message.data) {
+                        println!("Received Shard #{} from {}", shard.sequence_id, propagation_source);
+            
+                        // 3. Store in the Guardian Buffer
+                        let buffer = guardian_buffers.entry(propagation_source).or_insert_with(std::collections::VecDeque::new);
+                        buffer.push_back(shard);
+
+                        // 4. Protection: Only keep the last 30 shards (~1 minute of evidence)
+                        if buffer.len() > 30 {
+                            buffer.pop_front();
+                        }
                     }
                 },
                 _ => {}
