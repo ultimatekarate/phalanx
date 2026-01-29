@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
     // Define the local state
-    //let mut stdin = io::BufReader::new(io::stdin()).lines();
+    // let mut stdin = io::BufReader::new(io::stdin()).lines();
     let mut shredder = vid::Shredder::new();
     let mut peer_heartbeats: HashMap<libp2p::PeerId, Instant> = HashMap::new();
     let mut guardian_buffers: HashMap<libp2p::PeerId, std::collections::VecDeque<vid::VideoShard>> = HashMap::new();
