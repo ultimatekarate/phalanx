@@ -34,13 +34,41 @@ pub fn compress_frame(raw_pixels: Vec<u8>, width: u32, height: u32) -> Result<Ve
     let mut compressed_data = Vec::new();
     
     // 1. Point an encoder at our empty vector
-    let mut encoder = JpegEncoder::new_with_quality(&mut compressed_data, 60); // 60% quality is the 'sweet spot' for evidence
+    let mut encoder = JpegEncoder::new_with_quality(&mut compressed_data, 50); 
     
     // 2. Encode the raw RGB pixels into JPEG format
     encoder.encode(&raw_pixels, width, height, ExtendedColorType::Rgb8)
         .map_err(|e| format!("Compression failed: {}", e))?;
     
     Ok(compressed_data)
+}
+
+pub fn recover_vault_to_images(peer_id_str: &str) -> std::io::Result<()> {
+    let vault_path = format!("./vault/{}/", peer_id_str);
+    let recovery_path = format!("./recovered/{}/", peer_id_str);
+    fs::create_dir_all(&recovery_path)?;
+
+    let entries = fs::read_dir(vault_path)?;
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.extension().and_then(|s| s.to_str()) == Some("phlx") {
+            // 1. Read the binary shard
+            let encoded_data = fs::read(&path)?;
+            
+            // 2. Deserialize back into a VideoShard
+            if let Ok(shard) = postcard::from_bytes::<VideoShard>(&encoded_data) {
+                // 3. Save as a standard JPG
+                let filename = format!("recovered_{}.jpg", shard.sequence_id);
+                let mut file = File::create(recovery_path.clone() + &filename)?;
+                file.write_all(&shard.data)?;
+                println!("🔓 Recovered: {}", filename);
+            }
+        }
+    }
+    Ok(())
 }
 
 impl Shredder {

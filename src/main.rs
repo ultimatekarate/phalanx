@@ -81,6 +81,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .heartbeat_interval(Duration::from_secs(1))
                 .validation_mode(gossipsub::ValidationMode::Strict)
                 .message_id_fn(message_id_fn)
+                .max_transmit_size(8 * 1024 * 1024)
                 .build()
                 .map_err(|msg| io::Error::new(io::ErrorKind::Other, msg))?;
 
@@ -133,20 +134,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
             _ = shred_timer.tick() => {
                 // 1. Grab a frame from the hardware
                 if let Ok(frame) = camera.frame() {
-                    // 2. Convert the raw frame to an image buffer
-                    let buffer = frame.decode_image::<RgbFormat>().unwrap();
-                    
-                    // 3. For now, let's just use the raw bytes (we'll add compression next)
-                    let raw_bytes = buffer.into_raw(); 
-                    
-                    // 4. Shred and Publish
-                    let shard = shredder.create_shard(raw_bytes);
-                    let payload = postcard::to_stdvec(&shard).unwrap();
-                    
-                    if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), payload) {
-                        eprintln!("Broadcast Error: {e:?}");
-                    } else {
-                        println!("✔ Snapshot sent: Shard {} ({} KB)", shard.sequence_id, shard.data.len() / 1024);
+                    if let Ok(decoded) = frame.decode_image::<RgbFormat>() {
+                        let (w, h) = (decoded.width(), decoded.height());
+
+                        // Compress the captured frame
+                        if let Ok(jpeg_bytes) = vid::compress_frame(decoded.into_raw(), w, h) {
+                            // 4. Shred and Publish
+                            let shard = shredder.create_shard(jpeg_bytes);
+                            let payload = postcard::to_stdvec(&shard).unwrap();
+                        
+                            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), payload) {
+                                eprintln!("Broadcast Error: {e:?}");
+                            } else {
+                                println!("Snapshot sent: Shard {} ({} KB)", shard.sequence_id, shard.data.len() / 1024);
+                            }
+                        }
                     }
                 }
             }
