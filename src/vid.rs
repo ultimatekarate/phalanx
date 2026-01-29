@@ -64,7 +64,7 @@ pub fn recover_vault_to_images(peer_id_str: &str) -> std::io::Result<()> {
                 let filename = format!("recovered_{}.jpg", shard.sequence_id);
                 let mut file = File::create(recovery_path.clone() + &filename)?;
                 file.write_all(&shard.data)?;
-                println!("🔓 Recovered: {}", filename);
+                println!("Recovered: {}", filename);
             }
         }
     }
@@ -224,6 +224,14 @@ mod tests {
         std::fs::write("sentinel_test_capture.jpg", &jpeg_bytes).unwrap();
         
         println!("Saved compressed image ({} bytes) to sentinel_test_capture.jpg", jpeg_bytes.len());
+    }
+
+    #[test]
+    fn test_recovery_from_vault() {
+        // folder_name is peerID in the vault directory
+        let folder_name = "12D3KooWRm8rukdtBLihH9U7mnJ6GGGxAaGBMvNBjtZWsrNiyAUS"; 
+        let result = recover_vault_to_images(folder_name);
+        assert!(result.is_ok());
     }
 }
 
