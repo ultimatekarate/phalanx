@@ -2647,12 +2647,14 @@ name = "phalanx"
 version = "0.1.0"
 dependencies = [
  "ctrlc",
+ "ed25519-dalek",
  "env_logger",
  "image",
  "libp2p",
  "log",
  "nokhwa",
  "postcard",
+ "rand 0.9.2",
  "ring 0.17.14",
  "serde",
  "tokio",

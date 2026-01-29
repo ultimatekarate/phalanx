@@ -12,6 +12,19 @@ use nokhwa::Camera;
 use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::pixel_format::RgbFormat;
 
+use ed25519_dalek::{Keypair, Signer, Signature, Verifier, VerifyingKey};
+
+pub fn sign_witness_data(keypair: &Keypair, shard: &VideoShard) -> Vec<u8> {
+    // 1. Serialize the shard to bytes so we can sign it
+    let shard_bytes = postcard::to_stdvec(shard).unwrap();
+    
+    // 2. Sign the bytes with your private key
+    let signature = keypair.sign(&shard_bytes);
+    
+    // 3. Return the signature as bytes
+    signature.to_bytes().to_vec()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoShard {
     pub timestamp: u64,
