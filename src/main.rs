@@ -1,22 +1,17 @@
 #![allow(dead_code)]
 
 use libp2p::{
-    gossipsub, 
-    mdns, 
-    noise, 
-    tcp, 
-    yamux, 
+    gossipsub, mdns, noise, tcp, yamux, 
     SwarmBuilder,
-    swarm::NetworkBehaviour, // The macro itself needs to be explicitly imported
-    futures::StreamExt,       // For .select_next_some()
+    swarm::NetworkBehaviour, 
+    futures::StreamExt,      
 };
-
 use std::error::Error;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
-
 use tokio::{io, io::AsyncBufReadExt, select};
 
+// Hardware and Media crates
 use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::Camera;
@@ -38,35 +33,34 @@ pub enum PhalanxEvent {
 
 // 3. The "Glue" (Telling Rust how to wrap sub-events into PhalanxEvent)
 impl From<gossipsub::Event> for PhalanxEvent {
-    fn from(event: gossipsub::Event) -> Self {
-        PhalanxEvent::Gossipsub(event)
-    }
+    fn from(event: gossipsub::Event) -> Self { PhalanxEvent::Gossipsub(event) }
 }
 
 impl From<mdns::Event> for PhalanxEvent {
-    fn from(event: mdns::Event) -> Self {
-        PhalanxEvent::Mdns(event)
-    }
+    fn from(event: mdns::Event) -> Self { PhalanxEvent::Mdns(event) }
 }
 
-
-
+// ==================
+//   MAIN LOOP
+// ==================
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // System setup
+    env_logger::init();
+    println!("--- PHALANX: OVERLAPPING SHIELD INITIALIZING ---");
+
     ctrlc::set_handler(move || {
         println!("\nSentinel shutting down. Releasing hardware...");
         std::process::exit(0);
     }).expect("Error setting Ctrl-C handler");
 
+    // Make sure the camera is working.
     match phalanx::vid::test_single_capture() {
         Ok(size) => println!("Success! Captured a frame of {} bytes.", size),
         Err(e) => println!("Hardware Error: {}", e),
     }
 
-    env_logger::init();
-    println!("--- PHALANX: OVERLAPPING SHIELD INITIALIZING ---");
-
-    // 1. Setup Identity & Security (The "Device Passport")
+    // Setup Identity & Security (The "Device Passport")
     let mut swarm = SwarmBuilder::with_new_identity()
         .with_tokio()
         .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
@@ -81,7 +75,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .heartbeat_interval(Duration::from_secs(1))
                 .validation_mode(gossipsub::ValidationMode::Strict)
                 .message_id_fn(message_id_fn)
-                .max_transmit_size(8 * 1024 * 1024)
+                .max_transmit_size(8 * 1024 * 1024)// 8MB per shard
                 .build()
                 .map_err(|msg| io::Error::new(io::ErrorKind::Other, msg))?;
 
@@ -96,41 +90,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
-    // 2. Subscribe to the "Emergency" Topic
+    // topic subscription and listening
     let topic = gossipsub::IdentTopic::new("phalanx/emergency/the-thing");
     swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
-
-    // 3. The Event Loop (The "Sentinel" state)
-    println!("Sentinel Active. Listening for peers...");
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
-    let mut stdin = io::BufReader::new(io::stdin()).lines();
+    // Define the local state
+    //let mut stdin = io::BufReader::new(io::stdin()).lines();
     let mut shredder = vid::Shredder::new();
     let mut peer_heartbeats: HashMap<libp2p::PeerId, Instant> = HashMap::new();
     let mut guardian_buffers: HashMap<libp2p::PeerId, std::collections::VecDeque<vid::VideoShard>> = HashMap::new();
-    const PULSE_TIMEOUT: Duration = Duration::from_secs(5); // 5 seconds of silence = Seizure/Crash
-    
-    // 1. Pick the first available camera
-    let index = CameraIndex::Index(0); 
 
-    // 2. Request a standard format (High FPS isn't needed for evidence, stability is)
-    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
-
-    // 3. Open the camera
-    let mut camera = Camera::new(index, requested)
-        .expect("Could not find a webcam. Is it plugged in?");
-
-    camera.open_stream().expect("Could not open camera stream.");
-    println!("Phalanx Sentinel Active: Hardware capture online.");
-
+    // Timers
     let mut shred_timer = tokio::time::interval(Duration::from_secs(2));
     let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(1));
     let mut cleanup_timer = tokio::time::interval(Duration::from_secs(5));
+    const PULSE_TIMEOUT: Duration = Duration::from_secs(5); // 5 seconds of silence = Seizure/Crash
+    
+    // Initialize the video stream
+    let mut camera = Camera::new(
+        CameraIndex::Index(0), 
+        RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate)
+    ).expect("Webcam not found");
+    camera.open_stream().expect("Could not open camera stream.");
+
+    println!("Phalanx Sentinel Active: Hardware capture online. Peer ID: {}", swarm.local_peer_id());
 
     loop {
         select! {
-            // BRANCH A: The Video Shredder (The Spear)
-            // This ticks every 2 seconds regardless of other network traffic
+            // BRANCH A: The Video Shredder- Capture, Compress, Shred, and Publish
             _ = shred_timer.tick() => {
                 // 1. Grab a frame from the hardware
                 if let Ok(frame) = camera.frame() {
@@ -159,10 +147,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), pulse.as_bytes());
             }
 
+            /*
             // BRANCH C: Manual Input
             Ok(Some(line)) = stdin.next_line() => {
                 let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), line.as_bytes());
             }
+            */
 
             // BRANCH D: Monitoring for "Dark" Peers
             // If we notice that someone in the area loses connection abruptly,
@@ -174,12 +164,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         println!("[!!!] ALERT: Witness {} has gone dark. Finalizing evidence.", id);
 
                         if let Some(shards) = guardian_buffers.remove(id) {
-
-                            let count = shards.len();
-                            if let Err(e) = vid::seal_to_vault(id, shards) {
-                                eprintln!("Failed to seal vault: {}", e);
-                            }
-                            println!("🛡 [VAULT] Secured {} shards.", count);
+                            let _ = vid::seal_to_vault(id, shards);
                         }
                         false 
                     } else { true }
@@ -195,13 +180,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                 },
                 libp2p::swarm::SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(gossipsub::Event::Message { propagation_source, message, .. })) => {
-                    // try to parse heartbeat
                     let msg_content = String::from_utf8_lossy(&message.data);
-    
+                    
+                    // Try to parse the heartbeat, if that fails try to parse shards
                     if msg_content.starts_with("ALIVE|") {
                         peer_heartbeats.insert(propagation_source, Instant::now());
                     } 
-                    // Try to parse a video shard (binary)
                     else if let Ok(shard) = postcard::from_bytes::<vid::VideoShard>(&message.data) {
                         println!("Received Shard #{} from {}", shard.sequence_id, propagation_source);
             
@@ -210,9 +194,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         buffer.push_back(shard);
 
                         // 4. Protection: Only keep the last 30 shards (~1 minute of evidence)
-                        if buffer.len() > 30 {
-                            buffer.pop_front();
-                        }
+                        if buffer.len() > 30 { buffer.pop_front(); }
                     }
                 },
                 _ => {}

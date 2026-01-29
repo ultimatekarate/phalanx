@@ -3,28 +3,19 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 use std::collections::VecDeque;
-use serde::{Serialize, Deserialize};
 
+// external crates
+use serde::{Serialize, Deserialize};
 use image::codecs::jpeg::JpegEncoder;
 use image::{ExtendedColorType};
-
 use nokhwa::Camera;
 use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::pixel_format::RgbFormat;
+use ed25519_dalek::{SigningKey, Signer};
 
-use ed25519_dalek::{SigningKey, Signer, Signature, Verifier, VerifyingKey};
-
-pub fn sign_witness_data(signing_key: &SigningKey, shard: &VideoShard) -> Vec<u8> {
-    // Serialize the shard to bytes so we can sign it
-    let shard_bytes = postcard::to_stdvec(shard).unwrap();
-    
-    // Sign the bytes with  private key
-    let signature = signing_key.sign(&shard_bytes);
-    
-    // Return the signature as bytes
-    signature.to_bytes().to_vec()
-}
-
+// =====================
+// DATA STRUCTURES
+// =====================
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoShard {
     pub timestamp: u64,
@@ -44,6 +35,34 @@ pub struct Shredder {
     current_sequence: u32,
 }
 
+// =============
+//   CORE LOGIC
+// =============
+
+impl Shredder {
+    pub fn new() -> Self {
+        Self { current_sequence: 0 }
+    }
+
+    /// Takes a raw buffer (from the camera) and "shreds" it into a Phalanx Shard
+    pub fn create_shard(&mut self, buffer: Vec<u8>) -> VideoShard {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let shard = VideoShard {
+            timestamp: now,
+            data: buffer,
+            sequence_id: self.current_sequence,
+            is_final: false,
+        };
+
+        self.current_sequence += 1;
+        shard
+    }
+}
+
 pub fn compress_frame(raw_pixels: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, String> {
     let mut compressed_data = Vec::new();
     
@@ -57,6 +76,43 @@ pub fn compress_frame(raw_pixels: Vec<u8>, width: u32, height: u32) -> Result<Ve
     Ok(compressed_data)
 }
 
+
+// ================
+//   ENCRYPTION
+// ================
+
+pub fn sign_witness_data(signing_key: &SigningKey, shard: &VideoShard) -> Vec<u8> {
+    // Serialize the shard to bytes so we can sign it
+    let shard_bytes = postcard::to_stdvec(shard).unwrap();
+    
+    // Sign the bytes with  private key
+    let signature = signing_key.sign(&shard_bytes);
+    
+    // Return the signature as bytes
+    signature.to_bytes().to_vec()
+}
+
+pub fn get_dalek_key(libp2p_key: &libp2p::identity::Keypair) -> Result<SigningKey, String> {
+    // Extract the raw secret bytes from libp2p
+    let protobuf = libp2p_key.to_protobuf_encoding()
+        .map_err(|e| format!("Key conversion failed: {}", e))?;
+    
+    // We are using Ed25519 (libp2p default)
+    // We take the last 32 bytes which represent the secret seed
+    if protobuf.len() < 32 {
+        return Err("Key buffer too short".into());
+    }
+    
+    let mut secret_bytes = [0u8; 32];
+    secret_bytes.copy_from_slice(&protobuf[protobuf.len() - 32..]);
+    
+    Ok(SigningKey::from_bytes(&secret_bytes))
+}
+
+
+// ====================
+//   DATA RECOVERY
+// ====================
 pub fn recover_vault_to_images(peer_id_str: &str) -> std::io::Result<()> {
 
     // Robust path reading.
@@ -83,7 +139,7 @@ pub fn recover_vault_to_images(peer_id_str: &str) -> std::io::Result<()> {
             
             // 2. Deserialize back into a VideoShard
             if let Ok(shard) = postcard::from_bytes::<VideoShard>(&encoded_data) {
-                // 3. Save as a standard JPG
+                // save as a standard JPG
                 let filename = format!("recovered_{}.jpg", shard.sequence_id);
                 let save_path = recovery_path.join(filename);
                 let mut file = File::create(save_path)?;
@@ -96,31 +152,6 @@ pub fn recover_vault_to_images(peer_id_str: &str) -> std::io::Result<()> {
     println!("Recovered: {}", pure_id);
     Ok(())
 }
-
-impl Shredder {
-    pub fn new() -> Self {
-        Self { current_sequence: 0 }
-    }
-
-    /// Takes a raw buffer (from the camera) and "shreds" it into a Phalanx Shard
-    pub fn create_shard(&mut self, buffer: Vec<u8>) -> VideoShard {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        let shard = VideoShard {
-            timestamp: now,
-            data: buffer,
-            sequence_id: self.current_sequence,
-            is_final: false,
-        };
-
-        self.current_sequence += 1;
-        shard
-    }
-}
-#[allow(dead_code)]
 
 pub fn seal_to_vault(peer_id: &libp2p::PeerId, shards: VecDeque<VideoShard>) -> std::io::Result<()> {
     // Create the directory for this specific peer
@@ -142,22 +173,26 @@ pub fn seal_to_vault(peer_id: &libp2p::PeerId, shards: VecDeque<VideoShard>) -> 
     Ok(())
 }
 
+
+// ===============
+//  HARDWARE TEST
+// ===============
 pub fn test_single_capture() -> Result<usize, String> {
-    // 1. Identify the first camera
+    // Identify the first camera
     let index = CameraIndex::Index(0);
     
-    // 2. Request a standard RGB format
+    // Request a standard RGB format
     let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
     
-    // 3. Initialize the hardware
+    // Initialize the hardware
     let mut camera = Camera::new(index, requested)
         .map_err(|e| format!("Failed to find camera: {}", e))?;
 
-    // 4. Open the stream
+    // Open the stream
     camera.open_stream()
         .map_err(|e| format!("Failed to open stream: {}", e))?;
 
-    // 5. Capture one frame
+    // Capture one frame
     // Note: Some cameras need a moment to "warm up" (auto-exposure), 
     // but for a raw pixel test, the first frame is fine.
     let frame = camera.frame()
@@ -171,6 +206,10 @@ pub fn test_single_capture() -> Result<usize, String> {
     Ok(bytes.len())
 }
 
+
+// ================
+//  TESTS
+// ================
 #[cfg(test)]
 mod tests {
     use super::*;
