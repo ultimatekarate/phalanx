@@ -1,11 +1,12 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::fs::{self, File};
-use std::io::{self, Write, Cursor};
+use std::io::{self, Write};
+use std::path::Path;
 use std::collections::VecDeque;
 use serde::{Serialize, Deserialize};
 
 use image::codecs::jpeg::JpegEncoder;
-use image::{DynamicImage, ExtendedColorType};
+use image::{ExtendedColorType};
 
 use nokhwa::Camera;
 use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
@@ -44,11 +45,20 @@ pub fn compress_frame(raw_pixels: Vec<u8>, width: u32, height: u32) -> Result<Ve
 }
 
 pub fn recover_vault_to_images(peer_id_str: &str) -> std::io::Result<()> {
-    let vault_path = format!("./vault/{}/", peer_id_str);
-    let recovery_path = format!("./recovered/{}/", peer_id_str);
+
+    // Robust path reading.
+    let vault_path = if peer_id_str.contains("vault") {
+        Path::new(peer_id_str).to_path_buf()
+    } else {
+        Path::new("./vault").join(peer_id_str)
+    };
+
+    let pure_id = vault_path.file_name().unwrap().to_str().unwrap();
+    let recovery_path = Path::new("./recovered").join(pure_id);
+
     fs::create_dir_all(&recovery_path)?;
 
-    let entries = fs::read_dir(vault_path)?;
+    let entries = fs::read_dir(&vault_path)?;
 
     for entry in entries {
         let entry = entry?;
@@ -62,12 +72,15 @@ pub fn recover_vault_to_images(peer_id_str: &str) -> std::io::Result<()> {
             if let Ok(shard) = postcard::from_bytes::<VideoShard>(&encoded_data) {
                 // 3. Save as a standard JPG
                 let filename = format!("recovered_{}.jpg", shard.sequence_id);
-                let mut file = File::create(recovery_path.clone() + &filename)?;
+                let save_path = recovery_path.join(filename);
+                let mut file = File::create(save_path)?;
                 file.write_all(&shard.data)?;
-                println!("Recovered: {}", filename);
+                
             }
         }
     }
+
+    println!("Recovered: {}", pure_id);
     Ok(())
 }
 
