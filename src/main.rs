@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let gossipsub_config = gossipsub::ConfigBuilder::default()
                 .heartbeat_interval(Duration::from_secs(1))
-                .validation_mode(gossipsub::ValidationMode::Strict)
+                .validation_mode(gossipsub::ValidationMode::Permissive)
                 .message_id_fn(message_id_fn)
                 .max_transmit_size(8 * 1024 * 1024)// 8MB per shard
                 .build()
@@ -188,22 +188,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     // Don't check on yourself!
                     if id == &local_id { return true; }
 
+                    // Timestamps can be in the future due to initialization
+                    if last > now {
+                        return true; 
+                    }
+
                     if now.duration_since(last) > PULSE_TIMEOUT {
                         println!("[!!!] ALERT: Witness {} has gone dark. Finalizing evidence.", id);
 
                         if let Some(shards) = guardian_buffers.remove(id) {
-                            if let Err(e) = vid::seal_to_vault(id, shards) {
-                                eprintln!("Vault sealing failed: {}", e);
-                            } else {
-                                // 2. TRIGGER RECOVERY: Turn those shards into JPEGs in ./recovered/
-                                let peer_id_str = id.to_string();
-                                if let Err(e) = vid::recover_vault_to_images(&peer_id_str) {
-                                    eprintln!("Recovery failed: {}", e);
-                                } else {
-                                    // 3. OPTIONAL: Generate the contact sheet proof
-                                    let _ = vid::verify_video_motion(&peer_id_str);
-                                }
-                            }
+                            let _ = vid::seal_to_vault(id, shards);
+                            let _ = vid::recover_vault_to_images(&id.to_string());
                         }
                         false 
                     } else { true }
@@ -214,14 +209,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             event = swarm.select_next_some() => match event {
                 libp2p::swarm::SwarmEvent::Behaviour(PhalanxEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, _multiaddr) in list {
-                        if !peer_heartbeats.contains_key(&peer_id) {
-                            println!("Shield Overlapped: {peer_id}");
-                            swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                            peer_heartbeats.entry(peer_id).or_insert(Instant::now());
+                        if peer_id != *swarm.local_peer_id() {
+                            if !peer_heartbeats.contains_key(&peer_id) {
+                                println!("Shield Overlapped: {peer_id}");
+                                swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                                peer_heartbeats.entry(peer_id).or_insert((Instant::now()) + Duration::from_secs(10));
+                            }
                         }
                     }
                 },
                 libp2p::swarm::SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(gossipsub::Event::Message { propagation_source, message, .. })) => {
+                    peer_heartbeats.insert(propagation_source, Instant::now());
                     let msg_content = String::from_utf8_lossy(&message.data);
                     
                     // Try to parse the heartbeat, if that fails try to parse shards
