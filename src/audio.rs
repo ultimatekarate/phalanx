@@ -67,3 +67,74 @@ pub fn seal_audio_to_vault(peer_id: &libp2p::PeerId, shards: std::collections::V
     println!("Status: Audio vault sealed for {}", peer_id);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+    use tokio::sync::mpsc;
+    use libp2p::PeerId;
+
+    #[test]
+    fn test_audio_shard_creation() {
+        let shard = AudioShard {
+            timestamp: 123456789,
+            sequence_id: 1,
+            data: vec![0u8; 10],
+            sample_rate: 44100,
+            channels: 1,
+        };
+        assert_eq!(shard.sequence_id, 1);
+        assert_eq!(shard.data.len(), 10);
+    }
+
+    #[test]
+    fn test_seal_audio_to_vault() {
+        use std::collections::VecDeque;
+        
+        let peer_id = PeerId::random();
+        let mut shards = VecDeque::new();
+        
+        // Create 2 dummy shards
+        for i in 0..2 {
+            shards.push_back(AudioShard {
+                timestamp: 1000 + i as u64,
+                sequence_id: i,
+                data: vec![i as u8; 5],
+                sample_rate: 44100,
+                channels: 1,
+            });
+        }
+
+        let result = seal_audio_to_vault(&peer_id, shards);
+        assert!(result.is_ok());
+
+        // Verify files exist on disk
+        let path_str = format!("./vault/{}/shard_0.aud", peer_id);
+        assert!(Path::new(&path_str).exists());
+
+        // Cleanup
+        let _ = fs::remove_dir_all(format!("./vault/{}", peer_id));
+    }
+
+    #[tokio::test]
+    async fn test_audio_thread_production() {
+        use std::time::Duration;
+
+        let (tx, mut rx) = mpsc::channel(10);
+        let audio_thread = PhalanxAudioThread { sample_rate: 44100 };
+
+        // Spawn thread starting at sequence 100
+        audio_thread.spawn(100, tx);
+
+        // Wait for the first shard
+        let shard = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("Timeout waiting for audio shard")
+            .expect("Channel closed");
+
+        assert_eq!(shard.sequence_id, 100);
+        assert!(!shard.data.is_empty());
+    }
+}
