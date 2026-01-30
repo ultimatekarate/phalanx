@@ -82,6 +82,24 @@ impl Sentinel {
     }
 }
 
+impl Drop for Sentinel {
+    fn drop(&mut self) {
+        // This is the "Last Will and Testament" of the Sentinel.
+        // It runs whenever the Sentinel is destroyed (Panic, Ctrl+C, or End of Main).
+        println!("\n[PHALANX] Sentinel is dropping. Emergency vault seal initiated...");
+        
+        // We use .drain() to take ownership of all buffered shards 
+        // so we can seal them before the memory is wiped.
+        for (peer_id, shards) in self.guardian_buffers.drain() {
+            if !shards.is_empty() {
+                println!("[VAULT] Final seal for witness: {}", peer_id);
+                // We use vid::seal_to_vault just like in your process_cleanup logic
+                let _ = vid::seal_to_vault(&peer_id, shards);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

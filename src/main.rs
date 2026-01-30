@@ -16,7 +16,6 @@ mod camera;
 mod sentinel;
 
 use sentinel::Sentinel;
-use camera::PhalanxCamera;
 
 // ==================
 //   NETWORK STATE
@@ -82,11 +81,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let (video_tx, mut video_rx) = tokio::sync::mpsc::channel::<vid::VideoShard>(100);
     
-    // The "Eyes" Task
+    // The "Eyes" - Initialized the camera
     
-    let phalanx_cam = PhalanxCamera::new(0, 15);
-    phalanx_cam.spawn_thread(video_tx);
-    
+    let eyes = camera::PhalanxCameraThread { fps: 15 };
+    if let Ok(_) = camera::HardwareCamera::new(0) {
+        // We just test if it's openable, then let the thread handle the rest
+        eyes.spawn(Some(0), video_tx);
+    } else {
+        println!("Hardware busy/missing. Falling back to Mock Camera.");
+        eyes.spawn(None, video_tx); // None signals "Use Mock"
+    }
+
     let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(1));
     let mut cleanup_timer: tokio::time::Interval = tokio::time::interval(Duration::from_secs(5));
 
