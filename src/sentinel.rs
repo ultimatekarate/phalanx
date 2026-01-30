@@ -3,10 +3,9 @@ use std::time::{Duration, Instant};
 use std::collections::{HashMap, VecDeque};
 use serde::{Serialize, Deserialize};
 
-use crate::vid::{self, VideoShard};
-use crate::audio::{self, AudioShard};
-use crate::PhalanxBehaviour;
-use crate::PhalanxEvent;
+use crate::vid;
+use crate::audio;
+use crate::{PhalanxBehaviour, PhalanxEvent};
 
 
 use libp2p::mdns;
@@ -22,7 +21,7 @@ pub struct ControlMessage {
 pub struct Sentinel {
     pub peer_heartbeats: HashMap<PeerId, Instant>,
     pub peer_capacities: HashMap<PeerId, ControlMessage>, // Tracks mesh health
-    pub guardian_buffers: HashMap<PeerId, VecDeque<VideoShard>>,
+    pub guardian_buffers: HashMap<PeerId, VecDeque<vid::VideoShard>>,
     pub audio_buffers: HashMap<PeerId, VecDeque<audio::AudioShard>>,
     pub topic: gossipsub::IdentTopic,
     pub pulse_timeout: Duration,
@@ -85,7 +84,7 @@ impl Sentinel {
                     // Keep 60 seconds of audio (usually small enough for RAM)
                     if buffer.len() > 60 { buffer.pop_front(); }
                 }// Check if it's a VideoShard
-                else if let Ok(shard) = postcard::from_bytes::<VideoShard>(&message.data) {
+                else if let Ok(shard) = postcard::from_bytes::<vid::VideoShard>(&message.data) {
                     let buffer = self.guardian_buffers.entry(propagation_source).or_insert_with(VecDeque::new);
                     buffer.push_back(shard);
                     if buffer.len() > 30 { buffer.pop_front(); }
@@ -105,7 +104,10 @@ impl Sentinel {
                 println!("ALERT: Witness {} has gone dark. Finalizing evidence.", id);
                 if let Some(shards) = self.guardian_buffers.remove(id) {
                     let _ = vid::seal_to_vault(id, shards);
-                    let _ = vid::recover_vault_to_images(&id.to_string());
+                }
+
+                if let Some(a_shards) = self.audio_buffers.remove(id) {
+                    let _ = audio::seal_audio_to_vault(id, a_shards);
                 }
                 self.peer_capacities.remove(id);
                 false 

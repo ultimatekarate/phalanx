@@ -3,7 +3,6 @@
 use libp2p::{
     gossipsub, mdns, noise, tcp, yamux, 
     SwarmBuilder,
-    swarm::{NetworkBehaviour}, 
     futures::StreamExt,      
 };
 use std::error::Error;
@@ -12,36 +11,12 @@ use tokio::select;
 use tokio::sync::mpsc;
 
 use phalanx::vid;
+use phalanx::camera;
+use phalanx::audio;
+use phalanx::sentinel::Sentinel;
 
-mod camera;
-mod audio;
-mod sentinel;
+use phalanx::{PhalanxBehaviour};
 
-use sentinel::Sentinel;
-
-// ==================
-//   NETWORK STATE
-// ==================
-
-#[derive(NetworkBehaviour)]
-#[behaviour(out_event = "PhalanxEvent")]
-pub struct PhalanxBehaviour {
-    pub gossipsub: gossipsub::Behaviour,
-    pub mdns: mdns::tokio::Behaviour,
-}
-
-pub enum PhalanxEvent {
-    Gossipsub(gossipsub::Event),
-    Mdns(mdns::Event),
-}
-
-impl From<gossipsub::Event> for PhalanxEvent {
-    fn from(event: gossipsub::Event) -> Self { PhalanxEvent::Gossipsub(event) }
-}
-
-impl From<mdns::Event> for PhalanxEvent {
-    fn from(event: mdns::Event) -> Self { PhalanxEvent::Mdns(event) }
-}
 
 // ==================
 //   MAIN ENTRY
@@ -59,9 +34,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 
     println!("--- PHALANX: INITIALIZING ---");
-
-
-
 
     // Networking setup
     let mut sentinel = Sentinel::new("phalanx/emergency/the-thing", 10);
