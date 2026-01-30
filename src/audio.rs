@@ -1,7 +1,9 @@
-use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::Sender;
 use serde::{Serialize, Deserialize};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use std::fs::File;
+use std::io::Write;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioShard {
@@ -45,4 +47,23 @@ impl PhalanxAudioThread {
             }
         });
     }
+}
+
+pub fn seal_audio_to_vault(peer_id: &libp2p::PeerId, shards: std::collections::VecDeque<AudioShard>) -> std::io::Result<()> {
+    let path = format!("./vault/{}/", peer_id);
+    std::fs::create_dir_all(&path)?;
+
+    for shard in &shards {
+        let file_path = format!("{}shard_{}.aud", path, shard.sequence_id);
+        let mut file = File::create(file_path)?;
+        
+        let data = postcard::to_stdvec(&shard)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        
+        // This will now work because 'Write' is in scope
+        file.write_all(&data)?;
+    }
+    
+    println!("Status: Audio vault sealed for {}", peer_id);
+    Ok(())
 }

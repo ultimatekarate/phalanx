@@ -7,7 +7,7 @@ use libp2p::{
     futures::StreamExt,      
 };
 use std::error::Error;
-use std::time::{Duration, Instant};
+use std::time::{Duration};
 use tokio::select;
 use tokio::sync::mpsc;
 
@@ -116,8 +116,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     loop {
         select! {
-            // Replace the bincode lines in your select! block with this:
-
             Some(v_shard) = video_rx.recv() => {
                 // Standardize on postcard for mobile efficiency
                 match postcard::to_stdvec(&v_shard) {
@@ -142,19 +140,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             
             _ = heartbeat_timer.tick() => {
-                    // Generate a structured heartbeat instead of a raw string
-                    let heartbeat = sentinel.generate_heartbeat(swarm.local_peer_id());
-                    
-                    match postcard::to_stdvec(&heartbeat) {
-                        Ok(encoded) => {
-                            // Use the control/emergency topic for health updates
-                            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(sentinel.topic.clone(), encoded) {
-                                println!("Status: Heartbeat broadcast failed: {}", e);
-                            }
+                let heartbeat = sentinel.generate_heartbeat(swarm.local_peer_id());
+                match postcard::to_stdvec(&heartbeat) {
+                    Ok(encoded) => {
+                        // 3. Send those bytes to the network
+                        if let Err(e) = swarm.behaviour_mut().gossipsub.publish(sentinel.topic.clone(), encoded) {
+                            println!("Status: Heartbeat failed: {}", e);
                         }
-                        Err(e) => println!("Status: Heartbeat serialization error: {}", e),
                     }
+                    Err(e) => println!("Status: Serialization error: {}", e),
                 }
+            }
 
             _ = cleanup_timer.tick() => sentinel.process_cleanup(*swarm.local_peer_id()),
             event = swarm.select_next_some() => sentinel.handle_network_event(event, &mut swarm),

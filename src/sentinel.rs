@@ -1,33 +1,56 @@
 use libp2p::{gossipsub, PeerId, Swarm, swarm::SwarmEvent};
 use std::time::{Duration, Instant};
 use std::collections::{HashMap, VecDeque};
+use serde::{Serialize, Deserialize};
+
 use crate::vid::{self, VideoShard};
+use crate::audio::{self, AudioShard};
 use crate::PhalanxBehaviour;
 use crate::PhalanxEvent;
 
-use libp2p::{
-    mdns, 
-    
-};
+
+use libp2p::mdns;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlMessage {
+    pub sender: String,
+    pub load_factor: f32,      // 0.0 (idle) to 1.0 (at capacity)
+    pub is_on_battery: bool,
+    pub storage_remaining_mb: u64,
+}
 
 pub struct Sentinel {
     pub peer_heartbeats: HashMap<PeerId, Instant>,
+    pub peer_capacities: HashMap<PeerId, ControlMessage>, // Tracks mesh health
     pub guardian_buffers: HashMap<PeerId, VecDeque<VideoShard>>,
+    pub audio_buffers: HashMap<PeerId, VecDeque<audio::AudioShard>>,
     pub topic: gossipsub::IdentTopic,
     pub pulse_timeout: Duration,
-    pub heartbeat_interval: Duration,
-    pub cleanup_interval: Duration,
+    pub max_peers: usize, // Hard limit for burden sharing
 }
 
 impl Sentinel {
     pub fn new(topic_name: &str, timeout_secs: u64) -> Self {
         Self {
             peer_heartbeats: HashMap::new(),
+            peer_capacities: HashMap::new(),
             guardian_buffers: HashMap::new(),
+            audio_buffers: HashMap::new(),
             topic: gossipsub::IdentTopic::new(topic_name),
             pulse_timeout: Duration::from_secs(timeout_secs),
-            heartbeat_interval: Duration::from_secs(1),
-            cleanup_interval: Duration::from_secs(5),
+            max_peers: 10
+        }
+    }
+
+    pub fn generate_heartbeat(&self, local_id: &PeerId) -> ControlMessage {
+        let current_load = self.guardian_buffers.len() as f32;
+        let capacity = self.max_peers as f32;
+
+        ControlMessage {
+            sender: local_id.to_string(),
+            load_factor: (current_load / capacity).min(1.0),
+            is_on_battery: false, // Future mobile bridge
+            storage_remaining_mb: 1024,
         }
     }
 
@@ -41,7 +64,7 @@ impl Sentinel {
             SwarmEvent::Behaviour(PhalanxEvent::Mdns(mdns::Event::Discovered(list))) => {
                 for (peer_id, multiaddr) in list {
                     if peer_id != *swarm.local_peer_id() {
-                        println!("🛡 Shield Overlapped: {peer_id}");
+                        println!("Shield Overlapped: {peer_id}");
                         let _ = swarm.dial(multiaddr.clone());
                         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                         // Initialization Grace Period
@@ -53,8 +76,16 @@ impl Sentinel {
                 // Universal Refresh
                 self.peer_heartbeats.insert(propagation_source, Instant::now());
 
-                if let Ok(shard) = postcard::from_bytes::<VideoShard>(&message.data) {
-                    println!("Received Shard #{} from {}", shard.sequence_id, propagation_source);
+                if let Ok(ctrl) = postcard::from_bytes::<ControlMessage>(&message.data) {
+                    self.peer_capacities.insert(propagation_source, ctrl);
+                } // Check for audio shard
+                else if let Ok(a_shard) = postcard::from_bytes::<audio::AudioShard>(&message.data) {
+                    let buffer = self.audio_buffers.entry(propagation_source).or_insert_with(VecDeque::new);
+                    buffer.push_back(a_shard);
+                    // Keep 60 seconds of audio (usually small enough for RAM)
+                    if buffer.len() > 60 { buffer.pop_front(); }
+                }// Check if it's a VideoShard
+                else if let Ok(shard) = postcard::from_bytes::<VideoShard>(&message.data) {
                     let buffer = self.guardian_buffers.entry(propagation_source).or_insert_with(VecDeque::new);
                     buffer.push_back(shard);
                     if buffer.len() > 30 { buffer.pop_front(); }
@@ -71,11 +102,12 @@ impl Sentinel {
             if id == &local_id || *last > now { return true; }
 
             if now.duration_since(*last) > self.pulse_timeout {
-                println!("[!!!] ALERT: Witness {} has gone dark. Finalizing evidence.", id);
+                println!("ALERT: Witness {} has gone dark. Finalizing evidence.", id);
                 if let Some(shards) = self.guardian_buffers.remove(id) {
                     let _ = vid::seal_to_vault(id, shards);
                     let _ = vid::recover_vault_to_images(&id.to_string());
                 }
+                self.peer_capacities.remove(id);
                 false 
             } else { true }
         });
@@ -90,11 +122,17 @@ impl Drop for Sentinel {
         
         // We use .drain() to take ownership of all buffered shards 
         // so we can seal them before the memory is wiped.
-        for (peer_id, shards) in self.guardian_buffers.drain() {
-            if !shards.is_empty() {
-                println!("[VAULT] Final seal for witness: {}", peer_id);
-                // We use vid::seal_to_vault just like in your process_cleanup logic
-                let _ = vid::seal_to_vault(&peer_id, shards);
+        for (peer_id, v_shards) in self.guardian_buffers.drain() {
+            if !v_shards.is_empty() {
+                println!("Status: Final video seal for witness: {}", peer_id);
+                let _ = vid::seal_to_vault(&peer_id, v_shards);
+            }
+        }
+
+        for (peer_id, a_shards) in self.audio_buffers.drain() {
+            if !a_shards.is_empty() {
+                println!("Status: Final audio seal for witness: {}", peer_id);
+                let _ = audio::seal_audio_to_vault(&peer_id, a_shards);
             }
         }
     }
