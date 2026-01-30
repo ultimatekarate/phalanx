@@ -173,6 +173,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_physical_hardware_connection() {
         let result = test_hardware_connection(0);
         match result {
