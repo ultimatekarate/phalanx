@@ -1,16 +1,12 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, Write, Cursor}; // Added Cursor
 use std::path::Path;
 use std::collections::VecDeque;
 
 // external crates
 use serde::{Serialize, Deserialize};
-use image::codecs::jpeg::JpegEncoder;
-use image::{ExtendedColorType};
-use nokhwa::Camera;
-use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
-use nokhwa::pixel_format::RgbFormat;
+use image::{DynamicImage, ImageFormat, GenericImage, RgbImage}; // Added Image traits
 use ed25519_dalek::{SigningKey, Signer};
 
 // =====================
@@ -26,15 +22,16 @@ pub struct VideoShard {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WitnessEnvelope {
-    pub original_shard: VideoShard, // The data from the uploader
-    pub witness_peer_id: String,   // PeerID
-    pub receipt_timestamp: u64,    // When YOU received it
-    pub witness_signature: Vec<u8>, // cryptographic signature
+    pub original_shard: VideoShard, 
+    pub witness_peer_id: String,   
+    pub receipt_timestamp: u64,    
+    pub witness_signature: Vec<u8>, 
 }
 
 pub struct Shredder {
     current_sequence: u32,
 }
+
 // =============
 //   CORE LOGIC
 // =============
@@ -55,7 +52,6 @@ impl Shredder {
     }
 
     pub fn create_shard(&mut self, buffer: Vec<Vec<u8>>) -> VideoShard {
-
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
         VideoShard {
             timestamp: now,
@@ -66,42 +62,36 @@ impl Shredder {
     }
 }
 
-pub fn compress_frame(raw_pixels: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let mut compressed_data = Vec::new();
-    
-    // 1. Point an encoder at our empty vector
-    let mut encoder = JpegEncoder::new_with_quality(&mut compressed_data, 50); 
-    
-    // 2. Encode the raw RGB pixels into JPEG format
-    encoder.encode(&raw_pixels, width, height, ExtendedColorType::Rgb8)
-        .map_err(|e| format!("Compression failed: {}", e))?;
-    
-    Ok(compressed_data)
-}
+pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let img = DynamicImage::ImageRgb8(
+        image::ImageBuffer::from_raw(width, height, raw_data)
+            .ok_or("Failed to create image buffer")?
+    );
 
+    let mut jpeg_bytes = Vec::new();
+    let mut cursor = Cursor::new(&mut jpeg_bytes);
+    
+    // Pure Rust JPEG compression
+    img.write_to(&mut cursor, ImageFormat::Jpeg)
+        .map_err(|e| format!("Compression error: {}", e))?;
+
+    Ok(jpeg_bytes)
+}
 
 // ================
 //   ENCRYPTION
 // ================
 
 pub fn sign_witness_data(signing_key: &SigningKey, shard: &VideoShard) -> Vec<u8> {
-    // Serialize the shard to bytes so we can sign it
     let shard_bytes = postcard::to_stdvec(shard).unwrap();
-    
-    // Sign the bytes with  private key
     let signature = signing_key.sign(&shard_bytes);
-    
-    // Return the signature as bytes
     signature.to_bytes().to_vec()
 }
 
 pub fn get_dalek_key(libp2p_key: &libp2p::identity::Keypair) -> Result<SigningKey, String> {
-    // Extract the raw secret bytes from libp2p
     let protobuf = libp2p_key.to_protobuf_encoding()
         .map_err(|e| format!("Key conversion failed: {}", e))?;
     
-    // We are using Ed25519 (libp2p default)
-    // We take the last 32 bytes which represent the secret seed
     if protobuf.len() < 32 {
         return Err("Key buffer too short".into());
     }
@@ -112,13 +102,11 @@ pub fn get_dalek_key(libp2p_key: &libp2p::identity::Keypair) -> Result<SigningKe
     Ok(SigningKey::from_bytes(&secret_bytes))
 }
 
-
 // ====================
 //   DATA RECOVERY
 // ====================
-pub fn recover_vault_to_images(peer_id_str: &str) -> std::io::Result<()> {
 
-    // Robust path reading.
+pub fn recover_vault_to_images(peer_id_str: &str) -> std::io::Result<()> {
     let vault_path = if peer_id_str.contains("vault") {
         Path::new(peer_id_str).to_path_buf()
     } else {
@@ -136,7 +124,6 @@ pub fn recover_vault_to_images(peer_id_str: &str) -> std::io::Result<()> {
             let encoded_data = fs::read(&path)?;
             
             if let Ok(shard) = postcard::from_bytes::<VideoShard>(&encoded_data) {
-                // Loop through all frames in this shard
                 for (i, frame_data) in shard.frames.iter().enumerate() {
                     let filename = format!("recovered_shard{}_frame{}.jpg", shard.sequence_id, i);
                     let save_path = recovery_path.join(filename);
@@ -147,12 +134,11 @@ pub fn recover_vault_to_images(peer_id_str: &str) -> std::io::Result<()> {
             }
         }
     }
-    println!("Recovered: {}", pure_id);
+    println!("Status: Recovered peer {}", pure_id);
     Ok(())
 }
 
 pub fn seal_to_vault(peer_id: &libp2p::PeerId, shards: VecDeque<VideoShard>) -> std::io::Result<()> {
-    // Create the directory for this specific peer
     let path = format!("./vault/{}/", peer_id);
     fs::create_dir_all(&path)?;
 
@@ -160,42 +146,36 @@ pub fn seal_to_vault(peer_id: &libp2p::PeerId, shards: VecDeque<VideoShard>) -> 
         let file_path = format!("{}shard_{}.phlx", path, shard.sequence_id);
         let mut file = File::create(file_path)?;
 
-        // Use Postcard to serialize the shard into a compact binary format
         let data = postcard::to_stdvec(&shard)
             .map_err(|e| std::io::Error::new(io::ErrorKind::Other, e.to_string()))?;
         
         file.write_all(&data)?;
     }
     
-    println!("[VAULT] Sealed {} shards for peer {}.", shards.len(), peer_id);
+    println!("Status: Sealed {} shards for peer {}", shards.len(), peer_id);
     Ok(())
 }
 
 pub fn verify_video_motion(peer_id: &str) -> std::io::Result<()> {
-    use image::{GenericImage, RgbImage};
-
     let input_dir = format!("./recovered/{}/", peer_id);
     let output_file = format!("./recovered/{}_contact_sheet.jpg", peer_id);
 
-    // 1. Collect all recovered JPEGs
     let mut entries: Vec<_> = fs::read_dir(&input_dir)?
         .filter_map(|e| e.ok())
         .collect();
     
-    // Sort them so they appear in order
     entries.sort_by_key(|e| e.path());
 
     if entries.is_empty() {
-        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No recovered frames found."));
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No recovered frames found"));
     }
 
-    // 2. Create a 3x3 grid (9 frames total)
-    // Assuming 1080p frames, this will be a large image.
+    // Grid config
     let frame_w = 1920;
     let frame_h = 1080;
     let mut contact_sheet = RgbImage::new(frame_w * 3, frame_h * 3);
 
-    println!("Stitching contact sheet for {}...", peer_id);
+    println!("Status: Generating contact sheet for {}", peer_id);
 
     for (idx, entry) in entries.iter().take(9).enumerate() {
         let img = image::open(entry.path())
@@ -205,51 +185,16 @@ pub fn verify_video_motion(peer_id: &str) -> std::io::Result<()> {
         let x = (idx % 3) as u32 * frame_w;
         let y = (idx / 3) as u32 * frame_h;
         
-        // Copy the frame into the grid
         contact_sheet.copy_from(&img, x, y)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     }
 
-    // 3. Save the proof
     contact_sheet.save(&output_file)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
-    println!("Evidence Verified! View the grid at: {}", output_file);
+    println!("Status: Contact sheet created at {}", output_file);
     Ok(())
 }
-
-// ===============
-//  HARDWARE TEST
-// ===============
-pub fn test_single_capture() -> Result<usize, String> {
-    // Identify the first camera
-    let index = CameraIndex::Index(0);
-    
-    // Request a standard RGB format
-    let requested = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
-    
-    // Initialize the hardware
-    let mut camera = Camera::new(index, requested)
-        .map_err(|e| format!("Failed to find camera: {}", e))?;
-
-    // Open the stream
-    camera.open_stream()
-        .map_err(|e| format!("Failed to open stream: {}", e))?;
-
-    // Capture one frame
-    // Note: Some cameras need a moment to "warm up" (auto-exposure), 
-    // but for a raw pixel test, the first frame is fine.
-    let frame = camera.frame()
-        .map_err(|e| format!("Failed to capture frame: {}", e))?;
-
-    let decoded = frame.decode_image::<RgbFormat>()
-        .map_err(|e| format!("Failed to decode pixels: {}", e))?;
-
-    let bytes = decoded.into_raw();
-    
-    Ok(bytes.len())
-}
-
 
 // ================
 //  TESTS

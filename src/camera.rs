@@ -1,3 +1,5 @@
+/// The code provided includes implementations for camera frame providers, a camera thread for capturing
+/// frames, and tests for the camera functionality.
 use nokhwa::utils::{CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::Camera;
@@ -109,6 +111,21 @@ impl PhalanxCameraThread {
     }
 }
 
+// ===============
+//  HARDWARE TEST
+// ===============
+
+pub fn test_hardware_connection(index: usize) -> Result<usize, String> {
+    let mut camera = HardwareCamera::new(index)?;
+    
+    // Attempt to capture a single frame to verify pixels are flowing
+    let raw_frame = camera.capture_frame()?;
+    
+    Ok(raw_frame.len())
+}
+
+// UNIT TESTS
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +170,17 @@ mod tests {
         assert!(!shard.frames.is_empty(), "Shard should contain JPEG data");
         // Since we have 2 FPS, the shard should contain 2 frames
         // Note: The shredder logic might vary, but we verify data exists
+    }
+
+    #[test]
+    fn test_physical_hardware_connection() {
+        let result = test_hardware_connection(0);
+        match result {
+            Ok(len) => {
+                println!("Hardware Success: Captured {} bytes", len);
+                assert!(len > 0);
+            },
+            Err(e) => panic!("Hardware test failed: {}", e),
+        }
     }
 }
