@@ -32,6 +32,32 @@ pub struct Shredder {
     current_sequence: u32,
 }
 
+
+// =====
+// CHUNKS
+// =====
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ShardChunk {
+    pub shard_id: u32,      // Matches the VideoShard sequence_id
+    pub chunk_index: u32,   // 0, 1, 2...
+    pub total_chunks: u32,
+    pub data: Vec<u8>,
+}
+
+/// Helper to split a large buffer into chunks
+pub fn chunkify(shard_id: u32, data: Vec<u8>, chunk_size: usize) -> Vec<ShardChunk> {
+    let total_chunks = (data.len() as f64 / chunk_size as f64).ceil() as u32;
+    data.chunks(chunk_size)
+        .enumerate()
+        .map(|(i, chunk)| ShardChunk {
+            shard_id,
+            chunk_index: i as u32,
+            total_chunks,
+            data: chunk.to_vec(),
+        })
+        .collect()
+}
+
 // =============
 //   CORE LOGIC
 // =============

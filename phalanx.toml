@@ -1,0 +1,19 @@
+[network]
+heartbeat_interval_secs = 1
+heartbeat_initialization_grace_period = 30
+pulse_timeout_secs = 30
+chunk_size_bytes = 32768
+video_topic = "phalanx/video"
+audio_topic = "phalanx/audio"
+control_topic = "phalanx/emergency/the-thing"
+
+[storage]
+vault_path = "./vault"
+max_video_buffer = 30
+max_audio_buffer = 60
+max_peers = 10
+
+[hardware]
+camera_fps = 15
+audio_sample_rate = 44100
+audio_channels = 1

@@ -4,6 +4,7 @@ pub mod vid;
 pub mod camera;
 pub mod audio;
 pub mod sentinel;
+pub mod config;
 
 
 #[derive(NetworkBehaviour)]
