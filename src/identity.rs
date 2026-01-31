@@ -1,22 +1,24 @@
-use ed25519_dalek::{SigningKey, Signer, VerifyingKey, Signature};
+use ed25519_dalek::{SigningKey, VerifyingKey, Signer};
+// Re-exported traits ensure ed25519-dalek is happy with the RNG version
+use dalek_rand::{OsRng}; 
 use serde::{Serialize, Deserialize};
 use std::fs;
 use std::path::Path;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PhalanxIdentity {
-    pub did: String,             // e.g., "did:phlx:z6Mkq..."
-    pub signing_key: Vec<u8>,    // Secret key bytes
+    pub did: String,             
+    pub signing_key: Vec<u8>,    
 }
 
 impl PhalanxIdentity {
-    /// Create a new identity and save it to a local file
     pub fn generate<P: AsRef<Path>>(save_path: P) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut rng = rand::thread_rng();
+        let mut rng = OsRng;
+        // This call requires the CryptoRngCore trait to be in scope
         let signing_key = SigningKey::generate(&mut rng);
-        let verifying_key: VerifyingKey = (&signing_key).into();
         
-        // Use the public key bytes to create a deterministic DID
+        let verifying_key: VerifyingKey = signing_key.verifying_key();
+        
         let did = format!("did:phlx:{}", hex::encode(verifying_key.as_bytes()));
         
         let identity = Self {
@@ -30,18 +32,11 @@ impl PhalanxIdentity {
         Ok(identity)
     }
 
-    /// Load an existing identity from disk
-    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
-        let bytes = fs::read(path)?;
-        let identity: PhalanxIdentity = postcard::from_bytes(&bytes)?;
-        Ok(identity)
-    }
-
-    /// Sign a data buffer (e.g., a VideoShard)
     pub fn sign(&self, data: &[u8]) -> Vec<u8> {
-        let key = SigningKey::from_bytes(
-            &self.signing_key.clone().try_into().expect("Invalid key length")
-        );
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&self.signing_key[..32]);
+        let key = SigningKey::from_bytes(&bytes);
+        
         let signature = key.sign(data);
         signature.to_bytes().to_vec()
     }

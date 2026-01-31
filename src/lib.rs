@@ -5,7 +5,8 @@ pub mod camera;
 pub mod audio;
 pub mod sentinel;
 pub mod config;
-
+pub mod identity;
+pub mod stronghold;
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "PhalanxEvent")]

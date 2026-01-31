@@ -25,8 +25,43 @@ pub struct WitnessEnvelope {
     pub original_shard: VideoShard, 
     pub witness_peer_id: String,   
     pub receipt_timestamp: u64,    
-    pub witness_signature: Vec<u8>, 
+    pub signature: Vec<u8>, 
+    pub did: String,
 }
+
+impl WitnessEnvelope {
+    pub fn verify(&self) -> bool {
+        // 1. Extract Public Key from DID (format: did:phlx:HEX_BYTES)
+        let pub_key_hex = match self.did.strip_prefix("did:phlx:") {
+            Some(hex) => hex,
+            None => return false,
+        };
+
+        let pub_key_bytes = match hex::decode(pub_key_hex) {
+            Ok(bytes) => bytes,
+            Err(_) => return false,
+        };
+
+        // 2. Reconstruct the VerifyingKey
+        use ed25519_dalek::{VerifyingKey, Signature, Verifier};
+        let verifying_key = match VerifyingKey::from_bytes(
+            &pub_key_bytes.try_into().unwrap_or([0u8; 32])
+        ) {
+            Ok(key) => key,
+            Err(_) => return false,
+        };
+
+        // 3. Serialize the shard and verify against signature
+        let shard_bytes = postcard::to_stdvec(&self.original_shard).unwrap_or_default();
+        let sig_obj = match Signature::from_slice(&self.signature) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+
+        verifying_key.verify(&shard_bytes, &sig_obj).is_ok()
+    }
+}
+
 
 pub struct Shredder {
     current_sequence: u32,
@@ -179,6 +214,30 @@ pub fn seal_to_vault(peer_id: &libp2p::PeerId, shards: VecDeque<VideoShard>) -> 
     }
     
     println!("Status: Sealed {} shards for peer {}", shards.len(), peer_id);
+    Ok(())
+}
+
+pub fn seal_to_vault_from_vec(peer_id_str: &str, shards: Vec<VideoShard>) -> io::Result<()> {
+    use std::collections::VecDeque;
+    seal_to_vault_id_str(peer_id_str, VecDeque::from(shards))
+}
+
+pub fn seal_to_vault_id_str(id_str: &str, shards: VecDeque<VideoShard>) -> io::Result<()> {
+    let vault_dir = format!("vault/{}", id_str);
+    fs::create_dir_all(&vault_dir)?;
+
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let file_path = format!("{}/evidence_{}.bin", vault_dir, now);
+    let mut file = File::create(&file_path)?;
+
+    for shard in shards {
+        for frame in shard.frames {
+            file.write_all(&frame)?;
+        }
+    }
+
+    file.flush()?;
+    println!("Stronghold: Evidence sealed to {}", file_path);
     Ok(())
 }
 
