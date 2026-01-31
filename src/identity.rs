@@ -32,6 +32,12 @@ impl PhalanxIdentity {
         Ok(identity)
     }
 
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+        let bytes = fs::read(path)?;
+        let identity: PhalanxIdentity = postcard::from_bytes(&bytes)?;
+        Ok(identity)
+    }
+
     pub fn sign(&self, data: &[u8]) -> Vec<u8> {
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(&self.signing_key[..32]);

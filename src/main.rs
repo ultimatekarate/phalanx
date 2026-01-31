@@ -1,8 +1,7 @@
 #![allow(dead_code)]
 
 use libp2p::{
-    gossipsub, mdns, noise, tcp, yamux, 
-    SwarmBuilder,
+    gossipsub,
     futures::StreamExt,      
 };
 use std::error::Error;
@@ -11,12 +10,10 @@ use tokio::select;
 use tokio::sync::mpsc;
 
 use phalanx::vid;
+use phalanx::identity;
 use phalanx::camera;
 use phalanx::audio;
 use phalanx::sentinel::Sentinel;
-
-use phalanx::{PhalanxBehaviour};
-
 
 // ==================
 //   MAIN ENTRY
@@ -37,26 +34,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 
     println!("--- PHALANX: INITIALIZING ---");
-
+    let my_identity = phalanx::init_identity();
     // Networking setup
     let mut sentinel = Sentinel::new(&config);
 
-    let mut swarm = SwarmBuilder::with_new_identity()
-        .with_tokio()
-        .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
-        .with_behaviour(|key| {
-            let config = gossipsub::ConfigBuilder::default()
-                .validation_mode(gossipsub::ValidationMode::Permissive)
-                .max_transmit_size(config.network.chunk_size_bytes + 4096)
-                .do_px()
-                .build()
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-            Ok(PhalanxBehaviour {
-                gossipsub: gossipsub::Behaviour::new(gossipsub::MessageAuthenticity::Signed(key.clone()), config)?,
-                mdns: mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?,
-            })
-        })?
-        .build();
+    let mut swarm = phalanx::setup_phalanx_swarm(&config).await?;
 
     swarm.behaviour_mut().gossipsub.subscribe(&sentinel.topic)?;
     let port = std::env::args().nth(1).unwrap_or("0".to_string());
@@ -82,6 +64,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Subscribe to audio and video topic
     let video_topic = gossipsub::IdentTopic::new(&config.network.video_topic);
     let audio_topic = gossipsub::IdentTopic::new(&config.network.audio_topic);
+    let sentinel_topic = gossipsub::IdentTopic::new(&config.network.control_topic);
 
     swarm.behaviour_mut().gossipsub.subscribe(&video_topic)?;
     swarm.behaviour_mut().gossipsub.subscribe(&audio_topic)?;
@@ -95,21 +78,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         select! {
             Some(v_shard) = video_rx.recv() => {
-                if let Ok(full_bytes) = postcard::to_stdvec(&v_shard) {
-                    // Shred into 32KB chunks to stay well under the 64KB limit
-                    let chunks = vid::chunkify(v_shard.sequence_id, full_bytes, config.network.chunk_size_bytes);
+                // 1. Wrap the Shard into a Signed Envelope
+                // This is the "Identity Step" that validates your evidence
+                let shard_bytes = postcard::to_stdvec(&v_shard).unwrap();
+                let signature = my_identity.sign(&shard_bytes);
+                
+                let envelope = vid::WitnessEnvelope {
+                    original_shard: v_shard.clone(),
+                    witness_peer_id: swarm.local_peer_id().to_string(),
+                    receipt_timestamp: v_shard.timestamp,
+                    signature,
+                    did: my_identity.did.clone(),
+                };
+
+                // 2. Serialize the ENVELOPE (not the raw shard)
+                if let Ok(envelope_bytes) = postcard::to_stdvec(&envelope) {
+                    // 3. Shred into chunks for P2P transport
+                    let chunks = vid::chunkify(
+                        v_shard.sequence_id, 
+                        envelope_bytes, 
+                        config.network.chunk_size_bytes
+                    );
                     
                     for chunk in chunks {
                         if let Ok(encoded_chunk) = postcard::to_stdvec(&chunk) {
                             let _ = swarm.behaviour_mut().gossipsub.publish(video_topic.clone(), encoded_chunk);
                         }
                     }
-                }
-            }
-
-            Some(a_shard) = audio_rx.recv() => {
-                if let Ok(encoded) = postcard::to_stdvec(&a_shard) {
-                    let _ = swarm.behaviour_mut().gossipsub.publish(audio_topic.clone(), encoded);
                 }
             }
             
