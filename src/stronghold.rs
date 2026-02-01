@@ -36,12 +36,12 @@ impl Stronghold {
     }
 
     fn write_to_wal(&self, envelope: &WitnessEnvelope) -> std::io::Result<()> {
-        let mut wal_path = self.vault_storage.clone();
-        wal_path.push("wal");
+        let safe_did = envelope.did.replace(":", "_");
+        let file_name = format!("{}_{}.tmp", safe_did, envelope.original_shard.sequence_id);
+        let wal_path = self.wal_directory.join(file_name);
+
         fs::create_dir_all(&wal_path)?;
-        
-        // Save as individual shard for crash recovery
-        wal_path.push(format!("{}_{}.tmp", envelope.did.replace(":", "_"), envelope.original_shard.sequence_id));
+
         let bytes = postcard::to_stdvec(envelope).unwrap();
         fs::write(wal_path, bytes)
     }
@@ -156,6 +156,15 @@ impl Stronghold {
                     // 3. Success! Clear the WAL logs for this session
                     self.clear_session_wal(did_full, &keys);
                 }
+            }
+
+            let is_audio = sorted_shards.iter().any(|s| s.fps == 0);
+            let extension = if is_audio { "aud.phlx" } else { "vid.phlx" };
+
+            save_path.push(format!("session_{}.{}", sorted_shards[0].timestamp, extension));
+            
+            if let Ok(encoded) = postcard::to_stdvec(&sorted_shards) {
+                let _ = fs::write(&save_path, encoded);
             }
         }
     }

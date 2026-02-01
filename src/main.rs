@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             
             Some(a_shard) = audio_rx.recv() => {
-                handle_audio_shard(&mut swarm, &audio_topic, a_shard);
+                handle_audio_shard(&mut swarm, &audio_topic, a_shard, &my_identity, &config);
             }
             
             _ = heartbeat_timer.tick() => {
@@ -136,9 +136,35 @@ fn is_video_message(event: &SwarmEvent<PhalanxEvent>, sentinel: &Sentinel) -> bo
     false
 }
 
-fn handle_audio_shard(swarm: &mut Swarm<PhalanxBehaviour>, topic: &gossipsub::IdentTopic, shard: audio::AudioShard) {
-    if let Ok(encoded) = postcard::to_stdvec(&shard) {
-        let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), encoded);
+fn handle_audio_shard(
+    swarm: &mut Swarm<PhalanxBehaviour>,
+    topic: &gossipsub::IdentTopic,
+    shard: audio::AudioShard,
+    identity: &identity::PhalanxIdentity,
+    config: &PhalanxConfig,
+) {
+    // 1. Wrap the audio shard in a signed WitnessEnvelope
+    // We use the swarm local peer ID to identify the broadcaster
+    let peer_id = swarm.local_peer_id().to_string();
+    let envelope = audio::wrap_audio_shard(shard, identity, peer_id);
+
+    // 2. Serialize the entire envelope for transmission
+    if let Ok(encoded_envelope) = postcard::to_stdvec(&envelope) {
+        // 3. Shred the envelope into chunks to fit Gossipsub MTU
+        let chunks = vid::chunkify(
+            envelope.original_shard.sequence_id,
+            encoded_envelope,
+            config.network.chunk_size_bytes,
+        );
+
+        // 4. Publish each chunk to the mesh
+        for chunk in chunks {
+            if let Ok(encoded_chunk) = postcard::to_stdvec(&chunk) {
+                if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), encoded_chunk) {
+                    eprintln!("Network Error: Failed to publish audio chunk: {}", e);
+                }
+            }
+        }
     }
 }
 
@@ -174,14 +200,21 @@ fn subscribe_to_topics(
 }
 
 fn spawn_hardware_threads(config: &PhalanxConfig) -> (mpsc::Receiver<vid::VideoShard>, mpsc::Receiver<audio::AudioShard>) {
-    let (v_tx, v_rx) = mpsc::channel(100);
-    let (a_tx, a_rx) = mpsc::channel(100);
+    let (v_tx, v_rx) = mpsc::channel(64);
+    let (a_tx, a_rx) = mpsc::channel(64);
 
-    let eyes = camera::PhalanxCameraThread { fps: config.hardware.camera_fps };
-    eyes.spawn(Some(0), v_tx); // Add logic here if you want mock fallback
+    // 1. Video Thread
+    let camera_thread = camera::PhalanxCameraThread { 
+        fps: config.hardware.camera_fps 
+    };
+    camera_thread.spawn(Some(0), v_tx);
 
-    let ears = audio::PhalanxAudioThread { sample_rate: config.hardware.audio_sample_rate };
-    ears.spawn(0, a_tx);
+    let audio_thread = audio::PhalanxAudioThread { 
+        sample_rate: config.hardware.audio_sample_rate,
+        channels: config.hardware.audio_channels 
+    };
+    
+    audio_thread.spawn(a_tx); 
 
     (v_rx, a_rx)
 }
