@@ -26,6 +26,7 @@ pub struct StorageConfig {
     pub max_video_buffer: usize,
     pub max_audio_buffer: usize,
     pub max_peers: usize,
+    pub stale_session_threshold: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]

@@ -73,7 +73,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         storage.ingest_envelope(envelope);
                     }
                 }
+
+                storage.archive_stale_sessions(Duration::from_secs(config.storage.stale_session_threshold));
             }
+
             event = swarm.select_next_some() => {
                 if is_video_message(&event, &sentinel){
                     if let Some(chunk)= message_to_chunk(event){

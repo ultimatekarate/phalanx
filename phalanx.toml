@@ -12,6 +12,7 @@ vault_path = "./vault"
 max_video_buffer = 30
 max_audio_buffer = 60
 max_peers = 10
+stale_session_threshold = 300
 
 [hardware]
 camera_fps = 15

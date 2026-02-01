@@ -2,7 +2,7 @@ use crate::vid::{WitnessEnvelope, VideoShard};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-
+use std::time::{Duration, Instant};
 
 // Stronghold is a Personal Data Server. Sentinels gather information 
 // and store it in a stronghold.
@@ -11,6 +11,7 @@ pub struct Stronghold {
     pub vault_storage: PathBuf,
     pub wal_directory: PathBuf,
     pub active_sessions: HashMap<String, HashMap<u32, WitnessEnvelope>>, 
+    pub session_activity: HashMap<String, Instant>,
     pub processed_sequences: HashMap<String, HashSet<u32>>,
 }
 
@@ -26,6 +27,7 @@ impl Stronghold {
             vault_storage: root,
             wal_directory: wal,
             active_sessions: HashMap::new(),
+            session_activity: HashMap::new(),
             processed_sequences: HashMap::new(),
         };
 
@@ -92,7 +94,9 @@ impl Stronghold {
                 eprintln!("Stronghold WAL Error: {}. Dropping shard.", e);
                 return; 
             }
-            
+
+            self.session_activity.insert(did_key.clone(), Instant::now());
+
             let session = self.active_sessions
                 .entry(did_key.clone())
                 .or_insert_with(HashMap::new);
@@ -102,9 +106,28 @@ impl Stronghold {
             // Archive session every 10 shards
             if session.len() >= 10 { 
                 self.archive_session(&did_key); 
+                self.session_activity.remove(&did_key);
             }
         } else {
             eprintln!("Warning: Rejected invalid signature from DID: {}", envelope.did);
+        }
+    }
+
+    pub fn archive_stale_sessions(&mut self, timeout: Duration) {
+        let now = Instant::now();
+        
+        // Identify DIDs that have timed out
+        let stale_dids: Vec<String> = self.session_activity
+            .iter()
+            .filter(|(_, &last_active)| now.duration_since(last_active) > timeout)
+            .map(|(did, _)| did.clone())
+            .collect();
+
+        for did in stale_dids {
+            println!("Stronghold: Force-archiving stale session for {}", did);
+            // Calling the existing archive logic even if len < 10
+            self.archive_session(&did);
+            self.session_activity.remove(&did);
         }
     }
 
