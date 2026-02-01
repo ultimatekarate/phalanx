@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use libp2p::{
     gossipsub,
     futures::StreamExt,    
