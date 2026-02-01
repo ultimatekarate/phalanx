@@ -78,5 +78,6 @@ pub fn wrap_audio_shard(
         receipt_timestamp: shard.timestamp,
         signature,
         did: identity.did.clone(),
+        is_partial: false,
     }
 }

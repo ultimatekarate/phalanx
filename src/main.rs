@@ -1,7 +1,7 @@
 use libp2p::{
     gossipsub,
     futures::StreamExt,    
-    Swarm, swarm::SwarmEvent, PeerId
+    Swarm
 };
 use std::error::Error;
 use std::time::{Duration};
@@ -15,7 +15,6 @@ use phalanx::identity;
 use phalanx::sentinel::Sentinel;
 use phalanx::config::PhalanxConfig;
 use phalanx::PhalanxBehaviour;
-use phalanx::PhalanxEvent;
 
 use phalanx::stronghold::Stronghold;
 
@@ -35,7 +34,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
     let my_identity = phalanx::init_identity();
     let mut sentinel = Sentinel::new(&config);
-    let mut storage = Stronghold::new(&config.storage.vault_path);
+    let mut storage = Stronghold::new(&config.storage.vault_path, &config);
     let mut swarm = phalanx::setup_phalanx_swarm(&config).await?;
 
     sentinel.subscribe_all(&mut swarm)?;
@@ -101,6 +100,7 @@ fn handle_video_shard(
             receipt_timestamp: shard.timestamp,
             signature: identity.sign(&shard_bytes),
             did: identity.did.clone(),
+            is_partial: false,
         };
 
         if let Ok(envelope_bytes) = postcard::to_stdvec(&envelope) {

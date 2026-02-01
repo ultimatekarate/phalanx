@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config = PhalanxConfig::load("phalanx.toml")
         .expect("Failed to load phalanx.toml.");
     
-    let mut storage = Stronghold::new("./vault");
+    let mut storage = Stronghold::new("./vault", &config);
     let mut sentinel = Sentinel::new(&config);
     let mut swarm = phalanx::setup_phalanx_swarm(&config).await?;
 

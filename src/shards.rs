@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::io::{Cursor}; 
 
@@ -34,6 +34,7 @@ pub struct WitnessEnvelope {
     pub receipt_timestamp: u64,    
     pub signature: Vec<u8>, 
     pub did: String,
+    pub is_partial: bool,
 }
 
 impl WitnessEnvelope {
@@ -109,12 +110,12 @@ impl ReassemblyBuffer {
         }
     }
 
-    /// Primary entry point for peer cleanup
     pub fn try_salvage(self) -> Option<WitnessEnvelope> {
-        if self.chunks.iter().all(|c| c.is_none()) {
-            return None;
+        if let Some(mut envelope) = self.assemble_partial() {
+            envelope.is_partial = true;
+            return Some(envelope);
         }
-        self.assemble_partial()
+        None
     }
 
     fn assemble_partial(&self) -> Option<WitnessEnvelope> {

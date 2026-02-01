@@ -27,6 +27,7 @@ pub struct StorageConfig {
     pub max_audio_buffer: usize,
     pub max_peers: usize,
     pub stale_session_threshold: u64,
+    pub shards_needed_to_archive: usize
 }
 
 #[derive(Debug, Deserialize, Clone)]

@@ -13,10 +13,11 @@ pub struct Stronghold {
     pub active_sessions: HashMap<String, HashMap<u32, WitnessEnvelope>>, 
     pub session_activity: HashMap<String, Instant>,
     pub processed_sequences: HashMap<String, HashSet<u32>>,
+    pub shards_needed_to_archive: usize,
 }
 
 impl Stronghold {
-    pub fn new(vault_path: &str) -> Self {
+    pub fn new(vault_path: &str, config: &crate::config::PhalanxConfig) -> Self {
         // Ensure the vault directory exists
         let root = PathBuf::from(vault_path);
         let wal = root.join("wal");
@@ -29,6 +30,7 @@ impl Stronghold {
             active_sessions: HashMap::new(),
             session_activity: HashMap::new(),
             processed_sequences: HashMap::new(),
+            shards_needed_to_archive: config.storage.shards_needed_to_archive,
         };
 
         stronghold.recover_from_wal();
@@ -83,11 +85,19 @@ impl Stronghold {
     pub fn ingest_envelope(&mut self, envelope: WitnessEnvelope) {
         let span = tracing::span!(tracing::Level::INFO, "stronghold_ingest", 
             sender = %envelope.did, 
-            seq = envelope.original_shard.sequence_id
+            seq = envelope.original_shard.sequence_id,
+            partial = envelope.is_partial
         );
         let _enter = span.enter();
         
-        if envelope.verify() {
+        let should_ingest = if envelope.is_partial {
+            tracing::warn!("Bypassing signature check for forensic salvage shard");
+            true
+        } else {
+            envelope.verify()
+        };
+
+        if should_ingest {
             let did_key = envelope.did.clone(); 
             let seq_id = envelope.original_shard.sequence_id;
 
@@ -112,8 +122,8 @@ impl Stronghold {
             tracing::debug!("Verified and cached in memory");
 
             // Archive session every 10 shards
-            if session.len() >= 10 { 
-                tracing::info!("Archival threshold met. Sealing shard bundle.");
+            if session.len() >= self.shards_needed_to_archive { 
+                tracing::info!(%self.shards_needed_to_archive, "Archival threshold met. Sealing shard bundle.");
                 self.archive_session(&did_key); 
                 self.session_activity.remove(&did_key);
             }
