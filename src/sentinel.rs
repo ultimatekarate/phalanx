@@ -43,6 +43,15 @@ pub struct Sentinel {
     pub max_audio_buffer: usize,
 }
 
+/// Packets sent over the simulated mesh
+#[derive(Clone)]
+pub enum SimPacket {
+    Chunk(ShardChunk),
+    Heartbeat(PeerId, Vec<u8>), // Serialized ControlMessage
+    Shutdown,
+}
+
+
 impl Sentinel {
     pub fn new(config: &PhalanxConfig) -> Self {
         Self {

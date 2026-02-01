@@ -50,34 +50,3 @@ impl PhalanxAudioThread {
         });
     }
 }
-
-/// Helper for main.rs to create a signed envelope for audio
-pub fn wrap_audio_shard(
-    shard: AudioShard, 
-    identity: &crate::identity::PhalanxIdentity,
-    peer_id: String
-) -> crate::shards::WitnessEnvelope {
-    use crate::shards::{WitnessEnvelope, VideoShard};
-    
-    // We repurpose the WitnessEnvelope by wrapping the audio data
-    // into a pseudo-VideoShard structure.
-    // NOTE: In a future iteration, we may want a generic 'EvidenceShard' enum.
-    let pseudo_video = VideoShard {
-        timestamp: shard.timestamp,
-        frames: vec![shard.data], // Audio data lives in the frame buffer
-        sequence_id: shard.sequence_id,
-        fps: 0, // 0 FPS indicates this is an Audio-Only shard
-    };
-
-    let data_to_sign = postcard::to_stdvec(&pseudo_video).unwrap();
-    let signature = identity.sign(&data_to_sign);
-
-    WitnessEnvelope {
-        original_shard: pseudo_video,
-        witness_peer_id: peer_id,
-        receipt_timestamp: shard.timestamp,
-        signature,
-        did: identity.did.clone(),
-        is_partial: false,
-    }
-}

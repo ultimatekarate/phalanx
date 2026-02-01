@@ -3,17 +3,10 @@ use tokio::sync::mpsc;
 use tracing::{info, warn, span, Level};
 use crate::shards::{WitnessEnvelope, ShardChunk};
 use crate::identity::PhalanxIdentity;
-use crate::sentinel::Sentinel;
+use crate::sentinel::{Sentinel, SimPacket};
 use crate::stronghold::Stronghold;
 use crate::config::PhalanxConfig;
 
-/// Packets sent over the simulated mesh
-#[derive(Clone)]
-pub enum SimPacket {
-    Chunk(ShardChunk),
-    Heartbeat(PeerId, Vec<u8>), // Serialized ControlMessage
-    Shutdown,
-}
 
 /// A handle to a virtual node in the harness
 pub struct SimNodeHandle {
@@ -25,6 +18,11 @@ pub struct SimulationHarness {
     pub nodes: HashMap<String, mpsc::Sender<SimPacket>>,
     pub broadcast_channel: mpsc::Sender<(String, SimPacket)>,
     pub config: PhalanxConfig,
+}
+
+pub struct SimNodeHandle {
+    pub did: String,
+    pub tx: mpsc::Sender<(String, SimPacket)>, 
 }
 
 impl SimulationHarness {

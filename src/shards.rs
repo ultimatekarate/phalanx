@@ -7,7 +7,7 @@ use crate::identity::PhalanxIdentity;
 // external crates
 use serde::{Serialize, Deserialize};
 use image::{DynamicImage, ImageFormat}; 
-
+use crate::audio;
 
 // =====================
 // DATA STRUCTURES
@@ -50,6 +50,87 @@ impl WitnessEnvelope {
         };
 
         PhalanxIdentity::verify(&pubkey_bytes, &data_bytes, &self.signature)
+    }
+    
+    pub fn from_video(
+        shard: VideoShard,
+        identity: &crate::identity::PhalanxIdentity,
+        peer_id: String,
+    ) -> Self {
+        let data_to_sign = postcard::to_stdvec(&shard)
+            .expect("Failed to serialize shard for signing");
+        
+        let signature = identity.sign(&data_to_sign);
+
+        Self {
+            original_shard: shard,
+            witness_peer_id: peer_id,
+            receipt_timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            signature,
+            did: identity.did.clone(),
+            is_partial: false,
+        }
+    }
+
+    pub fn from_audio(
+        shard: crate::audio::AudioShard,
+        identity: &crate::identity::PhalanxIdentity,
+        peer_id: String,
+    ) -> Self {
+        let pseudo_video = VideoShard {
+            timestamp: shard.timestamp,
+            frames: vec![shard.data], // Audio payload lives in the frame buffer
+            sequence_id: shard.sequence_id,
+            fps: 0, // 0 FPS signals Audio-Only to the Stronghold
+        };
+
+        // Serialize the inner shard for signing
+        let data_to_sign = postcard::to_stdvec(&pseudo_video)
+            .expect("Failed to serialize pseudo-video shard for signing");
+        
+        let signature = identity.sign(&data_to_sign);
+
+        Self {
+            original_shard: pseudo_video,
+            witness_peer_id: peer_id,
+            receipt_timestamp: shard.timestamp,
+            signature,
+            did: identity.did.clone(),
+            is_partial: false,
+        }
+    }
+}
+
+pub fn wrap_audio_shard(
+    shard: audio::AudioShard, 
+    identity: &crate::identity::PhalanxIdentity,
+    peer_id: String
+) -> crate::shards::WitnessEnvelope {
+    use crate::shards::{WitnessEnvelope, VideoShard};
+    
+    // We repurpose the WitnessEnvelope by wrapping the audio data
+    // into a pseudo-VideoShard structure.
+    // NOTE: In a future iteration, we may want a generic 'EvidenceShard' enum.
+    let pseudo_video = VideoShard {
+        timestamp: shard.timestamp,
+        frames: vec![shard.data], // Audio data lives in the frame buffer
+        sequence_id: shard.sequence_id,
+        fps: 0, // 0 FPS indicates this is an Audio-Only shard
+    };
+
+    let data_to_sign = postcard::to_stdvec(&pseudo_video).unwrap();
+    let signature = identity.sign(&data_to_sign);
+
+    WitnessEnvelope {
+        original_shard: pseudo_video,
+        witness_peer_id: peer_id,
+        receipt_timestamp: shard.timestamp,
+        signature,
+        did: identity.did.clone(),
+        is_partial: false,
     }
 }
 

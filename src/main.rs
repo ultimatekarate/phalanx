@@ -52,11 +52,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         select! {
             Some(v_shard) = video_rx.recv() => {
-                handle_video_shard(&mut swarm, &video_topic, v_shard, &my_identity, &config);
+                handle_video_shard(&mut swarm, &video_topic, v_shard, &my_identity, &config, &storage);
             }
             
             Some(a_shard) = audio_rx.recv() => {
-                handle_audio_shard(&mut swarm, &audio_topic, a_shard, &my_identity, &config);
+                handle_audio_shard(&mut swarm, &audio_topic, a_shard, &my_identity, &config, &storage);
             }
             
             _ = heartbeat_timer.tick() => {
@@ -92,26 +92,16 @@ fn handle_video_shard(
     shard: shards::VideoShard,
     identity: &identity::PhalanxIdentity,
     config: &PhalanxConfig,
+    storage: &mut Stronghold,
 ) {
-    if let Ok(shard_bytes) = postcard::to_stdvec(&shard) {
-        let envelope = shards::WitnessEnvelope {
-            original_shard: shard.clone(),
-            witness_peer_id: swarm.local_peer_id().to_string(),
-            receipt_timestamp: shard.timestamp,
-            signature: identity.sign(&shard_bytes),
-            did: identity.did.clone(),
-            is_partial: false,
-        };
+    let peer_id = swarm.local_peer_id().to_string();
+    let envelope = shards::WitnessEnvelope::from_video(shard, identity, peer_id);
 
-        if let Ok(envelope_bytes) = postcard::to_stdvec(&envelope) {
-            let chunks = shards::chunkify(shard.sequence_id, envelope_bytes, config.network.chunk_size_bytes);
-            for chunk in chunks {
-                if let Ok(encoded) = postcard::to_stdvec(&chunk) {
-                    let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), encoded);
-                }
-            }
-        }
-    }
+    // 2. Persist locally to the Stronghold
+    storage.ingest_envelope(envelope.clone());
+
+    // 3. Delegate to the shared broadcast helper
+    broadcast_envelope(swarm, topic, envelope, config);
 }
 
 fn handle_audio_shard(
@@ -124,27 +114,11 @@ fn handle_audio_shard(
     // 1. Wrap the audio shard in a signed WitnessEnvelope
     // We use the swarm local peer ID to identify the broadcaster
     let peer_id = swarm.local_peer_id().to_string();
-    let envelope = audio::wrap_audio_shard(shard, identity, peer_id);
-
-    // 2. Serialize the entire envelope for transmission
-    if let Ok(encoded_envelope) = postcard::to_stdvec(&envelope) {
-        // 3. Shred the envelope into chunks to fit Gossipsub MTU
-        let chunks = shards::chunkify(
-            envelope.original_shard.sequence_id,
-            encoded_envelope,
-            config.network.chunk_size_bytes,
-        );
-
-        // 4. Publish each chunk to the mesh
-        for chunk in chunks {
-            if let Ok(encoded_chunk) = postcard::to_stdvec(&chunk) {
-                if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), encoded_chunk) {
-                    eprintln!("Network Error: Failed to publish audio chunk: {}", e);
-                }
-            }
-        }
-    }
+    let envelope = shards::WitnessEnvelope::from_audio(shard, identity, peer_id);
+    storage.ingest_envelope(envelope.clone());
+    broadcast_envelope(swarm, topic, envelope, config);
 }
+
 
 fn handle_heartbeat(swarm: &mut Swarm<PhalanxBehaviour>, sentinel: &mut Sentinel) {
     let heartbeat = sentinel.generate_heartbeat(swarm.local_peer_id());
@@ -153,6 +127,26 @@ fn handle_heartbeat(swarm: &mut Swarm<PhalanxBehaviour>, sentinel: &mut Sentinel
     }
 }
 
+fn broadcast_envelope(
+    swarm: &mut Swarm<PhalanxBehaviour>,
+    topic: &gossipsub::IdentTopic,
+    envelope: shards::WitnessEnvelope,
+    config: &PhalanxConfig,
+) {
+    if let Ok(encoded_envelope) = postcard::to_stdvec(&envelope) {
+        let chunks = shards::chunkify(
+            envelope.original_shard.sequence_id,
+            encoded_envelope,
+            config.network.chunk_size_bytes,
+        );
+
+        for chunk in chunks {
+            if let Ok(encoded_chunk) = postcard::to_stdvec(&chunk) {
+                let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), encoded_chunk);
+            }
+        }
+    }
+}
 // --- HELPER SETUP FUNCTIONS ---
 
 fn setup_shutdown_handler() {
