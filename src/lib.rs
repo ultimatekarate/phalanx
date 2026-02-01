@@ -67,8 +67,13 @@ pub async fn setup_phalanx_swarm(config: &PhalanxConfig) -> Result<Swarm<Phalanx
 
 pub fn init_identity() -> PhalanxIdentity {
     let id_path = "identity.bin";
-    PhalanxIdentity::load(id_path).unwrap_or_else(|_| {
+
+    PhalanxIdentity::load_from_disk(id_path).unwrap_or_else(|_| {
         println!("Status: Generating new Phalanx Identity...");
-        PhalanxIdentity::generate(id_path).expect("Failed to create identity")
+
+        let new_id = PhalanxIdentity::generate();
+        new_id.save_to_disk(id_path).expect("Failed to save identity to disk.");
+
+        new_id
     })
 }
