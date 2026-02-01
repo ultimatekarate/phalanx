@@ -46,19 +46,17 @@ impl PhalanxIdentity {
         self.signing_key.sign(data).to_bytes().to_vec()
     }
 
+
     pub fn verify(pubkey_bytes: &[u8], data: &[u8], signature_bytes: &[u8]) -> bool {
-        // 1. Try to parse the public key (VerifyingKey)
-        let Ok(verifying_key) = VerifyingKey::try_from(pubkey_bytes) else {
+        let Ok(public_key) = VerifyingKey::try_from(pubkey_bytes) else {
             return false;
         };
 
-        // 2. Try to parse the signature (This is where your error was)
         let Ok(sig) = Signature::from_slice(signature_bytes) else {
             return false;
         };
 
-        // 3. Verify the data
-        verifying_key.verify(data, &sig).is_ok()
+        public_key.verify(data, &sig).is_ok()
     }
 }
 

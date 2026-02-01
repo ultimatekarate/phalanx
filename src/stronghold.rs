@@ -30,38 +30,40 @@ impl Stronghold {
     pub fn ingest_envelope(&mut self, envelope: WitnessEnvelope) {
         if envelope.verify() { // This now does real cryptographic work
             let did_key = envelope.did.clone(); 
-            let id_suffix = did_key.replace("did:phlx:", "");
+            let safe_did = did_key.replace(":", "_");
             let seq_id = envelope.original_shard.sequence_id;
 
             let session = self.active_sessions
-                .entry(did_key) // did_key is used here
+                .entry(did_key.clone()) // did_key is used here
                 .or_insert_with(HashMap::new);
 
             session.insert(seq_id, envelope);
             
-            if session.len() >= 10 { self.archive_session(&id_suffix); }
+            if session.len() >= 10 { self.archive_session(&did_key, &safe_did); }
 
         } else {
             eprintln!("Warning: Received invalid signature from DID: {}", envelope.did);
         }
     }
 
-    fn archive_session(&mut self, did_suffix: &str) {
-        let did_full = format!("did:phlx:{}", did_suffix);
-        if let Some(mut session) = self.active_sessions.remove(&did_full) {
+    fn archive_session(&mut self, did_full: &str, safe_did: &str) {
+        if let Some(mut session) = self.active_sessions.remove(did_full) {
             println!("Stronghold: Sealing archive for {}", did_full);
             
-            // Sort by sequence_id to ensure video order
             let mut keys: Vec<_> = session.keys().cloned().collect();
             keys.sort();
 
             let sorted_shards: Vec<VideoShard> = keys.into_iter()
-                .map(|k| session.remove(&k).unwrap().original_shard)
+                .map(|k| {
+                    let env = session.remove(&k).unwrap();
+                    // Mark as processed to prevent re-archiving
+                    self.processed_sequences.entry(did_full.to_string()).or_default().insert(k);
+                    env.original_shard
+                })
                 .collect();
 
-            // Offload to your existing vid::seal_to_vault logic
-            // Note: We use the DID suffix as the folder name
-            let _ = crate::vid::seal_to_vault_from_vec(did_suffix, sorted_shards);
+            // Offload to vault logic using sanitized DID
+            let _ = crate::vid::seal_to_vault_from_vec(safe_did, sorted_shards);
         }
     }
 }

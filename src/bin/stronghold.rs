@@ -32,7 +32,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Stronghold Status: Online. PeerID: {}", swarm.local_peer_id());
 
-    // 5. The Event Loop
     loop {
         tokio::select! {
             event = swarm.select_next_some() => match event {
