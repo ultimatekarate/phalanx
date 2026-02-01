@@ -1,7 +1,7 @@
 use libp2p::{
     gossipsub,
     futures::StreamExt,    
-    Swarm, swarm::SwarmEvent
+    Swarm, swarm::SwarmEvent, PeerId
 };
 use std::error::Error;
 use std::time::{Duration};
@@ -76,14 +76,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
 
             event = swarm.select_next_some() => {
-                if is_video_message(&event, &sentinel){
-                    if let Some(chunk)= message_to_chunk(event){
-                        if let Some(envelope) = sentinel.ingest_chunk(chunk) {
-                            storage.ingest_envelope(envelope);
-                        }
-                    }
-                } else {
-                    sentinel.handle_network_event(event, &mut swarm);
+                if let Some(envelope) =  sentinel.handle_network_event(event, &mut swarm) {
+                    storage.ingest_envelope(envelope);
                 }
             }
         }
@@ -92,13 +86,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 
 // --- EXTRACTED HANDLER FUNCTIONS ---
-
-fn message_to_chunk(event: SwarmEvent<PhalanxEvent>) -> Option<shards::ShardChunk> {
-    if let SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(libp2p::gossipsub::Event::Message { message, .. })) = event {
-        return postcard::from_bytes::<shards::ShardChunk>(&message.data).ok();
-    }
-    None
-}
 
 fn handle_video_shard(
     swarm: &mut Swarm<PhalanxBehaviour>,
@@ -125,13 +112,6 @@ fn handle_video_shard(
             }
         }
     }
-}
-
-fn is_video_message(event: &SwarmEvent<PhalanxEvent>, sentinel: &Sentinel) -> bool {
-    if let SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(libp2p::gossipsub::Event::Message { message, .. })) = event {
-        return message.topic == sentinel.video_topic.hash();
-    }
-    false
 }
 
 fn handle_audio_shard(

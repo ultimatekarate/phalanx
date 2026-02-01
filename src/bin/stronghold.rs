@@ -1,87 +1,67 @@
-use libp2p::{futures::StreamExt, swarm::SwarmEvent};
+use libp2p::{futures::StreamExt};
 use phalanx::{
     stronghold::Stronghold, 
-    shards::{WitnessEnvelope, ShardChunk}, 
     sentinel::Sentinel,
     config::PhalanxConfig,
-    identity::PhalanxIdentity,
 };
-
 use std::error::Error;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
     println!("PHALANX STRONGHOLD: Initializing Headless PDS...");
 
-    // 1. Load Configuration
     let config = PhalanxConfig::load("phalanx.toml")
-        .expect("Failed to load phalanx.toml. PDS requires a valid configuration.");
+        .expect("Failed to load phalanx.toml.");
     
-    // Initialize the Storage Engine (The Stronghold)
     let mut storage = Stronghold::new("./vault");
     let mut sentinel = Sentinel::new(&config);
     let mut swarm = phalanx::setup_phalanx_swarm(&config).await?;
 
-    let video_topic = libp2p::gossipsub::IdentTopic::new(&config.network.video_topic);
-    swarm.behaviour_mut().gossipsub.subscribe(&video_topic)?;
-    swarm.behaviour_mut().gossipsub.subscribe(&sentinel.control_topic)?;
+    // Use the topics already managed by the sentinel
+    sentinel.subscribe_all(&mut swarm)?;
 
-    let port = std::env::args().nth(1).unwrap_or("4001".to_string());
+    let port = std::env::args().nth(1).unwrap_or_else(|| "4001".to_string());
     swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}", port).parse()?)?;
+
+    // Cleanup and Heartbeat timers
+    let mut cleanup_timer = tokio::time::interval(Duration::from_secs(10));
+    let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(30));
 
     println!("Stronghold Status: Online. PeerID: {}", swarm.local_peer_id());
 
     loop {
         tokio::select! {
-            event = swarm.select_next_some() => match event {
-                SwarmEvent::Behaviour(phalanx::PhalanxEvent::Gossipsub(libp2p::gossipsub::Event::Message { message, .. })) => {
-                    if message.topic == video_topic.hash() {
-                        if let Ok(chunk) = postcard::from_bytes::<ShardChunk>(&message.data) {
-                            if let Some(envelope_bytes) = handle_reassembly(&mut sentinel, chunk) {
-                                process_verified_envelope(&envelope_bytes, &mut storage);
-                            }
-                        }
+            // 1. Handle Incoming Network Traffic
+            event = swarm.select_next_some() => {
+                // Delegate all network event logic to the sentinel.
+                // It now returns a WitnessEnvelope only when a shard is fully reassembled.
+                if let Some(envelope) = sentinel.handle_network_event(event, &mut swarm) {
+                    // Security & verification are now handled inside ingest_envelope
+                    storage.ingest_envelope(envelope);
+                }
+            }
+
+            // 2. Periodic Peer Cleanup & Forensic Salvage
+            _ = cleanup_timer.tick() => {
+                let local_id = *swarm.local_peer_id();
+                let stale_data = sentinel.process_cleanup(local_id);
+                
+                for (_peer_id, envelopes) in stale_data {
+                    for envelope in envelopes {
+                        storage.ingest_envelope(envelope);
                     }
                 }
-                SwarmEvent::NewListenAddr { address, .. } => {
-                    println!("Stronghold listening on: {:?}", address);
-                }
-                _ => {}
             }
-        }
-    }
-}
 
-fn process_verified_envelope(bytes: &[u8], storage: &mut Stronghold) {
-    if let Ok(envelope) = postcard::from_bytes::<WitnessEnvelope>(bytes) {
-        if let Ok(shard_bytes) = postcard::to_stdvec(&envelope.original_shard) {
-            let clean_did = envelope.did.replace("did:key:z", "");
-            
-            if let Ok(pubkey_bytes) = bs58::decode(clean_did).into_vec() {
-                if PhalanxIdentity::verify(&pubkey_bytes, &shard_bytes, &envelope.signature) {
-                    println!("Verified: Shard #{} [DID: {}]", envelope.original_shard.sequence_id, envelope.did);
-                    storage.ingest_envelope(envelope);
-                } else {
-                    println!("Rejected: Signature Mismatch for DID {}", envelope.did);
+            // 3. Outgoing Heartbeats
+            _ = heartbeat_timer.tick() => {
+                let hb = sentinel.generate_heartbeat(swarm.local_peer_id());
+                if let Ok(data) = postcard::to_stdvec(&hb) {
+                    let _ = swarm.behaviour_mut().gossipsub.publish(sentinel.control_topic.clone(), data);
                 }
             }
         }
     }
-}
-
-fn handle_reassembly(sentinel: &mut Sentinel, chunk: ShardChunk) -> Option<Vec<u8>> {
-    let entry = sentinel.chunk_reassembly.entry(chunk.shard_id)
-        .or_insert_with(|| vec![None; chunk.total_chunks as usize]);
-
-    if (chunk.chunk_index as usize) < entry.len() {
-        entry[chunk.chunk_index as usize] = Some(chunk.data);
-    }
-
-    if entry.iter().all(|c| c.is_some()) {
-        let full_data: Vec<u8> = entry.drain(..).map(|c| c.unwrap()).flatten().collect();
-        sentinel.chunk_reassembly.remove(&chunk.shard_id);
-        return Some(full_data);
-    }
-    None
 }

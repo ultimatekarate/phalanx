@@ -12,6 +12,7 @@ use crate::config::PhalanxConfig;
 pub enum SimPacket {
     Chunk(ShardChunk),
     Heartbeat(PeerId, Vec<u8>), // Serialized ControlMessage
+    Shutdown,
 }
 
 /// A handle to a virtual node in the harness
@@ -42,6 +43,13 @@ impl SimulationHarness {
             config,
         };
         (harness, rx)
+    }
+
+    pub async fn stop_node(&mut self, did: &str) {
+        if let Some(tx) = self.nodes.remove(did) {
+            let _ = tx.send(SimPacket::Shutdown).await;
+            warn!(node_did = %did, "Node stopped manually via harness");
+        }
     }
 
     pub async fn run_mesh_relay(&mut self, mut relay_rx: mpsc::Receiver<(String, PeerId, SimPacket)>) {
@@ -97,6 +105,11 @@ impl SimulationHarness {
                     // 2. Incoming Packet Processing
                     Some(packet) = node_rx.recv() => {
                         match packet {
+                            SimPacket::Shutdown => {
+                                info!("Shutdown signal received. Exiting virtual node loop.");
+                                break; // Exit the loop and terminate the task
+                            }
+
                             SimPacket::Chunk(chunk) => {
                                 if let Some(envelope) = sentinel.ingest_chunk(chunk) {
                                     storage.ingest_envelope(envelope);
@@ -130,4 +143,23 @@ impl SimulationHarness {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn test_salvage_on_node_death() {
+    let (mut harness, mut relay) = SimulationHarness::init_mesh(PhalanxConfig::default());
+    
+    // Start the mesh relay
+    tokio::spawn(async move { harness.run_mesh_relay(relay).await });
+
+    let node_a = harness.spawn_node("Alpha").await;
+    let node_b = harness.spawn_node("Beta").await;
+
+    // Wait for discovery...
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Node A sends partial data, then dies
+    harness.stop_node(&node_a).await;
+
+    // Verification: Does Node B eventually archive Node A's fragments?
 }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::io::{Cursor}; 
 
@@ -92,5 +93,70 @@ pub fn create_video_shard(buffer: Vec<Vec<u8>>, sequence_id: u32, fps: u8) -> Vi
         frames: buffer,
         sequence_id,
         fps,
+    }
+}
+pub struct ReassemblyBuffer {
+    /// Use Option to track exactly which chunks are present and which are missing
+    pub chunks: Vec<Option<Vec<u8>>>,
+    pub total_chunks: usize,
+}
+
+impl ReassemblyBuffer {
+    pub fn new(total_chunks: usize) -> Self {
+        Self {
+            chunks: vec![None; total_chunks],
+            total_chunks,
+        }
+    }
+
+    /// Primary entry point for peer cleanup
+    pub fn try_salvage(self) -> Option<WitnessEnvelope> {
+        if self.chunks.iter().all(|c| c.is_none()) {
+            return None;
+        }
+        self.assemble_partial()
+    }
+
+    fn assemble_partial(&self) -> Option<WitnessEnvelope> {
+        // Find the average chunk size to fill gaps accurately.
+        // If we don't have any chunks, we've already returned None.
+        let known_chunk_size = self.chunks.iter()
+            .flatten()
+            .next()
+            .map(|c| c.len())
+            .unwrap_or(0);
+
+        let mut salvaged_data = Vec::new();
+
+        for chunk_opt in &self.chunks {
+            match chunk_opt {
+                Some(data) => salvaged_data.extend_from_slice(data),
+                None => {
+                    // CRITICAL: We fill missing gaps with zeros of the expected size.
+                    // This preserves the offsets for subsequent fields in the struct.
+                    salvaged_data.extend(std::iter::repeat(0).take(known_chunk_size));
+                }
+            }
+        }
+
+        if salvaged_data.is_empty() {
+            return None;
+        }
+
+        // Postcard deserialization is attempted on the padded buffer.
+        match postcard::from_bytes::<WitnessEnvelope>(&salvaged_data) {
+            Ok(envelope) => {
+                tracing::info!("Successfully salvaged partial envelope (seq: {})", envelope.original_shard.sequence_id);
+                Some(envelope)
+            },
+            Err(e) => {
+                tracing::warn!("Forensic salvage failed: {}. Data likely missing header chunks.", e);
+                None
+            }
+        }
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.chunks.iter().all(|c| c.is_some())
     }
 }

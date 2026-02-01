@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use std::collections::{HashMap, VecDeque};
 use serde::{Serialize, Deserialize};
 
-use crate::shards::{WitnessEnvelope, ShardChunk};
+use crate::shards::{ReassemblyBuffer, ShardChunk, WitnessEnvelope};
 use crate::audio;
 use crate::{PhalanxBehaviour, PhalanxEvent};
 use crate::config::PhalanxConfig;
@@ -32,8 +32,9 @@ pub struct Sentinel {
     pub audio_buffers: HashMap<PeerId, VecDeque<audio::AudioShard>>,
     
     // Reassembly State
-    pub chunk_reassembly: HashMap<u32, Vec<Option<Vec<u8>>>>,
-    
+    pub chunk_reassembly: HashMap<u32, ReassemblyBuffer>,
+    pub chunk_owners: HashMap<u32, PeerId>,
+
     // Constraints
     pub pulse_timeout: Duration,
     pub max_peers: usize,
@@ -50,6 +51,7 @@ impl Sentinel {
             control_topic: gossipsub::IdentTopic::new(&config.network.control_topic),
             peer_heartbeats: HashMap::new(),
             peer_capacities: HashMap::new(),
+            chunk_owners: HashMap::new(),
             guardian_buffers: HashMap::new(),
             audio_buffers: HashMap::new(),
             chunk_reassembly: HashMap::new(),
@@ -82,22 +84,29 @@ impl Sentinel {
     }
 
     /// Centralized Reassembly Logic
-    pub fn ingest_chunk(&mut self, chunk: ShardChunk) -> Option<WitnessEnvelope> {
-        let entry = self.chunk_reassembly
-            .entry(chunk.shard_id)
-            .or_insert_with(|| vec![None; chunk.total_chunks as usize]);
+    pub fn ingest_chunk(&mut self, source: PeerId, chunk: ShardChunk) -> Option<WitnessEnvelope> {
+        self.chunk_owners.insert(chunk.shard_id, source);
 
-        if (chunk.chunk_index as usize) < entry.len() {
-            entry[chunk.chunk_index as usize] = Some(chunk.data);
+        let buffer = self.chunk_reassembly
+            .entry(chunk.shard_id)
+            .or_insert_with(|| ReassemblyBuffer::new(chunk.total_chunks as usize));
+
+        if (chunk.chunk_index as usize) < buffer.chunks.len() {
+            buffer.chunks[chunk.chunk_index as usize] = Some(chunk.data);
         }
 
-        if entry.iter().all(|c| c.is_some()) {
-            let full_data: Vec<u8> = entry.drain(..).map(|c| c.unwrap()).flatten().collect();
-            self.chunk_reassembly.remove(&chunk.shard_id);
-
-            if let Ok(envelope) = postcard::from_bytes::<WitnessEnvelope>(&full_data) {
-                return Some(envelope);
-            }
+        // Check for completion
+        if buffer.is_complete() {
+            let completed_buffer = self.chunk_reassembly.remove(&chunk.shard_id).unwrap();
+            self.chunk_owners.remove(&chunk.shard_id);
+            
+            // Use the same assembly logic but without padding (since it's full)
+            let full_data: Vec<u8> = completed_buffer.chunks
+                .into_iter()
+                .flatten() // removes option
+                .flatten()// flatten the inner vec
+                .collect();
+            return postcard::from_bytes::<WitnessEnvelope>(&full_data).ok();
         }
         None
     }
@@ -107,12 +116,12 @@ impl Sentinel {
         self.peer_heartbeats.insert(source, now);
         self.peer_capacities.insert(source, message);
     }
-    
+
     pub fn handle_network_event(
         &mut self,
         event: SwarmEvent<PhalanxEvent>,
         swarm: &mut Swarm<PhalanxBehaviour>,
-    ) {
+    ) -> Option<WitnessEnvelope> {
         match event {
             SwarmEvent::Behaviour(PhalanxEvent::Mdns(mdns::Event::Discovered(list))) => {
                 for (peer_id, multiaddr) in list {
@@ -124,15 +133,22 @@ impl Sentinel {
                 }
             }
             SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(gossipsub::Event::Message { propagation_source, message, .. })) => {
+                // Update heartbeat for any message received
                 self.peer_heartbeats.insert(propagation_source, Instant::now());
 
-                // 1. Handle Control Messages
-                if message.topic == self.control_topic.hash() {
+                // 1. Handle Video (The primary ingestion path)
+                if message.topic == self.video_topic.hash() {
+                    if let Ok(chunk) = postcard::from_bytes::<ShardChunk>(&message.data) {
+                        return self.ingest_chunk(propagation_source, chunk);
+                    }
+                } 
+                // 2. Handle Control Messages
+                else if message.topic == self.control_topic.hash() {
                     if let Ok(ctrl) = postcard::from_bytes::<ControlMessage>(&message.data) {
                         self.peer_capacities.insert(propagation_source, ctrl);
                     }
                 } 
-                // 2. Handle Audio
+                // 3. Handle Audio
                 else if message.topic == self.audio_topic.hash() {
                     if let Ok(a_shard) = postcard::from_bytes::<audio::AudioShard>(&message.data) {
                         let buffer = self.audio_buffers.entry(propagation_source).or_insert_with(VecDeque::new);
@@ -143,6 +159,7 @@ impl Sentinel {
             }
             _ => {}
         }
+        None // No WitnessEnvelope completed in this event
     }
 
     /// Identifies peers that have gone dark. 
@@ -151,20 +168,46 @@ impl Sentinel {
         let now = Instant::now();
         let mut to_archive = Vec::new();
 
-        self.peer_heartbeats.retain(|id, last| {
-            if id == &local_id || *last > now { return true; }
+        let stale_peers: Vec<PeerId> = self.peer_heartbeats
+            .iter()
+            .filter(|(&id, &last)| id != local_id && now.duration_since(last) > self.pulse_timeout)
+            .map(|(&id, _)| id)
+            .collect();
 
-            if now.duration_since(*last) > self.pulse_timeout {
-                println!("ALERT: Witness {} has gone dark.", id);
-                if let Some(shards) = self.guardian_buffers.remove(id) {
-                    to_archive.push((*id, shards));
+        for id in stale_peers {
+            println!("ALERT: Witness {} has gone dark. Initiating salvage.", id);
+            let shards_to_clear: Vec<u32> = self.chunk_owners
+                .iter()
+                .filter(|(_, &owner)| owner == id)
+                .map(|(&sid, _)| sid)
+                .collect();
+
+            for sid in shards_to_clear {
+                if let Some(partial_chunks) = self.chunk_reassembly.remove(&sid) {
+                    self.chunk_owners.remove(&sid);
+                    if let Some(salvaged) = partial_chunks.try_salvage() {
+                        tracing::info!(shard_id = %sid, "Salvaged partial data from dark peer {}", id);
+
+                        let mut salvage_queue = std::collections::VecDeque::new();
+                        salvage_queue.push_back(salvaged);
+                        to_archive.push((id, salvage_queue));
+                    } else {
+                        tracing::debug!(shard_id = %sid, "Partial shard for {} was too fragmented to salvage", id);
+                    }
+                    
+                    
                 }
-                self.peer_capacities.remove(id);
-                self.audio_buffers.remove(id);
-                false 
-            } else { true }
-        });
+            }
+        
+            if let Some(shards) = self.guardian_buffers.remove(&id) {
+                to_archive.push((id, shards));
+            }
 
+        // 4. Final state cleanup
+            self.peer_heartbeats.remove(&id);
+            self.peer_capacities.remove(&id);
+            self.audio_buffers.remove(&id);
+        }
         to_archive
     }
 }
