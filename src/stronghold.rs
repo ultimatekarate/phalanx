@@ -81,6 +81,12 @@ impl Stronghold {
 
     /// The PDS validates the signature against the DID before storing
     pub fn ingest_envelope(&mut self, envelope: WitnessEnvelope) {
+        let span = tracing::span!(tracing::Level::INFO, "stronghold_ingest", 
+            sender = %envelope.did, 
+            seq = envelope.original_shard.sequence_id
+        );
+        let _enter = span.enter();
+        
         if envelope.verify() {
             let did_key = envelope.did.clone(); 
             let seq_id = envelope.original_shard.sequence_id;
@@ -103,13 +109,16 @@ impl Stronghold {
 
             session.insert(seq_id, envelope);
             
+            tracing::debug!("Verified and cached in memory");
+
             // Archive session every 10 shards
             if session.len() >= 10 { 
+                tracing::info!("Archival threshold met. Sealing shard bundle.");
                 self.archive_session(&did_key); 
                 self.session_activity.remove(&did_key);
             }
         } else {
-            eprintln!("Warning: Rejected invalid signature from DID: {}", envelope.did);
+            tracing::error!("Warning: Rejected invalid signature from DID: {}", envelope.did);
         }
     }
 
