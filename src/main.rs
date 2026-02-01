@@ -3,7 +3,7 @@
 use libp2p::{
     gossipsub,
     futures::StreamExt,    
-    Swarm  
+    Swarm, swarm::SwarmEvent
 };
 use std::error::Error;
 use std::time::{Duration};
@@ -17,6 +17,9 @@ use phalanx::identity;
 use phalanx::sentinel::Sentinel;
 use phalanx::config::PhalanxConfig;
 use phalanx::PhalanxBehaviour;
+use phalanx::PhalanxEvent;
+
+use phalanx::stronghold::Stronghold;
 
 // ==================
 //   MAIN ENTRY
@@ -34,7 +37,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
     let my_identity = phalanx::init_identity();
     let mut sentinel = Sentinel::new(&config);
+    let mut storage = Stronghold::new(&config.storage.vault_path);
     let mut swarm = phalanx::setup_phalanx_swarm(&config).await?;
+
+    sentinel.subscribe_all(&mut swarm)?;
 
     // 2. Network & Hardware Orchestration
     let (video_topic, audio_topic) = subscribe_to_topics(&mut swarm, &config, &sentinel);
@@ -60,14 +66,38 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 handle_heartbeat(&mut swarm, &mut sentinel);
             }
 
-            _ = cleanup_timer.tick() => sentinel.process_cleanup(*swarm.local_peer_id()),
-            
-            event = swarm.select_next_some() => sentinel.handle_network_event(event, &mut swarm),
+            _ = cleanup_timer.tick() => {
+                let abandoned_evidence = sentinel.process_cleanup(*swarm.local_peer_id());
+                for (peer, shards) in abandoned_evidence {
+                    for envelope in shards {
+                        storage.ingest_envelope(envelope);
+                    }
+                }
+            }
+            event = swarm.select_next_some() => {
+                if is_video_message(&event, &sentinel){
+                    if let Some(chunk)= message_to_chunk(event){
+                        if let Some(envelope) = sentinel.ingest_chunk(chunk) {
+                            storage.ingest_envelope(envelope);
+                        }
+                    }
+                } else {
+                    sentinel.handle_network_event(event, &mut swarm);
+                }
+            }
         }
     }
 }
 
+
 // --- EXTRACTED HANDLER FUNCTIONS ---
+
+fn message_to_chunk(event: SwarmEvent<PhalanxEvent>) -> Option<vid::ShardChunk> {
+    if let SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(libp2p::gossipsub::Event::Message { message, .. })) = event {
+        return postcard::from_bytes::<vid::ShardChunk>(&message.data).ok();
+    }
+    None
+}
 
 fn handle_video_shard(
     swarm: &mut Swarm<PhalanxBehaviour>,
@@ -96,6 +126,13 @@ fn handle_video_shard(
     }
 }
 
+fn is_video_message(event: &SwarmEvent<PhalanxEvent>, sentinel: &Sentinel) -> bool {
+    if let SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(libp2p::gossipsub::Event::Message { message, .. })) = event {
+        return message.topic == sentinel.video_topic.hash();
+    }
+    false
+}
+
 fn handle_audio_shard(swarm: &mut Swarm<PhalanxBehaviour>, topic: &gossipsub::IdentTopic, shard: audio::AudioShard) {
     if let Ok(encoded) = postcard::to_stdvec(&shard) {
         let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), encoded);
@@ -105,7 +142,7 @@ fn handle_audio_shard(swarm: &mut Swarm<PhalanxBehaviour>, topic: &gossipsub::Id
 fn handle_heartbeat(swarm: &mut Swarm<PhalanxBehaviour>, sentinel: &mut Sentinel) {
     let heartbeat = sentinel.generate_heartbeat(swarm.local_peer_id());
     if let Ok(encoded) = postcard::to_stdvec(&heartbeat) {
-        let _ = swarm.behaviour_mut().gossipsub.publish(sentinel.topic.clone(), encoded);
+        let _ = swarm.behaviour_mut().gossipsub.publish(sentinel.control_topic.clone(), encoded);
     }
 }
 
@@ -128,7 +165,7 @@ fn subscribe_to_topics(
 
     let _ = swarm.behaviour_mut().gossipsub.subscribe(&video);
     let _ = swarm.behaviour_mut().gossipsub.subscribe(&audio);
-    let _ = swarm.behaviour_mut().gossipsub.subscribe(&sentinel.topic);
+    let _ = swarm.behaviour_mut().gossipsub.subscribe(&sentinel.control_topic);
 
     (video, audio)
 }

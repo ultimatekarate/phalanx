@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let video_topic = libp2p::gossipsub::IdentTopic::new(&config.network.video_topic);
     swarm.behaviour_mut().gossipsub.subscribe(&video_topic)?;
-    swarm.behaviour_mut().gossipsub.subscribe(&sentinel.topic)?;
+    swarm.behaviour_mut().gossipsub.subscribe(&sentinel.control_topic)?;
 
     let port = std::env::args().nth(1).unwrap_or("4001".to_string());
     swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}", port).parse()?)?;
