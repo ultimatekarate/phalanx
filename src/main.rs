@@ -10,7 +10,7 @@ use std::time::{Duration};
 use tokio::select;
 use tokio::sync::mpsc;
 
-use phalanx::vid;
+use phalanx::shards;
 use phalanx::camera;
 use phalanx::audio;
 use phalanx::identity;
@@ -95,9 +95,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 // --- EXTRACTED HANDLER FUNCTIONS ---
 
-fn message_to_chunk(event: SwarmEvent<PhalanxEvent>) -> Option<vid::ShardChunk> {
+fn message_to_chunk(event: SwarmEvent<PhalanxEvent>) -> Option<shards::ShardChunk> {
     if let SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(libp2p::gossipsub::Event::Message { message, .. })) = event {
-        return postcard::from_bytes::<vid::ShardChunk>(&message.data).ok();
+        return postcard::from_bytes::<shards::ShardChunk>(&message.data).ok();
     }
     None
 }
@@ -105,12 +105,12 @@ fn message_to_chunk(event: SwarmEvent<PhalanxEvent>) -> Option<vid::ShardChunk> 
 fn handle_video_shard(
     swarm: &mut Swarm<PhalanxBehaviour>,
     topic: &gossipsub::IdentTopic,
-    shard: vid::VideoShard,
+    shard: shards::VideoShard,
     identity: &identity::PhalanxIdentity,
     config: &PhalanxConfig,
 ) {
     if let Ok(shard_bytes) = postcard::to_stdvec(&shard) {
-        let envelope = vid::WitnessEnvelope {
+        let envelope = shards::WitnessEnvelope {
             original_shard: shard.clone(),
             witness_peer_id: swarm.local_peer_id().to_string(),
             receipt_timestamp: shard.timestamp,
@@ -119,7 +119,7 @@ fn handle_video_shard(
         };
 
         if let Ok(envelope_bytes) = postcard::to_stdvec(&envelope) {
-            let chunks = vid::chunkify(shard.sequence_id, envelope_bytes, config.network.chunk_size_bytes);
+            let chunks = shards::chunkify(shard.sequence_id, envelope_bytes, config.network.chunk_size_bytes);
             for chunk in chunks {
                 if let Ok(encoded) = postcard::to_stdvec(&chunk) {
                     let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), encoded);
@@ -151,7 +151,7 @@ fn handle_audio_shard(
     // 2. Serialize the entire envelope for transmission
     if let Ok(encoded_envelope) = postcard::to_stdvec(&envelope) {
         // 3. Shred the envelope into chunks to fit Gossipsub MTU
-        let chunks = vid::chunkify(
+        let chunks = shards::chunkify(
             envelope.original_shard.sequence_id,
             encoded_envelope,
             config.network.chunk_size_bytes,
@@ -199,7 +199,7 @@ fn subscribe_to_topics(
     (video, audio)
 }
 
-fn spawn_hardware_threads(config: &PhalanxConfig) -> (mpsc::Receiver<vid::VideoShard>, mpsc::Receiver<audio::AudioShard>) {
+fn spawn_hardware_threads(config: &PhalanxConfig) -> (mpsc::Receiver<shards::VideoShard>, mpsc::Receiver<audio::AudioShard>) {
     let (v_tx, v_rx) = mpsc::channel(64);
     let (a_tx, a_rx) = mpsc::channel(64);
 

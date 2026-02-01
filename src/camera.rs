@@ -3,7 +3,7 @@ use nokhwa::pixel_format::RgbFormat;
 use nokhwa::Camera;
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
-use crate::vid::{self, VideoShard}; // Removed Shredder
+use crate::shards::{self, VideoShard}; // Removed Shredder
 
 pub trait FrameProvider: 'static {
     fn capture_frame(&mut self) -> Result<Vec<u8>, String>;
@@ -91,14 +91,14 @@ impl PhalanxCameraThread {
 
             loop {
                 if let Ok(raw_data) = provider.capture_frame() {
-                    if let Ok(jpeg) = vid::compress_frame(raw_data, width, height) {
+                    if let Ok(jpeg) = shards::compress_frame(raw_data, width, height) {
                         frames.push(jpeg);
                     }
                 }
 
                 if frames.len() >= fps as usize {
                     // Using stateless vid::create_video_shard
-                    let shard = vid::create_video_shard(
+                    let shard = shards::create_video_shard(
                         frames.split_off(0), 
                         sequence_id, 
                         fps

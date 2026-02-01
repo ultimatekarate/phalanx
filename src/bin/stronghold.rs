@@ -1,7 +1,7 @@
 use libp2p::{futures::StreamExt, swarm::SwarmEvent};
 use phalanx::{
     stronghold::Stronghold, 
-    vid::{WitnessEnvelope, ShardChunk}, 
+    shards::{WitnessEnvelope, ShardChunk}, 
     sentinel::Sentinel,
     config::PhalanxConfig,
     identity::PhalanxIdentity,

@@ -1,6 +1,6 @@
 use libp2p::{gossipsub, mdns, noise, tcp, yamux, Swarm, SwarmBuilder, swarm::NetworkBehaviour};
 
-pub mod vid;
+pub mod shards;
 pub mod camera;
 pub mod audio;
 pub mod sentinel;

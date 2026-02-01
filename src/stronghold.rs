@@ -1,4 +1,4 @@
-use crate::vid::{WitnessEnvelope, VideoShard};
+use crate::shards::{WitnessEnvelope, VideoShard};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;

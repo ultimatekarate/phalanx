@@ -56,8 +56,8 @@ pub fn wrap_audio_shard(
     shard: AudioShard, 
     identity: &crate::identity::PhalanxIdentity,
     peer_id: String
-) -> crate::vid::WitnessEnvelope {
-    use crate::vid::{WitnessEnvelope, VideoShard};
+) -> crate::shards::WitnessEnvelope {
+    use crate::shards::{WitnessEnvelope, VideoShard};
     
     // We repurpose the WitnessEnvelope by wrapping the audio data
     // into a pseudo-VideoShard structure.

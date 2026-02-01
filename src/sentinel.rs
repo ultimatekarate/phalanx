@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use std::collections::{HashMap, VecDeque};
 use serde::{Serialize, Deserialize};
 
-use crate::vid::{WitnessEnvelope, ShardChunk};
+use crate::shards::{WitnessEnvelope, ShardChunk};
 use crate::audio;
 use crate::{PhalanxBehaviour, PhalanxEvent};
 use crate::config::PhalanxConfig;
