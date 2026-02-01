@@ -20,7 +20,7 @@ impl PhalanxIdentity {
         
         let verifying_key: VerifyingKey = signing_key.verifying_key();
         
-        let did = format!("did:phlx:{}", hex::encode(verifying_key.as_bytes()));
+        let did = format!("did:key:z{}", bs58::encode(verifying_key.as_bytes()).into_string());
         
         Self { did, signing_key }
     }

@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             _ = cleanup_timer.tick() => {
                 let abandoned_evidence = sentinel.process_cleanup(*swarm.local_peer_id());
-                for (peer, shards) in abandoned_evidence {
+                for (_, shards) in abandoned_evidence {
                     for envelope in shards {
                         storage.ingest_envelope(envelope);
                     }

@@ -19,6 +19,13 @@ pub struct VideoShard {
     pub fps: u8
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ShardChunk {
+    pub shard_id: u32,      // Matches the VideoShard sequence_id
+    pub chunk_index: u32,   // 0, 1, 2...
+    pub total_chunks: u32,
+    pub data: Vec<u8>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WitnessEnvelope {
     pub original_shard: VideoShard, 
@@ -44,23 +51,6 @@ impl WitnessEnvelope {
     }
 }
 
-
-pub struct Shredder {
-    current_sequence: u32,
-}
-
-
-// =====
-// CHUNKS
-// =====
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ShardChunk {
-    pub shard_id: u32,      // Matches the VideoShard sequence_id
-    pub chunk_index: u32,   // 0, 1, 2...
-    pub total_chunks: u32,
-    pub data: Vec<u8>,
-}
-
 /// Helper to split a large buffer into chunks
 pub fn chunkify(shard_id: u32, data: Vec<u8>, chunk_size: usize) -> Vec<ShardChunk> {
     let total_chunks = (data.len() as f64 / chunk_size as f64).ceil() as u32;
@@ -73,36 +63,6 @@ pub fn chunkify(shard_id: u32, data: Vec<u8>, chunk_size: usize) -> Vec<ShardChu
             data: chunk.to_vec(),
         })
         .collect()
-}
-
-// =============
-//   CORE LOGIC
-// =============
-
-impl Shredder {
-    pub fn new() -> Self {
-        Self { current_sequence: 0 }
-    }
-
-    pub fn current_id(&self) -> u32 {
-        self.current_sequence
-    }
-
-    pub fn next_id(&mut self) -> u32 {
-        let id = self.current_sequence;
-        self.current_sequence += 1;
-        id
-    }
-
-    pub fn create_shard(&mut self, buffer: Vec<Vec<u8>>) -> VideoShard {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        VideoShard {
-            timestamp: now,
-            frames: buffer,
-            sequence_id: self.next_id(),
-            fps: 15
-        }
-    }
 }
 
 pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, String> {
@@ -119,4 +79,18 @@ pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<
         .map_err(|e| format!("Compression error: {}", e))?;
 
     Ok(jpeg_bytes)
+}
+
+pub fn create_video_shard(buffer: Vec<Vec<u8>>, sequence_id: u32, fps: u8) -> VideoShard {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    VideoShard {
+        timestamp: now,
+        frames: buffer,
+        sequence_id,
+        fps,
+    }
 }
