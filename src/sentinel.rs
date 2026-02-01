@@ -102,6 +102,12 @@ impl Sentinel {
         None
     }
 
+    pub fn register_sim_heartbeat(&mut self, source: PeerId, message: ControlMessage) {
+        let now = Instant::now();
+        self.peer_heartbeats.insert(source, now);
+        self.peer_capacities.insert(source, message);
+    }
+    
     pub fn handle_network_event(
         &mut self,
         event: SwarmEvent<PhalanxEvent>,
