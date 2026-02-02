@@ -4,6 +4,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use tracing::{instrument, warn, debug};
+
 // Stronghold is a Personal Data Server. Sentinels gather information 
 // and store it in a stronghold.
 
@@ -42,10 +44,21 @@ impl Stronghold {
         let file_name = format!("{}_{}.tmp", safe_did, envelope.original_shard.sequence_id);
         let wal_path = self.wal_directory.join(file_name);
 
-        fs::create_dir_all(&wal_path)?;
+        if !self.wal_directory.exists() {
+            fs::create_dir_all(&self.wal_directory)?;
+        }
 
         let bytes = postcard::to_stdvec(envelope).unwrap();
-        fs::write(wal_path, bytes)
+        
+        fs::write(wal_path, bytes)?;
+
+        tracing::trace!(
+            seq = %envelope.original_shard.sequence_id, 
+            did = %envelope.did, 
+            "WAL: Entry committed to disk"
+        );
+        
+        Ok(())
     }
 
     fn clear_session_wal(&self, did_full: &str, sequence_ids: &[u32]) {
@@ -57,7 +70,11 @@ impl Stronghold {
     }
 
     /// Scans the WAL directory and populates active_sessions with unarchived data.
+    #[tracing::instrument(skip(self))]
     fn recover_from_wal(&mut self) {
+        let span = tracing::info_span!("wal_recovery");
+        let _enter = span.enter();
+        
         if let Ok(entries) = fs::read_dir(&self.wal_directory) {
             let mut recovered_count = 0;
             for entry in entries.flatten() {
@@ -76,13 +93,26 @@ impl Stronghold {
                 }
             }
             if recovered_count > 0 {
-                println!("Stronghold: Recovered {} shards from WAL.", recovered_count);
+                tracing::info!(count = recovered_count, "Successfully restored state from WAL.");
             }
         }
     }
 
     /// The PDS validates the signature against the DID before storing
+    #[instrument(
+        level = "info", 
+        skip(self, envelope), 
+        fields(
+            did = %envelope.did, 
+            seq = %envelope.original_shard.sequence_id,
+            partial = envelope.is_partial
+        )
+    )]
     pub fn ingest_envelope(&mut self, envelope: WitnessEnvelope) {
+        if let Err(e) = self.write_to_wal(&envelope) {
+            tracing::error!(error = %e, "CRITICAL: Failed to write to WAL. Potential data loss.");
+        }
+
         let span = tracing::span!(tracing::Level::INFO, "stronghold_ingest", 
             sender = %envelope.did, 
             seq = envelope.original_shard.sequence_id,
@@ -103,12 +133,8 @@ impl Stronghold {
 
             // Replay protection: Don't ingest if already processed
             if self.processed_sequences.get(&did_key).map_or(false, |s| s.contains(&seq_id)) {
+                debug!("Replay protection: Shard already in vault. Skipping.");
                 return;
-            }
-
-            if let Err(e) = self.write_to_wal(&envelope) {
-                eprintln!("Stronghold WAL Error: {}. Dropping shard.", e);
-                return; 
             }
 
             self.session_activity.insert(did_key.clone(), Instant::now());
@@ -143,7 +169,7 @@ impl Stronghold {
             .collect();
 
         for did in stale_dids {
-            println!("Stronghold: Force-archiving stale session for {}", did);
+            tracing::info!("Stronghold: Force-archiving stale session for {}", did);
             // Calling the existing archive logic even if len < 10
             self.archive_session(&did);
             self.session_activity.remove(&did);

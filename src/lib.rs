@@ -6,7 +6,9 @@ pub mod audio;
 pub mod sentinel;
 pub mod config;
 pub mod identity;
-pub mod stronghold;
+pub mod stronghold; 
+pub mod obs;
+pub mod sim;
 
 use crate::config::PhalanxConfig;
 use crate::identity::PhalanxIdentity;

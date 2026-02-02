@@ -49,3 +49,32 @@ pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>>
         Self::load("phalanx.toml").expect("Critical Error: Missing phalanx.toml")
     }
 }
+
+impl Default for PhalanxConfig {
+    fn default() -> Self {
+        Self {
+            network: NetworkConfig {
+                heartbeat_interval_secs: 30,
+                pulse_timeout_secs: 60,
+                chunk_size_bytes: 8192,
+                video_topic: "phalanx/video".to_string(),
+                audio_topic: "phalanx/audio".to_string(),
+                control_topic: "phalanx/control".to_string(),
+                grace_period: 10,
+            },
+            storage: StorageConfig {
+                vault_path: "./sim_vault".to_string(),
+                max_video_buffer: 100,
+                max_audio_buffer: 100,
+                max_peers: 10,
+                stale_session_threshold: 3600,
+                shards_needed_to_archive: 10,
+            },
+            hardware: HardwareConfig {
+                camera_fps: 30,
+                audio_sample_rate: 44100,
+                audio_channels: 2,
+            },
+        }
+    }
+}

@@ -18,13 +18,15 @@ use phalanx::PhalanxBehaviour;
 
 use phalanx::stronghold::Stronghold;
 
+
+
 // ==================
 //   MAIN ENTRY
 // ==================
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    env_logger::init();
+    phalanx::obs::init_observability();
 
     // 1. Initialization Phase
     let config = PhalanxConfig::load("phalanx.toml")

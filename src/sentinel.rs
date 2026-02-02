@@ -2,6 +2,7 @@ use libp2p::{gossipsub, PeerId, Swarm, swarm::SwarmEvent};
 use std::time::{Duration, Instant};
 use std::collections::{HashMap, VecDeque};
 use serde::{Serialize, Deserialize};
+use tracing::{instrument, debug, warn};
 
 use crate::shards::{ReassemblyBuffer, ShardChunk, WitnessEnvelope};
 use crate::audio;
@@ -93,7 +94,9 @@ impl Sentinel {
     }
 
     /// Centralized Reassembly Logic
+    #[instrument(level = "info", skip(self, chunk), fields(shard_id = %chunk.shard_id))]
     pub fn ingest_chunk(&mut self, source: PeerId, chunk: ShardChunk) -> Option<WitnessEnvelope> {
+        debug!(index = %chunk.chunk_index, total = %chunk.total_chunks, "Processing chunk");
         self.chunk_owners.insert(chunk.shard_id, source);
 
         let buffer = self.chunk_reassembly
@@ -126,6 +129,11 @@ impl Sentinel {
         self.peer_capacities.insert(source, message);
     }
 
+    #[instrument(
+        level = "debug", 
+        skip(self, swarm, event), 
+        fields(peer_id)
+    )]
     pub fn handle_network_event(
         &mut self,
         event: SwarmEvent<PhalanxEvent>,
@@ -142,9 +150,13 @@ impl Sentinel {
                 }
             }
             SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(gossipsub::Event::Message { propagation_source, message, .. })) => {
+                
+                tracing::Span::current().record("peer_id", propagation_source.to_string());
+                debug!(topic = %message.topic, "Incoming mesh message");
+                
                 // Update heartbeat for any message received
                 self.peer_heartbeats.insert(propagation_source, Instant::now());
-
+                
                 // 1. Handle Video (The primary ingestion path)
                 if message.topic == self.video_topic.hash() {
                     if let Ok(chunk) = postcard::from_bytes::<ShardChunk>(&message.data) {
