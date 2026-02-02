@@ -223,8 +223,8 @@ impl Sentinel {
             .collect();
 
         for id in stale_peers {
-            let mut salvage_count = 0;
-            let mut failure_count = 0;
+            let salvage_count = 0;
+            let failure_count = 0;
 
             let shards_to_clear: Vec<u32> = self.chunk_owners
                 .iter()
@@ -243,6 +243,7 @@ impl Sentinel {
                     let fallback_did = self.shard_to_did.remove(&sid).unwrap_or_default();
                     
                     if let Some(mut salvaged) = partial_chunks.try_salvage() {
+
                         if salvaged.did.is_empty() {
                             salvaged.did = fallback_did;
                         }
