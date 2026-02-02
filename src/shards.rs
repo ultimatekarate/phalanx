@@ -134,7 +134,6 @@ pub fn wrap_audio_shard(
     }
 }
 
-/// Helper to split a large buffer into chunks
 pub fn chunkify(shard_id: u32, data: Vec<u8>, chunk_size: usize) -> Vec<ShardChunk> {
     let total_chunks = (data.len() as f64 / chunk_size as f64).ceil() as u32;
     data.chunks(chunk_size)

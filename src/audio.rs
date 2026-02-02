@@ -1,6 +1,7 @@
 use tokio::sync::mpsc::Sender;
 use serde::{Serialize, Deserialize};
 use std::time::{SystemTime, UNIX_EPOCH};
+use crate::config::HardwareConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioShard {
@@ -17,14 +18,14 @@ pub struct PhalanxAudioThread {
 }
 
 impl PhalanxAudioThread {
-    pub fn spawn(self, tx: Sender<AudioShard>) {
-        let sample_rate = self.sample_rate;
-        let channels = self.channels;
+    /// Spawns the audio capture thread using values from the HardwareConfig.
+    pub fn spawn(self, tx: Sender<AudioShard>, config: HardwareConfig) {
+        let sample_rate = config.audio_sample_rate;
+        let channels = config.audio_channels;
 
         std::thread::spawn(move || {
             let mut sequence_id: u32 = 0;
             
-            // Placeholder for hardware initialization (e.g., CPAL)
             loop {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -34,7 +35,7 @@ impl PhalanxAudioThread {
                 let shard = AudioShard {
                     timestamp: now,
                     sequence_id,
-                    data: vec![0u8; 1024], // Replace with actual captured buffer
+                    data: vec![0u8; 1024], // Simulation placeholder
                     sample_rate,
                     channels,
                 };
@@ -44,7 +45,7 @@ impl PhalanxAudioThread {
                 }
                 
                 sequence_id += 1;
-                // Sleep for ~1 second to simulate 1s audio chunks
+                // Capture 1-second chunks
                 std::thread::sleep(std::time::Duration::from_secs(1));
             }
         });

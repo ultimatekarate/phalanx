@@ -4,6 +4,7 @@ use nokhwa::Camera;
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use crate::shards::{self, VideoShard}; 
+use crate::config::HardwareConfig;
 
 pub trait FrameProvider: 'static {
     fn capture_frame(&mut self) -> Result<Vec<u8>, String>;
@@ -67,13 +68,14 @@ pub struct PhalanxCameraThread {
 }
 
 impl PhalanxCameraThread {
-    pub fn spawn(self, index: Option<usize>, tx: Sender<VideoShard>) {
-        let frame_duration = Duration::from_millis(1000 / self.fps as u64);
-        let fps = self.fps as u8;
+    /// Spawns the camera capture thread using values from the HardwareConfig.
+    pub fn spawn(self, index: Option<usize>, tx: Sender<VideoShard>, config: HardwareConfig) {
+        let fps = config.camera_fps as u8;
+        let frame_duration = Duration::from_millis(1000 / fps as u64);
 
         std::thread::spawn(move || {
             let mut provider: Box<dyn FrameProvider> = match index {
-                Some(idx) => match HardwareCamera::new(idx) {
+                Some(i) => match HardwareCamera::new(i) {
                     Ok(cam) => Box::new(cam),
                     Err(e) => {
                         eprintln!("Hardware Error: {}. Falling back to Mock.", e);
@@ -87,8 +89,6 @@ impl PhalanxCameraThread {
             let mut sequence_id: u32 = 0;
             let (width, height) = provider.dimensions();
 
-            println!("Camera Thread: Provider online.");
-
             loop {
                 if let Ok(raw_data) = provider.capture_frame() {
                     if let Ok(jpeg) = shards::compress_frame(raw_data, width, height) {
@@ -97,7 +97,6 @@ impl PhalanxCameraThread {
                 }
 
                 if frames.len() >= fps as usize {
-                    // Using stateless vid::create_video_shard
                     let shard = shards::create_video_shard(
                         frames.split_off(0), 
                         sequence_id, 

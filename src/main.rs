@@ -176,18 +176,18 @@ fn spawn_hardware_threads(config: &PhalanxConfig) -> (mpsc::Receiver<shards::Vid
     let (v_tx, v_rx) = mpsc::channel(64);
     let (a_tx, a_rx) = mpsc::channel(64);
 
-    // 1. Video Thread
+    // Camera initialization is now a one-liner
     let camera_thread = camera::PhalanxCameraThread { 
         fps: config.hardware.camera_fps 
     };
-    camera_thread.spawn(Some(0), v_tx);
+    camera_thread.spawn(Some(0), v_tx, config.hardware.clone());
 
+    // Audio initialization is now a one-liner
     let audio_thread = audio::PhalanxAudioThread { 
         sample_rate: config.hardware.audio_sample_rate,
         channels: config.hardware.audio_channels 
     };
-    
-    audio_thread.spawn(a_tx); 
+    audio_thread.spawn(a_tx, config.hardware.clone());
 
     (v_rx, a_rx)
 }
