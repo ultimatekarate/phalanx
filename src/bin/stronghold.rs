@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             _ = heartbeat_timer.tick() => {
                 let hb = sentinel.generate_heartbeat(swarm.local_peer_id());
                 if let Ok(data) = postcard::to_stdvec(&hb) {
-                    let _ = swarm.behaviour_mut().gossipsub.publish(sentinel.control_topic.clone(), data);
+                    let _ = swarm.behaviour_mut().gossipsub.publish(sentinel.topics.control.clone(), data);
                 }
             }
         }

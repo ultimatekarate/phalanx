@@ -132,7 +132,7 @@ fn handle_audio_shard(
 fn handle_heartbeat(swarm: &mut Swarm<PhalanxBehaviour>, sentinel: &mut Sentinel) {
     let heartbeat = sentinel.generate_heartbeat(swarm.local_peer_id());
     if let Ok(encoded) = postcard::to_stdvec(&heartbeat) {
-        let _ = swarm.behaviour_mut().gossipsub.publish(sentinel.control_topic.clone(), encoded);
+        let _ = swarm.behaviour_mut().gossipsub.publish(sentinel.topics.control.clone(), encoded);
     }
 }
 
@@ -176,7 +176,7 @@ fn subscribe_to_topics(
 
     let _ = swarm.behaviour_mut().gossipsub.subscribe(&video);
     let _ = swarm.behaviour_mut().gossipsub.subscribe(&audio);
-    let _ = swarm.behaviour_mut().gossipsub.subscribe(&sentinel.control_topic);
+    let _ = swarm.behaviour_mut().gossipsub.subscribe(&sentinel.topics.control);
 
     (video, audio)
 }
