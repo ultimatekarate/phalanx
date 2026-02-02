@@ -23,6 +23,42 @@ pub struct ControlMessage {
     pub storage_remaining_mb: u64,
 }
 
+pub struct HealthTracker {
+    pub heartbeats: HashMap<PeerId, Instant>,
+    pub capacities: HashMap<PeerId, ControlMessage>,
+    pub pulse_timeout_secs: u64,
+}
+
+impl HealthTracker {
+    pub fn new(pulse_timeout_secs: u64) -> Self {
+        Self {
+            heartbeats: HashMap::new(),
+            capacities: HashMap::new(),
+            pulse_timeout_secs,
+        }
+    }
+
+    pub fn register_heartbeat(&mut self, id: PeerId, msg: ControlMessage) {
+        self.heartbeats.insert(id, Instant::now());
+        self.capacities.insert(id, msg);
+    }
+}
+
+pub struct ReassemblyManager {
+    pub buffers: HashMap<u32, ReassemblyBuffer>,
+    pub owners: HashMap<u32, PeerId>,
+}
+
+impl ReassemblyManager {
+    pub fn new() -> Self {
+        Self {
+            buffers: HashMap::new(),
+            owners: HashMap::new(),
+        }
+    }
+}
+
+
 pub struct Sentinel {
     // Topic Management
     pub video_topic: gossipsub::IdentTopic,
