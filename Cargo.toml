@@ -7,7 +7,7 @@ edition = "2021"
 # The Networking Engine
 libp2p = { version = "0.56.0", features = ["tcp", "quic", "gossipsub", "mdns", "tokio","noise", "yamux", "macros"] }
 # Async Runtime
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1.0", features = ["full", "test-util"] }
 # Logging
 env_logger = "0.11"
 log = "0.4"

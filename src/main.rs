@@ -66,13 +66,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
 
             _ = cleanup_timer.tick() => {
-                let abandoned_evidence = sentinel.process_cleanup(*swarm.local_peer_id());
-                for (_peer, shards) in abandoned_evidence {
-                    for envelope in shards {
-                        storage.ingest_envelope(envelope);
+                // 1. Sentinel identifies dark peers and recovers fragments
+                let local_peer_id = swarm.local_peer_id();
+                let salvaged = sentinel.process_cleanup(*local_peer_id);
+                
+                for (dark_peer_id, envelopes) in salvaged {
+                    tracing::info!(peer = %dark_peer_id, count = envelopes.len(), "Salvage triggered for dark peer");
+                    for env in envelopes {
+                        // 2. Stronghold ingests the salvaged envelopes
+                        storage.ingest_envelope(env);
                     }
                 }
-
+                
+                // 3. Stronghold checks if any sessions (including salvaged ones) are ready for disk
                 storage.archive_stale_sessions(Duration::from_secs(config.storage.stale_session_threshold));
             }
 
@@ -141,6 +147,7 @@ fn broadcast_envelope(
             envelope.original_shard.sequence_id,
             encoded_envelope,
             config.network.chunk_size_bytes,
+            envelope.did.clone(),
         );
 
         for chunk in chunks {

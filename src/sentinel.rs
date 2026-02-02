@@ -1,9 +1,12 @@
 use libp2p::{gossipsub, PeerId, Swarm, swarm::SwarmEvent};
-use std::time::{Duration, Instant};
+use std::time::{Duration};
 use std::collections::{HashMap, VecDeque};
 use serde::{Serialize, Deserialize};
-use tracing::{instrument, debug, warn};
 
+
+use tokio::time::Instant;
+
+use tracing::{info, debug, warn, instrument};
 use crate::shards::{ReassemblyBuffer, ShardChunk, WitnessEnvelope};
 use crate::audio;
 use crate::{PhalanxBehaviour, PhalanxEvent};
@@ -42,12 +45,14 @@ pub struct Sentinel {
     pub grace_period: Duration,
     pub max_video_buffer: usize,
     pub max_audio_buffer: usize,
+
+    pub shard_to_did: HashMap<u32, String>,
 }
 
 /// Packets sent over the simulated mesh
 #[derive(Clone)]
 pub enum SimPacket {
-    Chunk(ShardChunk),
+    Chunk(PeerId, ShardChunk),
     Heartbeat(PeerId, Vec<u8>), // Serialized ControlMessage
     Shutdown,
 }
@@ -70,6 +75,7 @@ impl Sentinel {
             grace_period: Duration::from_secs(config.network.grace_period),
             max_video_buffer: config.storage.max_video_buffer,
             max_audio_buffer: config.storage.max_audio_buffer,
+            shard_to_did: HashMap::new(),
         }
     }
 
@@ -97,7 +103,10 @@ impl Sentinel {
     #[instrument(level = "info", skip(self, chunk), fields(shard_id = %chunk.shard_id))]
     pub fn ingest_chunk(&mut self, source: PeerId, chunk: ShardChunk) -> Option<WitnessEnvelope> {
         debug!(index = %chunk.chunk_index, total = %chunk.total_chunks, "Processing chunk");
+        
+        // Anchor the shard ID to the DID immediately
         self.chunk_owners.insert(chunk.shard_id, source);
+        self.shard_to_did.insert(chunk.shard_id, chunk.owner_did.clone()); 
 
         let buffer = self.chunk_reassembly
             .entry(chunk.shard_id)
@@ -107,17 +116,18 @@ impl Sentinel {
             buffer.chunks[chunk.chunk_index as usize] = Some(chunk.data);
         }
 
-        // Check for completion
+        // 2. Check for completion
         if buffer.is_complete() {
             let completed_buffer = self.chunk_reassembly.remove(&chunk.shard_id).unwrap();
             self.chunk_owners.remove(&chunk.shard_id);
+            self.shard_to_did.remove(&chunk.shard_id); // Cleanup mapping
             
-            // Use the same assembly logic but without padding (since it's full)
             let full_data: Vec<u8> = completed_buffer.chunks
                 .into_iter()
-                .flatten() // removes option
-                .flatten()// flatten the inner vec
+                .flatten()
+                .flatten()
                 .collect();
+                
             return postcard::from_bytes::<WitnessEnvelope>(&full_data).ok();
         }
         None
@@ -185,50 +195,90 @@ impl Sentinel {
 
     /// Identifies peers that have gone dark. 
     /// Returns a list of (PeerId, Shards) to be archived by Stronghold.
+    #[instrument(level = "info", skip(self, local_id), fields(node_id = %local_id))]
     pub fn process_cleanup(&mut self, local_id: PeerId) -> Vec<(PeerId, VecDeque<WitnessEnvelope>)> {
         let now = Instant::now();
         let mut to_archive = Vec::new();
+        
+        debug!(
+            heartbeat_count = self.peer_heartbeats.len(),
+            "Starting cleanup tick"
+        );
 
         let stale_peers: Vec<PeerId> = self.peer_heartbeats
             .iter()
-            .filter(|(&id, &last)| id != local_id && now.duration_since(last) > self.pulse_timeout)
-            .map(|(&id, _)| id)
+            .filter_map(|(&id, &last_active)| {
+                if id == local_id { return None; }
+                
+                let age = now.duration_since(last_active);
+                if age > self.pulse_timeout {
+                    info!(peer = %id, age = ?age, timeout = ?self.pulse_timeout, "Peer identified as STALE");
+                    Some(id)
+                } else {
+                    // Useful for confirming the clock is actually moving in simulation
+                    debug!(peer = %id, age = ?age, "Peer is still active");
+                    None
+                }
+            })
             .collect();
 
         for id in stale_peers {
-            println!("ALERT: Witness {} has gone dark. Initiating salvage.", id);
+            let mut salvage_count = 0;
+            let mut failure_count = 0;
+
             let shards_to_clear: Vec<u32> = self.chunk_owners
                 .iter()
                 .filter(|(_, &owner)| owner == id)
                 .map(|(&sid, _)| sid)
                 .collect();
 
+            info!(
+                peer = %id, 
+                shards_found = shards_to_clear.len(), 
+                "Initiating salvage for dark peer"
+            );
+
             for sid in shards_to_clear {
                 if let Some(partial_chunks) = self.chunk_reassembly.remove(&sid) {
-                    self.chunk_owners.remove(&sid);
-                    if let Some(salvaged) = partial_chunks.try_salvage() {
-                        tracing::info!(shard_id = %sid, "Salvaged partial data from dark peer {}", id);
+                    let fallback_did = self.shard_to_did.remove(&sid).unwrap_or_default();
+                    
+                    if let Some(mut salvaged) = partial_chunks.try_salvage() {
+                        if salvaged.did.is_empty() {
+                            salvaged.did = fallback_did;
+                        }
 
-                        let mut salvage_queue = std::collections::VecDeque::new();
+                        info!(peer = %id, shard_id = %sid, did = %salvaged.did, "SUCCESS: Salvaged with Identity");
+                        
+                        let mut salvage_queue = VecDeque::new();
                         salvage_queue.push_back(salvaged);
                         to_archive.push((id, salvage_queue));
-                    } else {
-                        tracing::debug!(shard_id = %sid, "Partial shard for {} was too fragmented to salvage", id);
                     }
-                    
                     
                 }
             }
         
-            if let Some(shards) = self.guardian_buffers.remove(&id) {
-                to_archive.push((id, shards));
+            if let Some(envelopes) = self.guardian_buffers.remove(&id) {
+                info!(peer = %id, count = envelopes.len(), "Moving guardian buffers to archival");
+                to_archive.push((id, envelopes));
             }
 
         // 4. Final state cleanup
             self.peer_heartbeats.remove(&id);
             self.peer_capacities.remove(&id);
             self.audio_buffers.remove(&id);
+
+            info!(
+                peer = %id, 
+                salvaged = salvage_count, 
+                failed = failure_count, 
+                "Cleanup complete for peer"
+            );
         }
+
+        if !to_archive.is_empty() {
+            info!(total_salvaged = to_archive.len(), "Cleanup tick returning salvaged data to harness");
+        }
+        
         to_archive
     }
 }

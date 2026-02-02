@@ -2,9 +2,12 @@ use crate::shards::{WitnessEnvelope, VideoShard};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+//use std::time::Instant;
 
-use tracing::{instrument, warn, debug};
+use tokio::time::Instant;
+
+use tracing::{info, debug, warn, error, instrument, trace, debug_span};
+
 
 // Stronghold is a Personal Data Server. Sentinels gather information 
 // and store it in a stronghold.
@@ -13,7 +16,7 @@ pub struct Stronghold {
     pub vault_storage: PathBuf,
     pub wal_directory: PathBuf,
     pub active_sessions: HashMap<String, HashMap<u32, WitnessEnvelope>>, 
-    pub session_activity: HashMap<String, Instant>,
+    pub session_activity: HashMap<String, tokio::time::Instant>,
     pub processed_sequences: HashMap<String, HashSet<u32>>,
     pub shards_needed_to_archive: usize,
 }
@@ -158,59 +161,96 @@ impl Stronghold {
         }
     }
 
-    pub fn archive_stale_sessions(&mut self, timeout: Duration) {
-        let now = Instant::now();
-        
+    #[instrument(level = "debug", skip(self))]
+    pub fn archive_stale_sessions(&mut self, timeout: std::time::Duration) {
+        let now = tokio::time::Instant::now();
+        let span = debug_span!("stale_cleanup");
+        let _enter = span.enter();
+
         // Identify DIDs that have timed out
         let stale_dids: Vec<String> = self.session_activity
             .iter()
-            .filter(|(_, &last_active)| now.duration_since(last_active) > timeout)
-            .map(|(did, _)| did.clone())
+            .filter_map(|(did, &last_active)| {
+                let age = now.duration_since(last_active);
+                if age > timeout {
+                    debug!(did = %did, age = ?age, "Found stale session for archival");
+                    Some(did.clone())
+                } else {
+                    None
+                }
+            })
             .collect();
 
+        if stale_dids.is_empty() {
+            trace!("No stale sessions found in this tick.");
+            return;
+        }
+
         for did in stale_dids {
-            tracing::info!("Stronghold: Force-archiving stale session for {}", did);
-            // Calling the existing archive logic even if len < 10
+            info!(did = %did, "Triggering force-archive for stale session");
             self.archive_session(&did);
             self.session_activity.remove(&did);
         }
     }
 
+    #[instrument(level = "info", skip(self))]
     fn archive_session(&mut self, did_full: &str) {
-        if let Some(mut session) = self.active_sessions.remove(did_full) {
-            let mut keys: Vec<_> = session.keys().cloned().collect();
-            keys.sort();
+        // 1. Attempt to pull session from RAM
+        let session = match self.active_sessions.remove(did_full) {
+            Some(s) => s,
+            None => {
+                warn!(did = %did_full, "Archival requested but no active session found in memory");
+                return;
+            }
+        };
 
-            let sorted_shards: Vec<VideoShard> = keys.iter()
-                .map(|k| {
-                    let env = session.remove(k).unwrap();
-                    self.processed_sequences.entry(did_full.to_string()).or_default().insert(*k);
-                    env.original_shard
+        let mut keys: Vec<_> = session.keys().cloned().collect();
+        keys.sort();
+
+        let sorted_shards: Vec<VideoShard> = keys.iter()
+            .filter_map(|k| {
+                session.get(k).map(|env| {
+                    // Record that we've processed this to prevent replays
+                    self.processed_sequences
+                        .entry(did_full.to_string())
+                        .or_default()
+                        .insert(*k);
+                    env.original_shard.clone()
                 })
-                .collect();
+            })
+            .collect();
 
-            let safe_did = did_full.replace(":", "_");
-            let mut save_path = self.vault_storage.join(&safe_did);
-            let _ = fs::create_dir_all(&save_path);
+        if sorted_shards.is_empty() {
+            warn!(did = %did_full, "Session contained no valid shards. Aborting archive.");
+            return;
+        }
 
-            save_path.push(format!("session_{}.phlx", sorted_shards[0].timestamp));
-            
-            if let Ok(encoded) = postcard::to_stdvec(&sorted_shards) {
-                if let Ok(_) = fs::write(&save_path, encoded) {
-                    println!("Stronghold: Archived session to {:?}", save_path);
-                    // 3. Success! Clear the WAL logs for this session
+        // 2. Prepare Directory
+        let safe_did = did_full.replace(":", "_");
+        let archive_dir = self.vault_storage.join(&safe_did);
+        
+        if let Err(e) = std::fs::create_dir_all(&archive_dir) {
+            error!(err = %e, path = ?archive_dir, "CRITICAL: Could not create peer archive directory");
+            return;
+        }
+
+        // 3. Determine File Identity
+        let is_audio = sorted_shards.iter().any(|s| s.fps == 0);
+        let extension = if is_audio { "aud.phlx" } else { "vid.phlx" };
+        let file_name = format!("session_{}.{}", sorted_shards[0].timestamp, extension);
+        let save_path = archive_dir.join(file_name);
+
+        // 4. Commit to Disk
+        match postcard::to_stdvec(&sorted_shards) {
+            Ok(encoded) => {
+                if let Err(e) = std::fs::write(&save_path, encoded) {
+                    error!(err = %e, path = ?save_path, "IO ERROR: Archival write failed");
+                } else {
+                    info!(path = ?save_path, count = %sorted_shards.len(), "Archive successful. Purging WAL.");
                     self.clear_session_wal(did_full, &keys);
                 }
             }
-
-            let is_audio = sorted_shards.iter().any(|s| s.fps == 0);
-            let extension = if is_audio { "aud.phlx" } else { "vid.phlx" };
-
-            save_path.push(format!("session_{}.{}", sorted_shards[0].timestamp, extension));
-            
-            if let Ok(encoded) = postcard::to_stdvec(&sorted_shards) {
-                let _ = fs::write(&save_path, encoded);
-            }
+            Err(e) => error!(err = %e, "Serialization failed during archival"),
         }
     }
 }
