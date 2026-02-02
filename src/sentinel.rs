@@ -3,7 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use serde::{Serialize, Deserialize};
 use tokio::time::Instant;
-use tracing::{info, warn, instrument};
+use tracing::{info, warn, debug, instrument};
 
 use crate::shards::{ReassemblyBuffer, ShardChunk, WitnessEnvelope};
 use crate::audio;
@@ -46,8 +46,9 @@ impl HealthTracker {
     }
 
     pub fn register_new_peer(&mut self, id: PeerId) {
-        // New peers get a grace period before they are considered stale
-        self.heartbeats.insert(id, Instant::now() + self.grace_period);
+        let expiry = Instant::now() + self.grace_period;
+        info!(peer = %id, grace_expiry = ?expiry, "Registering peer with forensic grace period");
+        self.heartbeats.insert(id, expiry);
     }
 
     pub fn get_stale_peers(&self, local_id: &PeerId) -> Vec<PeerId> {
@@ -56,13 +57,38 @@ impl HealthTracker {
             .iter()
             .filter_map(|(&id, &last_active)| {
                 if id == *local_id { return None; }
-                if now > last_active && now.duration_since(last_active) > self.pulse_timeout {
+
+                // Protect against heartbeats in the future due to initialization
+                if last_active > now {
+                    let grace_remaining = last_active.duration_since(now);
+                    debug!(
+                        peer = %id, 
+                        status = "PROTECTED", 
+                        grace_remaining = ?grace_remaining,
+                        "Peer is currently in its grace period"
+                    );
+                    return None;
+                }
+                let age = now.duration_since(last_active);
+                if age > self.pulse_timeout {
+                    info!(
+                        peer = %id, 
+                        status = "STALE", 
+                        age = ?age, 
+                        timeout = ?self.pulse_timeout,
+                        "Peer exceeded pulse timeout"
+                    );
                     Some(id)
                 } else {
                     None
                 }
             })
             .collect()
+    }
+
+    pub fn remove_peer(&mut self, id: &PeerId) {
+        self.heartbeats.remove(id);
+        self.capacities.remove(id);
     }
 }
 
@@ -257,8 +283,7 @@ impl Sentinel {
             }
 
             // 3. Purge network state
-            self.health.heartbeats.remove(&id);
-            self.health.capacities.remove(&id);
+            self.health.remove_peer(&id);
             self.audio_buffers.remove(&id);
         }
 
@@ -276,4 +301,148 @@ pub enum SimPacket {
     
     /// Signal to gracefully shut down the virtual node task
     Shutdown,
+}
+
+#[cfg(test)]
+mod health_tracker_tests {
+    use super::*;
+    use libp2p::PeerId;
+    use std::time::Duration;
+    use tokio::time::{advance};
+
+    /// Helper to create a default test config
+    fn create_test_config() -> PhalanxConfig {
+        PhalanxConfig::test_defaults() // pulse_timeout=2s, grace_period=10s
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_peer_staleness_detection() {
+        let config = create_test_config();
+        let mut tracker = HealthTracker::new(&config);
+        let local_id = PeerId::random();
+        let remote_id = PeerId::random();
+
+        // 1. Register activity for a remote peer
+        tracker.register_activity(remote_id);
+
+        // 2. Advance time but stay within the pulse_timeout (2s)
+        advance(Duration::from_secs(1)).await;
+        let stale_peers = tracker.get_stale_peers(&local_id);
+        assert!(stale_peers.is_empty(), "Peer should not be stale after only 1 second");
+
+        // 3. Advance time past the pulse_timeout
+        advance(Duration::from_secs(2)).await;
+        let stale_peers = tracker.get_stale_peers(&local_id);
+        
+        assert_eq!(stale_peers.len(), 1, "Peer should be marked as stale after timeout");
+        assert_eq!(stale_peers[0], remote_id);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_grace_period_protection() {
+        // 1. Force the subscriber to show Phalanx logs
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("phalanx=debug")
+            .try_init();
+
+        let config = PhalanxConfig::test_defaults(); // 2s pulse, 10s grace
+        let mut tracker = HealthTracker::new(&config);
+        let local_id = PeerId::random();
+        let remote_id = PeerId::random();
+
+        info!("STEP 1: Registering peer with 10s grace. Now={:?}", tokio::time::Instant::now());
+        tracker.register_new_peer(remote_id);
+
+        // Verify initial state
+        let initial_heartbeat = tracker.heartbeats.get(&remote_id).unwrap();
+        info!("Peer Heartbeat set to: {:?}", initial_heartbeat);
+
+        // 2. Advance 5s (Halfway through grace)
+        tokio::time::advance(Duration::from_secs(5)).await;
+        info!("STEP 2: Advanced 5s. Now={:?}", tokio::time::Instant::now());
+
+        let stale_peers = tracker.get_stale_peers(&local_id);
+        
+        // This should be 0 because T+5 < T+10
+        assert!(
+            stale_peers.is_empty(), 
+            "FAILURE: Peer was stale during grace. Check HealthTracker future-check logic."
+        );
+
+        // 3. Advance past grace
+        tokio::time::advance(Duration::from_secs(10)).await;
+        info!("STEP 3: Advanced another 10s (T+15). Now={:?}", tokio::time::Instant::now());
+
+        let stale_peers = tracker.get_stale_peers(&local_id);
+        assert!(
+            !stale_peers.is_empty(), 
+            "FAILURE: Peer should be stale after 15s elapsed time."
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_heartbeat_resets_timer() {
+        let config = create_test_config();
+        let mut tracker = HealthTracker::new(&config);
+        let local_id = PeerId::random();
+        let remote_id = PeerId::random();
+
+        tracker.register_activity(remote_id);
+
+        // Advance 1s
+        advance(Duration::from_secs(1)).await;
+
+        // 1. Receive a heartbeat message
+        let msg = ControlMessage {
+            sender: remote_id.to_string(),
+            load_factor: 0.5,
+            is_on_battery: false,
+            storage_remaining_mb: 500,
+        };
+        tracker.register_heartbeat(remote_id, msg);
+
+        // 2. Advance another 1.5s (Total 2.5s since start, but only 1.5s since heartbeat)
+        advance(Duration::from_millis(1500)).await;
+        
+        let stale_peers = tracker.get_stale_peers(&local_id);
+        assert!(stale_peers.is_empty(), "Heartbeat should have reset the staleness timer");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_local_id_exclusion() {
+        let config = create_test_config();
+        let mut tracker = HealthTracker::new(&config);
+        let local_id = PeerId::random();
+
+        // Register local activity
+        tracker.register_activity(local_id);
+
+        // Advance time past timeout
+        advance(Duration::from_secs(5)).await;
+
+        // 1. The tracker should never return the local node as a stale peer
+        let stale_peers = tracker.get_stale_peers(&local_id);
+        assert!(stale_peers.is_empty(), "Tracker must exclude the local PeerId from stale lists");
+    }
+
+    #[test]
+    fn test_capacity_storage() {
+        let config = PhalanxConfig::test_defaults();
+        let mut tracker = HealthTracker::new(&config);
+        let remote_id = PeerId::random();
+
+        let msg = ControlMessage {
+            sender: remote_id.to_string(),
+            load_factor: 0.75,
+            is_on_battery: true,
+            storage_remaining_mb: 100,
+        };
+
+        tracker.register_heartbeat(remote_id, msg.clone());
+
+        // 1. Verify capacity data is correctly preserved
+        let stored_cap = tracker.capacities.get(&remote_id).expect("Capacity record missing");
+        assert_eq!(stored_cap.load_factor, 0.75);
+        assert!(stored_cap.is_on_battery);
+    }
 }

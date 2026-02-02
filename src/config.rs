@@ -58,7 +58,7 @@ pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>>
                 video_topic: "test/video".into(),
                 audio_topic: "test/audio".into(),
                 control_topic: "test/control".into(),
-                grace_period: 1,
+                grace_period: 10,
             },
             storage: StorageConfig {
                 vault_path: "sim_vault".into(),

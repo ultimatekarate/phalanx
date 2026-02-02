@@ -1,0 +1,17 @@
+Phalanx isn't just another decentralized storage project; it’s a specialized protocol designed for high-stakes accountability. Most "decentralized" projects focus on content delivery (making files fast) or censorship resistance (making files permanent).
+
+Phalanx focuses on Chain of Custody—ensuring that from the millisecond light hits a camera lens, that data is cryptographically bound to an identity and witnessed by a mesh.
+
+Here are the novel pillars that define the project:
+
+Identity-at-the-Edge (Hardware Sovereignty): Unlike standard surveillance where a central server signs the footage, Phalanx moves the private key into the hardware capture threads. Because the WitnessEnvelope is signed by the source DID before it even hits the network, the data is self-authenticating. The network can't lie about what the camera saw.
+
+Stateless Shredding & Reassembly: Phalanx treats network transport as a "lossy shield." By shredding envelopes into ShardChunks, we bypass the strict MTU limits of P2P protocols like Gossipsub. The novelty lies in the Sentinel reassembly logic, which acts as a "Stateless Buffer"—it doesn't need to know the peer's history to reconstruct the truth; it only needs the shards.
+
+PDS-Backed Witnessing (The Stronghold): Phalanx separates "Network Presence" (Sentinels) from "Evidence Storage" (Strongholds). This creates a Federated Witness Model. You don't just store your own data; you act as a "Guardian" for others. When a peer goes dark, the Sentinel automatically "salvages" their shards and moves them to the Stronghold, ensuring that a "forced disconnect" doesn't result in lost evidence.
+
+Cross-Modal Sovereignty (Audio/Video Parity): Most systems treat audio as a secondary stream or an unencrypted "sidecar" file. Phalanx enforces Audio Sovereignty by wrapping 1-second audio fragments into the same WitnessEnvelope structure as video. This prevents "Audio Injection" attacks where a malicious node tries to replace a video's sound with fake noise or a different track.
+
+Atomic Write-Ahead Logging (WAL) for Evidence: Typical P2P apps hold data in RAM until they have a "full file." Phalanx uses a WAL-First Ingestion strategy. The moment a shard is verified, it is committed to a .tmp file on disk. This is a novel application of database-level durability (ACID) to the world of P2P data streaming, ensuring that partial evidence survives system crashes.
+
+Deterministic "Force-Sealing": We use a hybrid archival trigger. Data is "sealed" into a permanent .phlx bundle either by Count (e.g., 10 shards) or by Staleness (e.g., 5 minutes of inactivity). This ensures that even if a node is destroyed halfway through a capture, the fragments that reached the mesh are eventually consolidated and indexed into the Stronghold.

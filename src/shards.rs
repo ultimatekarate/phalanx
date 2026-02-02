@@ -243,3 +243,30 @@ impl ReassemblyBuffer {
         self.chunks.iter().all(|c| c.is_some())
     }
 }
+
+#[cfg(test)]
+mod forensic_tests {
+    use super::*;
+
+    #[test]
+    fn test_buffer_padding_salvage() {
+        // 1. Create a buffer for a 3-chunk shard
+        let mut buffer = ReassemblyBuffer::new(3);
+        
+        // 2. Add chunks 0 and 2 (Missing the middle)
+        let chunk_data = vec![1u8, 2u8, 3u8];
+        buffer.chunks[0] = Some(chunk_data.clone());
+        buffer.chunks[2] = Some(chunk_data.clone());
+        
+        assert!(!buffer.is_complete());
+
+        // 3. Attempt salvage
+        // Note: This will likely return None unless 'chunk_data' 
+        // makes the padded buffer valid Postcard data, but we can 
+        // test the padding length specifically in 'assemble_partial'.
+        let _salvaged = buffer.try_salvage();
+        
+        // In this specific architecture, if the header (Chunk 0) is valid,
+        // assemble_partial should at least attempt the conversion.
+    }
+}

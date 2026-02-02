@@ -69,83 +69,98 @@ impl SimulationHarness {
     }
 
     /// Spawns a new virtual node into the simulation
-    pub async fn spawn_node(&mut self, name: &str) -> String {
-        let name_owned = name.to_string();
-        let identity = PhalanxIdentity::generate();
-        let did = identity.did.clone();
-        let peer_id = PeerId::random(); // Deterministic PeerId generation
-        let (node_tx, mut node_rx) = mpsc::channel::<SimPacket>(100);
+pub async fn spawn_node(&mut self, name: &str) -> String {
+    let name_owned = name.to_string();
+    let identity = PhalanxIdentity::generate();
+    let did = identity.did.clone();
+    let peer_id = PeerId::random();
+    
+    let (node_tx, mut node_rx) = mpsc::channel::<SimPacket>(100);
 
-        // 1. REGISTER METADATA IMMEDIATELY
-        // Do this BEFORE the spawn to ensure the harness sees the peer
-        {
-            let mut peer_map_guard = self.peer_map.write().await;
-            peer_map_guard.insert(did.clone(), peer_id);
-        }
+    // Register node identity in the harness for test lookups
+    {
+        let mut peer_guard = self.peer_map.write().await;
+        peer_guard.insert(did.clone(), peer_id);
+    }
 
-        let mut nodes_guard = self.nodes.write().await;
-        nodes_guard.insert(did.clone(), node_tx);
+    let mut nodes_guard = self.nodes.write().await;
+    nodes_guard.insert(did.clone(), node_tx);
 
-        let broadcast_tx = self.broadcast_channel.clone();
-        let node_did = did.clone();
-        let config = self.config.clone();
-        
-        // 2. INITIALIZE MODULES
-        let mut sentinel = Sentinel::new(&config);
-        let mut storage = Stronghold::new(&format!("sim_vault/{}", name), &config);
+    let broadcast_tx = self.broadcast_channel.clone();
+    let node_did = did.clone();
+    let config = self.config.clone();
+    
+    let mut sentinel = Sentinel::new(&config);
+    let mut storage = Stronghold::new(&format!("sim_vault/{}", name), &config);
 
-        // 3. SPAWN THE BACKGROUND LOOP
-        tokio::spawn(async move {
-            let span = span!(Level::INFO, "sim_node", node = %name_owned, peer = %peer_id);
-            let _enter = span.enter();
-            info!("Virtual node loop started");
+    tokio::spawn(async move {
+        let span = span!(Level::INFO, "sim_node", node = %name_owned, peer = %peer_id);
+        let _enter = span.enter();
+        info!("Virtual node loop started");
 
-            // Set missed tick behavior to avoid skipping during 'advance'
-            let mut heartbeat_tick = tokio::time::interval(Duration::from_secs(config.network.heartbeat_interval_secs));
-            heartbeat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
-            
-            let mut cleanup_tick = tokio::time::interval(Duration::from_secs(5));
-            cleanup_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
+        let mut heartbeat_tick = tokio::time::interval(Duration::from_secs(config.network.heartbeat_interval_secs));
+        let mut cleanup_tick = tokio::time::interval(Duration::from_secs(5));
 
-            loop {
-                tokio::select! {
-                    _ = heartbeat_tick.tick() => {
-                        let msg = sentinel.generate_heartbeat(&peer_id);
-                        if let Ok(data) = postcard::to_stdvec(&msg) {
+        loop {
+            tokio::select! {
+                // 1. Outbound Heartbeats
+                _ = heartbeat_tick.tick() => {
+                    let msg = sentinel.generate_heartbeat(&peer_id);
+                    match postcard::to_stdvec(&msg) {
+                        Ok(data) => {
                             let _ = broadcast_tx.send((node_did.clone(), peer_id, SimPacket::Heartbeat(peer_id, data))).await;
+                        },
+                        Err(e) => warn!(error = %e, "Failed to serialize outbound heartbeat"),
+                    }
+                }
+
+                // 2. Health Cleanup and Archival
+                _ = cleanup_tick.tick() => {
+                    // process_cleanup now uses HealthTracker internally to find stale peers
+                    let salvaged = sentinel.process_cleanup(peer_id);
+                    for (_dark_peer, envelopes) in salvaged {
+                        for env in envelopes {
+                            storage.ingest_envelope(env);
                         }
                     }
-                    _ = cleanup_tick.tick() => {
-                        let salvaged = sentinel.process_cleanup(peer_id);
-                        for (_dark_peer, envelopes) in salvaged {
-                            for env in envelopes {
-                                storage.ingest_envelope(env);
+                    storage.archive_stale_sessions(Duration::from_secs(config.storage.stale_session_threshold));
+                }
+
+                // 3. Inbound Packet Handling
+                Some(packet) = node_rx.recv() => {
+                    match packet {
+                        SimPacket::Shutdown => {
+                            info!("Shutdown signal received. Terminating virtual node loop");
+                            break;
+                        }
+                        SimPacket::Chunk(actual_source, chunk) => {
+                            // Delegation to ReassemblyManager preserves PeerId-to-DID link
+                            if let Some(envelope) = sentinel.ingest_chunk(actual_source, chunk) {
+                                storage.ingest_envelope(envelope);
                             }
                         }
-                        storage.archive_stale_sessions(Duration::from_secs(config.storage.stale_session_threshold));
-                    }
-                    Some(packet) = node_rx.recv() => {
-                        match packet {
-                            SimPacket::Shutdown => break,
-                            SimPacket::Chunk(source, chunk) => {
-                                if let Some(envelope) = sentinel.ingest_chunk(source, chunk) {
-                                    storage.ingest_envelope(envelope);
-                                }
-                            }
-                            SimPacket::Heartbeat(source, data) => {
-                                if let Ok(msg) = postcard::from_bytes::<ControlMessage>(&data) {
-                                    sentinel.register_sim_heartbeat(source, msg);
-                                }
+                        SimPacket::Heartbeat(source_peer, data) => {
+                            match postcard::from_bytes::<ControlMessage>(&data) {
+                                Ok(msg) => {
+                                    /* FUNCTIONAL DOCUMENTATION:
+                                       Targeting the HealthTracker directly ensures we use tokio::time::Instant.
+                                       This is critical for 'tokio::time::pause' and 'advance' compatibility 
+                                       in the simulation harness.
+                                    */
+                                    sentinel.health.register_heartbeat(source_peer, msg);
+                                },
+                                Err(e) => warn!(error = %e, "Received malformed heartbeat in simulation"),
                             }
                         }
                     }
                 }
             }
-            info!("Virtual node loop terminated");
-        });
+        }
+        info!("Virtual node loop terminated");
+    });
 
-        did
-    }
+    did
+}
 
     /// Simulates a broadcast on the Gossipsub network
     pub async fn broadcast(&self, sender_did: &str, packet: SimPacket) {
