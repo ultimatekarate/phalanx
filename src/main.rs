@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (mut video_rx, mut audio_rx) = spawn_hardware_threads(&config);
 
     let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(config.network.heartbeat_interval_secs));
-    let mut cleanup_timer = tokio::time::interval(Duration::from_secs(5));
+    let mut cleanup_timer = tokio::time::interval(Duration::from_secs(60));
 
     println!("--- PHALANX: ACTIVE ---");
 
@@ -52,11 +52,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         select! {
             Some(v_shard) = video_rx.recv() => {
-                handle_video_shard(&mut swarm, &video_topic, v_shard, &my_identity, &config, &storage);
+                handle_video_shard(&mut swarm, &video_topic, v_shard, &my_identity, &config, &mut storage);
             }
             
             Some(a_shard) = audio_rx.recv() => {
-                handle_audio_shard(&mut swarm, &audio_topic, a_shard, &my_identity, &config, &storage);
+                handle_audio_shard(&mut swarm, &audio_topic, a_shard, &my_identity, &config, &mut storage);
             }
             
             _ = heartbeat_timer.tick() => {
@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             _ = cleanup_timer.tick() => {
                 let abandoned_evidence = sentinel.process_cleanup(*swarm.local_peer_id());
-                for (_, shards) in abandoned_evidence {
+                for (_peer, shards) in abandoned_evidence {
                     for envelope in shards {
                         storage.ingest_envelope(envelope);
                     }
@@ -110,6 +110,7 @@ fn handle_audio_shard(
     shard: audio::AudioShard,
     identity: &identity::PhalanxIdentity,
     config: &PhalanxConfig,
+    storage: &mut Stronghold,
 ) {
     // 1. Wrap the audio shard in a signed WitnessEnvelope
     // We use the swarm local peer ID to identify the broadcaster

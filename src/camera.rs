@@ -3,7 +3,7 @@ use nokhwa::pixel_format::RgbFormat;
 use nokhwa::Camera;
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
-use crate::shards::{self, VideoShard}; // Removed Shredder
+use crate::shards::{self, VideoShard}; 
 
 pub trait FrameProvider: 'static {
     fn capture_frame(&mut self) -> Result<Vec<u8>, String>;
