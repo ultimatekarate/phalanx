@@ -147,7 +147,7 @@ fn broadcast_envelope(
 ) {
     if let Ok(encoded_envelope) = postcard::to_stdvec(&envelope) {
         let chunks = shards::chunkify(
-            envelope.original_shard.sequence_id,
+            shards::ShardId(envelope.original_shard.sequence_id),
             encoded_envelope,
             config.network.chunk_size_bytes,
             envelope.did.clone(),

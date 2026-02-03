@@ -1,6 +1,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::io::{Cursor}; 
+use std::fmt;
 
 use crate::identity::PhalanxIdentity;
 
@@ -12,6 +13,17 @@ use crate::audio;
 // =====================
 // DATA STRUCTURES
 // =====================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct ShardId(pub u32);
+
+impl fmt::Display for ShardId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Formats as "shard:101" instead of just "101" in logs
+        write!(f, "shard:{}", self.0)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoShard {
     pub timestamp: u64,
@@ -22,7 +34,7 @@ pub struct VideoShard {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ShardChunk {
-    pub shard_id: u32,      // Matches the VideoShard sequence_id
+    pub shard_id: ShardId,
     pub chunk_index: u32,   // 0, 1, 2...
     pub total_chunks: u32,
     pub data: Vec<u8>,
@@ -135,7 +147,7 @@ pub fn wrap_audio_shard(
     }
 }
 
-pub fn chunkify(shard_id: u32, data: Vec<u8>, chunk_size: usize, owner_did: String) -> Vec<ShardChunk> {
+pub fn chunkify(shard_id: ShardId, data: Vec<u8>, chunk_size: usize, owner_did: String) -> Vec<ShardChunk> {
     let total_chunks = (data.len() as f64 / chunk_size as f64).ceil() as u32;
     data.chunks(chunk_size)
         .enumerate()

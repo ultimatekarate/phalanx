@@ -188,6 +188,7 @@ async fn test_salvage_on_node_death() {
         .with_env_filter("phalanx=debug,info")
         .try_init();
 
+    use crate::shards::ShardId;
     use crate::shards::ShardChunk;
     use std::time::Duration;
     use tracing::{info, info_span};
@@ -219,8 +220,8 @@ async fn test_salvage_on_node_death() {
     info!(alpha = %node_a_did, peer = %node_a_peer_id, "Nodes initialized and registered");
     
     let partial_chunks = vec![
-        ShardChunk { shard_id: 999, chunk_index: 0, total_chunks: 5, data: vec![1, 2, 3], owner_did: node_a_did.clone() },
-        ShardChunk { shard_id: 999, chunk_index: 1, total_chunks: 5, data: vec![4, 5, 6], owner_did: node_a_did.clone() },
+        ShardChunk { shard_id: ShardId(999), chunk_index: 0, total_chunks: 5, data: vec![1, 2, 3], owner_did: node_a_did.clone() },
+        ShardChunk { shard_id: ShardId(999), chunk_index: 1, total_chunks: 5, data: vec![4, 5, 6], owner_did: node_a_did.clone() },
     ];
 
     for chunk in partial_chunks {

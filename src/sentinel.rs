@@ -5,7 +5,7 @@ use serde::{Serialize, Deserialize};
 use tokio::time::Instant;
 use tracing::{info, warn, debug, instrument};
 
-use crate::shards::{ReassemblyBuffer, ShardChunk, WitnessEnvelope};
+use crate::shards::{ReassemblyBuffer, ShardChunk, ShardId, WitnessEnvelope};
 use crate::audio;
 use crate::{PhalanxBehaviour, PhalanxEvent};
 use crate::config::PhalanxConfig;
@@ -94,9 +94,9 @@ impl HealthTracker {
 
 /// Specialized manager for shard reassembly and identity mapping
 pub struct ReassemblyManager {
-    pub buffers: HashMap<u32, ReassemblyBuffer>,
-    pub owners: HashMap<u32, PeerId>,
-    pub shard_to_did: HashMap<u32, String>,
+    pub buffers: HashMap<ShardId, ReassemblyBuffer>,
+    pub owners: HashMap<ShardId, PeerId>,
+    pub shard_to_did: HashMap<ShardId, String>,
 }
 
 impl Default for ReassemblyManager {
@@ -259,7 +259,7 @@ impl Sentinel {
             info!(peer = %id, "Dark peer detected; initiating salvage");
 
             // 1. Identify all orphaned shards owned by the dark peer
-            let shards_to_clear: Vec<u32> = self.reassembly.owners
+            let shards_to_clear: Vec<ShardId> = self.reassembly.owners
                 .iter()
                 .filter(|(_, &owner)| owner == id)
                 .map(|(&sid, _)| sid)
