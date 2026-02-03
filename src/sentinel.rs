@@ -1,4 +1,4 @@
-use libp2p::{gossipsub, mdns, PeerId, Swarm, swarm::SwarmEvent};
+use libp2p::{gossipsub, mdns, Swarm, swarm::SwarmEvent};
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use serde::{Serialize, Deserialize};
@@ -9,6 +9,7 @@ use crate::shards::{ReassemblyBuffer, ShardChunk, ShardId, WitnessEnvelope};
 use crate::audio;
 use crate::{PhalanxBehaviour, PhalanxEvent};
 use crate::config::PhalanxConfig;
+use crate::identity::{NetworkId, Did};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlMessage {
@@ -20,8 +21,8 @@ pub struct ControlMessage {
 
 /// Specialized manager for peer vitality and capacity tracking
 pub struct HealthTracker {
-    pub heartbeats: HashMap<PeerId, Instant>,
-    pub capacities: HashMap<PeerId, ControlMessage>,
+    pub heartbeats: HashMap<NetworkId, Instant>,
+    pub capacities: HashMap<NetworkId, ControlMessage>,
     pub pulse_timeout: std::time::Duration,
     pub grace_period: std::time::Duration,
 }
@@ -36,22 +37,22 @@ impl HealthTracker {
         }
     }
 
-    pub fn register_activity(&mut self, id: PeerId) {
+    pub fn register_activity(&mut self, id: NetworkId) {
         self.heartbeats.insert(id, Instant::now());
     }
 
-    pub fn register_heartbeat(&mut self, id: PeerId, msg: ControlMessage) {
+    pub fn register_heartbeat(&mut self, id: NetworkId, msg: ControlMessage) {
         self.heartbeats.insert(id, Instant::now());
         self.capacities.insert(id, msg);
     }
 
-    pub fn register_new_peer(&mut self, id: PeerId) {
+    pub fn register_new_peer(&mut self, id: NetworkId) {
         let expiry = Instant::now() + self.grace_period;
         info!(peer = %id, grace_expiry = ?expiry, "Registering peer with forensic grace period");
         self.heartbeats.insert(id, expiry);
     }
 
-    pub fn get_stale_peers(&self, local_id: &PeerId) -> Vec<PeerId> {
+    pub fn get_stale_peers(&self, local_id: &NetworkId) -> Vec<NetworkId> {
         let now = Instant::now();
         self.heartbeats
             .iter()
@@ -86,7 +87,7 @@ impl HealthTracker {
             .collect()
     }
 
-    pub fn remove_peer(&mut self, id: &PeerId) {
+    pub fn remove_peer(&mut self, id: &NetworkId) {
         self.heartbeats.remove(id);
         self.capacities.remove(id);
     }
@@ -95,8 +96,8 @@ impl HealthTracker {
 /// Specialized manager for shard reassembly and identity mapping
 pub struct ReassemblyManager {
     pub buffers: HashMap<ShardId, ReassemblyBuffer>,
-    pub owners: HashMap<ShardId, PeerId>,
-    pub shard_to_did: HashMap<ShardId, String>,
+    pub owners: HashMap<ShardId, NetworkId>,
+    pub shard_to_did: HashMap<ShardId, Did>,
 }
 
 impl Default for ReassemblyManager {
@@ -114,7 +115,7 @@ impl ReassemblyManager {
         }
     }
 
-    pub fn add_chunk(&mut self, source: PeerId, chunk: ShardChunk) -> Option<WitnessEnvelope> {
+    pub fn add_chunk(&mut self, source: NetworkId, chunk: ShardChunk) -> Option<WitnessEnvelope> {
         // Track the identity link for forensic salvage
         self.owners.insert(chunk.shard_id, source);
         self.shard_to_did.insert(chunk.shard_id, chunk.owner_did.clone());
@@ -151,8 +152,8 @@ pub struct Sentinel {
     pub reassembly: ReassemblyManager,
 
     // Managed Queues
-    pub guardian_buffers: HashMap<PeerId, VecDeque<WitnessEnvelope>>,
-    pub audio_buffers: HashMap<PeerId, VecDeque<audio::AudioShard>>,
+    pub guardian_buffers: HashMap<NetworkId, VecDeque<WitnessEnvelope>>,
+    pub audio_buffers: HashMap<NetworkId, VecDeque<audio::AudioShard>>,
 
     // Constraints from Config
     pub max_peers: usize,
@@ -189,7 +190,7 @@ impl Sentinel {
         Ok(())
     }
 
-    pub fn generate_heartbeat(&self, local_id: &PeerId) -> ControlMessage {
+    pub fn generate_heartbeat(&self, local_id: &NetworkId) -> ControlMessage {
         let current_load = self.guardian_buffers.len() as f32;
         let capacity = self.max_peers as f32;
 
@@ -201,11 +202,11 @@ impl Sentinel {
         }
     }
 
-    pub fn ingest_chunk(&mut self, source: PeerId, chunk: ShardChunk) -> Option<WitnessEnvelope> {
+    pub fn ingest_chunk(&mut self, source: NetworkId, chunk: ShardChunk) -> Option<WitnessEnvelope> {
         self.reassembly.add_chunk(source, chunk)
     }
 
-    pub fn register_sim_heartbeat(&mut self, source: PeerId, message: ControlMessage) {
+    pub fn register_sim_heartbeat(&mut self, source: NetworkId, message: ControlMessage) {
         self.health.register_heartbeat(source, message);
     }
 
@@ -220,26 +221,26 @@ impl Sentinel {
                     if peer_id != *swarm.local_peer_id() {
                         let _ = swarm.dial(multiaddr.clone());
                         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                        self.health.register_new_peer(peer_id);
+                        self.health.register_new_peer(NetworkId(peer_id));
                     }
                 }
             }
             SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(gossipsub::Event::Message { propagation_source, message, .. })) => {
-                self.health.register_activity(propagation_source);
+                self.health.register_activity(NetworkId(propagation_source));
                 
                 if message.topic == self.topics.video.hash() {
                     if let Ok(chunk) = postcard::from_bytes::<ShardChunk>(&message.data) {
-                        return self.ingest_chunk(propagation_source, chunk);
+                        return self.ingest_chunk(NetworkId(propagation_source), chunk);
                     }
                 } 
                 else if message.topic == self.topics.control.hash() {
                     if let Ok(ctrl) = postcard::from_bytes::<ControlMessage>(&message.data) {
-                        self.health.register_heartbeat(propagation_source, ctrl);
+                        self.health.register_heartbeat(NetworkId(propagation_source), ctrl);
                     }
                 } 
                 else if message.topic == self.topics.audio.hash() {
                     if let Ok(a_shard) = postcard::from_bytes::<audio::AudioShard>(&message.data) {
-                        let buffer = self.audio_buffers.entry(propagation_source).or_default();
+                        let buffer = self.audio_buffers.entry(NetworkId(propagation_source)).or_default();
                         buffer.push_back(a_shard);
                         if buffer.len() > self.max_audio_buffer { buffer.pop_front(); }
                     }
@@ -251,7 +252,7 @@ impl Sentinel {
     }
 
     #[instrument(level = "info", skip(self, local_id), fields(node_id = %local_id))]
-    pub fn process_cleanup(&mut self, local_id: PeerId) -> Vec<(PeerId, VecDeque<WitnessEnvelope>)> {
+    pub fn process_cleanup(&mut self, local_id: NetworkId) -> Vec<(NetworkId, VecDeque<WitnessEnvelope>)> {
         let mut to_archive = Vec::new();
         let stale_peers = self.health.get_stale_peers(&local_id);
 
@@ -271,7 +272,7 @@ impl Sentinel {
                     let fallback_did = self.reassembly.shard_to_did.remove(&sid).unwrap_or_default();
                     
                     if let Some(mut salvaged) = buffer.try_salvage() {
-                        if salvaged.did.is_empty() {
+                        if salvaged.did.0.is_empty() {
                             salvaged.did = fallback_did;
                         }
                         
@@ -299,11 +300,11 @@ impl Sentinel {
 
 #[derive(Clone, Debug)]
 pub enum SimPacket {
-    /// Mimics a Video Topic message: (Sender's PeerId, The Shard Fragment)
-    Chunk(PeerId, ShardChunk),
+    /// Mimics a Video Topic message: (Sender's NetworkId, The Shard Fragment)
+    Chunk(NetworkId, ShardChunk),
     
-    /// Mimics a Control Topic message: (Sender's PeerId, Serialized ControlMessage)
-    Heartbeat(PeerId, Vec<u8>), 
+    /// Mimics a Control Topic message: (Sender's NetworkId, Serialized ControlMessage)
+    Heartbeat(NetworkId, Vec<u8>), 
     
     /// Signal to gracefully shut down the virtual node task
     Shutdown,
@@ -312,7 +313,6 @@ pub enum SimPacket {
 #[cfg(test)]
 mod health_tracker_tests {
     use super::*;
-    use libp2p::PeerId;
     use std::time::Duration;
     use tokio::time::{advance};
 
@@ -325,8 +325,8 @@ mod health_tracker_tests {
     async fn test_peer_staleness_detection() {
         let config = create_test_config();
         let mut tracker = HealthTracker::new(&config);
-        let local_id = PeerId::random();
-        let remote_id = PeerId::random();
+        let local_id = NetworkId::random();
+        let remote_id = NetworkId::random();
 
         // 1. Register activity for a remote peer
         tracker.register_activity(remote_id);
@@ -353,8 +353,8 @@ mod health_tracker_tests {
 
         let config = PhalanxConfig::test_defaults(); // 2s pulse, 10s grace
         let mut tracker = HealthTracker::new(&config);
-        let local_id = PeerId::random();
-        let remote_id = PeerId::random();
+        let local_id = NetworkId::random();
+        let remote_id = NetworkId::random();
 
         info!("STEP 1: Registering peer with 10s grace. Now={:?}", tokio::time::Instant::now());
         tracker.register_new_peer(remote_id);
@@ -390,8 +390,8 @@ mod health_tracker_tests {
     async fn test_heartbeat_resets_timer() {
         let config = create_test_config();
         let mut tracker = HealthTracker::new(&config);
-        let local_id = PeerId::random();
-        let remote_id = PeerId::random();
+        let local_id = NetworkId::random();
+        let remote_id = NetworkId::random();
 
         tracker.register_activity(remote_id);
 
@@ -418,7 +418,7 @@ mod health_tracker_tests {
     async fn test_local_id_exclusion() {
         let config = create_test_config();
         let mut tracker = HealthTracker::new(&config);
-        let local_id = PeerId::random();
+        let local_id = NetworkId::random();
 
         // Register local activity
         tracker.register_activity(local_id);
@@ -435,7 +435,7 @@ mod health_tracker_tests {
     fn test_capacity_storage() {
         let config = PhalanxConfig::test_defaults();
         let mut tracker = HealthTracker::new(&config);
-        let remote_id = PeerId::random();
+        let remote_id = NetworkId::random();
 
         let msg = ControlMessage {
             sender: remote_id.to_string(),

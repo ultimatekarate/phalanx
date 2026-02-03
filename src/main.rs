@@ -70,8 +70,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             _ = cleanup_timer.tick() => {
                 // 1. Sentinel identifies dark peers and recovers fragments
-                let local_peer_id = swarm.local_peer_id();
-                let salvaged = sentinel.process_cleanup(*local_peer_id);
+                let local_peer_id = identity::NetworkId(*swarm.local_peer_id());
+                let salvaged = sentinel.process_cleanup(local_peer_id);
                 
                 for (dark_peer_id, envelopes) in salvaged {
                     tracing::info!(peer = %dark_peer_id, count = envelopes.len(), "Salvage triggered for dark peer");
@@ -133,7 +133,7 @@ fn handle_audio_shard(
 
 
 fn handle_heartbeat(swarm: &mut Swarm<PhalanxBehaviour>, sentinel: &mut Sentinel) {
-    let heartbeat = sentinel.generate_heartbeat(swarm.local_peer_id());
+    let heartbeat = sentinel.generate_heartbeat(&identity::NetworkId(*swarm.local_peer_id()));
     if let Ok(encoded) = postcard::to_stdvec(&heartbeat) {
         let _ = swarm.behaviour_mut().gossipsub.publish(sentinel.topics.control.clone(), encoded);
     }

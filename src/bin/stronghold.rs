@@ -1,4 +1,5 @@
 use libp2p::{futures::StreamExt};
+use phalanx::identity::NetworkId;
 use phalanx::{
     stronghold::Stronghold, 
     sentinel::Sentinel,
@@ -45,7 +46,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             // 2. Periodic Peer Cleanup & Forensic Salvage
             _ = cleanup_timer.tick() => {
-                let local_id = *swarm.local_peer_id();
+                let local_id = NetworkId(*swarm.local_peer_id());
                 let stale_data = sentinel.process_cleanup(local_id);
                 
                 for (_peer_id, envelopes) in stale_data {
@@ -57,7 +58,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             // 3. Outgoing Heartbeats
             _ = heartbeat_timer.tick() => {
-                let hb = sentinel.generate_heartbeat(swarm.local_peer_id());
+                let peer_id = NetworkId(*swarm.local_peer_id());
+                let hb = sentinel.generate_heartbeat(&peer_id);
                 if let Ok(data) = postcard::to_stdvec(&hb) {
                     let _ = swarm.behaviour_mut().gossipsub.publish(sentinel.topics.control.clone(), data);
                 }

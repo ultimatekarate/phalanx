@@ -1,32 +1,31 @@
 use std::collections::HashMap;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn, span, Level};
-use libp2p::PeerId;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::identity::PhalanxIdentity;
+use crate::identity::{PhalanxIdentity, Did, NetworkId};
 use crate::sentinel::{Sentinel, SimPacket, ControlMessage};
 use crate::stronghold::Stronghold;
 use crate::config::PhalanxConfig;
 
 /// A handle to a virtual node in the harness
 pub struct SimNodeHandle {
-    pub did: String,
+    pub did: Did,
     pub tx: mpsc::Sender<SimPacket>,
 }
 
 pub struct SimulationHarness {
     // Wrap nodes so they can be shared across tasks
-    pub nodes: Arc<RwLock<HashMap<String, mpsc::Sender<SimPacket>>>>,
-    pub broadcast_channel: mpsc::Sender<(String, PeerId, SimPacket)>,
+    pub nodes: Arc<RwLock<HashMap<Did, mpsc::Sender<SimPacket>>>>,
+    pub broadcast_channel: mpsc::Sender<(Did, NetworkId, SimPacket)>,
     pub config: PhalanxConfig,
-    pub peer_map: Arc<RwLock<HashMap<String, PeerId>>>,
+    pub peer_map: Arc<RwLock<HashMap<Did, NetworkId>>>,
 }
 
 impl SimulationHarness {
-    pub fn init_mesh(config: PhalanxConfig) -> (Self, mpsc::Receiver<(String, PeerId, SimPacket)>) {
+    pub fn init_mesh(config: PhalanxConfig) -> (Self, mpsc::Receiver<(Did, NetworkId, SimPacket)>) {
         let (tx, rx) = mpsc::channel(1024);
         let harness = Self {
             nodes: Arc::new(RwLock::new(HashMap::new())),
@@ -37,14 +36,14 @@ impl SimulationHarness {
         (harness, rx)
     }
 
-    pub async fn get_peer_id(&self, did: &str) -> Option<PeerId> {
+    pub async fn get_peer_id(&self, did: &Did) -> Option<NetworkId> {
         let map = self.peer_map.read().await;
         map.get(did).cloned()
     }
     
     pub async fn run_mesh_relay(
-        nodes: Arc<RwLock<HashMap<String, mpsc::Sender<SimPacket>>>>, 
-        mut relay_rx: mpsc::Receiver<(String, PeerId, SimPacket)>
+        nodes: Arc<RwLock<HashMap<Did, mpsc::Sender<SimPacket>>>>, 
+        mut relay_rx: mpsc::Receiver<(Did, NetworkId, SimPacket)>
     ) {
         while let Some((sender_did, _sender_peer, packet)) = relay_rx.recv().await {
             // Acquire a READ lock to find targets
@@ -57,7 +56,7 @@ impl SimulationHarness {
         }
     }
 
-    pub async fn stop_node(&mut self, did: &str) {
+    pub async fn stop_node(&mut self, did: &Did) {
         // 1. Acquire the write lock (awaiting if another task is reading/writing)
         let mut nodes_guard = self.nodes.write().await;
         
@@ -69,32 +68,33 @@ impl SimulationHarness {
     }
 
     /// Spawns a new virtual node into the simulation
-pub async fn spawn_node(&mut self, name: &str) -> String {
+pub async fn spawn_node(&mut self, name: &str) -> Did {
     let name_owned = name.to_string();
     let identity = PhalanxIdentity::generate();
-    let did = identity.did.clone();
-    let peer_id = PeerId::random();
+    let node_did = identity.did.clone();
+    let return_did = node_did.clone();
+    let node_network_id = NetworkId::random();
     
     let (node_tx, mut node_rx) = mpsc::channel::<SimPacket>(100);
 
     // Register node identity in the harness for test lookups
     {
         let mut peer_guard = self.peer_map.write().await;
-        peer_guard.insert(did.clone(), peer_id);
+        peer_guard.insert(node_did.clone(), node_network_id);
     }
 
     let mut nodes_guard = self.nodes.write().await;
-    nodes_guard.insert(did.clone(), node_tx);
+    nodes_guard.insert(node_did.clone(), node_tx);
 
     let broadcast_tx = self.broadcast_channel.clone();
-    let node_did = did.clone();
+
     let config = self.config.clone();
     
     let mut sentinel = Sentinel::new(&config);
     let mut storage = Stronghold::new(&format!("sim_vault/{}", name), &config);
 
     tokio::spawn(async move {
-        let span = span!(Level::INFO, "sim_node", node = %name_owned, peer = %peer_id);
+        let span = span!(Level::INFO, "sim_node", node = %name_owned, network_id = %node_network_id);
         let _enter = span.enter();
         info!("Virtual node loop started");
 
@@ -105,10 +105,10 @@ pub async fn spawn_node(&mut self, name: &str) -> String {
             tokio::select! {
                 // 1. Outbound Heartbeats
                 _ = heartbeat_tick.tick() => {
-                    let msg = sentinel.generate_heartbeat(&peer_id);
+                    let msg = sentinel.generate_heartbeat(&node_network_id);
                     match postcard::to_stdvec(&msg) {
                         Ok(data) => {
-                            let _ = broadcast_tx.send((node_did.clone(), peer_id, SimPacket::Heartbeat(peer_id, data))).await;
+                            let _ = broadcast_tx.send((node_did.clone(), node_network_id, SimPacket::Heartbeat(node_network_id, data))).await;
                         },
                         Err(e) => warn!(error = %e, "Failed to serialize outbound heartbeat"),
                     }
@@ -117,7 +117,7 @@ pub async fn spawn_node(&mut self, name: &str) -> String {
                 // 2. Health Cleanup and Archival
                 _ = cleanup_tick.tick() => {
                     // process_cleanup now uses HealthTracker internally to find stale peers
-                    let salvaged = sentinel.process_cleanup(peer_id);
+                    let salvaged = sentinel.process_cleanup(node_network_id);
                     for (_dark_peer, envelopes) in salvaged {
                         for env in envelopes {
                             storage.ingest_envelope(env);
@@ -159,11 +159,11 @@ pub async fn spawn_node(&mut self, name: &str) -> String {
         info!("Virtual node loop terminated");
     });
 
-    did
+    return_did
 }
 
     /// Simulates a broadcast on the Gossipsub network
-    pub async fn broadcast(&self, sender_did: &str, packet: SimPacket) {
+    pub async fn broadcast(&self, sender_did: &Did, packet: SimPacket) {
         let start = std::time::Instant::now();
         
         // Acquire the lock
@@ -251,7 +251,7 @@ async fn test_salvage_on_node_death() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // 5. VERIFICATION
-    let node_a_safe_did = node_a_did.replace(":", "_");
+    let node_a_safe_did = node_a_did.to_safe_name();
     let evidence_dir = std::path::PathBuf::from("sim_vault")
         .join("Beta")
         .join(&node_a_safe_did);

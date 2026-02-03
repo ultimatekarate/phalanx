@@ -31,3 +31,4 @@ bs58 = "0.5.1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 clippy = "0.0.302"
+serde_json = "1.0.149"

@@ -9,10 +9,26 @@ use crate::identity::PhalanxIdentity;
 use serde::{Serialize, Deserialize};
 use image::{DynamicImage, ImageFormat}; 
 use crate::audio;
+use crate::identity::Did;
 
 // =====================
 // DATA STRUCTURES
 // =====================
+
+/// The unique identifier for a single data unit during reassembly
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DataUnitId(pub u32);
+
+/// The order of a data unit within a long-term storage session
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StorageSequence(pub u32);
+
+/// The index of a fragment within a single DataUnitId
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct FragmentIndex(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct ShardId(pub u32);
@@ -38,7 +54,7 @@ pub struct ShardChunk {
     pub chunk_index: u32,   // 0, 1, 2...
     pub total_chunks: u32,
     pub data: Vec<u8>,
-    pub owner_did: String,
+    pub owner_did: Did,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WitnessEnvelope {
@@ -46,14 +62,14 @@ pub struct WitnessEnvelope {
     pub witness_peer_id: String,   
     pub receipt_timestamp: u64,    
     pub signature: Vec<u8>, 
-    pub did: String,
+    pub did: Did,
     pub is_partial: bool,
 }
 
 impl WitnessEnvelope {
     pub fn verify(&self) -> bool {
         // Strip DID prefix and decode Base58 to get the raw public key
-        let clean_did = self.did.replace("did:key:z", "");
+        let clean_did = self.did.0.replace("did:key:z", "");
         let Ok(pubkey_bytes) = bs58::decode(clean_did).into_vec() else {
             return false;
         };
@@ -147,7 +163,7 @@ pub fn wrap_audio_shard(
     }
 }
 
-pub fn chunkify(shard_id: ShardId, data: Vec<u8>, chunk_size: usize, owner_did: String) -> Vec<ShardChunk> {
+pub fn chunkify(shard_id: ShardId, data: Vec<u8>, chunk_size: usize, owner_did: Did) -> Vec<ShardChunk> {
     let total_chunks = (data.len() as f64 / chunk_size as f64).ceil() as u32;
     data.chunks(chunk_size)
         .enumerate()

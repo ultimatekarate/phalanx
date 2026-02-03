@@ -5,6 +5,7 @@ use std::path::PathBuf;
 //use std::time::Instant;
 
 use tokio::time::Instant;
+use crate::identity::Did;
 
 use tracing::{info, debug, warn, error, instrument, trace, debug_span};
 
@@ -15,9 +16,9 @@ use tracing::{info, debug, warn, error, instrument, trace, debug_span};
 pub struct Stronghold {
     pub vault_storage: PathBuf,
     pub wal_directory: PathBuf,
-    pub active_sessions: HashMap<String, HashMap<u32, WitnessEnvelope>>, 
-    pub session_activity: HashMap<String, tokio::time::Instant>,
-    pub processed_sequences: HashMap<String, HashSet<u32>>,
+    pub active_sessions: HashMap<Did, HashMap<u32, WitnessEnvelope>>, 
+    pub session_activity: HashMap<Did, tokio::time::Instant>,
+    pub processed_sequences: HashMap<Did, HashSet<u32>>,
     pub shards_needed_to_archive: usize,
 }
 
@@ -43,7 +44,7 @@ impl Stronghold {
     }
 
     fn write_to_wal(&self, envelope: &WitnessEnvelope) -> std::io::Result<()> {
-        let safe_did = envelope.did.replace(":", "_");
+        let safe_did = envelope.did.to_safe_name();
         let file_name = format!("{}_{}.tmp", safe_did, envelope.original_shard.sequence_id);
         let wal_path = self.wal_directory.join(file_name);
 
@@ -64,8 +65,8 @@ impl Stronghold {
         Ok(())
     }
 
-    fn clear_session_wal(&self, did_full: &str, sequence_ids: &[u32]) {
-        let safe_did = did_full.replace(":", "_");
+    fn clear_session_wal(&self, did_full: &Did, sequence_ids: &[u32]) {
+        let safe_did = did_full.to_safe_name();
         for seq in sequence_ids {
             let file_name = format!("{}_{}.tmp", safe_did, seq);
             let _ = fs::remove_file(self.wal_directory.join(file_name));
@@ -168,7 +169,7 @@ impl Stronghold {
         let _enter = span.enter();
 
         // Identify DIDs that have timed out
-        let stale_dids: Vec<String> = self.session_activity
+        let stale_dids: Vec<Did> = self.session_activity
             .iter()
             .filter_map(|(did, &last_active)| {
                 let age = now.duration_since(last_active);
@@ -194,7 +195,7 @@ impl Stronghold {
     }
 
     #[instrument(level = "info", skip(self))]
-    fn archive_session(&mut self, did_full: &str) {
+    fn archive_session(&mut self, did_full: &Did) {
         // 1. Attempt to pull session from RAM
         let session = match self.active_sessions.remove(did_full) {
             Some(s) => s,
@@ -212,7 +213,7 @@ impl Stronghold {
                 session.get(k).map(|env| {
                     // Record that we've processed this to prevent replays
                     self.processed_sequences
-                        .entry(did_full.to_string())
+                        .entry(did_full.clone())
                         .or_default()
                         .insert(*k);
                     env.original_shard.clone()
@@ -226,7 +227,7 @@ impl Stronghold {
         }
 
         // 2. Prepare Directory
-        let safe_did = did_full.replace(":", "_");
+        let safe_did = did_full.to_safe_name();
         let archive_dir = self.vault_storage.join(&safe_did);
         
         if let Err(e) = std::fs::create_dir_all(&archive_dir) {
