@@ -99,7 +99,7 @@ pub async fn spawn_node(&mut self, name: &str) -> String {
         info!("Virtual node loop started");
 
         let mut heartbeat_tick = tokio::time::interval(Duration::from_secs(config.network.heartbeat_interval_secs));
-        let mut cleanup_tick = tokio::time::interval(Duration::from_secs(5));
+        let mut cleanup_tick = tokio::time::interval(Duration::from_secs(config.network.cleanup_interval_secs));
 
         loop {
             tokio::select! {

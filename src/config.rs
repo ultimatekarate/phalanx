@@ -18,7 +18,8 @@ pub struct NetworkConfig {
     pub video_topic: String,
     pub audio_topic: String,
     pub control_topic: String,
-    pub grace_period: u64
+    pub grace_period: u64,
+    pub cleanup_interval_secs: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -70,6 +71,7 @@ impl PhalanxConfig {
                 audio_topic: "test/audio".into(),
                 control_topic: "test/control".into(),
                 grace_period: 10,
+                cleanup_interval_secs: 5,
             },
             storage: StorageConfig {
                 vault_path: "sim_vault".into(),
@@ -100,6 +102,7 @@ impl Default for PhalanxConfig {
                 audio_topic: "phalanx/audio".to_string(),
                 control_topic: "phalanx/control".to_string(),
                 grace_period: 10,
+                cleanup_interval_secs: 60,
             },
             storage: StorageConfig {
                 vault_path: "./sim_vault".to_string(),

@@ -6,6 +6,7 @@ chunk_size_bytes = 32768
 video_topic = "phalanx/video"
 audio_topic = "phalanx/audio"
 control_topic = "phalanx/emergency/the-thing"
+cleanup_interval_secs = 5
 
 [storage]
 vault_path = "./vault"

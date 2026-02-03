@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (mut video_rx, mut audio_rx) = spawn_hardware_threads(&config);
 
     let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(config.network.heartbeat_interval_secs));
-    let mut cleanup_timer = tokio::time::interval(Duration::from_secs(60));
+    let mut cleanup_timer = tokio::time::interval(Duration::from_secs(config.network.cleanup_interval_secs));
 
     println!("--- PHALANX: ACTIVE ---");
 
