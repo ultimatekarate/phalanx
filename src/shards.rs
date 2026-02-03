@@ -217,7 +217,7 @@ impl ReassemblyBuffer {
                 None => {
                     // CRITICAL: We fill missing gaps with zeros of the expected size.
                     // This preserves the offsets for subsequent fields in the struct.
-                    salvaged_data.extend(std::iter::repeat(0).take(known_chunk_size));
+                    salvaged_data.extend(std::iter::repeat_n(0, known_chunk_size));
                 }
             }
         }

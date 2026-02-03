@@ -47,6 +47,12 @@ pub struct MockCamera {
     height: u32,
 }
 
+impl Default for MockCamera {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockCamera {
     pub fn new() -> Self {
         Self { width: 640, height: 480 }

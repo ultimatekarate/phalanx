@@ -99,6 +99,12 @@ pub struct ReassemblyManager {
     pub shard_to_did: HashMap<u32, String>,
 }
 
+impl Default for ReassemblyManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReassemblyManager {
     pub fn new() -> Self {
         Self {
@@ -233,7 +239,7 @@ impl Sentinel {
                 } 
                 else if message.topic == self.topics.audio.hash() {
                     if let Ok(a_shard) = postcard::from_bytes::<audio::AudioShard>(&message.data) {
-                        let buffer = self.audio_buffers.entry(propagation_source).or_insert_with(VecDeque::new);
+                        let buffer = self.audio_buffers.entry(propagation_source).or_default();
                         buffer.push_back(a_shard);
                         if buffer.len() > self.max_audio_buffer { buffer.pop_front(); }
                     }

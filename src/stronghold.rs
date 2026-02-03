@@ -88,7 +88,7 @@ impl Stronghold {
                         
                         self.active_sessions
                             .entry(did)
-                            .or_insert_with(HashMap::new)
+                            .or_default()
                             .insert(seq, envelope);
                         
                         recovered_count += 1;
@@ -135,7 +135,7 @@ impl Stronghold {
             let seq_id = envelope.original_shard.sequence_id;
 
             // Replay protection: Don't ingest if already processed
-            if self.processed_sequences.get(&did_key).map_or(false, |s| s.contains(&seq_id)) {
+            if self.processed_sequences.get(&did_key).is_some_and(|s| s.contains(&seq_id)) {
                 debug!("Replay protection: Shard already in vault. Skipping.");
                 return;
             }
@@ -144,7 +144,7 @@ impl Stronghold {
 
             let session = self.active_sessions
                 .entry(did_key.clone())
-                .or_insert_with(HashMap::new);
+                .or_default();
 
             session.insert(seq_id, envelope);
             
