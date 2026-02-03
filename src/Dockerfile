@@ -25,8 +25,7 @@ RUN cargo build --release
 # ===========================
 # 2. RUNTIME STAGE (Lean)
 # ===========================
-# Use Google's Distroless for maximum security (no shell, no package manager)
-# OR debian:bookworm-slim for easier debugging if you need shell access
+# TODO: Swap to Google's Distroless for maximum security?
 FROM debian:bookworm-slim 
 
 # Install minimal runtime dependencies (SSL/Certificates are critical for libp2p)
