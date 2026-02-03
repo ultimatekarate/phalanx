@@ -1,6 +1,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::io::{Cursor}; 
+use std::ops::{Add, Sub, Deref};
 use std::fmt;
 
 use crate::identity::PhalanxIdentity;
@@ -14,9 +15,6 @@ use crate::identity::Did;
 // =====================
 // DATA STRUCTURES
 // =====================
-
-
-
 
 /// The unique identifier for a single data unit during reassembly
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -32,6 +30,33 @@ pub struct StorageSequence(pub u32);
 impl From<u32> for StorageSequence {
     fn from(val: u32) -> Self {
         Self(val)
+    }
+}
+
+impl Deref for StorageSequence {
+    type Target = u32;
+
+    /// Provides direct access to the underlying u32 value.
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Add<u32> for StorageSequence {
+    type Output = Self;
+
+    /// Increments the sequence by a u32 value, returning a new StorageSequence.
+    fn add(self, rhs: u32) -> Self::Output {
+        StorageSequence(self.0 + rhs)
+    }
+}
+
+impl Sub<u32> for StorageSequence {
+    type Output = Self;
+
+    /// Decrements the sequence by a u32 value, returning a new StorageSequence.
+    fn sub(self, rhs: u32) -> Self::Output {
+        StorageSequence(self.0 - rhs)
     }
 }
 

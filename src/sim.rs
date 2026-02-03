@@ -280,6 +280,52 @@ async fn test_salvage_on_node_death() {
 }
 
 #[tokio::test]
+async fn test_out_of_sequence_salvage_on_node_death() {
+    use crate::shards::{self, StorageSequence};
+    let config = PhalanxConfig::default();
+    let mut storage = Stronghold::new("sim_vault/salvage_test", &config);
+    let identity = PhalanxIdentity::generate();
+    
+    // 1. Generate a continuous sequence of evidence
+    let mut captured_envelopes = Vec::new();
+    for i in 0..5 {
+        let seq = shards::StorageSequence(i);
+        let shard = shards::create_video_shard(vec![vec![i as u8]], seq, 30);
+        let envelope = shards::WitnessEnvelope::from_video(shard, &identity, "peer_a".to_string());
+        captured_envelopes.push(envelope);
+    }
+
+    // 2. Simulate ingesting only the even sequences (creating a gap)
+    // This mimics a scenario where the network dropped shards 1 and 3.
+    storage.ingest_envelope(captured_envelopes[0].clone());
+    storage.ingest_envelope(captured_envelopes[2].clone());
+    storage.ingest_envelope(captured_envelopes[4].clone());
+
+    // 3. Simulate Salvage: The Sentinel recovers the missing shards (1 and 3)
+    // from a neighbor and re-injects them.
+    storage.ingest_envelope(captured_envelopes[1].clone());
+    storage.ingest_envelope(captured_envelopes[3].clone());
+
+    // 4. Verification: Ensure continuity in active sessions
+    let session = storage.active_sessions.get(&identity.did)
+        .expect("Session should exist for recovered DID");
+
+    let mut keys: Vec<&StorageSequence> = session.keys().collect();
+    keys.sort(); 
+
+    // Check for exact continuity
+    for (i, seq) in keys.iter().enumerate() {
+        assert_eq!(seq.0, i as u32, "Sequence gap detected at index {}", i);
+        
+        // Verify data integrity matches the sequence
+        let env = session.get(seq).unwrap();
+        assert_eq!(env.original_shard.frames[0][0], i as u8, "Data mismatch at sequence {}", i);
+    }
+
+    info!("Salvage continuity verified: 0 through 4 successfully reconstructed.");
+}
+
+#[tokio::test]
 async fn test_stronghold_crash_recovery() {
     use crate::shards;
     
