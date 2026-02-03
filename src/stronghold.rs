@@ -74,30 +74,72 @@ impl Stronghold {
     }
 
     /// Scans the WAL directory and populates active_sessions with unarchived data.
-    #[tracing::instrument(skip(self))]
+    #[instrument(skip(self), level = "info")]
     fn recover_from_wal(&mut self) {
         let span = tracing::info_span!("wal_recovery");
         let _enter = span.enter();
         
-        if let Ok(entries) = fs::read_dir(&self.wal_directory) {
-            let mut recovered_count = 0;
-            for entry in entries.flatten() {
-                if let Ok(bytes) = fs::read(entry.path()) {
-                    if let Ok(envelope) = postcard::from_bytes::<WitnessEnvelope>(&bytes) {
-                        let did = envelope.did.clone();
-                        let seq = envelope.original_shard.sequence_id;
-                        
-                        self.active_sessions
-                            .entry(did)
-                            .or_default()
-                            .insert(seq, envelope);
-                        
-                        recovered_count += 1;
+        debug!(path = ?self.wal_directory, "Scanning WAL directory for recovery");
+
+        match fs::read_dir(&self.wal_directory) {
+            Ok(entries) => {
+                let mut recovered_count = 0;
+                let mut file_count = 0;
+                let now = Instant::now();
+
+                for entry in entries.flatten() {
+                    file_count += 1;
+                    let path = entry.path();
+                    
+                    // Forensic Log: Track every file found in the WAL
+                    trace!(file = ?path, "Found potential WAL entry");
+
+                    match fs::read(&path) {
+                        Ok(bytes) => {
+                            match postcard::from_bytes::<WitnessEnvelope>(&bytes) {
+                                Ok(envelope) => {
+                                    let did = envelope.did.clone();
+                                    let seq = envelope.original_shard.sequence_id;
+
+                                    // Forensic Log: Successful extraction
+                                    debug!(%did, %seq, "Recovered envelope from disk");
+
+                                    // 1. Restore the session data
+                                    self.active_sessions
+                                        .entry(did.clone())
+                                        .or_default()
+                                        .insert(seq, envelope);
+                                    
+                                    // 2. Synchronize metadata: track this sequence as processed
+                                    self.processed_sequences
+                                        .entry(did.clone())
+                                        .or_default()
+                                        .insert(seq);
+
+                                    // 3. Update activity: mark session as warm for the archive
+                                    self.session_activity.insert(did, now);
+                                    
+                                    recovered_count += 1;
+                                }
+                                Err(e) => {
+                                    warn!(file = ?path, err = %e, "Corrupt WAL entry: Deserialization failed");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!(file = ?path, err = %e, "IO Error: Could not read WAL file");
+                        }
                     }
                 }
+                
+                info!(
+                    files_found = file_count, 
+                    sessions_restored = recovered_count, 
+                    "WAL recovery process complete"
+                );
             }
-            if recovered_count > 0 {
-                tracing::info!(count = recovered_count, "Successfully restored state from WAL.");
+            Err(e) => {
+                error!(path = ?self.wal_directory, err = %e, "CRITICAL: Could not access WAL directory");
             }
         }
     }

@@ -2,7 +2,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::io::{Cursor}; 
 use std::fmt;
-use std::ops::AddAssign;
 
 use crate::identity::PhalanxIdentity;
 
@@ -39,11 +38,11 @@ impl From<u32> for StorageSequence {
 // Implement Display for cleaner logging in Stronghold
 impl std::fmt::Display for StorageSequence {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "seq:{}", self.0)
+        write!(f, "{}", self.0)
     }
 }
 
-impl AddAssign<u32> for StorageSequence {
+impl std::ops::AddAssign<u32> for StorageSequence {
     fn add_assign(&mut self, rhs: u32) {
         self.0 += rhs;
     }
