@@ -2,6 +2,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::io::{Cursor}; 
 use std::fmt;
+use std::ops::AddAssign;
 
 use crate::identity::PhalanxIdentity;
 
@@ -15,16 +16,38 @@ use crate::identity::Did;
 // DATA STRUCTURES
 // =====================
 
+
+
+
 /// The unique identifier for a single data unit during reassembly
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DataUnitId(pub u32);
 
-/// The order of a data unit within a long-term storage session
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+/// The order of a data unit within a long-term storage session.
+/// We use PartialOrd and Ord so the Stronghold can sort sessions for archival.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
 #[serde(transparent)]
 pub struct StorageSequence(pub u32);
 
+impl From<u32> for StorageSequence {
+    fn from(val: u32) -> Self {
+        Self(val)
+    }
+}
+
+// Implement Display for cleaner logging in Stronghold
+impl std::fmt::Display for StorageSequence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "seq:{}", self.0)
+    }
+}
+
+impl AddAssign<u32> for StorageSequence {
+    fn add_assign(&mut self, rhs: u32) {
+        self.0 += rhs;
+    }
+}
 /// The index of a fragment within a single DataUnitId
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -44,7 +67,7 @@ impl fmt::Display for ShardId {
 pub struct VideoShard {
     pub timestamp: u64,
     pub frames: Vec<Vec<u8>>,
-    pub sequence_id: u32,
+    pub sequence_id: StorageSequence,
     pub fps: u8
 }
 
@@ -193,7 +216,7 @@ pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<
     Ok(jpeg_bytes)
 }
 
-pub fn create_video_shard(buffer: Vec<Vec<u8>>, sequence_id: u32, fps: u8) -> VideoShard {
+pub fn create_video_shard(buffer: Vec<Vec<u8>>, sequence_id: StorageSequence, fps: u8) -> VideoShard {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()

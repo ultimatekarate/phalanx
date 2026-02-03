@@ -1,12 +1,12 @@
 use tokio::sync::mpsc::Sender;
 use serde::{Serialize, Deserialize};
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::config::HardwareConfig;
+use crate::{config::HardwareConfig, shards::StorageSequence};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioShard {
     pub timestamp: u64,
-    pub sequence_id: u32,
+    pub sequence_id: StorageSequence,
     pub data: Vec<u8>, // Compressed audio bytes (AAC/Opus)
     pub sample_rate: u32,
     pub channels: u8,
@@ -24,7 +24,7 @@ impl PhalanxAudioThread {
         let channels = config.audio_channels;
 
         std::thread::spawn(move || {
-            let mut sequence_id: u32 = 0;
+            let mut sequence_id: StorageSequence = StorageSequence(0);
             
             loop {
                 let now = SystemTime::now()

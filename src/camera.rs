@@ -3,7 +3,7 @@ use nokhwa::pixel_format::RgbFormat;
 use nokhwa::Camera;
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
-use crate::shards::{self, VideoShard}; 
+use crate::shards::{self, StorageSequence, VideoShard}; 
 use crate::config::HardwareConfig;
 
 pub trait FrameProvider: 'static {
@@ -92,7 +92,7 @@ impl PhalanxCameraThread {
             };
 
             let mut frames = Vec::new();
-            let mut sequence_id: u32 = 0;
+            let mut sequence_id: StorageSequence = StorageSequence(0);
             let (width, height) = provider.dimensions();
 
             loop {

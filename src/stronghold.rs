@@ -1,4 +1,4 @@
-use crate::shards::{WitnessEnvelope, VideoShard};
+use crate::shards::{StorageSequence, VideoShard, WitnessEnvelope};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
@@ -16,9 +16,9 @@ use tracing::{info, debug, warn, error, instrument, trace, debug_span};
 pub struct Stronghold {
     pub vault_storage: PathBuf,
     pub wal_directory: PathBuf,
-    pub active_sessions: HashMap<Did, HashMap<u32, WitnessEnvelope>>, 
+    pub active_sessions: HashMap<Did, HashMap<StorageSequence, WitnessEnvelope>>, 
     pub session_activity: HashMap<Did, tokio::time::Instant>,
-    pub processed_sequences: HashMap<Did, HashSet<u32>>,
+    pub processed_sequences: HashMap<Did, HashSet<StorageSequence>>,
     pub shards_needed_to_archive: usize,
 }
 
@@ -65,7 +65,7 @@ impl Stronghold {
         Ok(())
     }
 
-    fn clear_session_wal(&self, did_full: &Did, sequence_ids: &[u32]) {
+    fn clear_session_wal(&self, did_full: &Did, sequence_ids: &[StorageSequence]) {
         let safe_did = did_full.to_safe_name();
         for seq in sequence_ids {
             let file_name = format!("{}_{}.tmp", safe_did, seq);
@@ -119,7 +119,7 @@ impl Stronghold {
 
         let span = tracing::span!(tracing::Level::INFO, "stronghold_ingest", 
             sender = %envelope.did, 
-            seq = envelope.original_shard.sequence_id,
+            seq = %envelope.original_shard.sequence_id,
             partial = envelope.is_partial
         );
         let _enter = span.enter();
@@ -205,7 +205,7 @@ impl Stronghold {
             }
         };
 
-        let mut keys: Vec<_> = session.keys().cloned().collect();
+        let mut keys: Vec<StorageSequence> = session.keys().cloned().collect();
         keys.sort();
 
         let sorted_shards: Vec<VideoShard> = keys.iter()

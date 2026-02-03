@@ -288,7 +288,7 @@ async fn test_stronghold_crash_recovery() {
 
     // 1. Ingest a shard
     let identity = PhalanxIdentity::generate();
-    let shard = shards::create_video_shard(vec![vec![0]], 101, 30);
+    let shard = shards::create_video_shard(vec![vec![0]], shards::StorageSequence(101), 30);
     let envelope = shards::WitnessEnvelope::from_video(shard, &identity, "peer_a".to_string());
     
     storage.ingest_envelope(envelope.clone());
@@ -302,7 +302,7 @@ async fn test_stronghold_crash_recovery() {
     
     let recovered_session = recovered_storage.active_sessions.get(&identity.did);
     assert!(recovered_session.is_some(), "Stronghold failed to recover DID session from WAL");
-    assert!(recovered_session.unwrap().contains_key(&101), "Stronghold failed to recover specific shard from WAL");
+    assert!(recovered_session.unwrap().contains_key(&shards::StorageSequence(101)), "Stronghold failed to recover specific shard from WAL");
     
     tracing::info!("DURABILITY VERIFIED: Shard 101 survived the simulated crash.");
 }
