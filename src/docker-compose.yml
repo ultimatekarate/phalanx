@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  stronghold:
+    build: .
+    container_name: phalanx_stronghold
+    restart: unless-stopped
+    # Host networking is often best for P2P discovery (mDNS), 
+    # but for cloud setups, we'd map specific ports.
+    network_mode: "host" 
+    volumes:
+      # Map the local vault folder to the container
+      - ./stronghold_data/vault:/app/vault
+      # Map the config file (we'll move phalanx.toml here)
+      - ./stronghold_data/config:/app/config
+      # Persist the identity file so the DID doesn't change on restart
+      - ./stronghold_data/identity:/app/identity
+    environment:
+      - RUST_LOG=phalanx=info

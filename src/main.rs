@@ -28,9 +28,12 @@ use phalanx::stronghold::Stronghold;
 async fn main() -> Result<(), Box<dyn Error>> {
     phalanx::obs::init_observability();
 
+    let config = PhalanxConfig::load_from_env();
     // 1. Initialization Phase
+
+    /* 
     let config = PhalanxConfig::load("phalanx.toml")
-        .expect("Critical: phalanx.toml not found.");
+        .expect("Critical: phalanx.toml not found.");*/
     
     setup_shutdown_handler();
     

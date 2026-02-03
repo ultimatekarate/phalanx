@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
+use std::env;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct PhalanxConfig {
@@ -47,6 +48,16 @@ impl PhalanxConfig {
 
     pub fn load_default() -> Self {
         Self::load("phalanx.toml").expect("Critical Error: Missing phalanx.toml")
+    }
+
+    pub fn load_from_env() -> Self {
+        let path = env::var("PHALANX_CONFIG_PATH")
+            .unwrap_or_else(|_| "phalanx.toml".to_string());
+            
+        Self::load(&path).unwrap_or_else(|_| {
+            eprintln!("Config not found at {}. Loading defaults.", path);
+            Self::default()
+        })
     }
 
     pub fn test_defaults() -> Self {
