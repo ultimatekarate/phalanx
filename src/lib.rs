@@ -49,7 +49,7 @@ pub async fn setup_phalanx_swarm(config: &PhalanxConfig) -> Result<Swarm<Phalanx
                 .max_transmit_size(config.network.chunk_size_bytes + 4096)
                 .do_px()
                 .build()
-                .map_err(|e| std::io::Error::other(e))?;
+                .map_err(std::io::Error::other)?;
 
             Ok(PhalanxBehaviour {
                 gossipsub: gossipsub::Behaviour::new(
