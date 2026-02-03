@@ -38,7 +38,7 @@ pub struct HardwareConfig {
 }
 
 impl PhalanxConfig {
-pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let content = fs::read_to_string(path)?;
         // We use the toml crate to turn the string into our struct
         let config: PhalanxConfig = toml::from_str(&content)?;
