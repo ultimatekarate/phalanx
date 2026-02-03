@@ -11,7 +11,7 @@ pub mod obs;
 pub mod sim;
 
 use crate::config::PhalanxConfig;
-use crate::identity::PhalanxIdentity;
+use crate::identity::{PhalanxIdentity, NetworkId};
 
 use std::error::Error;
 #[derive(NetworkBehaviour)]
@@ -21,13 +21,33 @@ pub struct PhalanxBehaviour {
     pub mdns: mdns::tokio::Behaviour,
 }
 
+pub struct PhalanxGossipEvent {
+    pub source: NetworkId,
+    pub message: gossipsub::Message,
+    pub message_id: gossipsub::MessageId,
+}
+
 pub enum PhalanxEvent {
-    Gossipsub(gossipsub::Event),
+    Gossipsub(Box<PhalanxGossipEvent>),
     Mdns(mdns::Event),
 }
 
 impl From<gossipsub::Event> for PhalanxEvent {
-    fn from(event: gossipsub::Event) -> Self { PhalanxEvent::Gossipsub(event) }
+    fn from(event: gossipsub::Event) -> Self {
+        match event {
+            gossipsub::Event::Message { propagation_source, message, message_id } => {
+                PhalanxEvent::Gossipsub(Box::new(PhalanxGossipEvent {
+                    source: NetworkId(propagation_source), // Intercept and wrap here
+                    message,
+                    message_id,
+                }))
+            },
+            // TODO: Add other gossip events here
+            _ => {
+                panic!("Unhandled Gossipsub event type in PhalanxEvent conversion");
+            }
+        }
+    }
 }
 
 impl From<mdns::Event> for PhalanxEvent {

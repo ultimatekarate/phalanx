@@ -13,7 +13,7 @@ use crate::identity::{NetworkId, Did};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlMessage {
-    pub sender: String,
+    pub sender: NetworkId,
     pub load_factor: f32,
     pub is_on_battery: bool,
     pub storage_remaining_mb: u64,
@@ -195,7 +195,7 @@ impl Sentinel {
         let capacity = self.max_peers as f32;
 
         ControlMessage {
-            sender: local_id.to_string(),
+            sender: *local_id,
             load_factor: (current_load / capacity).min(1.0),
             is_on_battery: false,
             storage_remaining_mb: 1024,
@@ -225,22 +225,27 @@ impl Sentinel {
                     }
                 }
             }
-            SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(gossipsub::Event::Message { propagation_source, message, .. })) => {
-                self.health.register_activity(NetworkId(propagation_source));
+
+            // Match against our custom PhalanxGossipEvent struct
+            SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(boxed_event)) => {
+                let event = *boxed_event; // Unbox
                 
-                if message.topic == self.topics.video.hash() {
-                    if let Ok(chunk) = postcard::from_bytes::<ShardChunk>(&message.data) {
-                        return self.ingest_chunk(NetworkId(propagation_source), chunk);
+                self.health.register_activity(event.source);
+                
+                if event.message.topic == self.topics.video.hash() {
+                    if let Ok(chunk) = postcard::from_bytes::<ShardChunk>(&event.message.data) {
+                        // source is already NetworkId
+                        return self.ingest_chunk(event.source, chunk);
                     }
                 } 
-                else if message.topic == self.topics.control.hash() {
-                    if let Ok(ctrl) = postcard::from_bytes::<ControlMessage>(&message.data) {
-                        self.health.register_heartbeat(NetworkId(propagation_source), ctrl);
+                else if event.message.topic == self.topics.control.hash() {
+                    if let Ok(ctrl) = postcard::from_bytes::<ControlMessage>(&event.message.data) {
+                        self.health.register_heartbeat(event.source, ctrl);
                     }
                 } 
-                else if message.topic == self.topics.audio.hash() {
-                    if let Ok(a_shard) = postcard::from_bytes::<audio::AudioShard>(&message.data) {
-                        let buffer = self.audio_buffers.entry(NetworkId(propagation_source)).or_default();
+                else if event.message.topic == self.topics.audio.hash() {
+                    if let Ok(a_shard) = postcard::from_bytes::<audio::AudioShard>(&event.message.data) {
+                        let buffer = self.audio_buffers.entry(event.source).or_default();
                         buffer.push_back(a_shard);
                         if buffer.len() > self.max_audio_buffer { buffer.pop_front(); }
                     }
@@ -250,6 +255,7 @@ impl Sentinel {
         }
         None
     }
+
 
     #[instrument(level = "info", skip(self, local_id), fields(node_id = %local_id))]
     pub fn process_cleanup(&mut self, local_id: NetworkId) -> Vec<(NetworkId, VecDeque<WitnessEnvelope>)> {
@@ -400,7 +406,7 @@ mod health_tracker_tests {
 
         // 1. Receive a heartbeat message
         let msg = ControlMessage {
-            sender: remote_id.to_string(),
+            sender: remote_id,
             load_factor: 0.5,
             is_on_battery: false,
             storage_remaining_mb: 500,
@@ -438,7 +444,7 @@ mod health_tracker_tests {
         let remote_id = NetworkId::random();
 
         let msg = ControlMessage {
-            sender: remote_id.to_string(),
+            sender: remote_id,
             load_factor: 0.75,
             is_on_battery: true,
             storage_remaining_mb: 100,
