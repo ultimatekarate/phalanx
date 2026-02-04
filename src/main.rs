@@ -28,9 +28,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let local_peer_id = NetworkId(*swarm.local_peer_id());
 
+    let current_volley_id = format!("volley_{}_{}", 
+        my_identity.did.to_safe_name(), 
+        chrono::Utc::now().timestamp()
+    );
+    tracing::info!(volley = %current_volley_id, "New Forensic Volley Initialized");
+
     // 2. Network & Hardware Orchestration
     subscribe_to_topics(&mut swarm, &config);
-    let (mut video_rx, mut audio_rx) = spawn_hardware_threads(&config);
+    let (mut video_rx, mut audio_rx) = spawn_hardware_threads(&config, current_volley_id);
 
     let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(config.network.heartbeat_interval_secs));
     let mut cleanup_timer = tokio::time::interval(Duration::from_secs(config.network.cleanup_interval_secs));
@@ -152,18 +158,18 @@ fn setup_shutdown_handler() {
     }).expect("Error setting Ctrl-C handler");
 }
 
-fn spawn_hardware_threads(config: &PhalanxConfig) -> (mpsc::Receiver<shards::VideoShard>, mpsc::Receiver<audio::AudioShard>) {
+fn spawn_hardware_threads(config: &PhalanxConfig, volley_id: String) -> (mpsc::Receiver<shards::VideoShard>, mpsc::Receiver<audio::AudioShard>) {
     let (v_tx, v_rx) = mpsc::channel(64);
     let (a_tx, a_rx) = mpsc::channel(64);
 
     let camera_thread = camera::PhalanxCameraThread { fps: config.hardware.camera_fps };
-    camera_thread.spawn(Some(0), v_tx, config.hardware.clone());
+    camera_thread.spawn(Some(0), v_tx, config.hardware.clone(), volley_id.clone());
 
     let audio_thread = audio::PhalanxAudioThread { 
         sample_rate: config.hardware.audio_sample_rate,
         channels: config.hardware.audio_channels 
     };
-    audio_thread.spawn(a_tx, config.hardware.clone());
+    audio_thread.spawn(a_tx, config.hardware.clone(), volley_id);
 
     (v_rx, a_rx)
 }

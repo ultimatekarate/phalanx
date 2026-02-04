@@ -179,6 +179,7 @@ async fn test_salvage_on_node_death() {
 
     // Create a real VideoShard to get valid serialized bytes
     let real_shard = crate::shards::VideoShard {
+        volley_id: "volley_test_999".to_string(),
         timestamp: 123456789,
         frames: vec![vec![1, 2, 3], vec![4, 5, 6]],
         sequence_id: crate::shards::StorageSequence(999),
@@ -274,6 +275,7 @@ async fn test_out_of_sequence_salvage_on_node_death() {
     for i in 0..5 {
         let seq = StorageSequence(i);
         let shard = VideoShard {
+            volley_id: "volley_test_999".to_string(),
             timestamp: 1000 + i as u64,
             frames: vec![vec![i as u8]],
             sequence_id: seq,
@@ -340,6 +342,7 @@ async fn test_stronghold_crash_recovery() {
     let seq = StorageSequence(101);
     
     let shard = VideoShard {
+        volley_id: "volley_test_999".to_string(),
         timestamp: 123456789,
         frames: vec![vec![0xAA]],
         sequence_id: seq,

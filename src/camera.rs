@@ -5,7 +5,6 @@ use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use crate::shards::{self, StorageSequence, VideoShard}; 
 use crate::config::HardwareConfig;
-use crate::stronghold::Volley;
 
 pub trait FrameProvider: 'static {
     fn capture_frame(&mut self) -> Result<Vec<u8>, String>;
@@ -76,7 +75,7 @@ pub struct PhalanxCameraThread {
 
 impl PhalanxCameraThread {
     /// Spawns the camera capture thread using values from the HardwareConfig.
-    pub fn spawn(self, index: Option<usize>, tx: Sender<VideoShard>, config: HardwareConfig) {
+    pub fn spawn(self, index: Option<usize>, tx: Sender<VideoShard>, config: HardwareConfig, volley_id: String) {
         let fps = config.camera_fps as u8;
         let frame_duration = Duration::from_millis(1000 / fps as u64);
 
@@ -104,12 +103,12 @@ impl PhalanxCameraThread {
                 }
 
                 if frames.len() >= fps as usize {
-                    let volley="name";
+
                     let shard = shards::create_video_shard(
                         frames.split_off(0), 
                         sequence_id, 
                         fps,
-                        volley.clone()
+                        volley_id.clone()
                     );
                     
                     if tx.blocking_send(shard).is_err() { break; }
