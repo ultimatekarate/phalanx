@@ -10,6 +10,12 @@ use crate::identity::Did;
 use tracing::{info, debug, warn, error, instrument,};
 use serde::{Serialize, Deserialize};
 
+pub trait Assembler {
+    type Output;
+    fn is_complete(&self) -> bool;
+    fn assemble(self) -> Self::Output;
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Volley {
     pub volley_id: String,           // Unique ID for this specific burst
