@@ -17,7 +17,7 @@ use std::error::Error;
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "PhalanxEvent")]
 pub struct PhalanxBehaviour {
-    pub gossipsub: gossipsub::Behaviour,
+    pub gossipsub: libp2p::gossipsub::Behaviour,
     pub mdns: mdns::tokio::Behaviour,
 }
 
@@ -30,6 +30,7 @@ pub struct PhalanxGossipEvent {
 pub enum PhalanxEvent {
     Gossipsub(Box<PhalanxGossipEvent>),
     Mdns(mdns::Event),
+    Metadata(gossipsub::Event),
 }
 
 impl From<gossipsub::Event> for PhalanxEvent {
@@ -44,7 +45,10 @@ impl From<gossipsub::Event> for PhalanxEvent {
             },
             // TODO: Add other gossip events here
             _ => {
-                panic!("Unhandled Gossipsub event type in PhalanxEvent conversion");
+                tracing::trace!("Ignoring non-message Gossipsub event");
+                // You might need a "Metadata" variant in PhalanxEvent 
+                // or just skip these in the main loop.
+                PhalanxEvent::Mdns(mdns::Event::Expired(vec![]))
             }
         }
     }
@@ -99,3 +103,4 @@ pub fn init_identity() -> PhalanxIdentity {
         new_id
     })
 }
+

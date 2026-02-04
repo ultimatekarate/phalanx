@@ -4,23 +4,68 @@ use std::io::{Cursor};
 use std::ops::{Add, Sub, Deref};
 use std::fmt;
 
-use crate::identity::PhalanxIdentity;
-
 // external crates
 use serde::{Serialize, Deserialize};
 use image::{DynamicImage, ImageFormat}; 
-use crate::audio;
-use crate::identity::Did;
+
+use crate::identity::{PhalanxIdentity, Did, NetworkId};
 
 // =====================
 // DATA STRUCTURES
 // =====================
+pub struct ReassemblyBuffer {
+    pub chunks: Vec<Option<Vec<u8>>>,
+    pub total_chunks: usize,
+    pub last_activity: tokio::time::Instant, // Added for Sentinel cleanup
+}
 
-/// The unique identifier for a single data unit during reassembly
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct DataUnitId(pub u32);
+impl ReassemblyBuffer {
+    pub fn new(total_chunks: usize) -> Self {
+        Self {
+            chunks: vec![None; total_chunks],
+            total_chunks,
+            last_activity: tokio::time::Instant::now(),
+        }
+    }
 
+    pub fn is_complete(&self) -> bool {
+        self.chunks.iter().all(|c| c.is_some())
+    }
+
+    /// Concatenates chunks into a single byte vector. Assumes is_complete() is true.
+    pub fn assemble(&self) -> Vec<u8> {
+        self.chunks.iter()
+            .flatten()
+            .cloned()
+            .flatten()
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Evidence {
+    Video(VideoShard),
+    Audio(crate::audio::AudioShard),
+    // Future expansion: Telemetry(TelemetryShard),
+}
+
+impl Evidence {
+    /// Helper to retrieve the sequence ID regardless of the inner type.
+    pub fn sequence_id(&self) -> StorageSequence {
+        match self {
+            Evidence::Video(s) => s.sequence_id,
+            Evidence::Audio(s) => s.sequence_id,
+        }
+    }
+
+    /// Helper to retrieve the capture timestamp.
+    pub fn timestamp(&self) -> u64 {
+        match self {
+            Evidence::Video(s) => s.timestamp,
+            Evidence::Audio(s) => s.timestamp,
+        }
+    }
+}
 /// The order of a data unit within a long-term storage session.
 /// We use PartialOrd and Ord so the Stronghold can sort sessions for archival.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
@@ -72,10 +117,6 @@ impl std::ops::AddAssign<u32> for StorageSequence {
         self.0 += rhs;
     }
 }
-/// The index of a fragment within a single DataUnitId
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct FragmentIndex(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct ShardId(pub u32);
@@ -103,110 +144,36 @@ pub struct ShardChunk {
     pub data: Vec<u8>,
     pub owner_did: Did,
 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WitnessEnvelope {
-    pub original_shard: VideoShard, 
-    pub witness_peer_id: String,   
-    pub receipt_timestamp: u64,    
-    pub signature: Vec<u8>, 
+    pub evidence: Evidence, 
+    pub witness_peer_id: NetworkId,     
+    pub witness_signature: Vec<u8>, 
     pub did: Did,
-    pub is_partial: bool,
 }
 
 impl WitnessEnvelope {
     pub fn verify(&self) -> bool {
-        // Strip DID prefix and decode Base58 to get the raw public key
         let clean_did = self.did.0.replace("did:key:z", "");
-        let Ok(pubkey_bytes) = bs58::decode(clean_did).into_vec() else {
-            return false;
-        };
+        let Ok(pubkey_bytes) = bs58::decode(clean_did).into_vec() else { return false; };
+        let Ok(data_bytes) = postcard::to_stdvec(&self.evidence) else { return false; };
 
-        let Ok(data_bytes) = postcard::to_stdvec(&self.original_shard) else {
-            return false;
-        };
-
-        PhalanxIdentity::verify(&pubkey_bytes, &data_bytes, &self.signature)
+        PhalanxIdentity::verify(&pubkey_bytes, &data_bytes, &self.witness_signature)
     }
-    
-    pub fn from_video(
-        shard: VideoShard,
-        identity: &crate::identity::PhalanxIdentity,
-        peer_id: String,
-    ) -> Self {
-        let data_to_sign = postcard::to_stdvec(&shard)
-            .expect("Failed to serialize shard for signing");
+
+    pub fn new(evidence: Evidence, identity: &PhalanxIdentity, peer_id: NetworkId) -> Self {
+        let data_to_sign = postcard::to_stdvec(&evidence)
+            .expect("Failed to serialize evidence for signing");
         
         let signature = identity.sign(&data_to_sign);
 
         Self {
-            original_shard: shard,
+            evidence,
             witness_peer_id: peer_id,
-            receipt_timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            signature,
+            witness_signature: signature.to_vec(),
             did: identity.did.clone(),
-            is_partial: false,
         }
-    }
-
-    pub fn from_audio(
-        shard: crate::audio::AudioShard,
-        identity: &crate::identity::PhalanxIdentity,
-        peer_id: String,
-    ) -> Self {
-        let pseudo_video = VideoShard {
-            timestamp: shard.timestamp,
-            frames: vec![shard.data], // Audio payload lives in the frame buffer
-            sequence_id: shard.sequence_id,
-            fps: 0, // 0 FPS signals Audio-Only to the Stronghold
-        };
-
-        // Serialize the inner shard for signing
-        let data_to_sign = postcard::to_stdvec(&pseudo_video)
-            .expect("Failed to serialize pseudo-video shard for signing");
-        
-        let signature = identity.sign(&data_to_sign);
-
-        Self {
-            original_shard: pseudo_video,
-            witness_peer_id: peer_id,
-            receipt_timestamp: shard.timestamp,
-            signature,
-            did: identity.did.clone(),
-            is_partial: false,
-        }
-    }
-}
-
-pub fn wrap_audio_shard(
-    shard: audio::AudioShard, 
-    identity: &crate::identity::PhalanxIdentity,
-    peer_id: String
-) -> crate::shards::WitnessEnvelope {
-    use crate::shards::{WitnessEnvelope, VideoShard};
-    
-    // We repurpose the WitnessEnvelope by wrapping the audio data
-    // into a pseudo-VideoShard structure.
-    // NOTE: In a future iteration, we may want a generic 'EvidenceShard' enum.
-    let pseudo_video = VideoShard {
-        timestamp: shard.timestamp,
-        frames: vec![shard.data], // Audio data lives in the frame buffer
-        sequence_id: shard.sequence_id,
-        fps: 0, // 0 FPS indicates this is an Audio-Only shard
-    };
-
-    let data_to_sign = postcard::to_stdvec(&pseudo_video).unwrap();
-    let signature = identity.sign(&data_to_sign);
-
-    WitnessEnvelope {
-        original_shard: pseudo_video,
-        witness_peer_id: peer_id,
-        receipt_timestamp: shard.timestamp,
-        signature,
-        did: identity.did.clone(),
-        is_partial: false,
     }
 }
 
@@ -251,97 +218,5 @@ pub fn create_video_shard(buffer: Vec<Vec<u8>>, sequence_id: StorageSequence, fp
         frames: buffer,
         sequence_id,
         fps,
-    }
-}
-pub struct ReassemblyBuffer {
-    /// Use Option to track exactly which chunks are present and which are missing
-    pub chunks: Vec<Option<Vec<u8>>>,
-    pub total_chunks: usize,
-}
-
-impl ReassemblyBuffer {
-    pub fn new(total_chunks: usize) -> Self {
-        Self {
-            chunks: vec![None; total_chunks],
-            total_chunks,
-        }
-    }
-
-    pub fn try_salvage(self) -> Option<WitnessEnvelope> {
-        if let Some(mut envelope) = self.assemble_partial() {
-            envelope.is_partial = true;
-            return Some(envelope);
-        }
-        None
-    }
-
-    fn assemble_partial(&self) -> Option<WitnessEnvelope> {
-        // Find the average chunk size to fill gaps accurately.
-        // If we don't have any chunks, we've already returned None.
-        let known_chunk_size = self.chunks.iter()
-            .flatten()
-            .next()
-            .map(|c| c.len())
-            .unwrap_or(0);
-
-        let mut salvaged_data = Vec::new();
-
-        for chunk_opt in &self.chunks {
-            match chunk_opt {
-                Some(data) => salvaged_data.extend_from_slice(data),
-                None => {
-                    // CRITICAL: We fill missing gaps with zeros of the expected size.
-                    // This preserves the offsets for subsequent fields in the struct.
-                    salvaged_data.extend(std::iter::repeat_n(0, known_chunk_size));
-                }
-            }
-        }
-
-        if salvaged_data.is_empty() {
-            return None;
-        }
-
-        // Postcard deserialization is attempted on the padded buffer.
-        match postcard::from_bytes::<WitnessEnvelope>(&salvaged_data) {
-            Ok(envelope) => {
-                tracing::info!("Successfully salvaged partial envelope (seq: {})", envelope.original_shard.sequence_id);
-                Some(envelope)
-            },
-            Err(e) => {
-                tracing::warn!("Forensic salvage failed: {}. Data likely missing header chunks.", e);
-                None
-            }
-        }
-    }
-
-    pub fn is_complete(&self) -> bool {
-        self.chunks.iter().all(|c| c.is_some())
-    }
-}
-
-#[cfg(test)]
-mod forensic_tests {
-    use super::*;
-
-    #[test]
-    fn test_buffer_padding_salvage() {
-        // 1. Create a buffer for a 3-chunk shard
-        let mut buffer = ReassemblyBuffer::new(3);
-        
-        // 2. Add chunks 0 and 2 (Missing the middle)
-        let chunk_data = vec![1u8, 2u8, 3u8];
-        buffer.chunks[0] = Some(chunk_data.clone());
-        buffer.chunks[2] = Some(chunk_data.clone());
-        
-        assert!(!buffer.is_complete());
-
-        // 3. Attempt salvage
-        // Note: This will likely return None unless 'chunk_data' 
-        // makes the padded buffer valid Postcard data, but we can 
-        // test the padding length specifically in 'assemble_partial'.
-        let _salvaged = buffer.try_salvage();
-        
-        // In this specific architecture, if the header (Chunk 0) is valid,
-        // assemble_partial should at least attempt the conversion.
     }
 }

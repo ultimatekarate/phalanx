@@ -1,31 +1,32 @@
 use std::collections::HashMap;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn, span, Level};
-
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::identity::{PhalanxIdentity, Did, NetworkId};
-use crate::sentinel::{Sentinel, SimPacket, ControlMessage};
+use crate::sentinel::{Sentinel, ControlMessage};
 use crate::stronghold::Stronghold;
 use crate::config::PhalanxConfig;
+use crate::shards::{ShardChunk};
 
-/// A handle to a virtual node in the harness
-pub struct SimNodeHandle {
-    pub did: Did,
-    pub tx: mpsc::Sender<SimPacket>,
+/// Internal events for the simulation harness to manage virtual nodes.
+#[derive(Clone)]
+pub enum SimEvent {
+    Chunk(NetworkId, ShardChunk),
+    Heartbeat(NetworkId, Vec<u8>), // Serialized ControlMessage
+    Shutdown,
 }
 
 pub struct SimulationHarness {
-    // Wrap nodes so they can be shared across tasks
-    pub nodes: Arc<RwLock<HashMap<Did, mpsc::Sender<SimPacket>>>>,
-    pub broadcast_channel: mpsc::Sender<(Did, NetworkId, SimPacket)>,
+    pub nodes: Arc<RwLock<HashMap<Did, mpsc::Sender<SimEvent>>>>,
+    pub broadcast_channel: mpsc::Sender<(Did, NetworkId, SimEvent)>,
     pub config: PhalanxConfig,
     pub peer_map: Arc<RwLock<HashMap<Did, NetworkId>>>,
 }
 
 impl SimulationHarness {
-    pub fn init_mesh(config: PhalanxConfig) -> (Self, mpsc::Receiver<(Did, NetworkId, SimPacket)>) {
+    pub fn init_mesh(config: PhalanxConfig) -> (Self, mpsc::Receiver<(Did, NetworkId, SimEvent)>) {
         let (tx, rx) = mpsc::channel(1024);
         let harness = Self {
             nodes: Arc::new(RwLock::new(HashMap::new())),
@@ -42,141 +43,104 @@ impl SimulationHarness {
     }
     
     pub async fn run_mesh_relay(
-        nodes: Arc<RwLock<HashMap<Did, mpsc::Sender<SimPacket>>>>, 
-        mut relay_rx: mpsc::Receiver<(Did, NetworkId, SimPacket)>
+        nodes: Arc<RwLock<HashMap<Did, mpsc::Sender<SimEvent>>>>, 
+        mut relay_rx: mpsc::Receiver<(Did, NetworkId, SimEvent)>
     ) {
-        while let Some((sender_did, _sender_peer, packet)) = relay_rx.recv().await {
-            // Acquire a READ lock to find targets
+        while let Some((sender_did, _sender_peer, event)) = relay_rx.recv().await {
             let current_nodes = nodes.read().await;
             for (did, node_tx) in current_nodes.iter() {
                 if did != &sender_did {
-                    let _ = node_tx.send(packet.clone()).await;
+                    let _ = node_tx.send(event.clone()).await;
                 }
             }
         }
     }
 
     pub async fn stop_node(&mut self, did: &Did) {
-        // 1. Acquire the write lock (awaiting if another task is reading/writing)
         let mut nodes_guard = self.nodes.write().await;
-        
-        // 2. Now you can call HashMap methods on the guard
         if let Some(tx) = nodes_guard.remove(did) {
-            let _ = tx.send(SimPacket::Shutdown).await;
+            let _ = tx.send(SimEvent::Shutdown).await;
             warn!(node_did = %did, "Node stopped manually via harness");
         }
     }
 
-    /// Spawns a new virtual node into the simulation
-pub async fn spawn_node(&mut self, name: &str) -> Did {
-    let name_owned = name.to_string();
-    let identity = PhalanxIdentity::generate();
-    let node_did = identity.did.clone();
-    let return_did = node_did.clone();
-    let node_network_id = NetworkId::random();
-    
-    let (node_tx, mut node_rx) = mpsc::channel::<SimPacket>(100);
+    pub async fn spawn_node(&mut self, name: &str) -> Did {
+        let name_owned = name.to_string();
+        let identity = PhalanxIdentity::generate();
+        let node_did = identity.did.clone();
+        let return_did = node_did.clone();
+        let node_network_id = NetworkId::random();
+        
+        let (node_tx, mut node_rx) = mpsc::channel::<SimEvent>(100);
 
-    // Register node identity in the harness for test lookups
-    {
-        let mut peer_guard = self.peer_map.write().await;
-        peer_guard.insert(node_did.clone(), node_network_id);
-    }
+        {
+            let mut peer_guard = self.peer_map.write().await;
+            peer_guard.insert(node_did.clone(), node_network_id);
+        }
 
-    let mut nodes_guard = self.nodes.write().await;
-    nodes_guard.insert(node_did.clone(), node_tx);
+        let mut nodes_guard = self.nodes.write().await;
+        nodes_guard.insert(node_did.clone(), node_tx);
 
-    let broadcast_tx = self.broadcast_channel.clone();
+        let broadcast_tx = self.broadcast_channel.clone();
+        let config = self.config.clone();
+        
+        let mut sentinel = Sentinel::new(&config);
+        let mut storage = Stronghold::new(&format!("sim_vault/{}", name), &config);
 
-    let config = self.config.clone();
-    
-    let mut sentinel = Sentinel::new(&config);
-    let mut storage = Stronghold::new(&format!("sim_vault/{}", name), &config);
+        tokio::spawn(async move {
+            let span = span!(Level::INFO, "sim_node", node = %name_owned, network_id = %node_network_id);
+            let _enter = span.enter();
+            info!("Virtual node loop started");
 
-    tokio::spawn(async move {
-        let span = span!(Level::INFO, "sim_node", node = %name_owned, network_id = %node_network_id);
-        let _enter = span.enter();
-        info!("Virtual node loop started");
+            let mut heartbeat_tick = tokio::time::interval(Duration::from_secs(config.network.heartbeat_interval_secs));
+            let mut cleanup_tick = tokio::time::interval(Duration::from_secs(config.network.cleanup_interval_secs));
 
-        let mut heartbeat_tick = tokio::time::interval(Duration::from_secs(config.network.heartbeat_interval_secs));
-        let mut cleanup_tick = tokio::time::interval(Duration::from_secs(config.network.cleanup_interval_secs));
-
-        loop {
-            tokio::select! {
-                // 1. Outbound Heartbeats
-                _ = heartbeat_tick.tick() => {
-                    let msg = sentinel.generate_heartbeat(&node_network_id);
-                    match postcard::to_stdvec(&msg) {
-                        Ok(data) => {
-                            let _ = broadcast_tx.send((node_did.clone(), node_network_id, SimPacket::Heartbeat(node_network_id, data))).await;
-                        },
-                        Err(e) => warn!(error = %e, "Failed to serialize outbound heartbeat"),
-                    }
-                }
-
-                // 2. Health Cleanup and Archival
-                _ = cleanup_tick.tick() => {
-                    // process_cleanup now uses HealthTracker internally to find stale peers
-                    let salvaged = sentinel.process_cleanup(node_network_id);
-                    for (_dark_peer, envelopes) in salvaged {
-                        for env in envelopes {
-                            storage.ingest_envelope(env);
+            loop {
+                tokio::select! {
+                    _ = heartbeat_tick.tick() => {
+                        let msg = ControlMessage {
+                            sender: node_network_id,
+                            load_factor: 0.1,
+                            storage_remaining_mb: 1024,
+                        };
+                        if let Ok(data) = postcard::to_stdvec(&msg) {
+                            let _ = broadcast_tx.send((node_did.clone(), node_network_id, SimEvent::Heartbeat(node_network_id, data))).await;
                         }
                     }
-                    storage.archive_stale_sessions(Duration::from_secs(config.storage.stale_session_threshold));
-                }
 
-                // 3. Inbound Packet Handling
-                Some(packet) = node_rx.recv() => {
-                    match packet {
-                        SimPacket::Shutdown => {
-                            info!("Shutdown signal received. Terminating virtual node loop");
-                            break;
-                        }
-                        SimPacket::Chunk(actual_source, chunk) => {
-                            // Delegation to ReassemblyManager preserves PeerId-to-DID link
-                            if let Some(envelope) = sentinel.ingest_chunk(actual_source, chunk) {
-                                storage.ingest_envelope(envelope);
+                    _ = cleanup_tick.tick() => {
+                        sentinel.prune_stale_buffers(&config);
+                        storage.archive_stale_sessions(Duration::from_secs(config.storage.stale_session_threshold));
+                    }
+
+                    Some(event) = node_rx.recv() => {
+                        match event {
+                            SimEvent::Shutdown => break,
+                            SimEvent::Chunk(_source, chunk) => {
+                                if let Some(envelope) = sentinel.process_chunk(chunk, &config.network.video_topic, &config, &identity, node_network_id) {
+                                    storage.ingest_envelope(envelope);
+                                }
                             }
-                        }
-                        SimPacket::Heartbeat(source_peer, data) => {
-                            match postcard::from_bytes::<ControlMessage>(&data) {
-                                Ok(msg) => {
-                                    /* FUNCTIONAL DOCUMENTATION:
-                                       Targeting the HealthTracker directly ensures we use tokio::time::Instant.
-                                       This is critical for 'tokio::time::pause' and 'advance' compatibility 
-                                       in the simulation harness.
-                                    */
-                                    sentinel.health.register_heartbeat(source_peer, msg);
-                                },
-                                Err(e) => warn!(error = %e, "Received malformed heartbeat in simulation"),
+                            SimEvent::Heartbeat(source_peer, data) => {
+                                if let Ok(_msg) = postcard::from_bytes::<ControlMessage>(&data) {
+                                    sentinel.health_tracker.register_activity(source_peer);
+                                }
                             }
                         }
                     }
                 }
             }
-        }
-        info!("Virtual node loop terminated");
-    });
+            info!("Virtual node loop terminated");
+        });
 
-    return_did
-}
+        return_did
+    }
 
-    /// Simulates a broadcast on the Gossipsub network
-    pub async fn broadcast(&self, sender_did: &Did, packet: SimPacket) {
-        let start = std::time::Instant::now();
-        
-        // Acquire the lock
+    pub async fn broadcast(&self, sender_did: &Did, event: SimEvent) {
         let nodes_guard = self.nodes.read().await;
-        
-        let wait_time = start.elapsed();
-        if wait_time > std::time::Duration::from_millis(10) {
-            tracing::warn!(?wait_time, "High lock contention in Simulation broadcast");
-        }
-
         for (did, tx) in nodes_guard.iter() {
             if did != sender_did {
-                let _ = tx.send(packet.clone()).await;
+                let _ = tx.send(event.clone()).await;
             }
         }
     }
@@ -225,7 +189,7 @@ async fn test_salvage_on_node_death() {
     ];
 
     for chunk in partial_chunks {
-        harness.broadcast(&node_a_did, SimPacket::Chunk(node_a_peer_id, chunk)).await;
+        harness.broadcast(&node_a_did, SimEvent::Chunk(node_a_peer_id, chunk)).await;
     }
 
     // Allow the chunks to propagate through the relay to Beta
@@ -281,28 +245,40 @@ async fn test_salvage_on_node_death() {
 
 #[tokio::test]
 async fn test_out_of_sequence_salvage_on_node_death() {
-    use crate::shards::{self, StorageSequence};
+    use crate::shards::{StorageSequence, Evidence, WitnessEnvelope, VideoShard};
+    use crate::identity::NetworkId;
+    
     let config = PhalanxConfig::default();
     let mut storage = Stronghold::new("sim_vault/salvage_test", &config);
     let identity = PhalanxIdentity::generate();
+    let peer_id = NetworkId::random(); // Using the NetworkId newtype
     
-    // 1. Generate a continuous sequence of evidence
+    // 1. Generate a continuous sequence of evidence using the new Evidence Enum
     let mut captured_envelopes = Vec::new();
     for i in 0..5 {
-        let seq = shards::StorageSequence(i);
-        let shard = shards::create_video_shard(vec![vec![i as u8]], seq, 30);
-        let envelope = shards::WitnessEnvelope::from_video(shard, &identity, "peer_a".to_string());
+        let seq = StorageSequence(i);
+        let shard = VideoShard {
+            timestamp: 1000 + i as u64,
+            frames: vec![vec![i as u8]],
+            sequence_id: seq,
+            fps: 30,
+        };
+        
+        // Use the new unified constructor
+        let envelope = WitnessEnvelope::new(
+            Evidence::Video(shard), 
+            &identity, 
+            peer_id
+        );
         captured_envelopes.push(envelope);
     }
 
     // 2. Simulate ingesting only the even sequences (creating a gap)
-    // This mimics a scenario where the network dropped shards 1 and 3.
     storage.ingest_envelope(captured_envelopes[0].clone());
     storage.ingest_envelope(captured_envelopes[2].clone());
     storage.ingest_envelope(captured_envelopes[4].clone());
 
-    // 3. Simulate Salvage: The Sentinel recovers the missing shards (1 and 3)
-    // from a neighbor and re-injects them.
+    // 3. Simulate Salvage: Ingesting the missing shards (1 and 3)
     storage.ingest_envelope(captured_envelopes[1].clone());
     storage.ingest_envelope(captured_envelopes[3].clone());
 
@@ -317,9 +293,13 @@ async fn test_out_of_sequence_salvage_on_node_death() {
     for (i, seq) in keys.iter().enumerate() {
         assert_eq!(seq.0, i as u32, "Sequence gap detected at index {}", i);
         
-        // Verify data integrity matches the sequence
+        // Verify data integrity via the Evidence variant
         let env = session.get(seq).unwrap();
-        assert_eq!(env.original_shard.frames[0][0], i as u8, "Data mismatch at sequence {}", i);
+        if let Evidence::Video(ref v) = env.evidence {
+            assert_eq!(v.frames[0][0], i as u8, "Data mismatch at sequence {}", i);
+        } else {
+            panic!("Expected Video evidence");
+        }
     }
 
     info!("Salvage continuity verified: 0 through 4 successfully reconstructed.");
@@ -327,28 +307,51 @@ async fn test_out_of_sequence_salvage_on_node_death() {
 
 #[tokio::test]
 async fn test_stronghold_crash_recovery() {
-    use crate::shards;
+    use crate::shards::{StorageSequence, Evidence, WitnessEnvelope, VideoShard};
+    use crate::identity::NetworkId;
     
     let config = PhalanxConfig::default();
-    let mut storage = Stronghold::new("sim_vault/crash_test", &config);
+    let vault_path = "sim_vault/crash_test";
+    
+    // Cleanup any old test artifacts
+    let _ = std::fs::remove_dir_all(vault_path);
+
+    let mut storage = Stronghold::new(vault_path, &config);
 
     // 1. Ingest a shard
     let identity = PhalanxIdentity::generate();
-    let shard = shards::create_video_shard(vec![vec![0]], shards::StorageSequence(101), 30);
-    let envelope = shards::WitnessEnvelope::from_video(shard, &identity, "peer_a".to_string());
+    let peer_id = NetworkId::random();
+    let seq = StorageSequence(101);
+    
+    let shard = VideoShard {
+        timestamp: 123456789,
+        frames: vec![vec![0xAA]],
+        sequence_id: seq,
+        fps: 30,
+    };
+    
+    let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id);
     
     storage.ingest_envelope(envelope.clone());
 
     // 2. Simulate Crash (Drop the old stronghold instance)
+    // The drop triggers no special logic, but the data must be in the .wal file
     drop(storage);
 
     // 3. Recover
-    let recovered_storage = Stronghold::new("sim_vault/crash_test", &config);
-    // Note: recover_from_wal should be called inside Stronghold::new
+    // Stronghold::new automatically calls recover_from_wal()
+    let recovered_storage = Stronghold::new(vault_path, &config);
     
-    let recovered_session = recovered_storage.active_sessions.get(&identity.did);
-    assert!(recovered_session.is_some(), "Stronghold failed to recover DID session from WAL");
-    assert!(recovered_session.unwrap().contains_key(&shards::StorageSequence(101)), "Stronghold failed to recover specific shard from WAL");
+    let recovered_session = recovered_storage.active_sessions.get(&identity.did)
+        .expect("Stronghold failed to recover DID session from WAL");
+        
+    let recovered_env = recovered_session.get(&seq)
+        .expect("Stronghold failed to recover specific shard 101 from WAL");
+
+    // Verify the data survived the "crash"
+    if let Evidence::Video(ref v) = recovered_env.evidence {
+        assert_eq!(v.frames[0][0], 0xAA);
+    }
     
-    tracing::info!("DURABILITY VERIFIED: Shard 101 survived the simulated crash.");
+    tracing::info!("DURABILITY VERIFIED: Shard 101 survived the simulated crash via WAL.");
 }

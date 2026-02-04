@@ -1,40 +1,24 @@
-use libp2p::{
-    gossipsub,
-    futures::StreamExt,    
-    Swarm
-};
+use libp2p::{gossipsub, futures::StreamExt, Swarm, swarm::SwarmEvent};
 use std::error::Error;
-use std::time::{Duration};
+use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc;
 
-use phalanx::shards;
+use phalanx::shards::{self, Evidence, WitnessEnvelope};
 use phalanx::camera;
 use phalanx::audio;
-use phalanx::identity;
-use phalanx::sentinel::Sentinel;
+use phalanx::identity::{NetworkId, PhalanxIdentity};
+use phalanx::sentinel::{Sentinel, ControlMessage};
 use phalanx::config::PhalanxConfig;
 use phalanx::PhalanxBehaviour;
-
 use phalanx::stronghold::Stronghold;
-
-
-
-// ==================
-//   MAIN ENTRY
-// ==================
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     phalanx::obs::init_observability();
 
-    let config = PhalanxConfig::load_from_env();
     // 1. Initialization Phase
-
-    /* 
-    let config = PhalanxConfig::load("phalanx.toml")
-        .expect("Critical: phalanx.toml not found.");*/
-    
+    let config = PhalanxConfig::load_from_env();
     setup_shutdown_handler();
     
     let my_identity = phalanx::init_identity();
@@ -42,10 +26,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut storage = Stronghold::new(&config.storage.vault_path, &config);
     let mut swarm = phalanx::setup_phalanx_swarm(&config).await?;
 
-    sentinel.subscribe_all(&mut swarm)?;
+    let local_peer_id = NetworkId(*swarm.local_peer_id());
 
     // 2. Network & Hardware Orchestration
-    let (video_topic, audio_topic) = subscribe_to_topics(&mut swarm, &config, &sentinel);
+    subscribe_to_topics(&mut swarm, &config);
     let (mut video_rx, mut audio_rx) = spawn_hardware_threads(&config);
 
     let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(config.network.heartbeat_interval_secs));
@@ -53,106 +37,81 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("--- PHALANX: ACTIVE ---");
 
-    // 3. The Clean Event Loop
     loop {
         select! {
+            // --- Hardware Input: Local Capture ---
             Some(v_shard) = video_rx.recv() => {
-                handle_video_shard(&mut swarm, &video_topic, v_shard, &my_identity, &config, &mut storage);
+                handle_local_evidence(&mut swarm, Evidence::Video(v_shard), &my_identity, &config, &mut storage, local_peer_id);
             }
             
             Some(a_shard) = audio_rx.recv() => {
-                handle_audio_shard(&mut swarm, &audio_topic, a_shard, &my_identity, &config, &mut storage);
+                handle_local_evidence(&mut swarm, Evidence::Audio(a_shard), &my_identity, &config, &mut storage, local_peer_id);
             }
             
+            // --- Network Input: Peer Data ---
+            event = swarm.select_next_some() => {
+                match event {
+                    SwarmEvent::Behaviour(phalanx::PhalanxEvent::Gossipsub(g_event)) => {
+                        let topic_str = g_event.message.topic.as_str();
+                        
+                        // Pass to Sentinel for reassembly
+                        if let Ok(chunk) = postcard::from_bytes::<shards::ShardChunk>(&g_event.message.data) {
+                            if let Some(envelope) = sentinel.process_chunk(chunk, topic_str, &config, &my_identity, local_peer_id) {
+                                storage.ingest_envelope(envelope);
+                            }
+                        }
+                    }
+                    SwarmEvent::Behaviour(phalanx::PhalanxEvent::Metadata(_m_event)) => {
+                        // Handle subscriptions or peer status if needed
+                    }
+                    _ => {}
+                }
+            }
+
+            // --- Maintenance: Heartbeats & Pruning ---
             _ = heartbeat_timer.tick() => {
-                handle_heartbeat(&mut swarm, &mut sentinel);
+                broadcast_heartbeat(&mut swarm, &config, local_peer_id);
             }
 
             _ = cleanup_timer.tick() => {
-                // 1. Sentinel identifies dark peers and recovers fragments
-                let local_peer_id = identity::NetworkId(*swarm.local_peer_id());
-                let salvaged = sentinel.process_cleanup(local_peer_id);
-                
-                for (dark_peer_id, envelopes) in salvaged {
-                    tracing::info!(peer = %dark_peer_id, count = envelopes.len(), "Salvage triggered for dark peer");
-                    for env in envelopes {
-                        // 2. Stronghold ingests the salvaged envelopes
-                        storage.ingest_envelope(env);
-                    }
-                }
-                
-                // 3. Stronghold checks if any sessions (including salvaged ones) are ready for disk
+                sentinel.prune_stale_buffers(&config);
                 storage.archive_stale_sessions(Duration::from_secs(config.storage.stale_session_threshold));
-            }
-
-            event = swarm.select_next_some() => {
-                if let Some(envelope) =  sentinel.handle_network_event(event, &mut swarm) {
-                    storage.ingest_envelope(envelope);
-                }
             }
         }
     }
 }
 
+// --- REFACTORED HANDLERS ---
 
-// --- EXTRACTED HANDLER FUNCTIONS ---
-
-fn handle_video_shard(
+fn handle_local_evidence(
     swarm: &mut Swarm<PhalanxBehaviour>,
-    topic: &gossipsub::IdentTopic,
-    shard: shards::VideoShard,
-    identity: &identity::PhalanxIdentity,
+    evidence: Evidence,
+    identity: &PhalanxIdentity,
     config: &PhalanxConfig,
     storage: &mut Stronghold,
+    local_id: NetworkId,
 ) {
-    let peer_id = swarm.local_peer_id().to_string();
-    let envelope = shards::WitnessEnvelope::from_video(shard, identity, peer_id);
+    // 1. Create Atomic WitnessEnvelope
+    let envelope = WitnessEnvelope::new(evidence.clone(), identity, local_id);
 
-    // 2. Persist locally to the Stronghold
+    // 2. Persist locally to the Stronghold immediately
     storage.ingest_envelope(envelope.clone());
 
-    // 3. Delegate to the shared broadcast helper
-    broadcast_envelope(swarm, topic, envelope, config);
-}
+    // 3. Chunkify and Broadcast
+    let topic_str = match evidence {
+        Evidence::Video(_) => &config.network.video_topic,
+        Evidence::Audio(_) => &config.network.audio_topic,
+    };
 
-fn handle_audio_shard(
-    swarm: &mut Swarm<PhalanxBehaviour>,
-    topic: &gossipsub::IdentTopic,
-    shard: audio::AudioShard,
-    identity: &identity::PhalanxIdentity,
-    config: &PhalanxConfig,
-    storage: &mut Stronghold,
-) {
-    // 1. Wrap the audio shard in a signed WitnessEnvelope
-    // We use the swarm local peer ID to identify the broadcaster
-    let peer_id = swarm.local_peer_id().to_string();
-    let envelope = shards::WitnessEnvelope::from_audio(shard, identity, peer_id);
-    storage.ingest_envelope(envelope.clone());
-    broadcast_envelope(swarm, topic, envelope, config);
-}
-
-
-fn handle_heartbeat(swarm: &mut Swarm<PhalanxBehaviour>, sentinel: &mut Sentinel) {
-    let heartbeat = sentinel.generate_heartbeat(&identity::NetworkId(*swarm.local_peer_id()));
-    if let Ok(encoded) = postcard::to_stdvec(&heartbeat) {
-        let _ = swarm.behaviour_mut().gossipsub.publish(sentinel.topics.control.clone(), encoded);
-    }
-}
-
-fn broadcast_envelope(
-    swarm: &mut Swarm<PhalanxBehaviour>,
-    topic: &gossipsub::IdentTopic,
-    envelope: shards::WitnessEnvelope,
-    config: &PhalanxConfig,
-) {
     if let Ok(encoded_envelope) = postcard::to_stdvec(&envelope) {
         let chunks = shards::chunkify(
-            shards::ShardId(envelope.original_shard.sequence_id.0),
+            shards::ShardId(evidence.sequence_id().0),
             encoded_envelope,
             config.network.chunk_size_bytes,
-            envelope.did.clone(),
+            identity.did.clone(),
         );
 
+        let topic = gossipsub::IdentTopic::new(topic_str);
         for chunk in chunks {
             if let Ok(encoded_chunk) = postcard::to_stdvec(&chunk) {
                 let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), encoded_chunk);
@@ -160,41 +119,46 @@ fn broadcast_envelope(
         }
     }
 }
-// --- HELPER SETUP FUNCTIONS ---
+
+fn broadcast_heartbeat(swarm: &mut Swarm<PhalanxBehaviour>, config: &PhalanxConfig, local_id: NetworkId) {
+    let hb = ControlMessage {
+        sender: local_id,
+        load_factor: 0.0, // Placeholder for system load
+        storage_remaining_mb: 1024,
+    };
+
+    if let Ok(encoded) = postcard::to_stdvec(&hb) {
+        let topic = gossipsub::IdentTopic::new(&config.network.control_topic);
+        let _ = swarm.behaviour_mut().gossipsub.publish(topic, encoded);
+    }
+}
+
+fn subscribe_to_topics(swarm: &mut Swarm<PhalanxBehaviour>, config: &PhalanxConfig) {
+    let topics = [
+        &config.network.video_topic,
+        &config.network.audio_topic,
+        &config.network.control_topic,
+    ];
+
+    for t in topics {
+        let _ = swarm.behaviour_mut().gossipsub.subscribe(&gossipsub::IdentTopic::new(t));
+    }
+}
 
 fn setup_shutdown_handler() {
     ctrlc::set_handler(move || {
-        println!("\n[PHALANX] Shutdown initiated...");
+        println!("\n[PHALANX] Shutdown initiated. Sealing vault...");
         std::process::exit(0);
     }).expect("Error setting Ctrl-C handler");
-}
-
-fn subscribe_to_topics(
-    swarm: &mut Swarm<PhalanxBehaviour>, 
-    config: &PhalanxConfig, 
-    sentinel: &Sentinel
-) -> (gossipsub::IdentTopic, gossipsub::IdentTopic) {
-    let video = gossipsub::IdentTopic::new(&config.network.video_topic);
-    let audio = gossipsub::IdentTopic::new(&config.network.audio_topic);
-
-    let _ = swarm.behaviour_mut().gossipsub.subscribe(&video);
-    let _ = swarm.behaviour_mut().gossipsub.subscribe(&audio);
-    let _ = swarm.behaviour_mut().gossipsub.subscribe(&sentinel.topics.control);
-
-    (video, audio)
 }
 
 fn spawn_hardware_threads(config: &PhalanxConfig) -> (mpsc::Receiver<shards::VideoShard>, mpsc::Receiver<audio::AudioShard>) {
     let (v_tx, v_rx) = mpsc::channel(64);
     let (a_tx, a_rx) = mpsc::channel(64);
 
-    // Camera initialization is now a one-liner
-    let camera_thread = camera::PhalanxCameraThread { 
-        fps: config.hardware.camera_fps 
-    };
+    let camera_thread = camera::PhalanxCameraThread { fps: config.hardware.camera_fps };
     camera_thread.spawn(Some(0), v_tx, config.hardware.clone());
 
-    // Audio initialization is now a one-liner
     let audio_thread = audio::PhalanxAudioThread { 
         sample_rate: config.hardware.audio_sample_rate,
         channels: config.hardware.audio_channels 

@@ -1,4 +1,4 @@
-use crate::shards::{StorageSequence, VideoShard, WitnessEnvelope};
+use crate::shards::{StorageSequence, Evidence, WitnessEnvelope};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use tokio::time::Instant;
 use crate::identity::Did;
 
-use tracing::{info, debug, warn, error, instrument, trace, debug_span};
+use tracing::{info, debug, warn, error, instrument,};
 
 
 // Stronghold is a Personal Data Server. Sentinels gather information 
@@ -45,23 +45,14 @@ impl Stronghold {
 
     fn write_to_wal(&self, envelope: &WitnessEnvelope) -> std::io::Result<()> {
         let safe_did = envelope.did.to_safe_name();
-        let file_name = format!("{}_{}.tmp", safe_did, envelope.original_shard.sequence_id);
+        // Use .0 to avoid potential Display trait formatting issues in filenames
+        let file_name = format!("{}_{}.wal", safe_did, envelope.evidence.sequence_id().0);
         let wal_path = self.wal_directory.join(file_name);
 
-        if !self.wal_directory.exists() {
-            fs::create_dir_all(&self.wal_directory)?;
-        }
-
-        let bytes = postcard::to_stdvec(envelope).unwrap();
+        let bytes = postcard::to_stdvec(envelope).map_err(|e| 
+            std::io::Error::new(std::io::ErrorKind::Other, e))?;
         
         fs::write(wal_path, bytes)?;
-
-        tracing::trace!(
-            seq = %envelope.original_shard.sequence_id, 
-            did = %envelope.did, 
-            "WAL: Entry committed to disk"
-        );
-        
         Ok(())
     }
 
@@ -79,67 +70,34 @@ impl Stronghold {
         let span = tracing::info_span!("wal_recovery");
         let _enter = span.enter();
         
-        debug!(path = ?self.wal_directory, "Scanning WAL directory for recovery");
+        if let Ok(entries) = fs::read_dir(&self.wal_directory) {
+            let mut recovered_count = 0;
+            let now = Instant::now();
 
-        match fs::read_dir(&self.wal_directory) {
-            Ok(entries) => {
-                let mut recovered_count = 0;
-                let mut file_count = 0;
-                let now = Instant::now();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                
+                // Skip zero-byte files (remnants of the Windows ADS/Colon bug)
+                if fs::metadata(&path).map(|m| m.len()).unwrap_or(0) == 0 {
+                    let _ = fs::remove_file(path);
+                    continue;
+                }
 
-                for entry in entries.flatten() {
-                    file_count += 1;
-                    let path = entry.path();
-                    
-                    // Forensic Log: Track every file found in the WAL
-                    trace!(file = ?path, "Found potential WAL entry");
+                if let Ok(bytes) = fs::read(&path) {
+                    if let Ok(envelope) = postcard::from_bytes::<WitnessEnvelope>(&bytes) {
+                        let did = envelope.did.clone();
+                        let seq = envelope.evidence.sequence_id();
 
-                    match fs::read(&path) {
-                        Ok(bytes) => {
-                            match postcard::from_bytes::<WitnessEnvelope>(&bytes) {
-                                Ok(envelope) => {
-                                    let did = envelope.did.clone();
-                                    let seq = envelope.original_shard.sequence_id;
-
-                                    // Forensic Log: Successful extraction
-                                    debug!(%did, %seq, "Recovered envelope from disk");
-
-                                    // 1. Restore the session data
-                                    self.active_sessions
-                                        .entry(did.clone())
-                                        .or_default()
-                                        .insert(seq, envelope);
-                                    
-                                    // 2. Synchronize metadata: track this sequence as processed
-                                    self.processed_sequences
-                                        .entry(did.clone())
-                                        .or_default()
-                                        .insert(seq);
-
-                                    // 3. Update activity: mark session as warm for the archive
-                                    self.session_activity.insert(did, now);
-                                    
-                                    recovered_count += 1;
-                                }
-                                Err(e) => {
-                                    warn!(file = ?path, err = %e, "Corrupt WAL entry: Deserialization failed");
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!(file = ?path, err = %e, "IO Error: Could not read WAL file");
-                        }
+                        self.active_sessions.entry(did.clone()).or_default().insert(seq, envelope);
+                        self.processed_sequences.entry(did.clone()).or_default().insert(seq);
+                        self.session_activity.insert(did, now);
+                        
+                        recovered_count += 1;
                     }
                 }
-                
-                info!(
-                    files_found = file_count, 
-                    sessions_restored = recovered_count, 
-                    "WAL recovery process complete"
-                );
             }
-            Err(e) => {
-                error!(path = ?self.wal_directory, err = %e, "CRITICAL: Could not access WAL directory");
+            if recovered_count > 0 {
+                info!(count = recovered_count, "Successfully restored state from WAL");
             }
         }
     }
@@ -147,153 +105,103 @@ impl Stronghold {
     /// The PDS validates the signature against the DID before storing
     #[instrument(
         level = "info", 
-        skip(self, envelope), 
-        fields(
-            did = %envelope.did, 
-            seq = %envelope.original_shard.sequence_id,
-            partial = envelope.is_partial
-        )
+        skip(self, envelope)
     )]
     pub fn ingest_envelope(&mut self, envelope: WitnessEnvelope) {
+        // 1. Durability: Write to WAL first
         if let Err(e) = self.write_to_wal(&envelope) {
-            tracing::error!(error = %e, "CRITICAL: Failed to write to WAL. Potential data loss.");
+            error!(error = %e, "CRITICAL: WAL write failed. Data loss risk.");
+            return;
         }
-
-        let span = tracing::span!(tracing::Level::INFO, "stronghold_ingest", 
-            sender = %envelope.did, 
-            seq = %envelope.original_shard.sequence_id,
-            partial = envelope.is_partial
-        );
-        let _enter = span.enter();
         
-        let should_ingest = if envelope.is_partial {
-            tracing::warn!("Bypassing signature check for forensic salvage shard");
-            true
-        } else {
-            envelope.verify()
-        };
-
-        if should_ingest {
-            let did_key = envelope.did.clone(); 
-            let seq_id = envelope.original_shard.sequence_id;
-
-            // Replay protection: Don't ingest if already processed
-            if self.processed_sequences.get(&did_key).is_some_and(|s| s.contains(&seq_id)) {
-                debug!("Replay protection: Shard already in vault. Skipping.");
-                return;
-            }
-
-            self.session_activity.insert(did_key.clone(), Instant::now());
-
-            let session = self.active_sessions
-                .entry(did_key.clone())
-                .or_default();
-
-            session.insert(seq_id, envelope);
-            
-            tracing::debug!("Verified and cached in memory");
-
-            // Archive session every 10 shards
-            if session.len() >= self.shards_needed_to_archive { 
-                tracing::info!(%self.shards_needed_to_archive, "Archival threshold met. Sealing shard bundle.");
-                self.archive_session(&did_key); 
-                self.session_activity.remove(&did_key);
-            }
-        } else {
-            tracing::error!("Warning: Rejected invalid signature from DID: {}", envelope.did);
-        }
-    }
-
-    #[instrument(level = "debug", skip(self))]
-    pub fn archive_stale_sessions(&mut self, timeout: std::time::Duration) {
-        let now = tokio::time::Instant::now();
-        let span = debug_span!("stale_cleanup");
-        let _enter = span.enter();
-
-        // Identify DIDs that have timed out
-        let stale_dids: Vec<Did> = self.session_activity
-            .iter()
-            .filter_map(|(did, &last_active)| {
-                let age = now.duration_since(last_active);
-                if age > timeout {
-                    debug!(did = %did, age = ?age, "Found stale session for archival");
-                    Some(did.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if stale_dids.is_empty() {
-            trace!("No stale sessions found in this tick.");
+        // 2. Cryptographic Validation
+        if !envelope.verify() {
+            error!(did = %envelope.did, "Rejected invalid signature");
             return;
         }
 
+        let did_key = envelope.did.clone(); 
+        let seq_id = envelope.evidence.sequence_id();
+
+        // 3. Replay Protection
+        if self.processed_sequences.get(&did_key).is_some_and(|s| s.contains(&seq_id)) {
+            debug!(%seq_id, "Replay protection: Shard already archived. Skipping.");
+            return;
+        }
+
+        // 4. In-Memory Tracking
+        self.session_activity.insert(did_key.clone(), Instant::now());
+        let session = self.active_sessions.entry(did_key.clone()).or_default();
+        session.insert(seq_id, envelope);
+
+        // 5. Threshold Check
+        if session.len() >= self.shards_needed_to_archive { 
+            info!(%did_key, "Threshold met. Archiving session.");
+            self.archive_session(&did_key); 
+        }
+    }
+
+    pub fn archive_stale_sessions(&mut self, timeout: std::time::Duration) {
+        let now = Instant::now();
+        let stale_dids: Vec<Did> = self.session_activity
+            .iter()
+            .filter_map(|(did, &last_active)| {
+                if now.duration_since(last_active) > timeout { Some(did.clone()) } else { None }
+            })
+            .collect();
+
         for did in stale_dids {
-            info!(did = %did, "Triggering force-archive for stale session");
+            info!(did = %did, "Force-archiving stale session");
             self.archive_session(&did);
-            self.session_activity.remove(&did);
         }
     }
 
     #[instrument(level = "info", skip(self))]
-    fn archive_session(&mut self, did_full: &Did) {
-        // 1. Attempt to pull session from RAM
-        let session = match self.active_sessions.remove(did_full) {
+    fn archive_session(&mut self, did: &Did) {
+        let session = match self.active_sessions.remove(did) {
             Some(s) => s,
-            None => {
-                warn!(did = %did_full, "Archival requested but no active session found in memory");
-                return;
-            }
+            None => return,
         };
 
         let mut keys: Vec<StorageSequence> = session.keys().cloned().collect();
         keys.sort();
 
-        let sorted_shards: Vec<VideoShard> = keys.iter()
+        // Map envelopes to Evidence variant for archival
+        let sorted_evidence: Vec<Evidence> = keys.iter()
             .filter_map(|k| {
                 session.get(k).map(|env| {
-                    // Record that we've processed this to prevent replays
-                    self.processed_sequences
-                        .entry(did_full.clone())
-                        .or_default()
-                        .insert(*k);
-                    env.original_shard.clone()
+                    self.processed_sequences.entry(did.clone()).or_default().insert(*k);
+                    env.evidence.clone()
                 })
             })
             .collect();
 
-        if sorted_shards.is_empty() {
-            warn!(did = %did_full, "Session contained no valid shards. Aborting archive.");
-            return;
-        }
+        if sorted_evidence.is_empty() { return; }
 
-        // 2. Prepare Directory
-        let safe_did = did_full.to_safe_name();
+        // Determine file type based on the first shard in the bundle
+        let extension = match sorted_evidence[0] {
+            Evidence::Video(_) => "vid.phlx",
+            Evidence::Audio(_) => "aud.phlx",
+        };
+
+        let safe_did = did.to_safe_name();
         let archive_dir = self.vault_storage.join(&safe_did);
-        
-        if let Err(e) = std::fs::create_dir_all(&archive_dir) {
-            error!(err = %e, path = ?archive_dir, "CRITICAL: Could not create peer archive directory");
-            return;
-        }
+        let _ = std::fs::create_dir_all(&archive_dir);
 
-        // 3. Determine File Identity
-        let is_audio = sorted_shards.iter().any(|s| s.fps == 0);
-        let extension = if is_audio { "aud.phlx" } else { "vid.phlx" };
-        let file_name = format!("session_{}.{}", sorted_shards[0].timestamp, extension);
+        let file_name = format!("session_{}.{}", sorted_evidence[0].timestamp(), extension);
         let save_path = archive_dir.join(file_name);
 
-        // 4. Commit to Disk
-        match postcard::to_stdvec(&sorted_shards) {
+        match postcard::to_stdvec(&sorted_evidence) {
             Ok(encoded) => {
                 if let Err(e) = std::fs::write(&save_path, encoded) {
-                    error!(err = %e, path = ?save_path, "IO ERROR: Archival write failed");
+                    error!(err = %e, "Archival write failed");
                 } else {
-                    info!(path = ?save_path, count = %sorted_shards.len(), "Archive successful. Purging WAL.");
-                    self.clear_session_wal(did_full, &keys);
+                    info!(path = ?save_path, "Archive successful. Clearing WAL.");
+                    self.clear_session_wal(did, &keys);
+                    self.session_activity.remove(did);
                 }
             }
-            Err(e) => error!(err = %e, "Serialization failed during archival"),
+            Err(e) => error!(err = %e, "Archival serialization failed"),
         }
     }
 }
