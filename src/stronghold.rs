@@ -8,7 +8,36 @@ use tokio::time::Instant;
 use crate::identity::Did;
 
 use tracing::{info, debug, warn, error, instrument,};
+use serde::{Serialize, Deserialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Volley {
+    pub volley_id: String,           // Unique ID for this specific burst
+    pub owner_did: Did,              // The Identity this volley belongs to
+    pub start_time: u64,             // Unix timestamp of the first shard
+    pub shards: Vec<WitnessEnvelope>,
+    pub is_complete: bool,           // Marked true on a 'Seal' command
+}
+
+impl Volley {
+    pub fn new(id: String, did: Did) -> Self {
+        Self {
+            volley_id: id,
+            owner_did: did,
+            start_time: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+            shards: Vec::new(),
+            is_complete: false,
+        }
+    }
+
+    /// Adds a shard and ensures logical sequence ordering
+    pub fn push(&mut self, envelope: WitnessEnvelope) {
+        self.shards.push(envelope);
+        // We sort by StorageSequence to ensure the Volley is continuous
+        self.shards.sort_by_key(|e| e.evidence.sequence_id());
+    }
+}
 
 // Stronghold is a Personal Data Server. Sentinels gather information 
 // and store it in a stronghold.
@@ -20,6 +49,7 @@ pub struct Stronghold {
     pub session_activity: HashMap<Did, tokio::time::Instant>,
     pub processed_sequences: HashMap<Did, HashSet<StorageSequence>>,
     pub shards_needed_to_archive: usize,
+    pub active_volleys: HashMap<Did, Volley>,
 }
 
 impl Stronghold {
@@ -37,6 +67,7 @@ impl Stronghold {
             session_activity: HashMap::new(),
             processed_sequences: HashMap::new(),
             shards_needed_to_archive: config.storage.shards_needed_to_archive,
+            active_volleys: HashMap::new(),
         };
 
         stronghold.recover_from_wal();

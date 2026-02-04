@@ -58,6 +58,14 @@ impl Evidence {
         }
     }
 
+    // gotta group everything into a cohesive file
+    pub fn volley_id(&self) -> &str {
+        match self {
+            Evidence::Video(s) => &s.volley_id,
+            Evidence::Audio(s) => &s.volley_id,
+        }
+    }
+
     /// Helper to retrieve the capture timestamp.
     pub fn timestamp(&self) -> u64 {
         match self {
@@ -133,7 +141,8 @@ pub struct VideoShard {
     pub timestamp: u64,
     pub frames: Vec<Vec<u8>>,
     pub sequence_id: StorageSequence,
-    pub fps: u8
+    pub fps: u8,
+    pub volley_id: String
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -207,7 +216,7 @@ pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<
     Ok(jpeg_bytes)
 }
 
-pub fn create_video_shard(buffer: Vec<Vec<u8>>, sequence_id: StorageSequence, fps: u8) -> VideoShard {
+pub fn create_video_shard(buffer: Vec<Vec<u8>>, sequence_id: StorageSequence, fps: u8, volley_id: String) -> VideoShard {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -218,5 +227,6 @@ pub fn create_video_shard(buffer: Vec<Vec<u8>>, sequence_id: StorageSequence, fp
         frames: buffer,
         sequence_id,
         fps,
+        volley_id: volley_id.clone(),
     }
 }

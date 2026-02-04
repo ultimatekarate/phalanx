@@ -22,7 +22,7 @@ pub struct SimulationHarness {
     pub nodes: Arc<RwLock<HashMap<Did, mpsc::Sender<SimEvent>>>>,
     pub broadcast_channel: mpsc::Sender<(Did, NetworkId, SimEvent)>,
     pub config: PhalanxConfig,
-    pub peer_map: Arc<RwLock<HashMap<Did, NetworkId>>>,
+    pub identity_registry: Arc<RwLock<HashMap<Did, NetworkId>>>,
 }
 
 impl SimulationHarness {
@@ -30,15 +30,15 @@ impl SimulationHarness {
         let (tx, rx) = mpsc::channel(1024);
         let harness = Self {
             nodes: Arc::new(RwLock::new(HashMap::new())),
-            peer_map: Arc::new(RwLock::new(HashMap::new())),
+            identity_registry: Arc::new(RwLock::new(HashMap::new())),
             broadcast_channel: tx,
             config,
         };
         (harness, rx)
     }
 
-    pub async fn get_peer_id(&self, did: &Did) -> Option<NetworkId> {
-        let map = self.peer_map.read().await;
+    pub async fn resolve_did(&self, did: &Did) -> Option<NetworkId> {
+        let map = self.identity_registry.read().await;
         map.get(did).cloned()
     }
     
@@ -74,7 +74,7 @@ impl SimulationHarness {
         let (node_tx, mut node_rx) = mpsc::channel::<SimEvent>(100);
 
         {
-            let mut peer_guard = self.peer_map.write().await;
+            let mut peer_guard = self.identity_registry.write().await;
             peer_guard.insert(node_did.clone(), node_network_id);
         }
 
@@ -152,8 +152,6 @@ async fn test_salvage_on_node_death() {
         .with_env_filter("phalanx=debug,info")
         .try_init();
 
-    use crate::shards::ShardId;
-    use crate::shards::ShardChunk;
     use std::time::Duration;
     use tracing::{info, info_span};
 
@@ -170,26 +168,44 @@ async fn test_salvage_on_node_death() {
 
     // 1. Spawn Alpha and Beta
     let node_a_did = harness.spawn_node("Alpha").await;
-    let _node_b_did = harness.spawn_node("Beta").await;
+    let node_b_did = harness.spawn_node("Beta").await;
     
     // Give nodes a moment to initialize and register in the relay
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // 2. Transmit Partial Data
-    // We fetch Alpha's PeerId from the harness to ensure the Sentinel tracks it correctly
-    let node_a_peer_id = harness.get_peer_id(&node_a_did).await
-        .expect("Alpha PeerId missing from harness");
+    // 2. Transmit Valid, Serialized Data
+    let node_a_network_id = harness.resolve_did(&node_a_did).await
+        .expect("Alpha NetworkId missing from harness");
 
+    // Create a real VideoShard to get valid serialized bytes
+    let real_shard = crate::shards::VideoShard {
+        timestamp: 123456789,
+        frames: vec![vec![1, 2, 3], vec![4, 5, 6]],
+        sequence_id: crate::shards::StorageSequence(999),
+        fps: 10,
+    };
 
-    info!(alpha = %node_a_did, peer = %node_a_peer_id, "Nodes initialized and registered");
-    
-    let partial_chunks = vec![
-        ShardChunk { shard_id: ShardId(999), chunk_index: 0, total_chunks: 5, data: vec![1, 2, 3], owner_did: node_a_did.clone() },
-        ShardChunk { shard_id: ShardId(999), chunk_index: 1, total_chunks: 5, data: vec![4, 5, 6], owner_did: node_a_did.clone() },
-    ];
+    // Serialize the shard so the Sentinel can actually read it
+    let serialized_data = postcard::to_stdvec(&real_shard)
+        .expect("Failed to serialize shard for test");
 
-    for chunk in partial_chunks {
-        harness.broadcast(&node_a_did, SimEvent::Chunk(node_a_peer_id, chunk)).await;
+    // Create real chunks from the serialized blob
+    let chunks = crate::shards::chunkify(
+        crate::shards::ShardId(999), 
+        serialized_data, 
+        10, // Small chunk size to ensure we get multiple chunks
+        node_a_did.clone()
+    );
+
+    info!(
+        alpha = %node_a_did, 
+        peer = %node_a_network_id, 
+        chunk_count = chunks.len(),
+        "Broadcasting valid serialized chunks"
+    );
+
+    for chunk in chunks {
+        harness.broadcast(&node_a_did, SimEvent::Chunk(node_a_network_id, chunk)).await;
     }
 
     // Allow the chunks to propagate through the relay to Beta
@@ -215,10 +231,10 @@ async fn test_salvage_on_node_death() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // 5. VERIFICATION
-    let node_a_safe_did = node_a_did.to_safe_name();
+    let node_b_safe_did = node_b_did.to_safe_name();
     let evidence_dir = std::path::PathBuf::from("sim_vault")
         .join("Beta")
-        .join(&node_a_safe_did);
+        .join(&node_b_safe_did);
     
     info!(constructed_path = ?evidence_dir, "Checking for salvaged evidence");
 
@@ -228,7 +244,7 @@ async fn test_salvage_on_node_death() {
         if evidence_dir.exists() {
             if let Ok(entries) = std::fs::read_dir(&evidence_dir) {
                 for entry in entries.flatten() {
-                    if entry.file_name().to_string_lossy().ends_with(".aud.phlx") {
+                    if entry.file_name().to_string_lossy().ends_with(".vid.phlx") {
                         found_file = true;
                         break;
                     }

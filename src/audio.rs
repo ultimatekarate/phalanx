@@ -10,6 +10,7 @@ pub struct AudioShard {
     pub data: Vec<u8>, // Compressed audio bytes (AAC/Opus)
     pub sample_rate: u32,
     pub channels: u8,
+    pub volley_id: String,
 }
 
 pub struct PhalanxAudioThread {
@@ -19,7 +20,7 @@ pub struct PhalanxAudioThread {
 
 impl PhalanxAudioThread {
     /// Spawns the audio capture thread using values from the HardwareConfig.
-    pub fn spawn(self, tx: Sender<AudioShard>, config: HardwareConfig) {
+    pub fn spawn(self, tx: Sender<AudioShard>, config: HardwareConfig, volley_id: String,) {
         let sample_rate = config.audio_sample_rate;
         let channels = config.audio_channels;
 
@@ -38,6 +39,7 @@ impl PhalanxAudioThread {
                     data: vec![0u8; 1024], // Simulation placeholder
                     sample_rate,
                     channels,
+                    volley_id: volley_id.clone()
                 };
 
                 if tx.blocking_send(shard).is_err() {
