@@ -9,4 +9,3 @@ pub fn init_observability() {
             .add_directive("phalanx=debug".parse().unwrap())) // Phalanx specific DEBUG logs
         .init();
 }
-
