@@ -11,8 +11,8 @@ This plan synthesizes all specialized roadmaps (Network, Security, Stronghold, H
   - [x] Create `src/network.rs` and decouple logic from `lib.rs` (The Facade Pattern).
   - [x] Implement **Kademlia DHT** (`libp2p::kad`) to enable WAN peer discovery.
   - [x] Implement **Service Discovery** (`announce_stronghold`, `find_strongholds`).
-- [ ] **Infrastructure Setup**
-  - [ ] **Cloud Bootstrap Node:** Deploy a minimal Stronghold on a public VPS (static IP) to act as the permanent Relay/Bootstrap peer for development.
+- [x] **Infrastructure Setup**
+  - [x] **Cloud Bootstrap Node:** Deploy a minimal Stronghold on a public VPS (static IP) to act as the permanent Relay/Bootstrap peer for development.
 - [ ] **Forensic Integrity Engine**
   - [ ] Implement `ForensicAssembler<T>` generic struct for gap detection.
   - [ ] Refactor `Stronghold` to use the **Recursive Assembly** pattern (Shards → Volleys → Archives).

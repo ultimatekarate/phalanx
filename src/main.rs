@@ -1,9 +1,10 @@
-use libp2p::{gossipsub, kad, mdns, identify, swarm::SwarmEvent, futures::StreamExt, Swarm};
+use libp2p::{gossipsub, identify, kad, mdns, swarm::SwarmEvent, Swarm, futures::StreamExt};
 use std::error::Error;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc;
 
+// Internal Modules
 use phalanx::shards::{self, Evidence, WitnessEnvelope};
 use phalanx::camera;
 use phalanx::audio;
@@ -11,9 +12,148 @@ use phalanx::identity::{NetworkId, PhalanxIdentity};
 use phalanx::sentinel::{Sentinel, ControlMessage};
 use phalanx::config::PhalanxConfig;
 use phalanx::stronghold::Stronghold;
-// Import the new re-exports from lib.rs
 use phalanx::{PhalanxBehaviour, PhalanxEvent}; 
 
+// --- THE STATE STRUCT ---
+// Encapsulates the "Self" so the main loop doesn't have to manage variables.
+struct PhalanxNode {
+    sentinel: Sentinel,
+    storage: Stronghold,
+    identity: PhalanxIdentity,
+    config: PhalanxConfig,
+    local_peer_id: NetworkId,
+}
+
+impl PhalanxNode {
+    /// The Central Brain: Decides what to do with a Network Event
+    fn handle_network_event(
+        &mut self, 
+        event: PhalanxEvent, 
+        swarm: &mut Swarm<PhalanxBehaviour>
+    ) {
+        match event {
+            // 1. DATA LAYER: Receive Evidence Shards
+            PhalanxEvent::Gossipsub(gossipsub::Event::Message { message, .. }) => {
+                let topic_str = message.topic.as_str();
+                
+                // Deserialize the shard
+                if let Ok(chunk) = postcard::from_bytes::<shards::ShardChunk>(&message.data) {
+                    // Pass to Sentinel for Reassembly
+                    if let Some(envelope) = self.sentinel.process_chunk(
+                        chunk, 
+                        topic_str, 
+                        &self.config, 
+                        &self.identity, 
+                        self.local_peer_id
+                    ) {
+                        // If reassembly is complete, save to vault
+                        self.storage.ingest_envelope(envelope);
+                    }
+                }
+            }
+
+            // 2. DISCOVERY: mDNS (Local Network)
+            PhalanxEvent::Mdns(mdns::Event::Discovered(list)) => {
+                for (peer_id, multiaddr) in list {
+                    tracing::debug!(%peer_id, "mDNS: Discovered local peer");
+                    swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr);
+                }
+            }
+
+            // 3. ROUTING: Kademlia (WAN/DHT)
+            PhalanxEvent::Kademlia(kad_event) => {
+                self.handle_kademlia_event(kad_event, swarm);
+            }
+
+            // 4. IDENTITY: Public IP Resolution
+            PhalanxEvent::Identify(identify::Event::Received { peer_id, info, .. }) => {
+                for addr in info.listen_addrs {
+                    swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    /// Sub-handler for DHT logic (Service Discovery)
+    fn handle_kademlia_event(
+        &self, 
+        event: libp2p::kad::Event, 
+        swarm: &mut Swarm<PhalanxBehaviour>
+    ) {
+        match event {
+            // Found a Service Provider (Stronghold)
+            kad::Event::OutboundQueryProgressed {
+                result: kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders { providers, key, .. })),
+                ..
+            } => {
+                // Ensure it is the correct service key
+                if key == phalanx::network::get_storage_key() {
+                    for peer in providers {
+                        tracing::info!(%peer, "DISCOVERY: Found Stronghold Node!");
+                        // Auto-dial to establish direct data link
+                        swarm.dial(peer).unwrap_or_else(|_| {});
+                    }
+                }
+            }
+            // Ignore other DHT events (routing updates, etc)
+            _ => {}
+        }
+    }
+    
+    /// Handler for Local Hardware Inputs (Camera/Mic)
+    fn handle_local_evidence(
+        &mut self,
+        swarm: &mut Swarm<PhalanxBehaviour>,
+        evidence: Evidence
+    ) {
+        // 1. Create Witness Envelope
+         let envelope = WitnessEnvelope::new(evidence.clone(), &self.identity, self.local_peer_id);
+         
+         // 2. Persist Locally (Always save your own data first)
+         self.storage.ingest_envelope(envelope.clone());
+    
+         // 3. Select Topic
+         let topic_str = match evidence {
+            Evidence::Video(_) => &self.config.network.video_topic,
+            Evidence::Audio(_) => &self.config.network.audio_topic,
+        };
+    
+        // 4. Chunkify and Broadcast
+        if let Ok(encoded) = postcard::to_stdvec(&envelope) {
+            let chunks = shards::chunkify(
+                shards::ShardId(evidence.sequence_id().0),
+                encoded,
+                self.config.network.chunk_size_bytes,
+                self.identity.did.clone(),
+            );
+    
+            let topic = gossipsub::IdentTopic::new(topic_str);
+            for chunk in chunks {
+                if let Ok(chunk_bytes) = postcard::to_stdvec(&chunk) {
+                    let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), chunk_bytes);
+                }
+            }
+        }
+    }
+
+    /// Broadcast System Status
+    fn broadcast_heartbeat(&self, swarm: &mut Swarm<PhalanxBehaviour>) {
+        let hb = ControlMessage {
+            sender: self.local_peer_id,
+            load_factor: 0.0, // Placeholder
+            storage_remaining_mb: 1024, // Placeholder
+        };
+    
+        if let Ok(encoded) = postcard::to_stdvec(&hb) {
+            let topic = gossipsub::IdentTopic::new(&self.config.network.control_topic);
+            let _ = swarm.behaviour_mut().gossipsub.publish(topic, encoded);
+        }
+    }
+}
+
+// --- MAIN ENTRY POINT ---
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     phalanx::obs::init_observability();
@@ -23,221 +163,94 @@ async fn main() -> Result<(), Box<dyn Error>> {
     setup_shutdown_handler();
     
     let my_identity = phalanx::init_identity();
-    let mut sentinel = Sentinel::new(&config);
-    let mut storage = Stronghold::new(&config.storage.vault_path, &config);
+    let sentinel = Sentinel::new(&config);
+    let storage = Stronghold::new(&config.storage.vault_path, &config);
     
-    // Initialize swarm
+    // Setup Network with proper key conversion
     let mut swarm = phalanx::setup_phalanx_swarm(my_identity.to_libp2p_keypair())?;
+    
+    // Bind to Random Port (Client Mode)
+    // Use Port 0 to let OS assign an available port
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
-
-    // Start looking for Strongholds immediately
-    let storage_key = phalanx::network::get_storage_key();
-    let query_id = swarm.behaviour_mut().kademlia.get_providers(storage_key);
-    tracing::info!(?query_id, "Initiated search for Stronghold nodes...");
 
     let local_peer_id = NetworkId(*swarm.local_peer_id());
 
-    let current_volley_id = format!("volley_{}_{}", 
-        my_identity.did.to_safe_name(), 
-        chrono::Utc::now().timestamp()
-    );
-    tracing::info!(volley = %current_volley_id, "New Forensic Volley Initialized");
+    // Initialize State Bundle
+    let mut node = PhalanxNode {
+        sentinel,
+        storage,
+        identity: my_identity,
+        config: config.clone(),
+        local_peer_id,
+    };
 
-    // 2. Network & Hardware Orchestration
+    // 2. Hardware Orchestration
+    let current_volley_id = format!("volley_{}_{}", node.identity.did.to_safe_name(), chrono::Utc::now().timestamp());
+    tracing::info!(volley = %current_volley_id, "New Forensic Volley Initialized");
+    
     subscribe_to_topics(&mut swarm, &config);
     let (mut video_rx, mut audio_rx) = spawn_hardware_threads(&config, current_volley_id);
 
+    // 3. Timers
     let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(config.network.heartbeat_interval_secs));
     let mut cleanup_timer = tokio::time::interval(Duration::from_secs(config.network.cleanup_interval_secs));
-    // TODO: put this in the config
-    let mut discovery_timer = tokio::time::interval(Duration::from_secs(30));
+    let mut discovery_timer = tokio::time::interval(Duration::from_secs(30)); // Service Discovery
 
-    println!("--- PHALANX: ACTIVE (WAN + LAN) ---");
-
-    let bootnodes: Vec<&str> = vec![
-        // "/ip4/123.45.67.89/tcp/4001/p2p/12D3KooW..."
-    ];
-
+    // 4. Bootstrap (Optional - Add your VPS here)
+    let bootnodes: Vec<&str> = vec![]; 
     for peer_str in bootnodes {
         if let Ok(multiaddr) = peer_str.parse::<libp2p::Multiaddr>() {
             tracing::info!("Bootstrapping: Dialing {}", peer_str);
-            
-            // 1. Dial the node to open the TCP connection
-            if let Err(e) = swarm.dial(multiaddr.clone()) {
-                 tracing::warn!("Failed to dial bootnode: {}", e);
-            }
-
-            // 2. Add it to the Kademlia Routing Table
-            // We need to extract the PeerId from the Multiaddr
+            let _ = swarm.dial(multiaddr.clone());
+            // Add to DHT
             if let Some(libp2p::multiaddr::Protocol::P2p(peer_id)) = multiaddr.iter().last() {
                 swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr);
-                tracing::info!("Added Bootnode {} to DHT", peer_id);
             }
         }
     }
 
+    println!("--- PHALANX SENSOR: ONLINE (WAN + LAN) ---");
+
+    // 5. The Clean Loop
     loop {
         select! {
-            // --- Hardware Input: Local Capture ---
+            // --- Hardware Inputs ---
             Some(v_shard) = video_rx.recv() => {
-                handle_local_evidence(&mut swarm, Evidence::Video(v_shard), &my_identity, &config, &mut storage, local_peer_id);
+                node.handle_local_evidence(&mut swarm, Evidence::Video(v_shard));
             }
             
             Some(a_shard) = audio_rx.recv() => {
-                handle_local_evidence(&mut swarm, Evidence::Audio(a_shard), &my_identity, &config, &mut storage, local_peer_id);
+                node.handle_local_evidence(&mut swarm, Evidence::Audio(a_shard));
             }
-            
-            // --- Network Input: Peer Data ---
+
+            // --- Network Events ---
+            // The swarm yields events; we delegate processing to the Node struct.
             event = swarm.select_next_some() => {
-                match event {
-                    // 1. DATA LAYER (Gossipsub)
-                    // We now match strictly against the enum defined in network.rs
-                    SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(gossipsub::Event::Message { message, .. })) => {
-                        let topic_str = message.topic.as_str();
-                        
-                        if let Ok(chunk) = postcard::from_bytes::<shards::ShardChunk>(&message.data) {
-                            if let Some(envelope) = sentinel.process_chunk(chunk, topic_str, &config, &my_identity, local_peer_id) {
-                                storage.ingest_envelope(envelope);
-                            }
-                        }
-                    }
-
-                    // 2. DISCOVERY LAYER (mDNS - Local)
-                    // Critical: When mDNS finds a peer, we add them to Kademlia so the DHT knows they exist.
-                    SwarmEvent::Behaviour(PhalanxEvent::Mdns(mdns::Event::Discovered(list))) => {
-                        for (peer_id, multiaddr) in list {
-                            tracing::info!(%peer_id, "mDNS discovered peer, bridging to Kademlia");
-                            swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr);
-                        }
-                    }
-
-                    // 3. ROUTING LAYER (Kademlia - WAN)
-                    SwarmEvent::Behaviour(PhalanxEvent::Kademlia(kad::Event::RoutingUpdated { peer, .. })) => {
-                        tracing::debug!(%peer, "DHT Routing Table Updated");
-                    }
-
-                    // 4. IDENTITY LAYER (Public IP Resolution)
-                    // When we identify a peer, add their listen addresses to the DHT
-                    SwarmEvent::Behaviour(PhalanxEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
-                        tracing::debug!(%peer_id, "Identify Received");
-                        for addr in info.listen_addrs {
-                            swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
-                        }
-                    }
-                    
-
-                    SwarmEvent::Behaviour(PhalanxEvent::Kademlia(kad_event)) => {
-                        match kad_event {
-                            // 1. We found Providers!
-                            kad::Event::OutboundQueryProgressed {
-                                result: kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders { providers, key, .. })),
-                                ..
-                            } => {
-                                if key == phalanx::network::get_storage_key() {
-                                    for peer in providers {
-                                        tracing::info!(%peer, "DISCOVERY: Found a Stronghold Node!");
-                                        
-                                        // ACTION: Automatically connect to them
-                                        // This creates a dedicated TCP connection for heavy data transfer
-                                        swarm.dial(peer).unwrap_or_else(|e| tracing::warn!("Failed to dial discovered Stronghold: {}", e));
-                                        
-                                        // OPTIONAL: Add them to a "Preferred Peers" list in your sentinel
-                                        // sentinel.register_stronghold(peer); 
-                                    }
-                                }
-                            }
-                            
-                            // 2. Search finished (no more results coming for this query)
-                            kad::Event::OutboundQueryProgressed {
-                                result: kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FinishedWithNoAdditionalRecord { .. })),
-                                ..
-                            } => {
-                                tracing::debug!("Stronghold discovery query finished.");
-                            }
-
-                            // 3. Routing Table Updates (keep your existing logging here)
-                            kad::Event::RoutingUpdated { peer, .. } => {
-                                tracing::debug!(%peer, "DHT Routing Table Updated");
-                            }
-                            
-                            _ => {}
-                        }
-                    }
-                    _ => {}
+                if let SwarmEvent::Behaviour(phalanx_event) = event {
+                    node.handle_network_event(phalanx_event, &mut swarm);
                 }
             }
 
-            // --- Maintenance: Heartbeats & Pruning ---
+            // --- Maintenance Timers ---
             _ = heartbeat_timer.tick() => {
-                broadcast_heartbeat(&mut swarm, &config, local_peer_id);
+                node.broadcast_heartbeat(&mut swarm);
             }
 
             _ = discovery_timer.tick() => {
-                // Every 30 seconds, ask the network: "Who provides Storage?"
+                // Periodically ask the network: "Who provides storage?"
                 let key = phalanx::network::get_storage_key();
                 swarm.behaviour_mut().kademlia.get_providers(key);
-                tracing::debug!("Refreshing Stronghold discovery...");
             }
 
             _ = cleanup_timer.tick() => {
-                sentinel.prune_stale_buffers(&config);
-                storage.archive_stale_sessions(Duration::from_secs(config.storage.stale_session_threshold));
-
-                // re-announce the service
-                let storage_key = phalanx::network::get_storage_key();
-                let _ = swarm.behaviour_mut().kademlia.start_providing(storage_key);
+                node.sentinel.prune_stale_buffers(&node.config);
+                node.storage.archive_stale_sessions(Duration::from_secs(node.config.storage.stale_session_threshold));
             }
         }
     }
 }
 
-// --- HANDLERS (Slightly updated signatures) ---
-
-fn handle_local_evidence(
-    swarm: &mut Swarm<PhalanxBehaviour>,
-    evidence: Evidence,
-    identity: &PhalanxIdentity,
-    config: &PhalanxConfig,
-    storage: &mut Stronghold,
-    local_id: NetworkId,
-) {
-    let envelope = WitnessEnvelope::new(evidence.clone(), identity, local_id);
-    storage.ingest_envelope(envelope.clone());
-
-    let topic_str = match evidence {
-        Evidence::Video(_) => &config.network.video_topic,
-        Evidence::Audio(_) => &config.network.audio_topic,
-    };
-
-    if let Ok(encoded_envelope) = postcard::to_stdvec(&envelope) {
-        let chunks = shards::chunkify(
-            shards::ShardId(evidence.sequence_id().0),
-            encoded_envelope,
-            config.network.chunk_size_bytes,
-            identity.did.clone(),
-        );
-
-        let topic = gossipsub::IdentTopic::new(topic_str);
-        for chunk in chunks {
-            if let Ok(encoded_chunk) = postcard::to_stdvec(&chunk) {
-                let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), encoded_chunk);
-            }
-        }
-    }
-}
-
-fn broadcast_heartbeat(swarm: &mut Swarm<PhalanxBehaviour>, config: &PhalanxConfig, local_id: NetworkId) {
-    let hb = ControlMessage {
-        sender: local_id,
-        load_factor: 0.0,
-        storage_remaining_mb: 1024,
-    };
-
-    if let Ok(encoded) = postcard::to_stdvec(&hb) {
-        let topic = gossipsub::IdentTopic::new(&config.network.control_topic);
-        let _ = swarm.behaviour_mut().gossipsub.publish(topic, encoded);
-    }
-}
+// --- HELPERS ---
 
 fn subscribe_to_topics(swarm: &mut Swarm<PhalanxBehaviour>, config: &PhalanxConfig) {
     let topics = [
