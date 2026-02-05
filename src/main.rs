@@ -109,13 +109,13 @@ impl PhalanxNode {
         evidence: Evidence
     ) {
         // 1. Create Witness Envelope
-         let envelope = WitnessEnvelope::new(evidence.clone(), &self.identity, self.local_peer_id);
-         
-         // 2. Persist Locally (Always save your own data first)
-         self.storage.ingest_envelope(envelope.clone());
+        let envelope = WitnessEnvelope::new(evidence.clone(), &self.identity, self.local_peer_id);
+        
+        // 2. Persist Locally (Always save your own data first)
+        self.storage.ingest_envelope(envelope.clone());
     
-         // 3. Select Topic
-         let topic_str = match evidence {
+        // 3. Select Topic
+        let topic_str = match evidence {
             Evidence::Video(_) => &self.config.network.video_topic,
             Evidence::Audio(_) => &self.config.network.audio_topic,
         };
