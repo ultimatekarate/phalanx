@@ -7,10 +7,10 @@ This plan synthesizes all specialized roadmaps (Network, Security, Stronghold, H
 *Goal: Move from a LAN-only prototype to a WAN-capable, forensic-grade P2P network.*
 **Dependencies:** `network-upgrades.md`, `recurse-assembly-roadmap.md`, `stronghold-upgrades.md`
 
-- [ ] **Network Architecture Refactor**
-  - [ ] Create `src/network.rs` and decouple logic from `lib.rs` (The Facade Pattern).
-  - [ ] Implement **Kademlia DHT** (`libp2p::kad`) to enable WAN peer discovery.
-  - [ ] Implement **Service Discovery** (`announce_stronghold`, `find_strongholds`).
+- [x'] **Network Architecture Refactor**
+  - [x] Create `src/network.rs` and decouple logic from `lib.rs` (The Facade Pattern).
+  - [x] Implement **Kademlia DHT** (`libp2p::kad`) to enable WAN peer discovery.
+  - [x] Implement **Service Discovery** (`announce_stronghold`, `find_strongholds`).
 - [ ] **Infrastructure Setup**
   - [ ] **Cloud Bootstrap Node:** Deploy a minimal Stronghold on a public VPS (static IP) to act as the permanent Relay/Bootstrap peer for development.
 - [ ] **Forensic Integrity Engine**

@@ -4,6 +4,7 @@ use libp2p::{
     identify,
     futures::StreamExt,
     swarm::SwarmEvent, 
+    kad
 };
 use phalanx::identity::NetworkId;
 use phalanx::{
@@ -32,6 +33,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut storage = Stronghold::new("./vault", &config);
     let mut sentinel = Sentinel::new(&config);
     let mut swarm = phalanx::setup_phalanx_swarm(identity.to_libp2p_keypair())?;
+
+    let storage_key = phalanx::network::get_storage_key();
+    
+    // This tells the DHT: "I am a provider for this key"
+    swarm.behaviour_mut().kademlia.start_providing(storage_key.clone())
+        .expect("Failed to start providing storage service");
 
     let local_peer_id = NetworkId(*swarm.local_peer_id());
 
@@ -84,6 +91,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
                         }
                     }
+                    
+                    // 4. Kademlia Events handling
+                    SwarmEvent::Behaviour(PhalanxEvent::Kademlia(kad::Event::OutboundQueryProgressed { 
+                         result: kad::QueryResult::StartProviding(Ok(_)), .. 
+                     })) => {
+                         tracing::info!("Successfully announced Storage capability to the network.");
+                     }
 
                     _ => {}
                 }

@@ -26,8 +26,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut sentinel = Sentinel::new(&config);
     let mut storage = Stronghold::new(&config.storage.vault_path, &config);
     
-    // UPDATED: Pass the raw keypair to the new setup function
+    // Initialize swarm
     let mut swarm = phalanx::setup_phalanx_swarm(my_identity.to_libp2p_keypair())?;
+    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+
+    // Start looking for Strongholds immediately
+    let storage_key = phalanx::network::get_storage_key();
+    let query_id = swarm.behaviour_mut().kademlia.get_providers(storage_key);
+    tracing::info!(?query_id, "Initiated search for Stronghold nodes...");
 
     let local_peer_id = NetworkId(*swarm.local_peer_id());
 
@@ -43,8 +49,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(config.network.heartbeat_interval_secs));
     let mut cleanup_timer = tokio::time::interval(Duration::from_secs(config.network.cleanup_interval_secs));
+    // TODO: put this in the config
+    let mut discovery_timer = tokio::time::interval(Duration::from_secs(30));
 
     println!("--- PHALANX: ACTIVE (WAN + LAN) ---");
+
+    let bootnodes: Vec<&str> = vec![
+        // "/ip4/123.45.67.89/tcp/4001/p2p/12D3KooW..."
+    ];
+
+    for peer_str in bootnodes {
+        if let Ok(multiaddr) = peer_str.parse::<libp2p::Multiaddr>() {
+            tracing::info!("Bootstrapping: Dialing {}", peer_str);
+            
+            // 1. Dial the node to open the TCP connection
+            if let Err(e) = swarm.dial(multiaddr.clone()) {
+                 tracing::warn!("Failed to dial bootnode: {}", e);
+            }
+
+            // 2. Add it to the Kademlia Routing Table
+            // We need to extract the PeerId from the Multiaddr
+            if let Some(libp2p::multiaddr::Protocol::P2p(peer_id)) = multiaddr.iter().last() {
+                swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr);
+                tracing::info!("Added Bootnode {} to DHT", peer_id);
+            }
+        }
+    }
 
     loop {
         select! {
@@ -95,6 +125,44 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
                     
+
+                    SwarmEvent::Behaviour(PhalanxEvent::Kademlia(kad_event)) => {
+                        match kad_event {
+                            // 1. We found Providers!
+                            kad::Event::OutboundQueryProgressed {
+                                result: kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders { providers, key, .. })),
+                                ..
+                            } => {
+                                if key == phalanx::network::get_storage_key() {
+                                    for peer in providers {
+                                        tracing::info!(%peer, "DISCOVERY: Found a Stronghold Node!");
+                                        
+                                        // ACTION: Automatically connect to them
+                                        // This creates a dedicated TCP connection for heavy data transfer
+                                        swarm.dial(peer).unwrap_or_else(|e| tracing::warn!("Failed to dial discovered Stronghold: {}", e));
+                                        
+                                        // OPTIONAL: Add them to a "Preferred Peers" list in your sentinel
+                                        // sentinel.register_stronghold(peer); 
+                                    }
+                                }
+                            }
+                            
+                            // 2. Search finished (no more results coming for this query)
+                            kad::Event::OutboundQueryProgressed {
+                                result: kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FinishedWithNoAdditionalRecord { .. })),
+                                ..
+                            } => {
+                                tracing::debug!("Stronghold discovery query finished.");
+                            }
+
+                            // 3. Routing Table Updates (keep your existing logging here)
+                            kad::Event::RoutingUpdated { peer, .. } => {
+                                tracing::debug!(%peer, "DHT Routing Table Updated");
+                            }
+                            
+                            _ => {}
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -104,9 +172,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 broadcast_heartbeat(&mut swarm, &config, local_peer_id);
             }
 
+            _ = discovery_timer.tick() => {
+                // Every 30 seconds, ask the network: "Who provides Storage?"
+                let key = phalanx::network::get_storage_key();
+                swarm.behaviour_mut().kademlia.get_providers(key);
+                tracing::debug!("Refreshing Stronghold discovery...");
+            }
+
             _ = cleanup_timer.tick() => {
                 sentinel.prune_stale_buffers(&config);
                 storage.archive_stale_sessions(Duration::from_secs(config.storage.stale_session_threshold));
+
+                // re-announce the service
+                let storage_key = phalanx::network::get_storage_key();
+                let _ = swarm.behaviour_mut().kademlia.start_providing(storage_key);
             }
         }
     }

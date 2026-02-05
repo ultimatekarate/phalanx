@@ -10,6 +10,16 @@ use tokio::io;
 // Define a custom Kademlia Record Store (MemoryStore is fine for now)
 pub type PhalanxKadStore = kad::store::MemoryStore;
 
+use libp2p::kad::RecordKey;
+
+// Service Keys for the Distributed Hash Table (DHT)
+pub const SERVICE_STORAGE: &[u8] = b"phalanx/service/storage/v1";
+pub const SERVICE_CONSENSUS: &[u8] = b"phalanx/service/consensus/v1";
+
+pub fn get_storage_key() -> RecordKey {
+    RecordKey::new(&SERVICE_STORAGE)
+}
+
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "PhalanxEvent")]
 pub struct PhalanxBehaviour {
