@@ -1,39 +1,45 @@
-use crate::Crucible::Mold;
-use crate::shards::{ShardChunk, WitnessEnvelope, ShardId};
+use crate::crucible::Mold;
+use crate::identity::Did;
+use crate::shards::{ShardChunk, ShardId, StorageSequence, WitnessEnvelope};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use serde::{Serialize, Deserialize};
 
 // --- STRATEGY 1: SHARD REASSEMBLY (Chunks -> Envelope) ---
 
-pub struct ShardAssembler;
+pub struct ShardAmalgam;
 
-pub struct FragmentBuffer {
+pub struct ShardBuffer {
     total_chunks: u32,
     received_count: u32,
     parts: BTreeMap<u32, Vec<u8>>,
+    estimated_chunk_size: usize,
 }
 
-impl Mold for ShardAssembler {
+impl Mold for ShardAmalgam {
     type Input = ShardChunk;
     type Output = WitnessEnvelope;
     type Key = ShardId;      // Group by Envelope ID
-    type Accumulator = FragmentBuffer;
+    type Accumulator = ShardBuffer;
 
     fn get_key(item: &Self::Input) -> Self::Key {
-        item.envelope_id.clone()
+        item.shard_id.clone()
     }
 
     fn init_accumulator(item: &Self::Input) -> Self::Accumulator {
-        FragmentBuffer {
+        ShardBuffer {
             total_chunks: item.total_chunks,
             received_count: 0,
             parts: BTreeMap::new(),
+            estimated_chunk_size: item.data.len(),
         }
     }
 
     fn ingest(acc: &mut Self::Accumulator, item: Self::Input) {
         if !acc.parts.contains_key(&item.chunk_index) {
+            if item.data.len() > acc.estimated_chunk_size {
+                acc.estimated_chunk_size = item.data.len();
+            }
             acc.parts.insert(item.chunk_index, item.data);
             acc.received_count += 1;
         }
@@ -51,7 +57,8 @@ impl Mold for ShardAssembler {
             if let Some(part) = acc.parts.get(&i) {
                 full_data.extend_from_slice(part);
             } else {
-                return None; // Should not happen given is_ready check
+                // dirty seal by padding zeros
+                full_data.extend(std::iter::repeat(0).take(acc.estimated_chunk_size));
             }
         }
         // Deserialize
@@ -63,75 +70,97 @@ impl Mold for ShardAssembler {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForensicGap {
-    pub start_seq: u64,
-    pub end_seq: u64,
+    pub start_seq: u32,
+    pub end_seq: u32,
     pub detected_at: u64,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct Volley {
     pub id: String,
-    pub artifacts: BTreeMap<u64, WitnessEnvelope>,
+    pub owner_did: String,
+    pub artifacts: Vec<WitnessEnvelope>,
     pub gaps: Vec<ForensicGap>,
+    pub is_complete: bool
 }
 
-pub struct VolleyAssembler;
+pub struct VolleyAmalgam;
 
 pub struct VolleyBuffer {
-    pub artifacts: BTreeMap<u64, WitnessEnvelope>,
-    pub gaps: Vec<ForensicGap>,
-    pub expected_next_seq: u64,
-    pub start_seq: u64,
+    pub artifacts: BTreeMap<StorageSequence, WitnessEnvelope>,
+    pub volley_id: String,
+    pub owner_did: Did
 }
 
-impl Mold for VolleyAssembler {
+impl Mold for VolleyAmalgam {
     type Input = WitnessEnvelope;
     type Output = Volley;
     type Key = String; // Peer DID
     type Accumulator = VolleyBuffer;
 
     fn get_key(item: &Self::Input) -> Self::Key {
-        item.provenance.signer_did.to_string()
+        item.did.to_string()
     }
 
     fn init_accumulator(item: &Self::Input) -> Self::Accumulator {
-        let seq = item.evidence.sequence_id().0;
         VolleyBuffer {
             artifacts: BTreeMap::new(),
-            gaps: Vec::new(),
-            expected_next_seq: seq,
-            start_seq: seq,
+            volley_id: item.evidence.volley_id().to_string(),
+            owner_did: item.did.clone(),
         }
     }
 
     fn ingest(acc: &mut Self::Accumulator, item: Self::Input) {
-        let seq = item.evidence.sequence_id().0;
+        // TODO: Maybe check if item.volley_id matches acc.volley_id
+        // and force a seal if they differ?
         
-        // Gap Detection Logic
-        if seq > acc.expected_next_seq {
-            acc.gaps.push(ForensicGap {
-                start_seq: acc.expected_next_seq,
-                end_seq: seq - 1,
-                detected_at: chrono::Utc::now().timestamp() as u64,
-            });
-            acc.expected_next_seq = seq + 1;
-        } else if seq == acc.expected_next_seq {
-            acc.expected_next_seq += 1;
-        }
-        // Late frames are just added, we don't retroactively fix gaps yet for simplicity
+        // but for this phase, we assume sequential consistency.
+
+        let seq = item.evidence.sequence_id();
         acc.artifacts.insert(seq, item);
     }
 
     fn is_ready(acc: &Self::Accumulator, elapsed: Duration) -> bool {
         // Seal if we have > 50 frames OR it's been > 5 seconds
+        // Magic constants for now
         acc.artifacts.len() >= 50 || elapsed > Duration::from_secs(5)
     }
 
-    fn assemble(key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output> {
+    fn assemble(_key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output> {
+        if acc.artifacts.is_empty() { return None; }
+
+        let mut sorted_artifacts: Vec<WitnessEnvelope> = Vec::with_capacity(acc.artifacts.len());
+        let mut gaps = Vec::new();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+
+        let mut expected_seq: Option<u32> = None;
+
+        // Iterate through sorted keys to detect gaps
+        for (seq, env) in acc.artifacts {
+            let current_seq = seq.0;
+
+            if let Some(expected) = expected_seq {
+                if current_seq > expected {
+                    // GAP DETECTED: Missing sequences between expected and current
+                    gaps.push(ForensicGap {
+                        start_seq: expected,
+                        end_seq: current_seq - 1,
+                        detected_at: now,
+                    });
+                }
+            }
+
+            // Expect the immediate next integer
+            expected_seq = Some(current_seq + 1);
+            sorted_artifacts.push(env);
+        }
+
         Some(Volley {
-            id: format!("vol_{}_{}", key, acc.start_seq),
-            artifacts: acc.artifacts,
-            gaps: acc.gaps,
+            id: acc.volley_id,
+            owner_did: acc.owner_did.to_string(),
+            artifacts: sorted_artifacts,
+            gaps,
+            is_complete: true,
         })
     }
 }

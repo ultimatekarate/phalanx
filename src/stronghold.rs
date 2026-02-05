@@ -1,66 +1,36 @@
-use crate::shards::{StorageSequence, Evidence, WitnessEnvelope};
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::path::PathBuf;
-//use std::time::Instant;
-
-use tokio::time::Instant;
+use crate::shards::{StorageSequence, Evidence, WitnessEnvelope, ShardChunk};
+use crate::crucible::{Crucible};
+use crate::strategies::{ShardAmalgam, VolleyAmalgam, Volley}; 
+use crate::config::PhalanxConfig;
 use crate::identity::Did;
 
-use tracing::{info, debug, warn, error, instrument,};
-use serde::{Serialize, Deserialize};
-
-pub trait Assembler {
-    type Output;
-    fn is_complete(&self) -> bool;
-    fn assemble(self) -> Self::Output;
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Volley {
-    pub volley_id: String,           // Unique ID for this specific burst
-    pub owner_did: Did,              // The Identity this volley belongs to
-    pub start_time: u64,             // Unix timestamp of the first shard
-    pub shards: Vec<WitnessEnvelope>,
-    pub is_complete: bool,           // Marked true on a 'Seal' command
-}
-
-impl Volley {
-    pub fn new(id: String, did: Did) -> Self {
-        Self {
-            volley_id: id,
-            owner_did: did,
-            start_time: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-            shards: Vec::new(),
-            is_complete: false,
-        }
-    }
-
-    /// Adds a shard and ensures logical sequence ordering
-    pub fn push(&mut self, envelope: WitnessEnvelope) {
-        self.shards.push(envelope);
-        // We sort by StorageSequence to ensure the Volley is continuous
-        self.shards.sort_by_key(|e| e.evidence.sequence_id());
-    }
-}
-
-// Stronghold is a Personal Data Server. Sentinels gather information 
-// and store it in a stronghold.
+use std::collections::{HashSet, HashMap};
+use std::fs;
+use std::path::PathBuf;
+use tokio::time::Instant;
+use tracing::{info, error, warn, debug, instrument};
 
 pub struct Stronghold {
     pub vault_storage: PathBuf,
     pub wal_directory: PathBuf,
-    pub active_sessions: HashMap<Did, HashMap<StorageSequence, WitnessEnvelope>>, 
-    pub session_activity: HashMap<Did, tokio::time::Instant>,
+
+    // --- THE WORKBENCHES ---
+    // Tier 1: Reassembles Packets -> Evidence (Key: ShardId)
+    pub micro_layer: Crucible<ShardAmalgam>,
+    
+    // Tier 2: Reassembles Evidence -> Volleys (Key: DID)
+    // This effectively replaces the old 'active_sessions' HashMap
+    pub macro_layer: Crucible<VolleyAmalgam>,
+    
+    // --- THE POLICY STATE ---
     pub processed_sequences: HashMap<Did, HashSet<StorageSequence>>,
-    pub shards_needed_to_archive: usize,
-    pub active_volleys: HashMap<Did, Volley>,
+    pub session_activity: HashMap<Did, Instant>,
+    
+    pub stale_threshold: std::time::Duration,
 }
 
 impl Stronghold {
-    pub fn new(vault_path: &str, config: &crate::config::PhalanxConfig) -> Self {
-        // Ensure the vault directory exists
+    pub fn new(vault_path: &str, config: &PhalanxConfig) -> Self {
         let root = PathBuf::from(vault_path);
         let wal = root.join("wal");
         let _ = fs::create_dir_all(&root);
@@ -69,176 +39,138 @@ impl Stronghold {
         let mut stronghold = Self {
             vault_storage: root,
             wal_directory: wal,
-            active_sessions: HashMap::new(),
-            session_activity: HashMap::new(),
+            micro_layer: Crucible::new(),
+            macro_layer: Crucible::new(),
             processed_sequences: HashMap::new(),
-            shards_needed_to_archive: config.storage.shards_needed_to_archive,
-            active_volleys: HashMap::new(),
+            session_activity: HashMap::new(),
+            stale_threshold: std::time::Duration::from_secs(config.storage.stale_session_threshold),
         };
-
+        
         stronghold.recover_from_wal();
         stronghold
     }
 
-    fn write_to_wal(&self, envelope: &WitnessEnvelope) -> std::io::Result<()> {
-        let safe_did = envelope.did.to_safe_name();
-        // Use .0 to avoid potential Display trait formatting issues in filenames
-        let file_name = format!("{}_{}.wal", safe_did, envelope.evidence.sequence_id().0);
-        let wal_path = self.wal_directory.join(file_name);
-
-        let bytes = postcard::to_stdvec(envelope).map_err(|e| 
-            std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        
-        fs::write(wal_path, bytes)?;
-        Ok(())
-    }
-
-    fn clear_session_wal(&self, did_full: &Did, sequence_ids: &[StorageSequence]) {
-        let safe_did = did_full.to_safe_name();
-        for seq in sequence_ids {
-            let file_name = format!("{}_{}.tmp", safe_did, seq);
-            let _ = fs::remove_file(self.wal_directory.join(file_name));
+    /// ENTRY POINT 1: Raw Network Data (Recursive Flow)
+    #[instrument(skip(self, chunk), level = "debug")]
+    pub fn ingest_chunk(&mut self, chunk: ShardChunk) {
+        // 1. Put chunk on the Micro Workbench
+        if let Some(envelope) = self.micro_layer.process(chunk) {
+            debug!(seq = %envelope.evidence.sequence_id(), "Micro-assembly complete. Promoting.");
+            // 2. If finished, promote to the Policy Layer
+            self.ingest_envelope(envelope);
         }
     }
 
-    /// Scans the WAL directory and populates active_sessions with unarchived data.
-    #[instrument(skip(self), level = "info")]
-    fn recover_from_wal(&mut self) {
-        let span = tracing::info_span!("wal_recovery");
-        let _enter = span.enter();
-        
-        if let Ok(entries) = fs::read_dir(&self.wal_directory) {
-            let mut recovered_count = 0;
-            let now = Instant::now();
-
-            for entry in entries.flatten() {
-                let path = entry.path();
-                
-                // Skip zero-byte files (remnants of the Windows ADS/Colon bug)
-                if fs::metadata(&path).map(|m| m.len()).unwrap_or(0) == 0 {
-                    let _ = fs::remove_file(path);
-                    continue;
-                }
-
-                if let Ok(bytes) = fs::read(&path) {
-                    if let Ok(envelope) = postcard::from_bytes::<WitnessEnvelope>(&bytes) {
-                        let did = envelope.did.clone();
-                        let seq = envelope.evidence.sequence_id();
-
-                        self.active_sessions.entry(did.clone()).or_default().insert(seq, envelope);
-                        self.processed_sequences.entry(did.clone()).or_default().insert(seq);
-                        self.session_activity.insert(did, now);
-                        
-                        recovered_count += 1;
-                    }
-                }
-            }
-            if recovered_count > 0 {
-                info!(count = recovered_count, "Successfully restored state from WAL");
-            }
-        }
+    // --- STATE INSPECTION (The Bridge) ---
+    // Look into the Workbench to see what is currently happening
+    pub fn get_active_volley_shards(&self, did: &Did) -> Option<&std::collections::BTreeMap<StorageSequence, WitnessEnvelope>> {
+        self.macro_layer.contexts.get(&did.to_string())
+            .map(|ctx| &ctx.accumulator.artifacts)
     }
 
-    /// The PDS validates the signature against the DID before storing
-    #[instrument(
-        level = "info", 
-        skip(self, envelope)
-    )]
-    pub fn ingest_envelope(&mut self, envelope: WitnessEnvelope) {
-        // 1. Durability: Write to WAL first
-        if let Err(e) = self.write_to_wal(&envelope) {
-            error!(error = %e, "CRITICAL: WAL write failed. Data loss risk.");
-            return;
-        }
-        
-        // 2. Cryptographic Validation
-        if !envelope.verify() {
-            error!(did = %envelope.did, "Rejected invalid signature");
-            return;
+    // --- PERSISTENCE ---
+    fn archive_volley(&mut self, volley: Volley) {
+        if volley.artifacts.is_empty() { return; }
+
+        let safe_did = volley.owner_did.replace(":", "_");
+        let archive_dir = self.vault_storage.join(&safe_did);
+        let _ = fs::create_dir_all(&archive_dir);
+
+        // Update Replay History
+        let did = Did(volley.owner_did.clone());
+        let history = self.processed_sequences.entry(did).or_default();
+        for artifact in &volley.artifacts {
+            history.insert(artifact.evidence.sequence_id());
         }
 
-        let did_key = envelope.did.clone(); 
-        let seq_id = envelope.evidence.sequence_id();
-
-        // 3. Replay Protection
-        if self.processed_sequences.get(&did_key).is_some_and(|s| s.contains(&seq_id)) {
-            debug!(%seq_id, "Replay protection: Shard already archived. Skipping.");
-            return;
-        }
-
-        // 4. In-Memory Tracking
-        self.session_activity.insert(did_key.clone(), Instant::now());
-        let session = self.active_sessions.entry(did_key.clone()).or_default();
-        session.insert(seq_id, envelope);
-
-        // 5. Threshold Check
-        if session.len() >= self.shards_needed_to_archive { 
-            info!(%did_key, "Threshold met. Archiving session.");
-            self.archive_session(&did_key); 
-        }
-    }
-
-    pub fn archive_stale_sessions(&mut self, timeout: std::time::Duration) {
-        let now = Instant::now();
-        let stale_dids: Vec<Did> = self.session_activity
-            .iter()
-            .filter_map(|(did, &last_active)| {
-                if now.duration_since(last_active) > timeout { Some(did.clone()) } else { None }
-            })
-            .collect();
-
-        for did in stale_dids {
-            info!(did = %did, "Force-archiving stale session");
-            self.archive_session(&did);
-        }
-    }
-
-    #[instrument(level = "info", skip(self))]
-    fn archive_session(&mut self, did: &Did) {
-        let session = match self.active_sessions.remove(did) {
-            Some(s) => s,
-            None => return,
-        };
-
-        let mut keys: Vec<StorageSequence> = session.keys().cloned().collect();
-        keys.sort();
-
-        // Map envelopes to Evidence variant for archival
-        let sorted_evidence: Vec<Evidence> = keys.iter()
-            .filter_map(|k| {
-                session.get(k).map(|env| {
-                    self.processed_sequences.entry(did.clone()).or_default().insert(*k);
-                    env.evidence.clone()
-                })
-            })
-            .collect();
-
-        if sorted_evidence.is_empty() { return; }
-
-        // Determine file type based on the first shard in the bundle
-        let extension = match sorted_evidence[0] {
+        let extension = match volley.artifacts[0].evidence {
             Evidence::Video(_) => "vid.phlx",
             Evidence::Audio(_) => "aud.phlx",
         };
 
-        let safe_did = did.to_safe_name();
-        let archive_dir = self.vault_storage.join(&safe_did);
-        let _ = std::fs::create_dir_all(&archive_dir);
+        let filename = format!("{}.{}", volley.id, extension);
+        let path = archive_dir.join(filename);
 
-        let file_name = format!("session_{}.{}", sorted_evidence[0].timestamp(), extension);
-        let save_path = archive_dir.join(file_name);
-
-        match postcard::to_stdvec(&sorted_evidence) {
-            Ok(encoded) => {
-                if let Err(e) = std::fs::write(&save_path, encoded) {
-                    error!(err = %e, "Archival write failed");
+        match postcard::to_stdvec(&volley) {
+            Ok(bytes) => {
+                if let Err(e) = fs::write(&path, bytes) {
+                    error!(%e, "Failed to write volley archive");
                 } else {
-                    info!(path = ?save_path, "Archive successful. Clearing WAL.");
-                    self.clear_session_wal(did, &keys);
-                    self.session_activity.remove(did);
+                    info!(path = ?path, "Volley successfully archived");
                 }
             }
-            Err(e) => error!(err = %e, "Archival serialization failed"),
+            Err(e) => error!(%e, "Serialization error"),
+        }
+    }
+
+    fn write_to_wal(&self, envelope: &WitnessEnvelope) -> std::io::Result<()> {
+        let safe_did = envelope.did.to_safe_name();
+        let file_name = format!("{}_{}.wal", safe_did, envelope.evidence.sequence_id().0);
+        let wal_path = self.wal_directory.join(file_name);
+        let bytes = postcard::to_stdvec(envelope).map_err(|e| 
+            std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        fs::write(wal_path, bytes)?;
+        Ok(())
+    }
+
+    fn recover_from_wal(&mut self) {
+        if let Ok(entries) = fs::read_dir(&self.wal_directory) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if fs::metadata(&path).map(|m| m.len()).unwrap_or(0) == 0 { continue; }
+
+                if let Ok(bytes) = fs::read(&path) {
+                    if let Ok(envelope) = postcard::from_bytes::<WitnessEnvelope>(&bytes) {
+                        // RECOVERY: Load directly into Macro Workbench
+                        self.macro_layer.process(envelope);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn ingest_envelope(&mut self, envelope: WitnessEnvelope) {
+        if let Err(e) = self.write_to_wal(&envelope) {
+            error!(error = %e, "CRITICAL: WAL write failed.");
+            return;
+        }
+
+        if !envelope.verify() { 
+            error!(did = %envelope.did, "Rejected invalid signature"); 
+            return; 
+        }
+        
+        let did = envelope.did.clone();
+        let seq = envelope.evidence.sequence_id();
+
+        if self.processed_sequences.get(&did).is_some_and(|set| set.contains(&seq)) {
+            debug!(%seq, "Replay protection: Dropping already archived shard.");
+            return;
+        }
+
+        self.session_activity.insert(did.clone(), Instant::now());
+
+        let output = self.macro_layer.process(envelope);
+        
+        if let Some(volley) = output {
+            info!(volley = %volley.id, "Volley sealed (Natural). Archiving.");
+            self.archive_volley(volley);
+        } 
+    }
+
+    pub fn archive_stale_sessions(&mut self, ttl: std::time::Duration) {
+        // 1. Flush Micro Layer
+        let recovered_envelopes = self.micro_layer.flush_stale(ttl);
+        for env in recovered_envelopes {
+            warn!(seq = %env.evidence.sequence_id(), "Salvaged incomplete shard.");
+            self.ingest_envelope(env);
+        }
+
+        // 2. Flush Macro Layer (for any data that was already sitting there)
+        let recovered_volleys = self.macro_layer.flush_stale(ttl);
+        for volley in recovered_volleys {
+            warn!(id = %volley.id, "Force-archiving stale volley");
+            self.archive_volley(volley);
         }
     }
 }

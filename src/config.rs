@@ -89,6 +89,34 @@ impl PhalanxConfig {
         }
     }
 
+    pub fn test_salvage_on_node_death() -> Self {
+        Self {
+            network: NetworkConfig {
+                heartbeat_interval_secs: 1,      // Pulse every second
+                pulse_timeout_secs: 2,           // Declare dead after 2 missed pulses
+                chunk_size_bytes: 1024,          // Smaller chunks for easier testing
+                video_topic: "test/video".into(),
+                audio_topic: "test/audio".into(),
+                control_topic: "test/control".into(),
+                grace_period: 10,
+                cleanup_interval_secs: 1,
+            },
+            storage: StorageConfig {
+                vault_path: "sim_vault".into(),
+                max_video_buffer: 10,
+                max_audio_buffer: 10,
+                max_peers: 5,
+                stale_session_threshold: 0,      // Archive very quickly
+                shards_needed_to_archive: 1,     
+            },
+            hardware: HardwareConfig {
+                camera_fps: 10,                 // Lower CPU load for simulation
+                audio_sample_rate: 16000,
+                audio_channels: 1,
+            },
+        }
+    }
+
 }
 
 impl Default for PhalanxConfig {

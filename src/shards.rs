@@ -126,7 +126,7 @@ impl std::ops::AddAssign<u32> for StorageSequence {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize, Default)]
 pub struct ShardId(pub u32);
 
 impl fmt::Display for ShardId {

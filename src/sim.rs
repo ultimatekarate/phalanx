@@ -158,7 +158,7 @@ async fn test_salvage_on_node_death() {
     let test_span = info_span!("test_salvage", shard_id = 999);
     let _enter = test_span.enter();
 
-    let config = PhalanxConfig::test_defaults();
+    let config = PhalanxConfig::test_salvage_on_node_death();
     let (mut harness, relay_rx) = SimulationHarness::init_mesh(config.clone());
     
     let nodes_ref = Arc::clone(&harness.nodes);
@@ -172,6 +172,7 @@ async fn test_salvage_on_node_death() {
     
     // Give nodes a moment to initialize and register in the relay
     tokio::time::sleep(Duration::from_secs(1)).await;
+    
 
     // 2. Transmit Valid, Serialized Data
     let node_a_network_id = harness.resolve_did(&node_a_did).await
@@ -216,19 +217,18 @@ async fn test_salvage_on_node_death() {
     info!(target = "Alpha", "Shutting down Alpha to trigger 'Dark Peer' state");
     harness.stop_node(&node_a_did).await;
 
-    // 4. TRIGGER SALVAGE (The Critical Sync)
-    // Advance time past the heartbeat timeout (65s)
-    let warp_duration = Duration::from_secs(70);
-    info!(warp = ?warp_duration, "Advancing virtual clock");
-    tokio::time::advance(warp_duration).await;
 
-    // IMPORTANT: In a paused-time environment, 'advance' moves the clock,
-    // but pending tasks (like cleanup_tick) need a 'sleep' or 'yield' to be scheduled.
-    // We sleep for a small amount of "virtual time" to ensure the cleanup loop runs.
+    // 4. TRIGGER SALVAGE (THE DOUBLE WARP)
+    // Warp 1: Flushes Micro Layer -> Moves data to Macro Layer
+    let warp_duration = Duration::from_secs(700);
+    info!("Warp 1: Moving data from Micro to Macro");
+    tokio::time::advance(warp_duration).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    info!("Warping again to trigger Stronghold disk archival");
-    tokio::time::advance(Duration::from_secs(10)).await;
+    // Warp 2: Ages Macro Layer -> Flushes data to Disk
+    // Without this, the data sits in Macro Layer because it looks "fresh" (0ms old)
+    info!("Warp 2: Moving data from Macro to Disk");
+    tokio::time::advance(warp_duration).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // 5. VERIFICATION
@@ -301,7 +301,7 @@ async fn test_out_of_sequence_salvage_on_node_death() {
     storage.ingest_envelope(captured_envelopes[3].clone());
 
     // 4. Verification: Ensure continuity in active sessions
-    let session = storage.active_sessions.get(&identity.did)
+    let session = storage.get_active_volley_shards(&identity.did)
         .expect("Session should exist for recovered DID");
 
     let mut keys: Vec<&StorageSequence> = session.keys().collect();
@@ -361,7 +361,7 @@ async fn test_stronghold_crash_recovery() {
     // Stronghold::new automatically calls recover_from_wal()
     let recovered_storage = Stronghold::new(vault_path, &config);
     
-    let recovered_session = recovered_storage.active_sessions.get(&identity.did)
+    let recovered_session = recovered_storage.get_active_volley_shards(&identity.did)
         .expect("Stronghold failed to recover DID session from WAL");
         
     let recovered_env = recovered_session.get(&seq)

@@ -4,52 +4,80 @@ This document outlines the critical "Fork in the Road" moments where Phalanx div
 
 ---
 
-## 1. The Transport Pivot: Integrity vs. Continuity
+## ADR 001: The Transport Pivot (Integrity vs. Continuity)
 
-From WebRTC (Real-Time) → Crucible (Forensic Integrity)
+### Context
 
-* **The Hypothesis:** Use standard WebRTC (like Zoom/Meet) for low-latency video transmission over UDP.
-* **The Failure (The "Lie of Smoothness"):** WebRTC optimizes for *Quality of Experience (QoE)*. When packets drop, it uses "Packet Loss Concealment" (PLC) to interpolate pixels and smooth over glitches. In a legal context, software-generated pixel interpolation can be argued as "tampering" or "manufacturing evidence."
-* **The Pivot:** We engineered **Crucible**, a custom ingestion engine.
-  * *Mechanism:* Instead of skipping gaps to maintain flow, Crucible materializes gaps as cryptographically signed "Tombstones."
-  * *Outcome:* We treat the stream as a sparse set cover problem. 0% interpolation is allowed. The viewer sees exactly what was received, with verified proof of what was lost.
+The initial hypothesis was to utilize standard WebRTC (similar to Zoom or Google Meet) to achieve low-latency video transmission over UDP. However, this approach failed due to the "Lie of Smoothness." WebRTC optimizes for *Quality of Experience (QoE)*; when packets are dropped, it employs "Packet Loss Concealment" (PLC) to interpolate pixels and smooth over glitches. In a legal context, software-generated pixel interpolation is inadmissible and can be argued by defense counsel as "tampering" or "manufacturing evidence."
 
-## 2. The Data Pivot: File-Based vs. Shard-Based
+### Decision
 
-From MP4 Containers → Witness Envelopes
+We engineered **Crucible**, a custom ingestion engine, to replace WebRTC.
 
-* **The Hypothesis:** Record video to standard `.mp4` files and hash the file upon completion.
-* **The Failure (The "Atom Vulnerability"):** MP4 files require a global header (MOOV atom) to be written at the *end* of the recording. If the device is destroyed, power is cut, or the app crashes mid-recording, the header is never written, rendering the entire file corrupt and unreadable.
-* **The Pivot:** We invented the **Witness Envelope**.
-  * *Mechanism:* A custom serialization format where every "Volley" (temporal unit) is wrapped in its own self-sovereign identity structure with independent metadata.
-  * *Outcome:* **Atomic Validity.** If a phone is destroyed at 10:05, the evidence from 10:04 is functionally independent, playable, and legally admissible.
+* **Mechanism:** Instead of skipping gaps to maintain visual flow, Crucible materializes gaps as cryptographically signed "Tombstones."
+* **Constraint:** Zero percent interpolation is permitted.
 
-## 3. The Consensus Pivot: Global vs. Local
+### Consequences
 
-From Blockchain Ledger → Recursive Assembly (Merkle Tree)
+* **Positive:** The stream is treated as a sparse set cover problem. The viewer sees exactly what was received, with verified cryptographic proof of exactly what was lost.
+* **Negative:** The viewing experience may be jittery or contain visual artifacts (black frames) where data is missing, prioritizing forensic accuracy over viewer comfort.
 
-* **The Hypothesis:** Hash every frame and broadcast it to a public ledger/blockchain for immutability.
-* **The Failure (The "Throughput Trap"):** Public blockchains are too slow (15 TPS) and expensive. Private blockchains are too heavy for mobile battery life. The latency of "Global Consensus" caused buffer overflows on the recording device.
-* **The Pivot:** We shifted to **Recursive Assembly**.
-  * *Mechanism:* We don't need the world to agree the video exists; we need to prove the *Sensor* saw it. We use a local **"Merkle Tree of Time"**—smelting Shards into Volleys, and Volleys into Archives locally.
-  * *Outcome:* We achieve "Chain of Custody" without the network overhead of "Global Consensus."
+---
 
-## 4. The Routing Pivot: Equality vs. Biology
+## ADR 002: The Data Pivot (File-Based vs. Shard-Based)
 
-From Standard Gossipsub → Vampire Routing
+**Context**: The standard industry practice is to record video to `.mp4` containers and hash the file upon completion. This introduced the "Atom Vulnerability": MP4 files require a global header (the MOOV atom) to be written at the *end* of the recording. If the device is destroyed, power is cut, or the application crashes mid-recording, this header is never written, rendering the entire file corrupt and unreadable.
 
-* **The Hypothesis:** Use standard P2P gossip where every node is an equal peer that relays messages to maximize network health.
-* **The Failure (The "Tragedy of the Commons"):** In high-stress scenarios (protests, disasters), relaying heavy video traffic drains the battery of the very phones trying to record evidence.
-* **The Pivot:** We implemented **Vampire Routing** (Biological Resource Governance).
-* *Mechanism:* We derived a utility function based on the derivative of battery drain ($\frac{dE}{dt}$). Nodes dynamically demote themselves to "Leaf Mode" (Listen-Only) when under stress.
-* *Outcome:* The network degrades gracefully. The mesh sacrifices "Routing Efficiency" to preserve "Witness Survivability."
+**Decision**: We implemented the **Witness Envelope** architecture.
 
-## 5. The Use-Case Pivot: Viewership vs. Archival
+**Mechanism:** A custom serialization format where every "Volley" (a discrete temporal unit) is wrapped in its own self-sovereign identity structure containing independent metadata.
 
-From Distributed Live Streaming → Streaming Upload (The "Lifeboat" Protocol)
+**Consequences**:
 
-* **The Hypothesis:** Build a "P2P Twitch" or "Periscope" where users could broadcast live protests to multiple peers for real-time viewing.
-* **The Failure (The "Fan-Out" Bottleneck):** Mobile networks have highly asymmetric bandwidth (low upload speeds). Trying to serve a live video stream to multiple viewing peers saturated the uploader's bandwidth, causing buffer bloat and dropped frames. The "Real-Time" requirement compromised the quality of the recording itself.
-* **The Pivot:** We shifted to **Streaming Upload**.
-  * *Mechanism:* We abandoned the "One-to-Many" broadcast model for a "One-to-One" (or One-to-Few) offload model. The goal changed from *broadcasting* the event to *evacuating* the data.
-  * *Outcome:* We treat the network as a "Bucket Brigade" for safekeeping, not a content delivery network (CDN) for entertainment. We optimize for "Save Rate," not "View Rate."
+* **Positive:** **Atomic Validity.** If a device is destroyed at 10:05, the evidence captured at 10:04 remains functionally independent, playable, and legally admissible.
+* **Positive:** Eliminates the single point of failure associated with global file headers.
+
+---
+
+## ADR 003: The Consensus Pivot (Global vs. Local)
+
+**Context**: We hypothesized that hashing every frame to a public ledger/blockchain would ensure immutability. This failed due to the "Throughput Trap." Public blockchains have low throughput (e.g., 15 TPS) and high costs, while private blockchains are too heavy for mobile battery life. The latency required to achieve "Global Consensus" caused buffer overflows on the recording device, compromising the recording itself.
+
+**Decision**: We shifted to **Recursive Assembly** using a local "Merkle Tree of Time."
+
+**Mechanism:** The system does not attempt to prove the world agrees the video exists, but rather that the *Sensor* saw it. Shards are smelted into Volleys, and Volleys into Archives locally.
+
+**Consequences**:
+
+* **Positive:** Achieves a rigorous "Chain of Custody" without the network overhead and latency of global consensus.
+* **Positive:** Significantly reduces battery and bandwidth consumption on the client device.
+
+---
+
+## ADR 004: The Routing Pivot (Equality vs. Biology)
+
+**Context**: Standard P2P gossip protocols (like Gossipsub) treat every node as an equal peer that relays messages to maximize network health. In high-stress scenarios (protests, disasters), this created a "Tragedy of the Commons," where relaying heavy video traffic drained the batteries of the very phones trying to record critical evidence.
+
+**Decision**: We implemented **Vampire Routing** (Biological Resource Governance).
+
+**Mechanism:** We derived a utility function based on the derivative of battery drain ($\frac{dE}{dt}$). Nodes dynamically demote themselves to "Leaf Mode" (Listen-Only) when they detect they are under resource stress.
+
+**Consequences**:
+
+* **Positive:** The network degrades gracefully under load.
+* **Trade-off:** The mesh explicitly sacrifices "Routing Efficiency" (bandwidth throughput) to preserve "Witness Survivability" (device uptime).
+
+---
+
+### ADR 005: The Use-Case Pivot (Viewership vs. Archival)
+
+**Context**: The original goal was to build a "P2P Twitch" for distributed live streaming, allowing users to broadcast events to multiple peers in real-time. This failed due to the "Fan-Out Bottleneck." Mobile networks have highly asymmetric bandwidth (low upload speeds). Attempting to serve a live stream to multiple viewing peers saturated the uploader's bandwidth, causing buffer bloat and dropped frames, which compromised the quality of the forensic recording.
+
+**Decision**: We shifted the protocol's primary objective to **Streaming Upload** (The "Lifeboat" Protocol).
+
+**Mechanism:** We abandoned the "One-to-Many" broadcast model in favor of a "One-to-One" (or One-to-Few) offload model. The goal changed from *broadcasting* the event to *evacuating* the data.
+
+**Consequences:**
+
+* **Positive:** We optimize for "Save Rate" rather than "View Rate."
+* **Outcome:** The network functions as a "Bucket Brigade" for data safekeeping rather than a Content Delivery Network (CDN) for entertainment.
