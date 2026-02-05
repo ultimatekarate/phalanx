@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # The Networking Engine
-libp2p = { version = "0.56.0", features = ["tcp", "quic", "gossipsub", "mdns", "tokio","noise", "yamux", "macros"] }
+libp2p = { version = "0.56.0", features = ["kad", "identify", "ping","tcp", "quic", "gossipsub", "mdns", "tokio","noise", "yamux", "macros"] }
 # Async Runtime
 tokio = { version = "1.0", features = ["full", "test-util"] }
 # Logging

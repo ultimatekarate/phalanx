@@ -164,6 +164,14 @@ impl PhalanxIdentity {
 
         public_key.verify(data, &sig).is_ok()
     }
+
+    pub fn to_libp2p_keypair(&self) -> libp2p::identity::Keypair {
+        let mut bytes = self.signing_key.to_bytes();
+        
+        // We use the raw bytes to cross the type boundary safely
+        libp2p::identity::Keypair::ed25519_from_bytes(&mut bytes)
+            .expect("Critical: Failed to convert valid Dalek key to Libp2p key")
+    }
 }
 
 #[cfg(test)]

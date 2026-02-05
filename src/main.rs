@@ -1,4 +1,4 @@
-use libp2p::{gossipsub, futures::StreamExt, Swarm, swarm::SwarmEvent};
+use libp2p::{gossipsub, kad, mdns, identify, swarm::SwarmEvent, futures::StreamExt, Swarm};
 use std::error::Error;
 use std::time::Duration;
 use tokio::select;
@@ -10,8 +10,9 @@ use phalanx::audio;
 use phalanx::identity::{NetworkId, PhalanxIdentity};
 use phalanx::sentinel::{Sentinel, ControlMessage};
 use phalanx::config::PhalanxConfig;
-use phalanx::PhalanxBehaviour;
 use phalanx::stronghold::Stronghold;
+// Import the new re-exports from lib.rs
+use phalanx::{PhalanxBehaviour, PhalanxEvent}; 
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -24,7 +25,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let my_identity = phalanx::init_identity();
     let mut sentinel = Sentinel::new(&config);
     let mut storage = Stronghold::new(&config.storage.vault_path, &config);
-    let mut swarm = phalanx::setup_phalanx_swarm(&config).await?;
+    
+    // UPDATED: Pass the raw keypair to the new setup function
+    let mut swarm = phalanx::setup_phalanx_swarm(my_identity.to_libp2p_keypair())?;
 
     let local_peer_id = NetworkId(*swarm.local_peer_id());
 
@@ -41,7 +44,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(config.network.heartbeat_interval_secs));
     let mut cleanup_timer = tokio::time::interval(Duration::from_secs(config.network.cleanup_interval_secs));
 
-    println!("--- PHALANX: ACTIVE ---");
+    println!("--- PHALANX: ACTIVE (WAN + LAN) ---");
 
     loop {
         select! {
@@ -57,19 +60,41 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // --- Network Input: Peer Data ---
             event = swarm.select_next_some() => {
                 match event {
-                    SwarmEvent::Behaviour(phalanx::PhalanxEvent::Gossipsub(g_event)) => {
-                        let topic_str = g_event.message.topic.as_str();
+                    // 1. DATA LAYER (Gossipsub)
+                    // We now match strictly against the enum defined in network.rs
+                    SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(gossipsub::Event::Message { message, .. })) => {
+                        let topic_str = message.topic.as_str();
                         
-                        // Pass to Sentinel for reassembly
-                        if let Ok(chunk) = postcard::from_bytes::<shards::ShardChunk>(&g_event.message.data) {
+                        if let Ok(chunk) = postcard::from_bytes::<shards::ShardChunk>(&message.data) {
                             if let Some(envelope) = sentinel.process_chunk(chunk, topic_str, &config, &my_identity, local_peer_id) {
                                 storage.ingest_envelope(envelope);
                             }
                         }
                     }
-                    SwarmEvent::Behaviour(phalanx::PhalanxEvent::Metadata(_m_event)) => {
-                        // Handle subscriptions or peer status if needed
+
+                    // 2. DISCOVERY LAYER (mDNS - Local)
+                    // Critical: When mDNS finds a peer, we add them to Kademlia so the DHT knows they exist.
+                    SwarmEvent::Behaviour(PhalanxEvent::Mdns(mdns::Event::Discovered(list))) => {
+                        for (peer_id, multiaddr) in list {
+                            tracing::info!(%peer_id, "mDNS discovered peer, bridging to Kademlia");
+                            swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr);
+                        }
                     }
+
+                    // 3. ROUTING LAYER (Kademlia - WAN)
+                    SwarmEvent::Behaviour(PhalanxEvent::Kademlia(kad::Event::RoutingUpdated { peer, .. })) => {
+                        tracing::debug!(%peer, "DHT Routing Table Updated");
+                    }
+
+                    // 4. IDENTITY LAYER (Public IP Resolution)
+                    // When we identify a peer, add their listen addresses to the DHT
+                    SwarmEvent::Behaviour(PhalanxEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
+                        tracing::debug!(%peer_id, "Identify Received");
+                        for addr in info.listen_addrs {
+                            swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                        }
+                    }
+                    
                     _ => {}
                 }
             }
@@ -87,7 +112,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-// --- REFACTORED HANDLERS ---
+// --- HANDLERS (Slightly updated signatures) ---
 
 fn handle_local_evidence(
     swarm: &mut Swarm<PhalanxBehaviour>,
@@ -97,13 +122,9 @@ fn handle_local_evidence(
     storage: &mut Stronghold,
     local_id: NetworkId,
 ) {
-    // 1. Create Atomic WitnessEnvelope
     let envelope = WitnessEnvelope::new(evidence.clone(), identity, local_id);
-
-    // 2. Persist locally to the Stronghold immediately
     storage.ingest_envelope(envelope.clone());
 
-    // 3. Chunkify and Broadcast
     let topic_str = match evidence {
         Evidence::Video(_) => &config.network.video_topic,
         Evidence::Audio(_) => &config.network.audio_topic,
@@ -129,7 +150,7 @@ fn handle_local_evidence(
 fn broadcast_heartbeat(swarm: &mut Swarm<PhalanxBehaviour>, config: &PhalanxConfig, local_id: NetworkId) {
     let hb = ControlMessage {
         sender: local_id,
-        load_factor: 0.0, // Placeholder for system load
+        load_factor: 0.0,
         storage_remaining_mb: 1024,
     };
 

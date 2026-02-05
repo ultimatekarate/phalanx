@@ -1,96 +1,25 @@
-use libp2p::{gossipsub, mdns, noise, tcp, yamux, Swarm, SwarmBuilder, swarm::NetworkBehaviour};
+// src/lib.rs
 
-pub mod shards;
-pub mod camera;
+// 1. Module Declarations
 pub mod audio;
-pub mod sentinel;
+pub mod camera;
 pub mod config;
 pub mod identity;
-pub mod stronghold; 
+pub mod network; // <--- Now handles all libp2p logic
 pub mod obs;
+pub mod sentinel;
+pub mod shards;
 pub mod sim;
+pub mod stronghold;
 
-use crate::config::PhalanxConfig;
-use crate::identity::{PhalanxIdentity, NetworkId};
+// 2. Re-exports
+// We expose the network logic so main.rs can use it without importing `crate::network::*`
+pub use network::{setup_phalanx_swarm, PhalanxBehaviour, PhalanxEvent};
 
-use std::error::Error;
-#[derive(NetworkBehaviour)]
-#[behaviour(out_event = "PhalanxEvent")]
-pub struct PhalanxBehaviour {
-    pub gossipsub: libp2p::gossipsub::Behaviour,
-    pub mdns: mdns::tokio::Behaviour,
-}
+// 3. Helpers
+use crate::identity::PhalanxIdentity;
 
-pub struct PhalanxGossipEvent {
-    pub source: NetworkId,
-    pub message: gossipsub::Message,
-    pub message_id: gossipsub::MessageId,
-}
-
-pub enum PhalanxEvent {
-    Gossipsub(Box<PhalanxGossipEvent>),
-    Mdns(mdns::Event),
-    Metadata(gossipsub::Event),
-}
-
-impl From<gossipsub::Event> for PhalanxEvent {
-    fn from(event: gossipsub::Event) -> Self {
-        match event {
-            gossipsub::Event::Message { propagation_source, message, message_id } => {
-                PhalanxEvent::Gossipsub(Box::new(PhalanxGossipEvent {
-                    source: NetworkId(propagation_source), // Intercept and wrap here
-                    message,
-                    message_id,
-                }))
-            },
-            // TODO: Add other gossip events here
-            _ => {
-                tracing::trace!("Ignoring non-message Gossipsub event");
-                // You might need a "Metadata" variant in PhalanxEvent 
-                // or just skip these in the main loop.
-                PhalanxEvent::Mdns(mdns::Event::Expired(vec![]))
-            }
-        }
-    }
-}
-
-impl From<mdns::Event> for PhalanxEvent {
-    fn from(event: mdns::Event) -> Self { PhalanxEvent::Mdns(event) }
-}
-
-pub async fn setup_phalanx_swarm(config: &PhalanxConfig) -> Result<Swarm<PhalanxBehaviour>, Box<dyn Error>> {
-    let swarm = SwarmBuilder::with_new_identity()
-        .with_tokio()
-        .with_tcp(
-            tcp::Config::default(), 
-            noise::Config::new, 
-            yamux::Config::default
-        )?
-        .with_behaviour(|key| {
-            // Gossipsub setup with validation matching our chunk size
-            let gossip_config = gossipsub::ConfigBuilder::default()
-                .validation_mode(gossipsub::ValidationMode::Permissive)
-                .max_transmit_size(config.network.chunk_size_bytes + 4096)
-                .do_px()
-                .build()
-                .map_err(std::io::Error::other)?;
-
-            Ok(PhalanxBehaviour {
-                gossipsub: gossipsub::Behaviour::new(
-                    gossipsub::MessageAuthenticity::Signed(key.clone()), 
-                    gossip_config
-                )?,
-                mdns: mdns::tokio::Behaviour::new(
-                    mdns::Config::default(), 
-                    key.public().to_peer_id()
-                )?,
-            })
-        })?
-        .build();
-
-    Ok(swarm)
-}
-
+/// Helper to load identity from disk or generate a new one.
 pub fn init_identity() -> PhalanxIdentity {
     let id_path = "identity.bin";
 
@@ -103,4 +32,3 @@ pub fn init_identity() -> PhalanxIdentity {
         new_id
     })
 }
-

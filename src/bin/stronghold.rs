@@ -1,5 +1,10 @@
-use libp2p::futures::StreamExt;
-use libp2p::gossipsub;
+use libp2p::{
+    gossipsub,
+    mdns,
+    identify,
+    futures::StreamExt,
+    swarm::SwarmEvent, 
+};
 use phalanx::identity::NetworkId;
 use phalanx::{
     stronghold::Stronghold, 
@@ -10,6 +15,8 @@ use phalanx::{
 use std::error::Error;
 use std::time::Duration;
 use tracing::{info};
+
+use phalanx::{PhalanxEvent};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -24,7 +31,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let identity = PhalanxIdentity::generate(); 
     let mut storage = Stronghold::new("./vault", &config);
     let mut sentinel = Sentinel::new(&config);
-    let mut swarm = phalanx::setup_phalanx_swarm(&config).await?;
+    let mut swarm = phalanx::setup_phalanx_swarm(identity.to_libp2p_keypair())?;
 
     let local_peer_id = NetworkId(*swarm.local_peer_id());
 
@@ -46,27 +53,38 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // 1. Handle Incoming Network Traffic
 
             event = swarm.select_next_some() => {
+
                 match event {
-                    libp2p::swarm::SwarmEvent::Behaviour(phalanx::PhalanxEvent::Gossipsub(gossip_event)) => {
-                        let message = &gossip_event.message;
+                    // 1. Correctly destructure the nested Enums
+                    SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(gossipsub::Event::Message { message, .. })) => {
+                        // NOW you have access to the `message` variable
                         let topic_str = message.topic.as_str();
-                        
-                        if topic_str == config.network.video_topic || topic_str == config.network.audio_topic {
-                            if let Ok(chunk) = postcard::from_bytes(&message.data) {
-                                // process_chunk now manages reassembly and returns Option<WitnessEnvelope>
-                                if let Some(envelope) = sentinel.process_chunk(chunk, topic_str, &config, &identity, local_peer_id) {
-                                    storage.ingest_envelope(envelope);
-                                }
-                            }
-                        } else if topic_str == config.network.control_topic {
-                            if let Ok(hb) = postcard::from_bytes::<phalanx::sentinel::ControlMessage>(&message.data) {
-                                sentinel.health_tracker.register_activity(hb.sender);
+
+                        if let Ok(chunk) = postcard::from_bytes::<phalanx::shards::ShardChunk>(&message.data) {
+                            println!("Stronghold received chunk from: {}", chunk.owner_did);
+                            
+                            // Reassembly logic
+                            if let Some(envelope) = sentinel.process_chunk(chunk, topic_str, &config, &identity, local_peer_id) {
+                                storage.ingest_envelope(envelope);
+                                println!("Stronghold archived full envelope.");
                             }
                         }
-                    },
-                    libp2p::swarm::SwarmEvent::Behaviour(phalanx::PhalanxEvent::Mdns(_mdns_event)) => {
-                        // TODO: peer discovery goes here eventually
-                    },
+                    }
+                    
+                    // 2. Handle mDNS to bridge local peers to Kademlia
+                    SwarmEvent::Behaviour(PhalanxEvent::Mdns(mdns::Event::Discovered(list))) => {
+                        for (peer_id, multiaddr) in list {
+                            swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr);
+                        }
+                    }
+
+                    // 3. Handle Identify to update routing table
+                    SwarmEvent::Behaviour(PhalanxEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
+                        for addr in info.listen_addrs {
+                            swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                        }
+                    }
+
                     _ => {}
                 }
             }
