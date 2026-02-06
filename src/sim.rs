@@ -161,7 +161,7 @@ async fn test_salvage_on_node_death() {
         .try_init();
 
     use std::time::Duration;
-    use tracing::{info, info_span};
+    use tracing::{info};
     use crate::shards::{Evidence, WitnessEnvelope};
 
     // 1. CONFIGURATION

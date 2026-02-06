@@ -14,12 +14,11 @@ pub struct Stronghold {
     pub vault_storage: PathBuf,
     pub wal_directory: PathBuf,
 
-    // --- THE WORKBENCHES ---
+
     // Tier 1: Reassembles Packets -> Evidence (Key: ShardId)
     pub micro_layer: Crucible<ShardAmalgam>,
     
     // Tier 2: Reassembles Evidence -> Volleys (Key: DID)
-    // This effectively replaces the old 'active_sessions' HashMap
     pub macro_layer: Crucible<VolleyAmalgam>,
     
     // --- THE POLICY STATE ---
@@ -56,7 +55,7 @@ impl Stronghold {
         // 1. Put chunk on the Micro Workbench
         if let Some(envelope) = self.micro_layer.process(chunk) {
             debug!(seq = %envelope.evidence.sequence_id(), "Micro-assembly complete. Promoting.");
-            // 2. If finished, promote to the Policy Layer
+            // 2. If finished, promote to the macro Layer
             self.ingest_envelope(envelope);
         }
     }
@@ -83,6 +82,18 @@ impl Stronghold {
             history.insert(artifact.evidence.sequence_id());
         }
 
+        // Track artifacts for cleanup
+        let mut wal_files_to_delete = Vec::new();
+
+        for artifact in &volley.artifacts {
+            history.insert(artifact.evidence.sequence_id());
+            // Calculate the WAL path for this artifact
+            let safe_did_artifact = artifact.did.to_safe_name();
+            let seq = artifact.evidence.sequence_id().0;
+            let wal_filename = format!("{}_{}.wal", safe_did_artifact, seq);
+            wal_files_to_delete.push(self.wal_directory.join(wal_filename));
+        }
+
         let extension = match volley.artifacts[0].evidence {
             Evidence::Video(_) => "vid.phlx",
             Evidence::Audio(_) => "aud.phlx",
@@ -97,6 +108,13 @@ impl Stronghold {
                     error!(%e, "Failed to write volley archive");
                 } else {
                     info!(path = ?path, "Volley successfully archived");
+
+                    for wal_path in wal_files_to_delete {
+                        if let Err(e) = fs::remove_file(&wal_path) {
+                            // Warn but don't fail; the archive is safe.
+                            warn!(file = ?wal_path, err = %e, "Failed to cleanup WAL file");
+                        }
+                    }
                 }
             }
             Err(e) => error!(%e, "Serialization error"),
