@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::time::{Duration};
+use tokio::time::Instant;
 
 // --- THE GENERIC TRAIT (The Strategy) ---
 pub trait Mold {
@@ -112,5 +113,82 @@ impl<S: Mold> Crucible<S> {
             }
         }
         results
+    }
+}
+
+// ... (existing code in src/crucible.rs)
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    // 1. MOCK STRATEGY
+    // A simple integer summer: Sums 3 integers, then returns the total string.
+    struct SumMold;
+    impl Mold for SumMold {
+        type Input = i32;
+        type Output = String;
+        type Key = String;
+        type Accumulator = Vec<i32>;
+
+        fn get_key(_item: &i32) -> String { "fixed_key".to_string() }
+        
+        fn init_accumulator(item: &i32) -> Vec<i32> { vec![*item] }
+        
+        fn ingest(acc: &mut Vec<i32>, item: i32) { acc.push(item); }
+        
+        fn is_ready(acc: &Vec<i32>, _elapsed: Duration) -> bool {
+            acc.len() >= 3 // Ready when we have 3 items
+        }
+        
+        fn assemble(_key: String, acc: Vec<i32>) -> Option<String> {
+            let sum: i32 = acc.iter().sum();
+            Some(format!("Sum: {}", sum))
+        }
+    }
+
+    #[test]
+    fn test_crucible_auto_seal() {
+        let mut crucible = Crucible::<SumMold>::new();
+
+        // 1. Ingest 2 items (Not ready)
+        assert!(crucible.process(10).is_none());
+        assert!(crucible.process(20).is_none());
+        
+        // 2. Ingest 3rd item (Trigger Seal)
+        let result = crucible.process(30);
+        assert_eq!(result, Some("Sum: 60".to_string()));
+        
+        // 3. Verify Workbench is empty
+        assert!(crucible.contexts.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)] // Requires "tokio" feature for time manipulation
+    async fn test_crucible_flush_stale() {
+        let mut crucible = Crucible::<SumMold>::new();
+
+        // 1. Ingest 1 item (Stale)
+        crucible.process(5);
+        
+        // 2. Advance time beyond threshold
+        tokio::time::advance(Duration::from_secs(10)).await;
+        
+        // 3. Flush
+        let results = crucible.flush_stale(Duration::from_secs(5));
+        
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], "Sum: 5");
+    }
+
+    #[test]
+    fn test_crucible_flush_all() {
+        let mut crucible = Crucible::<SumMold>::new();
+        crucible.process(1);
+        crucible.process(2); // 2 items waiting
+
+        let results = crucible.flush_all();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], "Sum: 3"); // 1+2
     }
 }

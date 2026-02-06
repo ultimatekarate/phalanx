@@ -315,3 +315,86 @@ impl Stronghold {
         }
     }
 }
+
+// ... (existing code in src/stronghold.rs)
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{StorageConfig, NetworkConfig, HardwareConfig};
+    use crate::identity::PhalanxIdentity;
+    use std::fs::File;
+    use std::io::Write;
+
+    fn mock_config(max_foreign_bytes: u64) -> PhalanxConfig {
+        PhalanxConfig {
+            network: NetworkConfig { 
+                heartbeat_interval_secs: 1, pulse_timeout_secs: 1, chunk_size_bytes: 100, 
+                video_topic: "t".into(), audio_topic: "t".into(), control_topic: "t".into(), 
+                grace_period: 1, cleanup_interval_secs: 1, 
+                bootstrap_peers: vec![], stronghold_service_key: "k".into() 
+            },
+            storage: StorageConfig {
+                vault_path: "test_vault_governance".into(),
+                max_video_buffer: 1, max_audio_buffer: 1, max_peers: 1, 
+                stale_session_threshold: 1, shards_needed_to_archive: 1,
+                max_storage_bytes: 100_000,
+                max_foreign_storage_bytes: max_foreign_bytes, // <--- Key Parameter
+            },
+            hardware: HardwareConfig { camera_fps: 1, audio_sample_rate: 1, audio_channels: 1 },
+        }
+    }
+
+    #[test]
+    fn test_governance_pruning() {
+        // Setup Paths
+        let vault_root = PathBuf::from("test_vault_governance");
+        let _ = fs::remove_dir_all(&vault_root); // Cleanup prev run
+        let _ = fs::create_dir_all(&vault_root);
+
+        // 1. Create Identities
+        let me = PhalanxIdentity::generate();
+        let stranger_1 = PhalanxIdentity::generate();
+        let stranger_2 = PhalanxIdentity::generate();
+
+        // 2. Populate Vault with "Foreign" Data manually
+        // Stranger 1 (Old)
+        let s1_dir = vault_root.join(stranger_1.did.to_safe_name());
+        fs::create_dir_all(&s1_dir).unwrap();
+        let mut f1 = File::create(s1_dir.join("old_evidence.phlx")).unwrap();
+        f1.write_all(&[0u8; 1000]).unwrap(); // 1000 bytes
+
+        // Stranger 2 (New)
+        let s2_dir = vault_root.join(stranger_2.did.to_safe_name());
+        fs::create_dir_all(&s2_dir).unwrap();
+        let mut f2 = File::create(s2_dir.join("new_evidence.phlx")).unwrap();
+        f2.write_all(&[0u8; 1000]).unwrap(); // 1000 bytes
+
+        // 3. Initialize Stronghold with TIGHT Quota (1500 bytes)
+        // We have 2000 bytes on disk. Logic should prune the oldest (Stranger 1).
+        let config = mock_config(1500); 
+        let mut stronghold = Stronghold::new("test_vault_governance", &config, me.did.clone());
+
+        // Assert initial state read from disk
+        assert_eq!(stronghold.foreign_storage_usage, 2000);
+
+        // 4. Trigger Pruning
+        // We can trigger this by calling the private method or ingesting something.
+        // For unit test access, we usually make `prune_foreign_evidence` pub(crate) 
+        // OR we just use `ingest_envelope` with a dummy foreign envelope to trigger the check.
+        stronghold.prune_foreign_evidence(); 
+
+        // 5. Verification
+        // Stranger 1 should be gone (Oldest)
+        assert!(!s1_dir.join("old_evidence.phlx").exists(), "Old evidence should be evicted");
+        
+        // Stranger 2 should remain (Newest)
+        assert!(s2_dir.join("new_evidence.phlx").exists(), "New evidence should be kept");
+        
+        // Usage should update
+        assert!(stronghold.foreign_storage_usage <= 1500, "Usage should be under limit");
+        
+        // Cleanup
+        let _ = fs::remove_dir_all(&vault_root);
+    }
+}
