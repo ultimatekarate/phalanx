@@ -10,7 +10,7 @@ use phalanx::{camera};
 use phalanx::audio;
 use phalanx::identity::{NetworkId, PhalanxIdentity};
 use phalanx::sentinel::{Sentinel, ControlMessage};
-use phalanx::config::PhalanxConfig;
+use phalanx::config::{PhalanxConfig, PhalanxPhysics};
 use phalanx::stronghold::Stronghold;
 use phalanx::{PhalanxBehaviour, PhalanxEvent}; 
 
@@ -168,7 +168,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
     let stronghold_flag = true;
     // Setup Network with proper key conversion
-    let mut swarm = phalanx::setup_phalanx_swarm(my_identity.to_libp2p_keypair(), stronghold_flag)?;
+    let physics = PhalanxPhysics::default_wan();
+    let mut swarm = phalanx::setup_phalanx_swarm(my_identity.to_libp2p_keypair(), stronghold_flag, physics)?;
     
     // Bind to Random Port (Client Mode)
     // Use Port 0 to let OS assign an available port

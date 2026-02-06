@@ -4,11 +4,13 @@ use libp2p::{
     swarm::{NetworkBehaviour}
         , SwarmBuilder, 
     tcp, yamux, Swarm, Transport,
-    core::upgrade::Version,
+    core::upgrade::Version
 };
 use std::time::Duration;
 use tokio::io;
 use libp2p::kad::RecordKey;
+use crate::config::PhalanxPhysics;
+use void::Void;
 
 // Define a custom Kademlia Record Store
 pub type PhalanxKadStore = kad::store::MemoryStore;
@@ -34,6 +36,8 @@ pub struct PhalanxBehaviour {
     pub relay_client: relay::client::Behaviour,
     pub dcutr: dcutr::Behaviour,              
     pub autonat: autonat::Behaviour, // <--- The field causing the error
+
+    pub physics: PhalanxPhysics,
 }
 
 #[derive(Debug)]
@@ -50,6 +54,14 @@ pub enum PhalanxEvent {
 
 // --- TRAIT IMPLEMENTATIONS ---
 // These allow the generic NetworkBehaviour to "bubble up" events to your enum.
+impl From<Void> for PhalanxEvent {
+    fn from(event: Void) -> Self {
+        // This tells the compiler: "If a Void event happens, the program is invalid."
+        // Since Void is uninhabited, this code is technically unreachable, 
+        // but it satisfies the type checker.
+        void::unreachable(event)
+    }
+}
 
 impl From<gossipsub::Event> for PhalanxEvent {
     fn from(v: gossipsub::Event) -> Self { Self::Gossipsub(v) }
@@ -80,6 +92,7 @@ impl From<autonat::Event> for PhalanxEvent {
 pub fn setup_phalanx_swarm(
     local_key: libp2p::identity::Keypair,
     is_stronghold: bool,
+    physics: PhalanxPhysics,
 ) -> Result<Swarm<PhalanxBehaviour>, Box<dyn std::error::Error>> {
     let local_peer_id = libp2p::PeerId::from(local_key.public());
     
@@ -95,6 +108,7 @@ pub fn setup_phalanx_swarm(
     let gossipsub = gossipsub::Behaviour::new(
         gossipsub::MessageAuthenticity::Signed(local_key.clone()),
         gossipsub::ConfigBuilder::default()
+            .heartbeat_interval(physics.heartbeat_interval())
             .validation_mode(gossipsub::ValidationMode::Strict)
             .build()
             .map_err(|msg| io::Error::new(io::ErrorKind::Other, msg))?,
@@ -136,6 +150,7 @@ pub fn setup_phalanx_swarm(
         relay_client,
         dcutr,
         autonat,
+        physics
     };
 
     // 4. Build Swarm

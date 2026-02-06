@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration};
 use tokio::time::Instant;
+use std::collections::btree_map::Entry;
 
 // --- THE GENERIC TRAIT (The Strategy) ---
 pub trait Mold {
@@ -49,24 +50,33 @@ impl<S: Mold> Crucible<S> {
         }
     }
 
-    pub fn process(&mut self, item: S::Input) -> Option<S::Output> {
+pub fn process(&mut self, item: S::Input) -> Option<S::Output> {
         self.perform_cleanup();
-
         let key = S::get_key(&item);
         
-        let ctx = self.contexts
-            .entry(key.clone())
-            .or_insert_with(|| WorkContext {
-                accumulator: S::init_accumulator(&item),
-                created_at: Instant::now(),
-            });
+// 1. INGEST (Unified Logic)
+        let is_ready_now = match self.contexts.entry(key.clone()) {
+            Entry::Occupied(mut entry) => {
+                let ctx = entry.get_mut();
+                S::ingest(&mut ctx.accumulator, item);
+                // Check readiness against elapsed time
+                S::is_ready(&ctx.accumulator, ctx.created_at.elapsed())
+            },
+            Entry::Vacant(entry) => {
+                let ctx = entry.insert(WorkContext {
+                    accumulator: S::init_accumulator(&item),
+                    created_at: Instant::now(),
+                });
+                // Check readiness IMMEDIATELY (Elapsed = 0)
+                // Critical for 0-latency configs
+                S::is_ready(&ctx.accumulator, Duration::ZERO)
+            }
+        };
 
-        S::ingest(&mut ctx.accumulator, item);
-
-        if S::is_ready(&ctx.accumulator, ctx.created_at.elapsed()) {
-            // "Seal" the work: Remove from workbench and assemble
-            if let Some(removed_ctx) = self.contexts.remove(&key) {
-                return S::assemble(key, removed_ctx.accumulator);
+        // 2. EJECT (If ready)
+        if is_ready_now {
+            if let Some(ctx) = self.contexts.remove(&key) {
+                return S::assemble(key, ctx.accumulator);
             }
         }
 
@@ -116,15 +126,12 @@ impl<S: Mold> Crucible<S> {
     }
 }
 
-// ... (existing code in src/crucible.rs)
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
 
     // 1. MOCK STRATEGY
-    // A simple integer summer: Sums 3 integers, then returns the total string.
     struct SumMold;
     impl Mold for SumMold {
         type Input = i32;
@@ -133,9 +140,7 @@ mod tests {
         type Accumulator = Vec<i32>;
 
         fn get_key(_item: &i32) -> String { "fixed_key".to_string() }
-        
         fn init_accumulator(item: &i32) -> Vec<i32> { vec![*item] }
-        
         fn ingest(acc: &mut Vec<i32>, item: i32) { acc.push(item); }
         
         fn is_ready(acc: &Vec<i32>, _elapsed: Duration) -> bool {
@@ -148,8 +153,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_crucible_auto_seal() {
+    // FIX: Must use tokio::test because Crucible::new() calls tokio::time::Instant::now()
+    #[tokio::test] 
+    async fn test_crucible_auto_seal() {
         let mut crucible = Crucible::<SumMold>::new();
 
         // 1. Ingest 2 items (Not ready)
@@ -164,7 +170,7 @@ mod tests {
         assert!(crucible.contexts.is_empty());
     }
 
-    #[tokio::test(start_paused = true)] // Requires "tokio" feature for time manipulation
+    #[tokio::test(start_paused = true)]
     async fn test_crucible_flush_stale() {
         let mut crucible = Crucible::<SumMold>::new();
 
@@ -172,17 +178,18 @@ mod tests {
         crucible.process(5);
         
         // 2. Advance time beyond threshold
+        // Since we are paused, this explicitly moves the clock forward
         tokio::time::advance(Duration::from_secs(10)).await;
         
-        // 3. Flush
+        // 3. Flush (Threshold is 5s, we waited 10s)
         let results = crucible.flush_stale(Duration::from_secs(5));
         
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], "Sum: 5");
     }
 
-    #[test]
-    fn test_crucible_flush_all() {
+    #[tokio::test]
+    async fn test_crucible_flush_all() {
         let mut crucible = Crucible::<SumMold>::new();
         crucible.process(1);
         crucible.process(2); // 2 items waiting

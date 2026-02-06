@@ -10,7 +10,7 @@ use phalanx::identity::NetworkId;
 use phalanx::{
     stronghold::Stronghold, 
     sentinel::Sentinel,
-    config::PhalanxConfig,
+    config::{PhalanxConfig, PhalanxPhysics},
     identity::PhalanxIdentity,
 };
 use std::error::Error;
@@ -34,7 +34,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut sentinel = Sentinel::new(&config);
 
     let stronghold_flag = true;
-    let mut swarm = phalanx::setup_phalanx_swarm(identity.to_libp2p_keypair(), stronghold_flag)?;
+    let physics = PhalanxPhysics::default_wan();
+    let mut swarm = phalanx::setup_phalanx_swarm(identity.to_libp2p_keypair(), stronghold_flag, physics)?;
 
     let storage_key = phalanx::network::get_storage_key();
     

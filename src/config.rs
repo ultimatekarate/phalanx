@@ -1,8 +1,134 @@
-use serde::Deserialize;
+use serde::{Serialize,Deserialize};
 use std::fs;
 use std::path::Path;
 use std::env;
+use std::task::{Context, Poll};
+use void::Void;
+use libp2p::swarm::{
+    NetworkBehaviour, 
+    ToSwarm, 
+    ConnectionDenied, 
+    ConnectionId, 
+    THandlerInEvent, 
+    THandlerOutEvent, 
+    dummy
+};
+use libp2p::{PeerId, Multiaddr};
+use libp2p::core::{transport::PortUse}; 
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct PhalanxPhysics {
+    pub tau_rtt: u64,      // The fundamental independent variable
+    pub delta_cpu: u64,    // The compute constraint
+    pub jitter_factor: u64 // The safety margin (k)
+}
+
+impl PhalanxPhysics {
+    // Production Default: Assuming standard WAN (300ms latency)
+    pub fn default_wan() -> Self {
+        Self {
+            tau_rtt: 300,
+            delta_cpu: 20,
+            jitter_factor: 3,
+        }
+    }
+
+    // CI/Test Profile: "Slow Time" for unstable environments
+    pub fn test_profile() -> Self {
+        Self {
+            tau_rtt: 50,      // Fast local network
+            delta_cpu: 100,   // BUT high CPU contention (slow runner)
+            jitter_factor: 5, // Extra safety margin
+        }
+    }
+
+    // --- The Derived Inequalities ---
+
+    pub fn heartbeat_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis((self.tau_rtt / 2).max(1))
+    }
+
+    pub fn shard_timeout(&self) -> std::time::Duration {
+        let ms = self.jitter_factor * (self.tau_rtt + self.delta_cpu);
+        std::time::Duration::from_millis(ms)
+    }
+
+    pub fn from_env() -> Self {
+        match env::var("PHALANX_PHYSICS_PROFILE").as_deref() {
+            Ok("LAN") => Self {
+                tau_rtt: 10,       // 10ms (Data Center / Local)
+                delta_cpu: 5,
+                jitter_factor: 3,
+            },
+            Ok("SAT") => Self {
+                tau_rtt: 1500,     // 1.5s (Starlink/Iridium edge case)
+                delta_cpu: 50,
+                jitter_factor: 2,  // Tighter margin to force efficiency
+            },
+            Ok("CHAOS") => Self {
+                tau_rtt: 500,      // Unstable Mix
+                delta_cpu: 500,    // Massive CPU contention (simulating heavy load)
+                jitter_factor: 5,  // High safety margin
+            },
+            Ok("TEST") => Self::test_profile(),
+            _ => Self::default_wan(), // Default to Standard WAN
+        }
+    }
+}
+
+impl NetworkBehaviour for PhalanxPhysics {
+    // 1. Define the Handler (Dummy because we don't talk to peers)
+    type ConnectionHandler = dummy::ConnectionHandler;
+    
+    // 2. Define the Event (Void because we never emit events)
+    type ToSwarm = Void; 
+
+    // 3. Handle Inbound Connections (Just accept them, but do nothing)
+    fn handle_established_inbound_connection(
+        &mut self,
+        _connection_id: ConnectionId,
+        _peer: PeerId,
+        _local_addr: &Multiaddr,
+        _remote_addr: &Multiaddr,
+    ) -> Result<Self::ConnectionHandler, ConnectionDenied> {
+        Ok(dummy::ConnectionHandler)
+    }
+
+    // 4. Handle Outbound Connections (Just accept them)
+    fn handle_established_outbound_connection(
+        &mut self,
+        _connection_id: ConnectionId,
+        _peer: PeerId,
+        _addr: &Multiaddr,
+        _role_override: libp2p::core::Endpoint,
+        _port_use: PortUse,
+    ) -> Result<Self::ConnectionHandler, ConnectionDenied> {
+        Ok(dummy::ConnectionHandler)
+    }
+
+    // 5. Handle Events from the Handler (Void, so unreachable)
+    fn on_connection_handler_event(
+        &mut self,
+        _peer_id: PeerId,
+        _connection_id: ConnectionId,
+        _event: THandlerOutEvent<Self>,
+    ) {
+        // No events to handle
+    }
+
+    // 6. Handle Events from the Swarm
+    fn on_swarm_event(&mut self, _event: libp2p::swarm::FromSwarm) {
+        // Physics doesn't care about swarm events
+    }
+
+    // 7. The Polling Loop (Updated Signature: No PollParameters!)
+    fn poll(
+        &mut self,
+        _cx: &mut Context<'_>,
+    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+        Poll::Pending
+    }
+}
 #[derive(Debug, Deserialize, Clone)]
 pub struct PhalanxConfig {
     pub network: NetworkConfig,

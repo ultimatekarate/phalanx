@@ -5,7 +5,8 @@ use crate::config::PhalanxConfig;
 use crate::identity::Did;
 
 use std::collections::{HashSet, HashMap};
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::PathBuf;
 use tokio::time::Instant;
 use tracing::{info, error, warn, debug, instrument};
@@ -297,7 +298,10 @@ impl Stronghold {
         let wal_path = self.wal_directory.join(file_name);
         let bytes = postcard::to_stdvec(envelope).map_err(|e| 
             std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        fs::write(wal_path, bytes)?;
+        
+        let mut file = File::create(wal_path)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?; // <--- Critical for test_stronghold_crash_recovery
         Ok(())
     }
 
@@ -315,8 +319,6 @@ impl Stronghold {
         }
     }
 }
-
-// ... (existing code in src/stronghold.rs)
 
 #[cfg(test)]
 mod tests {
@@ -339,7 +341,7 @@ mod tests {
                 max_video_buffer: 1, max_audio_buffer: 1, max_peers: 1, 
                 stale_session_threshold: 1, shards_needed_to_archive: 1,
                 max_storage_bytes: 100_000,
-                max_foreign_storage_bytes: max_foreign_bytes, // <--- Key Parameter
+                max_foreign_storage_bytes: max_foreign_bytes, 
             },
             hardware: HardwareConfig { camera_fps: 1, audio_sample_rate: 1, audio_channels: 1 },
         }
@@ -347,54 +349,46 @@ mod tests {
 
     #[test]
     fn test_governance_pruning() {
-        // Setup Paths
+        use std::thread;
         let vault_root = PathBuf::from("test_vault_governance");
-        let _ = fs::remove_dir_all(&vault_root); // Cleanup prev run
-        let _ = fs::create_dir_all(&vault_root);
+        let _ = fs::remove_dir_all(&vault_root);
+        fs::create_dir_all(&vault_root).expect("Failed to create root");
 
-        // 1. Create Identities
         let me = PhalanxIdentity::generate();
         let stranger_1 = PhalanxIdentity::generate();
         let stranger_2 = PhalanxIdentity::generate();
 
-        // 2. Populate Vault with "Foreign" Data manually
-        // Stranger 1 (Old)
+        // 1. Create OLD Data (Stranger 1)
         let s1_dir = vault_root.join(stranger_1.did.to_safe_name());
-        fs::create_dir_all(&s1_dir).unwrap();
-        let mut f1 = File::create(s1_dir.join("old_evidence.phlx")).unwrap();
-        f1.write_all(&[0u8; 1000]).unwrap(); // 1000 bytes
+        fs::create_dir_all(&s1_dir).expect("Failed to create s1 dir");
+        let mut f1 = File::create(s1_dir.join("old_evidence.phlx")).expect("Failed to create f1");
+        f1.write_all(&[0u8; 1000]).unwrap(); 
+        f1.sync_all().unwrap(); 
 
-        // Stranger 2 (New)
+        // FIX: Ensure distinct timestamp
+        thread::sleep(std::time::Duration::from_millis(100));
+
+        // 2. Create NEW Data (Stranger 2)
         let s2_dir = vault_root.join(stranger_2.did.to_safe_name());
-        fs::create_dir_all(&s2_dir).unwrap();
-        let mut f2 = File::create(s2_dir.join("new_evidence.phlx")).unwrap();
-        f2.write_all(&[0u8; 1000]).unwrap(); // 1000 bytes
+        fs::create_dir_all(&s2_dir).expect("Failed to create s2 dir");
+        let mut f2 = File::create(s2_dir.join("new_evidence.phlx")).expect("Failed to create f2");
+        f2.write_all(&[0u8; 1000]).unwrap(); 
+        f2.sync_all().unwrap(); 
 
-        // 3. Initialize Stronghold with TIGHT Quota (1500 bytes)
-        // We have 2000 bytes on disk. Logic should prune the oldest (Stranger 1).
+        // 3. Init Stronghold
         let config = mock_config(1500); 
         let mut stronghold = Stronghold::new("test_vault_governance", &config, me.did.clone());
 
-        // Assert initial state read from disk
-        assert_eq!(stronghold.foreign_storage_usage, 2000);
+        assert_eq!(stronghold.foreign_storage_usage, 2000, "Initial usage calculation failed");
 
         // 4. Trigger Pruning
-        // We can trigger this by calling the private method or ingesting something.
-        // For unit test access, we usually make `prune_foreign_evidence` pub(crate) 
-        // OR we just use `ingest_envelope` with a dummy foreign envelope to trigger the check.
         stronghold.prune_foreign_evidence(); 
 
         // 5. Verification
-        // Stranger 1 should be gone (Oldest)
         assert!(!s1_dir.join("old_evidence.phlx").exists(), "Old evidence should be evicted");
-        
-        // Stranger 2 should remain (Newest)
         assert!(s2_dir.join("new_evidence.phlx").exists(), "New evidence should be kept");
-        
-        // Usage should update
         assert!(stronghold.foreign_storage_usage <= 1500, "Usage should be under limit");
         
-        // Cleanup
         let _ = fs::remove_dir_all(&vault_root);
     }
 }

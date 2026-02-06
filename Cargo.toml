@@ -4,32 +4,54 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# The Networking Engine
-libp2p = { version = "0.56.0", features = ["dcutr", "autonat","kad","dns", "identify", "ping","tcp", "quic", "gossipsub", "relay", "mdns", "tokio","noise", "yamux", "macros"] }
-# Async Runtime
+# --- Async Runtime ---
 tokio = { version = "1.0", features = ["full", "test-util"] }
-# Logging
+
+# --- Logging ---
 env_logger = "0.11"
 log = "0.4"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
-# Security & Identity
+# --- Security & Identity ---
 # rand_core feature is mandatory for the .generate() method
 ed25519-dalek = { version = "2.1", features = ["serde", "rand_core"] }
 rand = "0.9.2"
 hex = "0.4"
 dalek_rand = { package = "rand_core", version = "0.6.4", features = ["std"] }
+bs58 = "0.5.1"
 
-# Data & Hardware
+# --- Data & Utilities ---
 serde = { version = "1.0", features = ["derive"] } 
+serde_json = "1.0.149"
 postcard = { version = "1.1.3", features = ["alloc", "use-std"] }
-nokhwa = { version = "0.10", features = ["input-msmf"] }
+toml = "0.9.8"
 ctrlc = "3.4"
+chrono = "0.4.43"
+void = "1.0.2"
+
+# --- Hardware & Media ---
+nokhwa = { version = "0.10", features = ["input-msmf"] }
 ndarray = "0.17.2"
 image = { version = "0.25.9", features = ["jpeg"] }
-toml = "0.9.8"
-bs58 = "0.5.1"
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-clippy = "0.0.302"
-serde_json = "1.0.149"
-chrono = "0.4.43"
+
+# --- Networking (Consolidated) ---
+[dependencies.libp2p]
+version = "0.56"
+features = [
+    "tcp",
+    "dns", 
+    "quic",        # Added back from your inline config
+    "ping",        # Added back from your inline config
+    "noise",
+    "yamux",
+    "gossipsub",
+    "mdns",
+    "kad",
+    "identify",
+    "macros",
+    "tokio",
+    "relay",
+    "dcutr",
+    "autonat"
+]
