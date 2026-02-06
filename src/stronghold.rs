@@ -78,9 +78,6 @@ impl Stronghold {
         // Update Replay History
         let did = Did(volley.owner_did.clone());
         let history = self.processed_sequences.entry(did).or_default();
-        for artifact in &volley.artifacts {
-            history.insert(artifact.evidence.sequence_id());
-        }
 
         // Track artifacts for cleanup
         let mut wal_files_to_delete = Vec::new();
@@ -99,20 +96,30 @@ impl Stronghold {
             Evidence::Audio(_) => "aud.phlx",
         };
 
-        let filename = format!("{}.{}", volley.id, extension);
-        let path = archive_dir.join(filename);
+        let final_filename = format!("{}.{}", volley.id, extension);
+        let tmp_filename = format!("{}.tmp", volley.id); // 1. Create .tmp name
+
+        let final_path = archive_dir.join(&final_filename);
+        let tmp_path = archive_dir.join(&tmp_filename);
 
         match postcard::to_stdvec(&volley) {
             Ok(bytes) => {
-                if let Err(e) = fs::write(&path, bytes) {
-                    error!(%e, "Failed to write volley archive");
+                // 2. Write to .tmp first
+                if let Err(e) = fs::write(&tmp_path, bytes) {
+                    error!(%e, "Failed to write temp archive file");
                 } else {
-                    info!(path = ?path, "Volley successfully archived");
-
-                    for wal_path in wal_files_to_delete {
-                        if let Err(e) = fs::remove_file(&wal_path) {
-                            // Warn but don't fail; the archive is safe.
-                            warn!(file = ?wal_path, err = %e, "Failed to cleanup WAL file");
+                    // 3. Atomically rename .tmp -> .phlx
+                    if let Err(e) = fs::rename(&tmp_path, &final_path) {
+                        error!(%e, "Failed to rename archive file");
+                        // Optional: Attempt cleanup of tmp file here
+                    } else {
+                        info!(path = ?final_path, "Volley successfully archived via atomic rename");
+                        
+                        // 4. NOW delete the WAL entries
+                        for wal_path in wal_files_to_delete {
+                            if let Err(e) = fs::remove_file(&wal_path) {
+                                warn!(file = ?wal_path, err = %e, "Failed to cleanup WAL file");
+                            }
                         }
                     }
                 }

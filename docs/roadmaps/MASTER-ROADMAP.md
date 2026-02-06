@@ -15,8 +15,8 @@ This plan synthesizes all specialized roadmaps (Network, Security, Stronghold, H
   - [x] **Cloud Bootstrap Node:** Deploy a minimal Stronghold on a public VPS (static IP) to act as the permanent Relay/Bootstrap peer for development.
 - [ ] **Forensic Integrity Engine**
   - [X] Implement `ForensicAssembler<T>` generic struct for gap detection.
-  - [ ] Refactor `Stronghold` to use the **Recursive Assembly** pattern (Shards → Volleys → Archives).
-  - [ ] Implement **Atomic Archival** (`.tmp` → `.phlx` rename) to prevent corruption.
+  - [X] Refactor `Stronghold` to use the **Recursive Assembly** pattern (Shards → Volleys → Archives).
+  - [x] Implement **Atomic Archival** (`.tmp` → `.phlx` rename) to prevent corruption.
 - [ ] **Governance & Quotas**
   - [ ] Implement `StorageConfig` with `max_foreign_storage_bytes`.
   - [ ] Implement **Eviction Policy**: `prune_foreign_evidence` (delete oldest non-owned data when full).
