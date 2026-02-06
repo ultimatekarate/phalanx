@@ -165,9 +165,7 @@ async fn test_salvage_on_node_death() {
     use crate::shards::{Evidence, WitnessEnvelope};
 
     // 1. CONFIGURATION
-    let mut config = PhalanxConfig::test_defaults();
-    config.storage.stale_session_threshold = 0; 
-    config.network.cleanup_interval_secs = 1;
+    let config = PhalanxConfig::test_salvage_on_node_death();
 
     let (mut harness, relay_rx) = SimulationHarness::init_mesh(config.clone());
     let nodes_ref = Arc::clone(&harness.nodes);
@@ -175,15 +173,15 @@ async fn test_salvage_on_node_death() {
         SimulationHarness::run_mesh_relay(nodes_ref, relay_rx).await 
     });
 
-    let node_a_did = harness.spawn_node("Alpha").await;
-    let _node_b_did = harness.spawn_node("Beta").await;
+    let smashed_device_did = harness.spawn_node("SmashedDevice").await;
+    let __guardian_device_did = harness.spawn_node("GuardianDevice").await;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // 2. CREATE DATA (Signed by a Victim Identity)
-    let node_a_network_id = harness.resolve_did(&node_a_did).await.unwrap();
+    let smashed_device_network_id = harness.resolve_did(&smashed_device_did).await.unwrap();
     
     // We generate a separate identity to sign the data. 
-    // This represents the "User" of the Alpha Node.
+    // This represents the "User" of the smashed device node.
     let victim_identity = crate::identity::PhalanxIdentity::generate(); 
     let victim_did = victim_identity.did.clone();
 
@@ -199,7 +197,7 @@ async fn test_salvage_on_node_death() {
     let envelope = WitnessEnvelope::new(
         Evidence::Video(real_shard), 
         &victim_identity, 
-        node_a_network_id
+        smashed_device_network_id
     );
 
     // Serialize the ENVELOPE (not just the shard)
@@ -217,7 +215,7 @@ async fn test_salvage_on_node_death() {
 
     for chunk in chunks {
         // Broadcast from Alpha's Network ID
-        harness.broadcast(&node_a_did, SimEvent::Chunk(node_a_network_id, chunk)).await;
+        harness.broadcast(&smashed_device_did, SimEvent::Chunk(smashed_device_network_id, chunk)).await;
     }
 
     tokio::task::yield_now().await;
@@ -232,7 +230,7 @@ async fn test_salvage_on_node_death() {
     
     // Check Beta's Vault for Victim's Folder
     let evidence_dir = std::path::PathBuf::from("sim_vault")
-        .join("Beta") // Physical Storage
+        .join("GuardianDevice") // Physical Storage
         .join(&victim_safe_did); // Logical Owner
     
     info!(path = ?evidence_dir, "Checking for salvaged archive");
