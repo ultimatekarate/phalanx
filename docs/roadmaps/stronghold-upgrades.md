@@ -50,10 +50,10 @@ This roadmap upgrades `stronghold.rs` from a naive "save everything" engine to a
 
 *Goal: Ensure data survives crashes and corruption.*
 
-- [ ] **Atomic Archival**
-  - [ ] Modify `archive_session` to write to a `.tmp` file first.
-  - [ ] Use `std::fs::rename` to atomically move `.tmp` to `.phlx`.
-  - [ ] Only delete WAL entries *after* the rename is successful.
+- [x] **Atomic Archival**
+  - [x] Modify `archive_session` to write to a `.tmp` file first.
+  - [x] Use `std::fs::rename` to atomically move `.tmp` to `.phlx`.
+  - [x] Only delete WAL entries *after* the rename is successful.
 
 - [ ] **Corrupt WAL Handling**
   - [ ] In `recover_from_wal`:

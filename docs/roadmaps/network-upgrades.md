@@ -6,37 +6,37 @@ This roadmap details the steps to upgrade Phalanx from a Local-Only Mesh (mDNS) 
 
 *Goal: Decouple network logic from the library definition to improve maintainability.*
 
-- [ ] **Create `src/network.rs`**
-  - [ ] Create a new file `src/network.rs`.
-  - [ ] Move the `PhalanxBehaviour` struct definition from `lib.rs` to `network.rs`.
-  - [ ] Move the `PhalanxEvent` enum from `lib.rs` to `network.rs`.
-  - [ ] Move the `setup_phalanx_swarm` function from `lib.rs` to `network.rs`.
-  - [ ] **Verification:** Ensure `cargo check` passes (update imports in `main.rs` and `lib.rs` as needed).
+- [x] **Create `src/network.rs`**
+  - [x] Create a new file `src/network.rs`.
+  - [x] Move the `PhalanxBehaviour` struct definition from `lib.rs` to `network.rs`.
+  - [x] Move the `PhalanxEvent` enum from `lib.rs` to `network.rs`.
+  - [x] Move the `setup_phalanx_swarm` function from `lib.rs` to `network.rs`.
+  - [x] **Verification:** Ensure `cargo check` passes (update imports in `main.rs` and `lib.rs` as needed).
 
-- [ ] **Clean up `src/lib.rs`**
-  - [ ] Remove all `libp2p` imports and logic from `lib.rs`.
-  - [ ] Add `pub mod network;`.
-  - [ ] Add re-exports for convenience: `pub use network::{PhalanxBehaviour, setup_phalanx_swarm, PhalanxEvent};`.
+- [x] **Clean up `src/lib.rs`**
+  - [x] Remove all `libp2p` imports and logic from `lib.rs`.
+  - [x] Add `pub mod network;`.
+  - [x] Add re-exports for convenience: `pub use network::{PhalanxBehaviour, setup_phalanx_swarm, PhalanxEvent};`.
 
 ## Phase 2: Kademlia Implementation (The Engine)
 
 *Goal: Enable the Distributed Hash Table (DHT) so nodes can route messages over the internet.*
 
-- [ ] **Update `PhalanxBehaviour` (in `src/network.rs`)**
-  - [ ] Import `libp2p::kad` and `libp2p::identify`.
-  - [ ] Add `kademlia: kad::Behaviour<kad::store::MemoryStore>` to the struct fields.
-  - [ ] Add `identify: identify::Behaviour` to the struct fields (required for NAT traversal).
+- [x] **Update `PhalanxBehaviour` (in `src/network.rs`)**
+  - [x] Import `libp2p::kad` and `libp2p::identify`.
+  - [x] Add `kademlia: kad::Behaviour<kad::store::MemoryStore>` to the struct fields.
+  - [x] Add `identify: identify::Behaviour` to the struct fields (required for NAT traversal).
 
-- [ ] **Update `PhalanxEvent` (in `src/network.rs`)**
-  - [ ] Add `Kademlia(kad::Event)` variant.
-  - [ ] Add `Identify(identify::Event)` variant.
-  - [ ] Implement `From<kad::Event>` and `From<identify::Event>` for `PhalanxEvent`.
+- [x] **Update `PhalanxEvent` (in `src/network.rs`)**
+  - [x] Add `Kademlia(kad::Event)` variant.
+  - [x] Add `Identify(identify::Event)` variant.
+  - [x] Implement `From<kad::Event>` and `From<identify::Event>` for `PhalanxEvent`.
 
-- [ ] **Update `setup_phalanx_swarm` (in `src/network.rs`)**
-  - [ ] Initialize Kademlia with `MemoryStore::new(local_peer_id)`.
-  - [ ] Configure `kad::Config` with a 60s query timeout.
-  - [ ] Initialize Identify with protocol version `"/phalanx/1.0.0"`.
-  - [ ] **Bootstrapping Logic:** Iterate through `config.network.bootstrap_peers` (see Phase 3) and call `kademlia.add_address`.
+- [x] **Update `setup_phalanx_swarm` (in `src/network.rs`)**
+  - [x] Initialize Kademlia with `MemoryStore::new(local_peer_id)`.
+  - [x] Configure `kad::Config` with a 60s query timeout.
+  - [x] Initialize Identify with protocol version `"/phalanx/1.0.0"`.
+  - [x] **Bootstrapping Logic:** Iterate through `config.network.bootstrap_peers` (see Phase 3) and call `kademlia.add_address`.
 
 ## Phase 3: Configuration & Discovery (The Wiring)
 
@@ -53,7 +53,7 @@ This roadmap details the steps to upgrade Phalanx from a Local-Only Mesh (mDNS) 
     - [ ] `fn find_strongholds(&mut self)`: Calls `self.kademlia.get_providers(key)`.
 
 - [ ] **Wire `src/main.rs`**
-  - [ ] In the main loop, handle `SwarmEvent::Behaviour(PhalanxEvent::Kademlia(...))`.
+  - [x] In the main loop, handle `SwarmEvent::Behaviour(PhalanxEvent::Kademlia(...))`.
   - [ ] **Routing Updates:** When a new peer is discovered via Kademlia, ensure it is added to the `HealthTracker` in `sentinel.rs`.
   - [ ] **Startup Logic:**
     - [ ] If `config.storage.max_peers > 10` (Stronghold Mode): Call `swarm.behaviour_mut().announce_stronghold()`.
