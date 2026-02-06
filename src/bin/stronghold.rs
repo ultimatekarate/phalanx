@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
     // Identity is required for signing any salvaged evidence
     let identity = PhalanxIdentity::generate(); 
-    let mut storage = Stronghold::new("./vault", &config);
+    let mut storage = Stronghold::new("./vault", &config, identity.did.clone());
     let mut sentinel = Sentinel::new(&config);
     let mut swarm = phalanx::setup_phalanx_swarm(identity.to_libp2p_keypair())?;
 

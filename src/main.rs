@@ -164,7 +164,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
     let my_identity = phalanx::init_identity();
     let sentinel = Sentinel::new(&config);
-    let storage = Stronghold::new(&config.storage.vault_path, &config);
+    let storage = Stronghold::new(&config.storage.vault_path, &config, my_identity.did.clone());
     
     // Setup Network with proper key conversion
     let mut swarm = phalanx::setup_phalanx_swarm(my_identity.to_libp2p_keypair())?;

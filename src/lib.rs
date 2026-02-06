@@ -39,7 +39,7 @@ mod integration_tests {
     use crate::config::PhalanxConfig;
     use crate::stronghold::Stronghold;
     use crate::shards::{self, Evidence, VideoShard, StorageSequence, WitnessEnvelope};
-    use crate::identity::{PhalanxIdentity, NetworkId};
+    use crate::identity::{NetworkId, PhalanxIdentity};
     use std::time::Duration;
 
     #[test]
@@ -49,12 +49,13 @@ mod integration_tests {
         config.storage.vault_path = "./test_vault".to_string();
         config.storage.stale_session_threshold = 1; // 1 second for fast testing
         
+
         // Clean up previous runs
         let _ = std::fs::remove_dir_all(&config.storage.vault_path);
-        
-        let mut stronghold = Stronghold::new(&config.storage.vault_path, &config);
         let identity = PhalanxIdentity::generate();
         let peer_id = NetworkId::random();
+        let mut stronghold = Stronghold::new(&config.storage.vault_path, &config, identity.did.clone());
+
 
         // 2. CREATE EVIDENCE: A mock video frame
         let shard = VideoShard {

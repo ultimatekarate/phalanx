@@ -84,7 +84,7 @@ impl SimulationHarness {
         let config = self.config.clone();
         
         let mut sentinel = Sentinel::new(&config);
-        let mut storage = Stronghold::new(&format!("sim_vault/{}", name), &config);
+        let mut storage = Stronghold::new(&format!("sim_vault/{}", name), &config, identity.did.clone());
 
         tokio::spawn(async move {
             let span = span!(Level::INFO, "sim_node", node = %name_owned, network_id = %node_network_id);
@@ -262,10 +262,11 @@ async fn test_out_of_sequence_salvage_on_node_death() {
     use crate::shards::{StorageSequence, Evidence, WitnessEnvelope, VideoShard};
     use crate::identity::NetworkId;
     
-    let config = PhalanxConfig::default();
-    let mut storage = Stronghold::new("sim_vault/salvage_test", &config);
     let identity = PhalanxIdentity::generate();
     let peer_id = NetworkId::random(); 
+    let config = PhalanxConfig::default();
+    let mut storage = Stronghold::new("sim_vault/salvage_test", &config, identity.did.clone());
+    
     
     let mut captured_envelopes = Vec::new();
     for i in 0..5 {
@@ -293,7 +294,7 @@ async fn test_out_of_sequence_salvage_on_node_death() {
     storage.ingest_envelope(captured_envelopes[1].clone());
     storage.ingest_envelope(captured_envelopes[3].clone());
 
-    let session = storage.get_active_volley_shards(&identity.did)
+    let session = storage.get_active_volley_shards(&identity.did.clone())
         .expect("Session should exist for recovered DID");
 
     let mut keys: Vec<&StorageSequence> = session.keys().collect();
@@ -317,12 +318,14 @@ async fn test_stronghold_crash_recovery() {
     let vault_path = "sim_vault/crash_test";
     let _ = std::fs::remove_dir_all(vault_path);
 
-    let mut storage = Stronghold::new(vault_path, &config);
+
 
     let identity = PhalanxIdentity::generate();
     let peer_id = NetworkId::random();
     let seq = StorageSequence(101);
     
+    let mut storage = Stronghold::new(vault_path, &config, identity.did.clone());
+
     let shard = VideoShard {
         volley_id: "volley_test_999".to_string(),
         timestamp: 123456789,
@@ -336,9 +339,9 @@ async fn test_stronghold_crash_recovery() {
 
     drop(storage);
 
-    let recovered_storage = Stronghold::new(vault_path, &config);
+    let recovered_storage = Stronghold::new(vault_path, &config, identity.did.clone());
     
-    let recovered_session = recovered_storage.get_active_volley_shards(&identity.did)
+    let recovered_session = recovered_storage.get_active_volley_shards(&identity.did.clone())
         .expect("Stronghold failed to recover DID session from WAL");
         
     let recovered_env = recovered_session.get(&seq)
