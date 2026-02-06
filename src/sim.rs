@@ -230,8 +230,8 @@ async fn test_salvage_on_node_death() {
     
     // Check Beta's Vault for Victim's Folder
     let evidence_dir = std::path::PathBuf::from("sim_vault")
-        .join("GuardianDevice") // Physical Storage
-        .join(&victim_safe_did); // Logical Owner
+        .join("GuardianDevice") // Guardian Folder
+        .join(&victim_safe_did); // File name associated with smashed device
     
     info!(path = ?evidence_dir, "Checking for salvaged archive");
 
