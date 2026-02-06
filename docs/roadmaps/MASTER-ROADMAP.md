@@ -17,13 +17,13 @@ This plan synthesizes all specialized roadmaps (Network, Security, Stronghold, H
   - [X] Implement `ForensicAssembler<T>` generic struct for gap detection.
   - [X] Refactor `Stronghold` to use the **Recursive Assembly** pattern (Shards → Volleys → Archives).
   - [x] Implement **Atomic Archival** (`.tmp` → `.phlx` rename) to prevent corruption.
-- [ ] **Governance & Quotas**
-  - [ ] Implement `StorageConfig` with `max_foreign_storage_bytes`.
-  - [ ] Implement **Eviction Policy**: `prune_foreign_evidence` (delete oldest non-owned data when full).
-- [ ] **NAT Traversal (The "Hole Punch")**
-  - [ ] **Stronghold Relay:** Configure `libp2p::relay` server on the Stronghold node.
-  - [ ] **Mobile DCUtR:** Enable `libp2p::dcutr` on clients to upgrade relay connections to direct P2P links.
-  - [ ] **Auto-NAT:** Implement `libp2p::autonat` so nodes know if they are publicly reachable.
+- [x] **Governance & Quotas**
+  - [x] Implement `StorageConfig` with `max_foreign_storage_bytes`.
+  - [x] Implement **Eviction Policy**: `prune_foreign_evidence` (delete oldest non-owned data when full).
+- [X] **NAT Traversal (The "Hole Punch")**
+  - [X] **Stronghold Relay:** Configure `libp2p::relay` server on the Stronghold node.
+  - [X] **Mobile DCUtR:** Enable `libp2p::dcutr` on clients to upgrade relay connections to direct P2P links.
+  - [X] **Auto-NAT:** Implement `libp2p::autonat` so nodes know if they are publicly reachable.
 
 ## Phase 2: Security & Hardening (The "Moat")
 

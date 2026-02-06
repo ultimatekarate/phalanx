@@ -32,7 +32,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let identity = PhalanxIdentity::generate(); 
     let mut storage = Stronghold::new("./vault", &config, identity.did.clone());
     let mut sentinel = Sentinel::new(&config);
-    let mut swarm = phalanx::setup_phalanx_swarm(identity.to_libp2p_keypair())?;
+
+    let stronghold_flag = true;
+    let mut swarm = phalanx::setup_phalanx_swarm(identity.to_libp2p_keypair(), stronghold_flag)?;
 
     let storage_key = phalanx::network::get_storage_key();
     
@@ -94,10 +96,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     
                     // 4. Kademlia Events handling
                     SwarmEvent::Behaviour(PhalanxEvent::Kademlia(kad::Event::OutboundQueryProgressed { 
-                         result: kad::QueryResult::StartProviding(Ok(_)), .. 
-                     })) => {
-                         tracing::info!("Successfully announced Storage capability to the network.");
-                     }
+                        result: kad::QueryResult::StartProviding(Ok(_)), .. 
+                    })) => {
+                        tracing::info!("Successfully announced Storage capability to the network.");
+                    }
 
                     _ => {}
                 }

@@ -6,21 +6,21 @@ This roadmap upgrades `stronghold.rs` from a naive "save everything" engine to a
 
 *Goal: Prevent the Stronghold (especially on mobile) from consuming infinite disk space.*
 
-- [ ] **Update `StorageConfig` in `config.rs`**
-  - [ ] Add field `pub max_storage_bytes: u64` (Default: 1GB for mobile, 1TB for server).
-  - [ ] Add field `pub max_foreign_storage_bytes: u64` (Limit specific to non-owned data).
+- [x] **Update `StorageConfig` in `config.rs`**
+  - [x] Add field `pub max_storage_bytes: u64` (Default: 1GB for mobile, 1TB for server).
+  - [x] Add field `pub max_foreign_storage_bytes: u64` (Limit specific to non-owned data).
 
-- [ ] **Implement Usage Tracking in `stronghold.rs`**
-  - [ ] Add `current_storage_usage: u64` to `Stronghold` struct.
-  - [ ] Add `foreign_storage_usage: u64` to `Stronghold` struct.
-  - [ ] Implement `fn calculate_usage(&self) -> u64`: Recursively walk `vault_storage` on startup to initialize these counters.
+- [x] **Implement Usage Tracking in `stronghold.rs`**
+  - [x] Add `current_storage_usage: u64` to `Stronghold` struct.
+  - [x] Add `foreign_storage_usage: u64` to `Stronghold` struct.
+  - [x] Implement `fn calculate_usage(&self) -> u64`: Recursively walk `vault_storage` on startup to initialize these counters.
 
-- [ ] **Implement `prune_foreign_evidence`**
-  - [ ] Create logic to identify "Foreign" sessions (where `did != my_did`).
-  - [ ] **Eviction Policy:** If `foreign_storage_usage > max_foreign_storage_bytes`:
-    - [ ] Sort foreign sessions by `last_updated` (oldest first).
-    - [ ] Delete oldest sessions until usage is below threshold.
-    - [ ] Log every deletion (`tracing::warn!`).
+- [x] **Implement `prune_foreign_evidence`**
+  - [x] Create logic to identify "Foreign" sessions (where `did != my_did`).
+  - [x] **Eviction Policy:** If `foreign_storage_usage > max_foreign_storage_bytes`:
+    - [x] Sort foreign sessions by `last_updated` (oldest first).
+    - [x] Delete oldest sessions until usage is below threshold.
+    - [x] Log every deletion (`tracing::warn!`).
 
 - [ ] **Hook Pruning into Ingest**
   - [ ] In `ingest_envelope`, before writing to WAL:
