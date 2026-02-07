@@ -4,6 +4,7 @@ use crate::shards::{ShardChunk, ShardId, StorageSequence, WitnessEnvelope};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use serde::{Serialize, Deserialize};
+use tracing::{info, warn, error}; // <--- ADDED TRACING
 
 // --- STRATEGY 1: SHARD REASSEMBLY (Chunks -> Envelope) ---
 
@@ -19,7 +20,7 @@ pub struct ShardBuffer {
 impl Mold for ShardAmalgam {
     type Input = ShardChunk;
     type Output = WitnessEnvelope;
-    type Key = ShardId;      // Group by Envelope ID
+    type Key = ShardId;      
     type Accumulator = ShardBuffer;
 
     fn get_key(item: &Self::Input) -> Self::Key {
@@ -27,10 +28,12 @@ impl Mold for ShardAmalgam {
     }
 
     fn init_accumulator(item: &Self::Input) -> Self::Accumulator {
+        let mut parts = BTreeMap::new();
+        parts.insert(item.chunk_index, item.data.clone());
         ShardBuffer {
             total_chunks: item.total_chunks,
-            received_count: 0,
-            parts: BTreeMap::new(),
+            received_count: 1, 
+            parts,
             estimated_chunk_size: item.data.len(),
         }
     }
@@ -46,23 +49,33 @@ impl Mold for ShardAmalgam {
     }
 
     fn is_ready(acc: &Self::Accumulator, _elapsed: Duration) -> bool {
-        // Ready when we have ALL pieces. Time is irrelevant for readiness here (staleness handles timeouts).
         acc.received_count == acc.total_chunks
     }
 
-    fn assemble(_key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output> {
-        // Stitch bytes
+    fn assemble(key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output> {
+        // 🔍 DEBUG: Log Shard Assembly
+        if acc.received_count != acc.total_chunks {
+            warn!(?key, received=%acc.received_count, total=%acc.total_chunks, "ShardAmalgam: Attempted assembly of incomplete shard");
+            return None;
+        }
+
         let mut full_data = Vec::new();
         for i in 0..acc.total_chunks {
             if let Some(part) = acc.parts.get(&i) {
                 full_data.extend_from_slice(part);
             } else {
-                // dirty seal by padding zeros
-                full_data.extend(std::iter::repeat(0).take(acc.estimated_chunk_size));
+                error!(?key, chunk_index=%i, "ShardAmalgam: Missing chunk despite count match!");
+                return None; 
             }
         }
-        // Deserialize
-        postcard::from_bytes(&full_data).ok()
+        
+        match postcard::from_bytes(&full_data) {
+            Ok(env) => Some(env),
+            Err(e) => {
+                error!(?key, error=%e, "ShardAmalgam: Deserialization failed");
+                None
+            }
+        }
     }
 }
 
@@ -103,31 +116,33 @@ impl Mold for VolleyAmalgam {
     }
 
     fn init_accumulator(item: &Self::Input) -> Self::Accumulator {
+        let mut artifacts = BTreeMap::new();
+        artifacts.insert(item.evidence.sequence_id(), item.clone());
+
         VolleyBuffer {
-            artifacts: BTreeMap::new(),
+            artifacts,
             volley_id: item.evidence.volley_id().to_string(),
             owner_did: item.did.clone(),
         }
     }
 
     fn ingest(acc: &mut Self::Accumulator, item: Self::Input) {
-        // TODO: Maybe check if item.volley_id matches acc.volley_id
-        // and force a seal if they differ?
-        
-        // but for this phase, we assume sequential consistency.
-
         let seq = item.evidence.sequence_id();
         acc.artifacts.insert(seq, item);
     }
 
     fn is_ready(acc: &Self::Accumulator, elapsed: Duration) -> bool {
-        // Seal if we have > 50 frames OR it's been > 5 seconds
-        // Magic constants for now
-        acc.artifacts.len() >= 50 || elapsed > Duration::from_secs(5)
+        acc.artifacts.len() >= 50 || elapsed > Duration::from_secs(1)
     }
 
-    fn assemble(_key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output> {
-        if acc.artifacts.is_empty() { return None; }
+    fn assemble(key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output> {
+        // 🔍 DEBUG: Log Volley Assembly
+        info!(key=%key, count=%acc.artifacts.len(), "VolleyAmalgam: Assembling volley...");
+
+        if acc.artifacts.is_empty() { 
+            warn!(key=%key, "VolleyAmalgam: Artifacts empty. Aborting.");
+            return None; 
+        }
 
         let mut sorted_artifacts: Vec<WitnessEnvelope> = Vec::with_capacity(acc.artifacts.len());
         let mut gaps = Vec::new();
@@ -135,13 +150,11 @@ impl Mold for VolleyAmalgam {
 
         let mut expected_seq: Option<u32> = None;
 
-        // Iterate through sorted keys to detect gaps
         for (seq, env) in acc.artifacts {
             let current_seq = seq.0;
 
             if let Some(expected) = expected_seq {
                 if current_seq > expected {
-                    // GAP DETECTED: Missing sequences between expected and current
                     gaps.push(ForensicGap {
                         start_seq: expected,
                         end_seq: current_seq - 1,
@@ -149,12 +162,12 @@ impl Mold for VolleyAmalgam {
                     });
                 }
             }
-
-            // Expect the immediate next integer
             expected_seq = Some(current_seq + 1);
             sorted_artifacts.push(env);
         }
 
+        info!(id=%acc.volley_id, "VolleyAmalgam: Assembly SUCCESS");
+        
         Some(Volley {
             id: acc.volley_id,
             owner_did: acc.owner_did.to_string(),

@@ -7,7 +7,7 @@ use crate::shards::{
     ShardId, WitnessEnvelope
 };
 use crate::audio::AudioShard;
-use crate::config::PhalanxConfig;
+use crate::config::{PhalanxPhysics, PhalanxConfig};
 use crate::identity::{NetworkId, PhalanxIdentity};
 
 // =====================
@@ -18,15 +18,13 @@ use crate::identity::{NetworkId, PhalanxIdentity};
 pub struct HealthTracker {
     pub heartbeats: HashMap<NetworkId, Instant>,
     pub capacities: HashMap<NetworkId, ControlMessage>,
-    pub pulse_timeout: std::time::Duration,
 }
 
 impl HealthTracker {
-    pub fn new(config: &PhalanxConfig) -> Self {
+    pub fn new() -> Self {
         Self {
             heartbeats: HashMap::new(),
             capacities: HashMap::new(),
-            pulse_timeout: std::time::Duration::from_secs(config.network.pulse_timeout_secs),
         }
     }
 
@@ -34,9 +32,9 @@ impl HealthTracker {
         self.heartbeats.insert(peer_id, Instant::now());
     }
 
-    pub fn is_peer_stale(&self, peer_id: &NetworkId) -> bool {
+    pub fn is_peer_stale(&self, peer_id: &NetworkId, physics: &PhalanxPhysics) -> bool {
         self.heartbeats.get(peer_id)
-            .map(|t| t.elapsed() > self.pulse_timeout)
+            .map(|t| t.elapsed() > physics.heartbeat_interval())
             .unwrap_or(true)
     }
 }
@@ -59,11 +57,11 @@ pub struct Sentinel {
 }
 
 impl Sentinel {
-    pub fn new(config: &PhalanxConfig) -> Self {
+    pub fn new(_config: &PhalanxConfig) -> Self {
         Self {
             video_buffers: HashMap::new(),
             audio_buffers: HashMap::new(),
-            health_tracker: HealthTracker::new(config),
+            health_tracker: HealthTracker::new(),
         }
     }
 
@@ -122,8 +120,8 @@ impl Sentinel {
     }
 
     /// Garbage collection for incomplete reassemblies that have timed out.
-    pub fn prune_stale_buffers(&mut self, config: &PhalanxConfig) {
-        let timeout = std::time::Duration::from_secs(config.network.grace_period);
+    pub fn prune_stale_buffers(&mut self, _config: &PhalanxConfig, physics: &PhalanxPhysics) {
+        let timeout = physics.shard_timeout();
 
         self.video_buffers.retain(|id, buffer| {
             let active = buffer.last_activity.elapsed() < timeout;

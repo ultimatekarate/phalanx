@@ -245,7 +245,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
 
             _ = cleanup_timer.tick() => {
-                node.sentinel.prune_stale_buffers(&node.config);
+                node.sentinel.prune_stale_buffers(&node.config, &physics);
                 node.storage.archive_stale_sessions(Duration::from_secs(node.config.storage.stale_session_threshold));
             }
         }

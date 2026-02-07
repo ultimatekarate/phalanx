@@ -108,7 +108,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             // 2. Periodic Buffer Pruning
             _ = cleanup_timer.tick() => {
-                sentinel.prune_stale_buffers(&config);
+                sentinel.prune_stale_buffers(&config, &physics);
                 storage.archive_stale_sessions(Duration::from_secs(config.storage.stale_session_threshold));
             }
 

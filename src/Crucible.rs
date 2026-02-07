@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 use std::time::{Duration};
 use tokio::time::Instant;
 use std::collections::btree_map::Entry;
+use tracing::{info, warn, debug, instrument};
 
 // --- THE GENERIC TRAIT (The Strategy) ---
 pub trait Mold {
     type Input;
     type Output;
-    type Key: Ord + Clone;      
+    type Key: Ord + Clone + std::fmt::Debug;      
     type Accumulator;           
 
     /// Identity derivation: Who does this item belong to?
@@ -50,17 +51,20 @@ impl<S: Mold> Crucible<S> {
         }
     }
 
-pub fn process(&mut self, item: S::Input) -> Option<S::Output> {
+    #[instrument(skip(self, item), level = "info")]
+    pub fn process(&mut self, item: S::Input) -> Option<S::Output> {
         self.perform_cleanup();
         let key = S::get_key(&item);
         
-// 1. INGEST (Unified Logic)
-        let is_ready_now = match self.contexts.entry(key.clone()) {
+    // 1. INGEST (Unified Logic)
+        let (is_ready_now, elapsed) = match self.contexts.entry(key.clone()) {
             Entry::Occupied(mut entry) => {
                 let ctx = entry.get_mut();
                 S::ingest(&mut ctx.accumulator, item);
                 // Check readiness against elapsed time
-                S::is_ready(&ctx.accumulator, ctx.created_at.elapsed())
+                let el = ctx.created_at.elapsed();
+                
+                (S::is_ready(&ctx.accumulator, el), el)
             },
             Entry::Vacant(entry) => {
                 let ctx = entry.insert(WorkContext {
@@ -69,12 +73,17 @@ pub fn process(&mut self, item: S::Input) -> Option<S::Output> {
                 });
                 // Check readiness IMMEDIATELY (Elapsed = 0)
                 // Critical for 0-latency configs
-                S::is_ready(&ctx.accumulator, Duration::ZERO)
+                (S::is_ready(&ctx.accumulator, Duration::ZERO), Duration::ZERO)
             }
         };
 
+        if !is_ready_now {
+            debug!(?key, ?elapsed, "Crucible: Item ingested but NOT ready to seal.");
+        }
+
         // 2. EJECT (If ready)
         if is_ready_now {
+            info!(?key, ?elapsed, "Crucible: Item READY. Sealing...");
             if let Some(ctx) = self.contexts.remove(&key) {
                 return S::assemble(key, ctx.accumulator);
             }
@@ -93,12 +102,20 @@ pub fn process(&mut self, item: S::Input) -> Option<S::Output> {
     pub fn flush_stale(&mut self, ttl: Duration) -> Vec<S::Output> {
         let mut ready_keys = Vec::new();
         
-        for (key, ctx) in &self.contexts {
-            if ctx.created_at.elapsed() >= ttl {
-                ready_keys.push(key.clone());
-            }
+        let active_count = self.contexts.len();
+        if active_count > 0 {
+            info!(count = active_count, ttl_ms = ttl.as_millis(), "Crucible checking for stale sessions...");
         }
 
+        for (key, ctx) in &self.contexts {
+            let age = ctx.created_at.elapsed();
+            if age >= ttl {
+                warn!(?key, age_ms = age.as_millis(), "Crucible: FOUND STALE SESSION. Flushing.");
+                ready_keys.push(key.clone());
+            } else {
+                debug!(?key, age_ms = age.as_millis(), "Crucible: Session active (not stale yet).");
+            }
+        }
         let mut results = Vec::new();
         for key in ready_keys {
             if let Some(ctx) = self.contexts.remove(&key) {

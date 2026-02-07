@@ -105,6 +105,7 @@ impl Stronghold {
     /// Enforce Quotas: Delete oldest foreign data if limits exceeded
     fn prune_foreign_evidence(&mut self) {
         if self.foreign_storage_usage <= self.max_foreign_storage {
+            info!(max_store = %self.max_foreign_storage, "No evidence to prune.");
             return;
         }
 
@@ -161,7 +162,20 @@ impl Stronghold {
 
     #[instrument(skip(self, chunk), level = "debug")]
     pub fn ingest_chunk(&mut self, chunk: ShardChunk) {
+
+        info!(
+            shard_id = %chunk.shard_id, 
+            index = chunk.chunk_index, 
+            total = chunk.total_chunks,
+            "Micro-Layer receiving chunk"
+        );
+
         if let Some(envelope) = self.micro_layer.process(chunk) {
+            info!(
+                shard_id = %envelope.evidence.sequence_id(), 
+                "Micro-layer reassembly complete. Promoting to envelope."
+            );
+
             self.ingest_envelope(envelope);
         }
     }
@@ -183,8 +197,8 @@ impl Stronghold {
         }
 
         if let Err(e) = self.write_to_wal(&envelope) {
-             error!(error = %e, "CRITICAL: WAL write failed.");
-             return;
+            error!(error = %e, "CRITICAL: WAL write failed.");
+            return;
         }
 
         if !envelope.verify() { 
@@ -214,10 +228,21 @@ impl Stronghold {
     }
 
     fn archive_volley(&mut self, volley: Volley) {
-        if volley.artifacts.is_empty() { return; }
+        info!(id = %volley.id, artifacts = volley.artifacts.len(), "Stronghold: archive_volley called");
+
+        if volley.artifacts.is_empty() { 
+            warn!(id = %volley.id, "Stronghold: Volley is empty! Aborting archive.");
+            return; 
+        }
 
         let safe_did = volley.owner_did.replace(":", "_");
         let archive_dir = self.vault_storage.join(&safe_did);
+
+        if let Err(e) = fs::create_dir_all(&archive_dir) {
+            error!(error = %e, path = ?archive_dir, "Failed to create archive directory");
+            return;
+        }
+
         let _ = fs::create_dir_all(&archive_dir);
 
         let did = Did(volley.owner_did.clone());
@@ -273,11 +298,19 @@ impl Stronghold {
             }
             Err(e) => error!(%e, "Serialization error"),
         }
+        info!(path = ?archive_dir, "Stronghold: Archive Write Success");
     }
 
     pub fn archive_stale_sessions(&mut self, ttl: std::time::Duration) {
         // 1. Flush Micro Layer
+
+        info!(ttl_ms = ttl.as_millis(), "Stronghold: Running governance cleanup cycle");
+
         let recovered_envelopes = self.micro_layer.flush_stale(ttl);
+        if !recovered_envelopes.is_empty() {
+            warn!(count = recovered_envelopes.len(), "Stronghold: Recovered stale micro-shards");
+        }
+
         for env in recovered_envelopes {
             warn!(seq = %env.evidence.sequence_id(), "Salvaged incomplete shard.");
             // Pushes data to Macro Layer (Governance checks apply here too)
@@ -285,7 +318,13 @@ impl Stronghold {
         }
 
         // 2. Flush Macro Layer
+        info!("Stronghold: Checking Macro Layer for stale volleys...");
         let recovered_volleys = self.macro_layer.flush_stale(ttl);
+
+        if !recovered_volleys.is_empty() {
+            warn!(count = recovered_volleys.len(), "Stronghold: Recovered stale VOLLEYS!");
+        }
+
         for volley in recovered_volleys {
             warn!(id = %volley.id, "Force-archiving stale volley");
             self.archive_volley(volley);

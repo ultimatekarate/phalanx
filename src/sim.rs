@@ -1,13 +1,12 @@
 use std::collections::HashMap;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{info, warn, span, Level};
+use tracing::{info, warn, debug, span, Level};
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::identity::{PhalanxIdentity, Did, NetworkId};
 use crate::sentinel::{Sentinel, ControlMessage};
 use crate::stronghold::Stronghold;
-use crate::config::PhalanxConfig;
+use crate::config::{PhalanxConfig, PhalanxPhysics};
 use crate::shards::{ShardChunk};
 
 #[derive(Clone)]
@@ -22,16 +21,18 @@ pub struct SimulationHarness {
     pub broadcast_channel: mpsc::Sender<(Did, NetworkId, SimEvent)>,
     pub config: PhalanxConfig,
     pub identity_registry: Arc<RwLock<HashMap<Did, NetworkId>>>,
+    pub physics: PhalanxPhysics,
 }
 
 impl SimulationHarness {
-    pub fn init_mesh(config: PhalanxConfig) -> (Self, mpsc::Receiver<(Did, NetworkId, SimEvent)>) {
+    pub fn init_mesh(config: PhalanxConfig, physics: PhalanxPhysics) -> (Self, mpsc::Receiver<(Did, NetworkId, SimEvent)>) {
         let (tx, rx) = mpsc::channel(1024);
         let harness = Self {
             nodes: Arc::new(RwLock::new(HashMap::new())),
             identity_registry: Arc::new(RwLock::new(HashMap::new())),
             broadcast_channel: tx,
             config,
+            physics
         };
         (harness, rx)
     }
@@ -82,7 +83,14 @@ impl SimulationHarness {
 
         let broadcast_tx = self.broadcast_channel.clone();
         let config = self.config.clone();
+        let physics= self.physics.clone();
         
+        info!(
+            node = %name_owned, 
+            quota_foreign = %config.storage.max_foreign_storage_bytes,
+            "Initializing Stronghold"
+        );
+
         let mut sentinel = Sentinel::new(&config);
         let mut storage = Stronghold::new(&format!("sim_vault/{}", name), &config, identity.did.clone());
 
@@ -91,8 +99,8 @@ impl SimulationHarness {
             let _enter = span.enter();
             info!("Virtual node loop started");
 
-            let mut heartbeat_tick = tokio::time::interval(Duration::from_secs(config.network.heartbeat_interval_secs));
-            let mut cleanup_tick = tokio::time::interval(Duration::from_secs(config.network.cleanup_interval_secs));
+            let mut heartbeat_tick = tokio::time::interval(physics.heartbeat_interval());
+            let mut cleanup_tick = tokio::time::interval(physics.shard_timeout());
 
             loop {
                 tokio::select! {
@@ -108,21 +116,22 @@ impl SimulationHarness {
                     }
 
                     _ = cleanup_tick.tick() => {
-                        sentinel.prune_stale_buffers(&config);
-                        storage.archive_stale_sessions(Duration::from_secs(config.storage.stale_session_threshold));
+                        sentinel.prune_stale_buffers(&config, &physics);
+                        storage.archive_stale_sessions(physics.shard_timeout());
                     }
 
                     Some(event) = node_rx.recv() => {
                         match event {
                             SimEvent::Shutdown => break,
                             SimEvent::Chunk(source_peer, chunk) => {
-                                // LOGIC FIX: SALVAGE ROUTING
                                 // 1. If I am the source, I must Witness it (Sign & Store)
                                 if source_peer == node_network_id {
+                                    debug!("Processing self-generated chunk");
                                     if let Some(envelope) = sentinel.process_chunk(chunk, &config.network.video_topic, &config, &identity, node_network_id) {
                                         storage.ingest_envelope(envelope);
                                     }
                                 } else {
+                                    info!(source = %source_peer, "Ingesting foreign chunk (Salvage)");
                                     // 2. If a Peer sent it, I must Salvage it (Store Only)
                                     // Bypassing Sentinel prevents re-signing the data as my own.
                                     // This assumes the chunk contains a fragment of a valid WitnessEnvelope.
@@ -154,27 +163,31 @@ impl SimulationHarness {
     }
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn test_salvage_on_node_death() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("phalanx=debug,info")
         .try_init();
 
-    use std::time::Duration;
+    // 1. SETUP
+    let _ = std::fs::remove_dir_all("sim_vault/SmashedDevice");
+    let _ = std::fs::remove_dir_all("sim_vault/GuardianDevice");
+
+    use tokio::time::Duration;
     use tracing::{info};
     use crate::shards::{Evidence, WitnessEnvelope};
 
     // 1. CONFIGURATION
     let config = PhalanxConfig::test_salvage_on_node_death();
-
-    let (mut harness, relay_rx) = SimulationHarness::init_mesh(config.clone());
+    let physics = PhalanxPhysics::test_profile();
+    let (mut harness, relay_rx) = SimulationHarness::init_mesh(config.clone(), physics);
     let nodes_ref = Arc::clone(&harness.nodes);
     tokio::spawn(async move { 
         SimulationHarness::run_mesh_relay(nodes_ref, relay_rx).await 
     });
 
     let smashed_device_did = harness.spawn_node("SmashedDevice").await;
-    let __guardian_device_did = harness.spawn_node("GuardianDevice").await;
+    let _guardian_device_did = harness.spawn_node("GuardianDevice").await;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // 2. CREATE DATA (Signed by a Victim Identity)
@@ -218,12 +231,11 @@ async fn test_salvage_on_node_death() {
         harness.broadcast(&smashed_device_did, SimEvent::Chunk(smashed_device_network_id, chunk)).await;
     }
 
-    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // 3. TRIGGER SALVAGE
-    info!("Advancing virtual clock");
-    tokio::time::advance(Duration::from_secs(10)).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    info!("Waiting for 5 seconds");
+    tokio::time::sleep(Duration::from_millis(5000)).await;
 
     // 4. VERIFICATION
     let victim_safe_did = victim_did.to_safe_name();
