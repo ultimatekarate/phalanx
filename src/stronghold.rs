@@ -186,7 +186,9 @@ impl Stronghold {
                 "Micro-layer reassembly complete. Promoting to envelope."
             );
 
-            _ = self.ingest_envelope(envelope);
+            if let Err(e) = self.ingest_envelope(envelope) {
+                warn!(error = ?e, "Stronghold rejected reassembled chunk");
+            }
         }
     }
 
@@ -325,7 +327,7 @@ impl Stronghold {
 
         for env in recovered_envelopes {
             warn!(seq = %env.evidence.sequence_id(), "Salvaged incomplete shard.");
-            // Pushes data to Macro Layer (Governance checks apply here too)
+            // Swallow errors during internal clean up.
             _ = self.ingest_envelope(env);
         }
 
@@ -361,9 +363,13 @@ impl Stronghold {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if fs::metadata(&path).map(|m| m.len()).unwrap_or(0) == 0 { continue; }
+
                 if let Ok(bytes) = fs::read(&path) {
                     if let Ok(envelope) = postcard::from_bytes::<WitnessEnvelope>(&bytes) {
-                        self.macro_layer.process(envelope);
+                        if let Some(volley) = self.macro_layer.process(envelope) {
+                            info!(id = %volley.id, "Recovered sealed volley from WAL. Archiving.");
+                            self.archive_volley(volley);
+                        }
                     }
                 }
             }
@@ -375,7 +381,8 @@ impl Stronghold {
 mod tests {
     use super::*;
     use crate::config::{StorageConfig, NetworkConfig, HardwareConfig};
-    use crate::identity::PhalanxIdentity;
+    use crate::identity::{PhalanxIdentity, NetworkId};
+    use crate::shards::VideoShard;
     use std::fs::File;
     use std::io::Write;
 
@@ -441,5 +448,142 @@ mod tests {
         assert!(stronghold.foreign_storage_usage <= 1500, "Usage should be under limit");
         
         let _ = fs::remove_dir_all(&vault_root);
+    }
+
+    #[test]
+    fn test_invalid_signature_rejection() {
+        let identity = PhalanxIdentity::generate();
+        let _attacker = PhalanxIdentity::generate(); // Different key!
+        let peer_id = NetworkId::random();
+        let config = PhalanxConfig::default();
+        let vault_path = "sim_vault/test_sig_reject";
+        let _ = std::fs::remove_dir_all(vault_path);
+
+        let mut stronghold = Stronghold::new(vault_path, &config, identity.did.clone());
+
+        // 1. Create a Shard
+        let shard = VideoShard {
+            volley_id: "v1".to_string(),
+            timestamp: 100,
+            frames: vec![vec![1]],
+            sequence_id: StorageSequence(1),
+            fps: 30,
+        };
+
+        // 2. Sign it with the WRONG identity (Attacker signs, claims to be Victim?)
+        // Actually, WitnessEnvelope::new signs with the 'owner' passed in.
+        // To forge it, we need to tamper with the payload AFTER signing.
+        let mut envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id);
+        
+        // 3. TAMPER: Modify the payload without updating the signature
+        if let Evidence::Video(ref mut v) = envelope.evidence {
+            v.timestamp = 999999; // Malicious timestamp edit
+        }
+
+        // 4. Ingest & Assert Failure
+        let result = stronghold.ingest_envelope(envelope);
+        
+        assert!(result.is_err(), "Stronghold accepted a tampered envelope!");
+        match result {
+            Err(StrongholdError::InvalidSignature(_)) => (), // Pass
+            _ => panic!("Wrong error type returned"),
+        }
+    }
+
+    #[test]
+    fn test_governance_rejection() {
+        let identity = PhalanxIdentity::generate();
+        let stranger = PhalanxIdentity::generate();
+        let peer_id = NetworkId::random();
+        
+        // 1. Setup Config with TINY limit (0 bytes)
+        let mut config = PhalanxConfig::default();
+        config.storage.max_foreign_storage_bytes = 0; // Strict mode
+        
+        let vault_path = "sim_vault/test_quota_reject";
+        let _ = std::fs::remove_dir_all(vault_path);
+        
+        let mut stronghold = Stronghold::new(vault_path, &config, identity.did.clone());
+
+        // 2. Artificially inflate usage to simulate a "stuck" state
+        // (Simulating a state where pruning failed to free space)
+        stronghold.foreign_storage_usage = 1000; 
+
+        let shard = VideoShard {
+            volley_id: "v1".to_string(),
+            timestamp: 100,
+            frames: vec![vec![1]],
+            sequence_id: StorageSequence(1),
+            fps: 30,
+        };
+        let envelope = WitnessEnvelope::new(Evidence::Video(shard), &stranger, peer_id);
+
+        // 3. Ingest Foreign Data
+        let result = stronghold.ingest_envelope(envelope);
+
+        // 4. Assert Quota Error
+        assert!(result.is_err(), "Stronghold ignored quota limits!");
+        match result {
+            Err(StrongholdError::QuotaExceeded(limit)) => assert_eq!(limit, 0),
+            _ => panic!("Wrong error type"),
+        }
+    }
+
+    #[test]
+    fn test_replay_protection() {
+        let identity = PhalanxIdentity::generate();
+        let peer_id = NetworkId::random();
+        let config = PhalanxConfig::default();
+        let vault_path = "sim_vault/test_replay";
+        let _ = std::fs::remove_dir_all(vault_path);
+
+        let mut stronghold = Stronghold::new(vault_path, &config, identity.did.clone());
+
+        let seq_num = StorageSequence(50);
+        let shard = VideoShard {
+            volley_id: "v1".to_string(),
+            timestamp: 100,
+            frames: vec![vec![1]],
+            sequence_id: seq_num, 
+            fps: 30,
+        };
+        let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id);
+
+        // 1. MANUALLY SEED HISTORY
+        // Simulate that Sequence #50 was already archived in the past.
+        stronghold.processed_sequences
+            .entry(identity.did.clone())
+            .or_default()
+            .insert(seq_num);
+
+        // 2. Ingest the "Replay" Envelope
+        // The Replay Guard should catch this and return Ok() immediately.
+        assert!(stronghold.ingest_envelope(envelope).is_ok());
+
+        // 3. Verify it was BLOCKED
+        // If it was blocked, it should NOT be in the active macro layer buffer.
+        let active_session = stronghold.get_active_volley_shards(&identity.did);
+        assert!(active_session.is_none(), "Replayed envelope leaked into active buffer!");
+    }
+
+    #[test]
+    fn test_initial_usage_scan() {
+        let identity = PhalanxIdentity::generate();
+        let stranger = PhalanxIdentity::generate();
+        let config = PhalanxConfig::default();
+        let vault_path = "sim_vault/test_init_scan";
+        let _ = std::fs::remove_dir_all(vault_path);
+        
+        // 1. Pre-seed the disk with data
+        let stranger_dir = std::path::PathBuf::from(vault_path).join(stranger.did.to_safe_name());
+        std::fs::create_dir_all(&stranger_dir).unwrap();
+        std::fs::write(stranger_dir.join("test.bin"), vec![0u8; 500]).unwrap(); // 500 bytes
+
+        // 2. Boot Stronghold
+        let stronghold = Stronghold::new(vault_path, &config, identity.did.clone());
+
+        // 3. Assert Usage Detected
+        assert_eq!(stronghold.current_storage_usage, 500);
+        assert_eq!(stronghold.foreign_storage_usage, 500);
     }
 }

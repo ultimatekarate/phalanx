@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{info, warn, debug, span, Level};
+use tracing::{error, info, warn, debug, span, Level};
 use std::sync::Arc;
 
 use crate::identity::{PhalanxIdentity, Did, NetworkId};
@@ -128,7 +128,9 @@ impl SimulationHarness {
                                 if source_peer == node_network_id {
                                     debug!("Processing self-generated chunk");
                                     if let Some(envelope) = sentinel.process_chunk(chunk, &config.network.video_topic, &config, &identity, node_network_id) {
-                                        _ = storage.ingest_envelope(envelope);
+                                        if let Err(e) = storage.ingest_envelope(envelope) {
+                                            error!(?e, "Failed to ingest self-generated envelope");
+                                        }
                                     }
                                 } else {
                                     info!(source = %source_peer, "Ingesting foreign chunk (Salvage)");
@@ -299,12 +301,11 @@ async fn test_out_of_sequence_salvage_on_node_death() {
         captured_envelopes.push(envelope);
     }
 
-    _ = storage.ingest_envelope(captured_envelopes[0].clone());
-    _ = storage.ingest_envelope(captured_envelopes[2].clone());
-    _ = storage.ingest_envelope(captured_envelopes[4].clone());
-
-    _ = storage.ingest_envelope(captured_envelopes[1].clone());
-    _ = storage.ingest_envelope(captured_envelopes[3].clone());
+    storage.ingest_envelope(captured_envelopes[0].clone()).expect("Ingest failed");
+    storage.ingest_envelope(captured_envelopes[2].clone()).expect("Ingest failed");
+    storage.ingest_envelope(captured_envelopes[4].clone()).expect("Ingest failed");
+    storage.ingest_envelope(captured_envelopes[1].clone()).expect("Ingest failed");
+    storage.ingest_envelope(captured_envelopes[3].clone()).expect("Ingest failed");
 
     let session = storage.get_active_volley_shards(&identity.did.clone())
         .expect("Session should exist for recovered DID");
@@ -347,7 +348,7 @@ async fn test_stronghold_crash_recovery() {
     };
     
     let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id);
-    _ = storage.ingest_envelope(envelope.clone());
+    storage.ingest_envelope(envelope.clone()).expect("Ingest failed");
 
     drop(storage);
 
