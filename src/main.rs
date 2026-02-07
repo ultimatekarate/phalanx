@@ -47,7 +47,7 @@ impl PhalanxNode {
                         self.local_peer_id
                     ) {
                         // If reassembly is complete, save to vault
-                        self.storage.ingest_envelope(envelope);
+                        _ = self.storage.ingest_envelope(envelope);
                     }
                 }
             }
@@ -112,7 +112,7 @@ impl PhalanxNode {
         let envelope = WitnessEnvelope::new(evidence.clone(), &self.identity, self.local_peer_id);
         
         // 2. Persist Locally (Always save your own data first)
-        self.storage.ingest_envelope(envelope.clone());
+        _ = self.storage.ingest_envelope(envelope.clone());
     
         // 3. Select Topic
         let topic_str = match evidence {

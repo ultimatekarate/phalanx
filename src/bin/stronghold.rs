@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             
                             // Reassembly logic
                             if let Some(envelope) = sentinel.process_chunk(chunk, topic_str, &config, &identity, local_peer_id) {
-                                storage.ingest_envelope(envelope);
+                                _ = storage.ingest_envelope(envelope);
                                 println!("Stronghold archived full envelope.");
                             }
                         }

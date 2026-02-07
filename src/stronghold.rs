@@ -11,6 +11,16 @@ use std::path::PathBuf;
 use tokio::time::Instant;
 use tracing::{info, error, warn, debug, instrument};
 
+// Error handling because people are going to be assholes.
+#[derive(Debug)]
+pub enum StrongholdError {
+    QuotaExceeded(u64),      // Peer is spamming
+    InvalidSignature(String), // Peer is lying
+    ReplayDetected(u32),      // Peer is replaying old data
+    WalWriteFailed(String),   // Disk IO failure
+    SerializationError(String),
+}
+
 pub struct Stronghold {
     pub vault_storage: PathBuf,
     pub wal_directory: PathBuf,
@@ -29,8 +39,8 @@ pub struct Stronghold {
 
     // --- GOVERNANCE & QUOTAS ---
     pub local_did: Did,                     // "My" Identity
-    pub max_storage: u64,                   // Total Limit
-    pub max_foreign_storage: u64,           // Foreign Limit
+    pub max_storage_bytes: u64,                   // Total Limit
+    pub max_foreign_storage_bytes: u64,           // Foreign Limit
     pub current_storage_usage: u64,         // Current Total Usage
     pub foreign_storage_usage: u64,         // Current Foreign Usage
 }
@@ -53,8 +63,8 @@ impl Stronghold {
             
             // Governance Init
             local_did,
-            max_storage: config.storage.max_storage_bytes,
-            max_foreign_storage: config.storage.max_foreign_storage_bytes,
+            max_storage_bytes: config.storage.max_storage_bytes,
+            max_foreign_storage_bytes: config.storage.max_foreign_storage_bytes,
             current_storage_usage: 0,
             foreign_storage_usage: 0,
         };
@@ -104,14 +114,14 @@ impl Stronghold {
 
     /// Enforce Quotas: Delete oldest foreign data if limits exceeded
     fn prune_foreign_evidence(&mut self) {
-        if self.foreign_storage_usage <= self.max_foreign_storage {
-            info!(max_store = %self.max_foreign_storage, "No evidence to prune.");
+        if self.foreign_storage_usage <= self.max_foreign_storage_bytes {
+            info!(max_store = %self.max_foreign_storage_bytes, "No evidence to prune.");
             return;
         }
 
         warn!(
             usage = self.foreign_storage_usage, 
-            limit = self.max_foreign_storage, 
+            limit = self.max_foreign_storage_bytes, 
             "Foreign storage quota exceeded. Pruning..."
         );
 
@@ -146,7 +156,7 @@ impl Stronghold {
 
         // 3. Delete until under limit
         for (path, size, _) in foreign_files {
-            if self.foreign_storage_usage <= self.max_foreign_storage {
+            if self.foreign_storage_usage <= self.max_foreign_storage_bytes {
                 break;
             }
 
@@ -176,34 +186,34 @@ impl Stronghold {
                 "Micro-layer reassembly complete. Promoting to envelope."
             );
 
-            self.ingest_envelope(envelope);
+            _ = self.ingest_envelope(envelope);
         }
     }
 
-    pub fn ingest_envelope(&mut self, envelope: WitnessEnvelope) {
+    pub fn ingest_envelope(&mut self, envelope: WitnessEnvelope) -> Result<(), StrongholdError> {
         // 0. GOVERNANCE CHECK
         // If this is foreign data, ensure we have space.
         if envelope.did != self.local_did {
             // Trigger pruning if we are over limit (or close to it)
-            if self.foreign_storage_usage > self.max_foreign_storage {
+            if self.foreign_storage_usage > self.max_foreign_storage_bytes {
                 self.prune_foreign_evidence();
                 
                 // Hard Reject if pruning failed to free enough space
-                if self.foreign_storage_usage > self.max_foreign_storage {
+                if self.foreign_storage_usage > self.max_foreign_storage_bytes {
                     warn!(did = %envelope.did, "Rejected foreign evidence: Storage Full");
-                    return; 
+                    return Err(StrongholdError::QuotaExceeded(self.max_foreign_storage_bytes));
                 }
             }
         }
 
         if let Err(e) = self.write_to_wal(&envelope) {
             error!(error = %e, "CRITICAL: WAL write failed.");
-            return;
+            return Err(StrongholdError::WalWriteFailed(e.to_string()));
         }
 
         if !envelope.verify() { 
             error!(did = %envelope.did, "Rejected invalid signature"); 
-            return; 
+            return Err(StrongholdError::InvalidSignature(envelope.did.to_string()));
         }
         
         let did = envelope.did.clone();
@@ -211,7 +221,7 @@ impl Stronghold {
 
         if self.processed_sequences.get(&did).is_some_and(|set| set.contains(&seq)) {
             debug!(%seq, "Replay protection: Dropping already archived shard.");
-            return;
+            return Ok(());
         }
 
         self.session_activity.insert(did.clone(), Instant::now());
@@ -220,6 +230,8 @@ impl Stronghold {
             info!(volley = %volley.id, "Volley sealed. Archiving.");
             self.archive_volley(volley);
         }
+
+        Ok(())
     }
 
     pub fn get_active_volley_shards(&self, did: &Did) -> Option<&std::collections::BTreeMap<StorageSequence, WitnessEnvelope>> {
@@ -314,7 +326,7 @@ impl Stronghold {
         for env in recovered_envelopes {
             warn!(seq = %env.evidence.sequence_id(), "Salvaged incomplete shard.");
             // Pushes data to Macro Layer (Governance checks apply here too)
-            self.ingest_envelope(env);
+            _ = self.ingest_envelope(env);
         }
 
         // 2. Flush Macro Layer
