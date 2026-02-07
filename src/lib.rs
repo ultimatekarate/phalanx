@@ -90,7 +90,7 @@ mod integration_tests {
 
         // VERIFY 1: Micro Layer State
         // The Micro Crucible should be holding the incomplete shard
-        let active_shard = stronghold.micro_layer.contexts.get(&shards::ShardId(0));
+        let active_shard = stronghold.micro_layer.get(&shards::ShardId(0));
         assert!(active_shard.is_some(), "Micro Layer failed to buffer incomplete chunks");
         
         // Feed the final chunk
@@ -98,7 +98,7 @@ mod integration_tests {
 
         // VERIFY 2: Promotion to Macro Layer
         // Micro layer should be empty (shard completed and moved up)
-        assert!(stronghold.micro_layer.contexts.is_empty(), "Micro Layer failed to clear completed shard");
+        assert!(stronghold.micro_layer.is_empty(), "Micro Layer failed to clear completed shard");
         
         // Macro layer (Crucible) should now hold the WIP Volley
         let active_shards = stronghold.get_active_volley_shards(&identity.did);

@@ -30,7 +30,7 @@ pub trait Mold {
 // --- THE CONTAINER (The Workbench) ---
 pub struct Crucible<S: Mold> {
     // PUBLIC: Allows Stronghold to inspect active work (e.g., for tests or status API)
-    pub contexts: BTreeMap<S::Key, WorkContext<S>>,
+    contexts: BTreeMap<S::Key, WorkContext<S>>,
     cleanup_interval: Duration,
     last_cleanup: Instant,
 }
@@ -88,10 +88,22 @@ impl<S: Mold> Crucible<S> {
                 return S::assemble(key, ctx.accumulator);
             }
         }
-
+        
         None
     }
 
+    pub fn active_count(&self) -> usize {
+        self.contexts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.contexts.is_empty()
+    }
+
+    pub fn get(&self, key: &S::Key) -> Option<&S::Accumulator> {
+        self.contexts.get(key).map(|ctx| &ctx.accumulator)
+    }
+    
     fn perform_cleanup(&mut self) {
         if self.last_cleanup.elapsed() > self.cleanup_interval {
             self.last_cleanup = Instant::now();

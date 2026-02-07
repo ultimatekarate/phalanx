@@ -223,8 +223,8 @@ impl Stronghold {
     }
 
     pub fn get_active_volley_shards(&self, did: &Did) -> Option<&std::collections::BTreeMap<StorageSequence, WitnessEnvelope>> {
-        self.macro_layer.contexts.get(&did.to_string())
-            .map(|ctx| &ctx.accumulator.artifacts)
+        self.macro_layer.get(&did.to_string())
+            .map(|buffer| &buffer.artifacts)
     }
 
     fn archive_volley(&mut self, volley: Volley) {

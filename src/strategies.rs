@@ -1,3 +1,6 @@
+const VOLLEY_SIZE_THRESHOLD: usize = 50;
+const VOLLEY_TIME_THRESHOLD: Duration = Duration::from_secs(1);
+
 use crate::crucible::Mold;
 use crate::identity::Did;
 use crate::shards::{ShardChunk, ShardId, StorageSequence, WitnessEnvelope};
@@ -132,7 +135,7 @@ impl Mold for VolleyAmalgam {
     }
 
     fn is_ready(acc: &Self::Accumulator, elapsed: Duration) -> bool {
-        acc.artifacts.len() >= 50 || elapsed > Duration::from_secs(1)
+        acc.artifacts.len() >= VOLLEY_SIZE_THRESHOLD || elapsed > VOLLEY_TIME_THRESHOLD
     }
 
     fn assemble(key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output> {

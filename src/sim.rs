@@ -170,7 +170,7 @@ async fn test_salvage_on_node_death() {
         .try_init();
 
     // 1. SETUP
-    let _ = std::fs::remove_dir_all("sim_vault/SmashedDevice");
+    let _ = std::fs::remove_dir_all("sim_vault/VictimDevice");
     let _ = std::fs::remove_dir_all("sim_vault/GuardianDevice");
 
     use tokio::time::Duration;
@@ -186,12 +186,12 @@ async fn test_salvage_on_node_death() {
         SimulationHarness::run_mesh_relay(nodes_ref, relay_rx).await 
     });
 
-    let smashed_device_did = harness.spawn_node("SmashedDevice").await;
+    let victim_device_did = harness.spawn_node("VictimDevice").await;
     let _guardian_device_did = harness.spawn_node("GuardianDevice").await;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // 2. CREATE DATA (Signed by a Victim Identity)
-    let smashed_device_network_id = harness.resolve_did(&smashed_device_did).await.unwrap();
+    let victim_device_network_id = harness.resolve_did(&victim_device_did).await.unwrap();
     
     // We generate a separate identity to sign the data. 
     // This represents the "User" of the smashed device node.
@@ -210,7 +210,7 @@ async fn test_salvage_on_node_death() {
     let envelope = WitnessEnvelope::new(
         Evidence::Video(real_shard), 
         &victim_identity, 
-        smashed_device_network_id
+        victim_device_network_id
     );
 
     // Serialize the ENVELOPE (not just the shard)
@@ -228,7 +228,7 @@ async fn test_salvage_on_node_death() {
 
     for chunk in chunks {
         // Broadcast from Alpha's Network ID
-        harness.broadcast(&smashed_device_did, SimEvent::Chunk(smashed_device_network_id, chunk)).await;
+        harness.broadcast(&victim_device_did, SimEvent::Chunk(victim_device_network_id, chunk)).await;
     }
 
     tokio::time::sleep(Duration::from_secs(1)).await;
