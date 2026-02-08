@@ -1,7 +1,7 @@
 use tokio::sync::mpsc::Sender;
 use serde::{Serialize, Deserialize};
 use std::time::{SystemTime, UNIX_EPOCH};
-use crate::{config::HardwareConfig, shards::StorageSequence};
+use crate::{core::config::HardwareConfig, protocol::shards::StorageSequence};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioShard {

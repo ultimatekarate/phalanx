@@ -5,13 +5,12 @@ use tokio::select;
 use tokio::sync::mpsc;
 
 // Internal Modules
-use phalanx::shards::{self, Evidence, WitnessEnvelope};
-use phalanx::{camera};
-use phalanx::audio;
-use phalanx::identity::{NetworkId, PhalanxIdentity};
-use phalanx::sentinel::{Sentinel, ControlMessage};
-use phalanx::config::{PhalanxConfig, PhalanxPhysics};
-use phalanx::stronghold::Stronghold;
+use phalanx::protocol::shards::{self, Evidence, WitnessEnvelope};
+use phalanx::hardware::{camera, audio};
+use phalanx::security::identity::{NetworkId, PhalanxIdentity};
+use phalanx::security::sentinel::{Sentinel, ControlMessage};
+use phalanx::core::config::{PhalanxConfig, PhalanxPhysics};
+use phalanx::storage::stronghold::Stronghold;
 use phalanx::{PhalanxBehaviour, PhalanxEvent}; 
 
 // --- THE STATE STRUCT ---
@@ -89,7 +88,7 @@ impl PhalanxNode {
                 ..
             } => {
                 // Ensure it is the correct service key
-                if key == phalanx::network::get_storage_key() {
+                if key == phalanx::network::network::get_storage_key() {
                     for peer in providers {
                         tracing::info!(%peer, "DISCOVERY: Found Stronghold Node!");
                         // Auto-dial to establish direct data link
@@ -156,7 +155,7 @@ impl PhalanxNode {
 // --- MAIN ENTRY POINT ---
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    phalanx::obs::init_observability();
+    phalanx::core::telemetry::init_observability();
 
     // 1. Initialization Phase
     let config = PhalanxConfig::load_from_env();
@@ -240,7 +239,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             _ = discovery_timer.tick() => {
                 // Periodically ask the network: "Who provides storage?"
-                let key = phalanx::network::get_storage_key();
+                let key = phalanx::network::network::get_storage_key();
                 swarm.behaviour_mut().kademlia.get_providers(key);
             }
 

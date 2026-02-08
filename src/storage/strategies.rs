@@ -1,9 +1,9 @@
 const VOLLEY_SIZE_THRESHOLD: usize = 50;
 const VOLLEY_TIME_THRESHOLD: Duration = Duration::from_secs(1);
 
-use crate::crucible::Mold;
-use crate::identity::Did;
-use crate::shards::{ShardChunk, ShardId, StorageSequence, WitnessEnvelope};
+use crate::storage::crucible::Mold;
+use crate::security::identity::Did;
+use crate::protocol::shards::{ShardChunk, ShardId, StorageSequence, WitnessEnvelope};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use serde::{Serialize, Deserialize};

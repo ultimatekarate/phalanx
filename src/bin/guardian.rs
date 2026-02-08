@@ -6,13 +6,22 @@ use libp2p::{
     swarm::SwarmEvent, 
     kad
 };
-use phalanx::identity::NetworkId;
+
 use phalanx::{
-    stronghold::Stronghold, 
-    sentinel::Sentinel,
-    config::{PhalanxConfig, PhalanxPhysics},
-    identity::PhalanxIdentity,
+    storage::stronghold::Stronghold, 
+    security::{
+        sentinel::Sentinel,
+        identity::{
+            PhalanxIdentity,
+            NetworkId
+        }
+    },
+    core::{
+        config::{PhalanxConfig, PhalanxPhysics},
+        telemetry
+    }
 };
+
 use std::error::Error;
 use std::time::Duration;
 use tracing::{info};
@@ -22,7 +31,7 @@ use phalanx::{PhalanxEvent};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // Initialize tracing (replacing env_logger for forensic-grade logging)
-    tracing_subscriber::fmt::init();
+    let _guard = telemetry::init_observability();
     info!("PHALANX STRONGHOLD: Initializing Headless PDS...");
 
     let config = PhalanxConfig::load("phalanx.toml")
@@ -37,7 +46,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let physics = PhalanxPhysics::default_wan();
     let mut swarm = phalanx::setup_phalanx_swarm(identity.to_libp2p_keypair(), stronghold_flag, physics)?;
 
-    let storage_key = phalanx::network::get_storage_key();
+    let storage_key = phalanx::network::network::get_storage_key();
     
     // This tells the DHT: "I am a provider for this key"
     swarm.behaviour_mut().kademlia.start_providing(storage_key.clone())
@@ -70,7 +79,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         // NOW you have access to the `message` variable
                         let topic_str = message.topic.as_str();
 
-                        if let Ok(chunk) = postcard::from_bytes::<phalanx::shards::ShardChunk>(&message.data) {
+                        if let Ok(chunk) = postcard::from_bytes::<phalanx::protocol::shards::ShardChunk>(&message.data) {
                             println!("Stronghold received chunk from: {}", chunk.owner_did);
                             
                             // Reassembly logic
@@ -114,7 +123,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             // 3. Outgoing Heartbeats (Capacity Announcements)
             _ = heartbeat_timer.tick() => {
-                let hb = phalanx::sentinel::ControlMessage {
+                let hb = phalanx::security::sentinel::ControlMessage {
                     sender: local_peer_id,
                     load_factor: 0.0, // Stronghold-specific metric
                     storage_remaining_mb: 10240, // Mock value

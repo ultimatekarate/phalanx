@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use tokio::time::Instant;
 use tracing::{info, warn, debug, instrument};
 
-use crate::shards::{
+use crate::protocol::shards::{
     Evidence, VideoShard, ReassemblyBuffer, ShardChunk, 
     ShardId, WitnessEnvelope
 };
-use crate::audio::AudioShard;
-use crate::config::{PhalanxPhysics, PhalanxConfig};
-use crate::identity::{NetworkId, PhalanxIdentity};
+use crate::hardware::audio::AudioShard;
+use crate::core::config::{PhalanxPhysics, PhalanxConfig};
+use crate::security::identity::{NetworkId, PhalanxIdentity};
 
 // =====================
 // HEALTH & CAPACITY

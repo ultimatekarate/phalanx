@@ -1,24 +1,20 @@
 // src/lib.rs
 
 // 1. Module Declarations
-pub mod audio;
-pub mod camera;
-pub mod config;
-pub mod identity;
-pub mod network; 
-pub mod obs;
-pub mod sentinel;
-pub mod shards;
+pub mod core;
+pub mod hardware;
+pub mod storage;
+pub mod security;
+pub mod protocol;
+pub mod network;
 pub mod sim;
-pub mod stronghold;
-pub mod crucible;
-pub mod strategies; 
+
 // 2. Re-exports
 // We expose the network logic so main.rs can use it without importing `crate::network::*`
-pub use network::{setup_phalanx_swarm, PhalanxBehaviour, PhalanxEvent};
+pub use network::network::{setup_phalanx_swarm, PhalanxBehaviour, PhalanxEvent};
+pub use core::config::PhalanxConfig;
+pub use security::identity::PhalanxIdentity;
 
-// 3. Helpers
-use crate::identity::PhalanxIdentity;
 
 /// Helper to load identity from disk or generate a new one.
 pub fn init_identity() -> PhalanxIdentity {
@@ -36,10 +32,10 @@ pub fn init_identity() -> PhalanxIdentity {
 
 #[cfg(test)]
 mod integration_tests {
-    use crate::config::PhalanxConfig;
-    use crate::stronghold::Stronghold;
-    use crate::shards::{self, Evidence, VideoShard, StorageSequence, WitnessEnvelope};
-    use crate::identity::{NetworkId, PhalanxIdentity};
+    use crate::core::config::PhalanxConfig;
+    use crate::storage::stronghold::Stronghold;
+    use crate::protocol::shards::{self, Evidence, VideoShard, StorageSequence, WitnessEnvelope};
+    use crate::security::identity::{NetworkId, PhalanxIdentity};
     use std::time::Duration;
 
     #[test]

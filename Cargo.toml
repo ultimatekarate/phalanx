@@ -3,6 +3,10 @@ name = "phalanx"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "guardian"
+path = "src/bin/guardian.rs"
+
 [dependencies]
 # --- Async Runtime ---
 tokio = { version = "1.0", features = ["full", "test-util"] }
@@ -11,7 +15,7 @@ tokio = { version = "1.0", features = ["full", "test-util"] }
 env_logger = "0.11"
 log = "0.4"
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 
 # --- Security & Identity ---
 # rand_core feature is mandatory for the .generate() method
@@ -34,6 +38,7 @@ void = "1.0.2"
 nokhwa = { version = "0.10", features = ["input-msmf"] }
 ndarray = "0.17.2"
 image = { version = "0.25.9", features = ["jpeg"] }
+tracing-appender = "0.2.4"
 
 # --- Networking (Consolidated) ---
 [dependencies.libp2p]

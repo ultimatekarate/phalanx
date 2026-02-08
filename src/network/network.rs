@@ -9,7 +9,7 @@ use libp2p::{
 use std::time::Duration;
 use tokio::io;
 use libp2p::kad::RecordKey;
-use crate::config::PhalanxPhysics;
+use crate::core::config::PhalanxPhysics;
 use void::Void;
 
 // Define a custom Kademlia Record Store

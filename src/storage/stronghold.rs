@@ -1,8 +1,8 @@
-use crate::shards::{StorageSequence, Evidence, WitnessEnvelope, ShardChunk};
-use crate::crucible::{Crucible};
-use crate::strategies::{ShardAmalgam, VolleyAmalgam, Volley}; 
-use crate::config::PhalanxConfig;
-use crate::identity::Did;
+use crate::protocol::shards::{StorageSequence, Evidence, WitnessEnvelope, ShardChunk};
+use crate::storage::crucible::{Crucible};
+use crate::storage::strategies::{ShardAmalgam, VolleyAmalgam, Volley}; 
+use crate::core::config::PhalanxConfig;
+use crate::security::identity::Did;
 
 use std::collections::{HashSet, HashMap};
 use std::fs::{self, File};
@@ -380,9 +380,9 @@ impl Stronghold {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{StorageConfig, NetworkConfig, HardwareConfig};
-    use crate::identity::{PhalanxIdentity, NetworkId};
-    use crate::shards::VideoShard;
+    use crate::core::config::{StorageConfig, NetworkConfig, HardwareConfig};
+    use crate::security::identity::{PhalanxIdentity, NetworkId};
+    use crate::protocol::shards::VideoShard;
     use std::fs::File;
     use std::io::Write;
 

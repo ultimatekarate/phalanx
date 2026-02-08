@@ -3,8 +3,8 @@ use nokhwa::pixel_format::RgbFormat;
 use nokhwa::Camera;
 use std::time::Duration;
 use tokio::sync::mpsc::Sender;
-use crate::shards::{self, StorageSequence, VideoShard}; 
-use crate::config::HardwareConfig;
+use crate::protocol::shards::{self, StorageSequence, VideoShard}; 
+use crate::core::config::HardwareConfig;
 
 pub trait FrameProvider: 'static {
     fn capture_frame(&mut self) -> Result<Vec<u8>, String>;

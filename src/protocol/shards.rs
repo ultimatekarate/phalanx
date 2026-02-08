@@ -8,7 +8,7 @@ use std::fmt;
 use serde::{Serialize, Deserialize};
 use image::{DynamicImage, ImageFormat}; 
 
-use crate::identity::{PhalanxIdentity, Did, NetworkId};
+use crate::security::identity::{PhalanxIdentity, Did, NetworkId};
 
 // =====================
 // DATA STRUCTURES
@@ -45,7 +45,7 @@ impl ReassemblyBuffer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Evidence {
     Video(VideoShard),
-    Audio(crate::audio::AudioShard),
+    Audio(crate::hardware::audio::AudioShard),
     // Future expansion: Telemetry(TelemetryShard),
 }
 
