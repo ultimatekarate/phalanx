@@ -11,6 +11,9 @@
   - [ ] Create a thread-safe "Moat" where audio samples wait to be picked up by the video frame.
   - [ ] Update Audio loop to fill the "moat".
   - [ ] Update Camera loop to drain the "moat" and seal the shard.
+- [ ] **Audio Forensics (The "Ventriloquist" Patch)**
+  - [ ] **Reverb Consistency:** Calculate RT60 (reverb time) and correlate with video scene context (e.g., ensure "Open Field" video doesn't sound like "Small Bathroom").
+  - [ ] **Ultrasonic Handshake:** Randomly emit an inaudible 19kHz chirp and verify the microphone captures the reflection to prevent pre-recorded audio injection.
 
 ## Camera Module (`camera.rs`)
 
@@ -25,10 +28,14 @@
 - [ ] **Fix Blocking Send**
   - [ ] Switch from `blocking_send` to `try_send`.
   - [ ] If `Full`: Log "Frame Dropped" (or implement a ring buffer to drop oldest).
-- [ ] **Thumbnail FFT for Moire Patterns**
-  - [ ] Downsample the frame to 512x512
-  - [ ] Convert to Gray scale.
-  - [ ] FFT Magic- Thank you Dr. Guo.
+- [ ] **Thumbnail FFT (Moiré Pattern Detector)**
+  - [ ] Downsample the frame to 512x512 using Nearest Neighbor (preserve aliasing).
+  - [ ] Convert to Grayscale.
+  - [ ] **FFT Magic:** Run 2D Fourier Transform to detect high-frequency grid artifacts (The "Professor's Method").
+- [ ] **Rolling Shutter ("Jello") Verifier**
+  - [ ] **Calibration:** Store sensor readout speed (e.g., 15ms) in config.
+  - [ ] **Motion Check:** Compare Gyro Y-axis rotation against Vertical Edge tilt in video.
+  - [ ] **Verdict:** Flag "Physics Mismatch" if gyro indicates rotation but video geometry remains flat (detects high-res screen recording).
 - [ ] **PRNU Analysis**
   - [ ] Have user film a blank wall.
   - [ ] Use this video to produce a unique PRNU signature.
