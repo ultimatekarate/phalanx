@@ -1,7 +1,12 @@
+/// DEFINITELY NOT WORKING YET
+/// LOTS OF PSEUDOCODE HERE.
+
+
 use rustfft::{FftPlanner, num_complex::Complex};
 use image::{GrayImage, imageops::FilterType};
 
 /// Returns a score from 0.0 (Natural) to 1.0 (Screen/Moiré)
+
 pub fn detect_moire(img: &DynamicImage) -> f32 {
     // 1. Downsample aggressively (This is the performance savior)
     // We use Nearest Neighbor for speed; Linear might smooth out the artifacts we want to find.
@@ -20,7 +25,8 @@ pub fn detect_moire(img: &DynamicImage) -> f32 {
     // 3. Execute FFT (Rows then Columns for 2D)
     // Process Rows
     fft.process(&mut buffer); 
-    // Transpose and Process Columns (Pseudo-code for brevity)
+
+    // Transpose and Process Columns
     // transpose(&mut buffer, 512);
     // fft.process(&mut buffer);
 
@@ -31,3 +37,4 @@ pub fn detect_moire(img: &DynamicImage) -> f32 {
     
     score
 }
+
