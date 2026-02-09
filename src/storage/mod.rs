@@ -1,7 +1,7 @@
-pub mod stronghold;
+pub mod guardian;
 pub mod crucible;
 pub mod strategies;
 
 // Re-export for easier access
-pub use stronghold::Stronghold;
+pub use guardian::Guardian;
 pub use crucible::Crucible;

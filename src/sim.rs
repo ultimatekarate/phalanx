@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::security::identity::{PhalanxIdentity, Did, NetworkId};
 use crate::security::sentinel::{Sentinel, ControlMessage};
-use crate::storage::stronghold::Stronghold;
+use crate::storage::guardian::Guardian;
 use crate::core::config::{PhalanxConfig, PhalanxPhysics};
 use crate::protocol::shards::{ShardChunk};
 
@@ -88,11 +88,11 @@ impl SimulationHarness {
         info!(
             node = %name_owned, 
             quota_foreign = %config.storage.max_foreign_storage_bytes,
-            "Initializing Stronghold"
+            "Initializing Guardian"
         );
 
         let mut sentinel = Sentinel::new(&config);
-        let mut storage = Stronghold::new(&format!("sim_vault/{}", name), &config, identity.did.clone());
+        let mut storage = Guardian::new(&format!("sim_vault/{}", name), &config, identity.did.clone());
 
         tokio::spawn(async move {
             let span = span!(Level::INFO, "sim_node", node = %name_owned, network_id = %node_network_id);
@@ -279,7 +279,7 @@ async fn test_out_of_sequence_salvage_on_node_death() {
     let identity = PhalanxIdentity::generate();
     let peer_id = NetworkId::random(); 
     let config = PhalanxConfig::default();
-    let mut storage = Stronghold::new("sim_vault/salvage_test", &config, identity.did.clone());
+    let mut storage = Guardian::new("sim_vault/salvage_test", &config, identity.did.clone());
     
     
     let mut captured_envelopes = Vec::new();
@@ -337,7 +337,7 @@ async fn test_stronghold_crash_recovery() {
     let peer_id = NetworkId::random();
     let seq = StorageSequence(101);
     
-    let mut storage = Stronghold::new(vault_path, &config, identity.did.clone());
+    let mut storage = Guardian::new(vault_path, &config, identity.did.clone());
 
     let shard = VideoShard {
         volley_id: "volley_test_999".to_string(),
@@ -352,13 +352,13 @@ async fn test_stronghold_crash_recovery() {
 
     drop(storage);
 
-    let recovered_storage = Stronghold::new(vault_path, &config, identity.did.clone());
+    let recovered_storage = Guardian::new(vault_path, &config, identity.did.clone());
     
     let recovered_session = recovered_storage.get_active_volley_shards(&identity.did.clone())
-        .expect("Stronghold failed to recover DID session from WAL");
+        .expect("Guardian failed to recover DID session from WAL");
         
     let recovered_env = recovered_session.get(&seq)
-        .expect("Stronghold failed to recover specific shard 101 from WAL");
+        .expect("Guardian failed to recover specific shard 101 from WAL");
 
     if let Evidence::Video(ref v) = recovered_env.evidence {
         assert_eq!(v.frames[0][0], 0xAA);

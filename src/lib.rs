@@ -33,14 +33,14 @@ pub fn init_identity() -> PhalanxIdentity {
 #[cfg(test)]
 mod integration_tests {
     use crate::core::config::PhalanxConfig;
-    use crate::storage::stronghold::Stronghold;
+    use crate::storage::guardian::Guardian;
     use crate::protocol::shards::{self, Evidence, VideoShard, StorageSequence, WitnessEnvelope};
     use crate::security::identity::{NetworkId, PhalanxIdentity};
     use std::time::Duration;
 
     #[test]
     fn test_full_recursive_pipeline() {
-        // 1. SETUP: Configure Stronghold (The Vault)
+        // 1. SETUP: Configure Guardian (The Vault)
         let mut config = PhalanxConfig::default();
         config.storage.vault_path = "./test_vault".to_string();
         config.storage.stale_session_threshold = 1; // 1 second for fast testing
@@ -50,7 +50,7 @@ mod integration_tests {
         let _ = std::fs::remove_dir_all(&config.storage.vault_path);
         let identity = PhalanxIdentity::generate();
         let peer_id = NetworkId::random();
-        let mut stronghold = Stronghold::new(&config.storage.vault_path, &config, identity.did.clone());
+        let mut stronghold = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
 
 
         // 2. CREATE EVIDENCE: A mock video frame

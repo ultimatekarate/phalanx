@@ -150,7 +150,7 @@ pub struct NetworkConfig {
     #[serde(default)] 
     pub bootstrap_peers: Vec<String>,
     #[serde(default = "default_service_key")]
-    pub stronghold_service_key: String,
+    pub guardian_service_key: String,
 }
 
 fn default_service_key() -> String {
@@ -216,7 +216,7 @@ impl PhalanxConfig {
                 grace_period: 10,
                 cleanup_interval_secs: 5,
                 bootstrap_peers: vec![],
-                stronghold_service_key: "test/service/storage".to_string(),
+                guardian_service_key: "test/service/storage".to_string(),
             },
             storage: StorageConfig {
                 vault_path: "sim_vault".into(),
@@ -249,7 +249,7 @@ impl PhalanxConfig {
                 grace_period: 10,
                 cleanup_interval_secs: 1,
                 bootstrap_peers: vec![],
-                stronghold_service_key: "test/service/storage".to_string(),
+                guardian_service_key: "test/service/storage".to_string(),
             },
             storage: StorageConfig {
                 vault_path: "sim_vault".into(),
@@ -285,7 +285,7 @@ impl Default for PhalanxConfig {
                 grace_period: 10,
                 cleanup_interval_secs: 60,
                 bootstrap_peers: vec![],
-                stronghold_service_key: "phalanx/service/storage/v1".to_string(),
+                guardian_service_key: "phalanx/service/storage/v1".to_string(),
             },
             storage: StorageConfig {
                 vault_path: "./sim_vault".to_string(),

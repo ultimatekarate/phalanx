@@ -10,14 +10,14 @@ use phalanx::hardware::{camera, audio};
 use phalanx::security::identity::{NetworkId, PhalanxIdentity};
 use phalanx::security::sentinel::{Sentinel, ControlMessage};
 use phalanx::core::config::{PhalanxConfig, PhalanxPhysics};
-use phalanx::storage::stronghold::Stronghold;
+use phalanx::storage::guardian::Guardian;
 use phalanx::{PhalanxBehaviour, PhalanxEvent}; 
 
 // --- THE STATE STRUCT ---
 // Encapsulates the "Self" so the main loop doesn't have to manage variables.
 struct PhalanxNode {
     sentinel: Sentinel,
-    storage: Stronghold,
+    storage: Guardian,
     identity: PhalanxIdentity,
     config: PhalanxConfig,
     local_peer_id: NetworkId,
@@ -163,7 +163,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
     let my_identity = phalanx::init_identity();
     let sentinel = Sentinel::new(&config);
-    let storage = Stronghold::new(&config.storage.vault_path, &config, my_identity.did.clone());
+    let storage = Guardian::new(&config.storage.vault_path, &config, my_identity.did.clone());
     
     let stronghold_flag = true;
     // Setup Network with proper key conversion

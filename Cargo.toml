@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "guardian"
-path = "src/bin/guardian.rs"
+name = "stronghold"
+path = "src/bin/stronghold.rs"
 
 [dependencies]
 # --- Async Runtime ---
