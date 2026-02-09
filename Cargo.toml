@@ -19,6 +19,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 
 # --- Security & Identity ---
 # rand_core feature is mandatory for the .generate() method
+# This is such a shitty hack and I hate it. 
 ed25519-dalek = { version = "2.1", features = ["serde", "rand_core"] }
 rand = "0.9.2"
 hex = "0.4"
@@ -46,8 +47,8 @@ version = "0.56"
 features = [
     "tcp",
     "dns", 
-    "quic",        # Added back from your inline config
-    "ping",        # Added back from your inline config
+    "quic",       
+    "ping",     
     "noise",
     "yamux",
     "gossipsub",
