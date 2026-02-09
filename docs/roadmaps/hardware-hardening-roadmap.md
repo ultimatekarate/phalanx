@@ -30,7 +30,7 @@
   - [ ] If `Full`: Log "Frame Dropped" (or implement a ring buffer to drop oldest).
 - [ ] **Thumbnail FFT (Moiré Pattern Detector)**
   - [ ] Downsample the frame to 512x512 using Nearest Neighbor (preserve aliasing).
-  - [ ] Convert to Grayscale.
+  - [ ] Convert to Gray scale.
   - [ ] **FFT Magic:** Run 2D Fourier Transform to detect high-frequency grid artifacts (The "Professor's Method").
 - [ ] **Rolling Shutter ("Jello") Verifier**
   - [ ] **Calibration:** Store sensor readout speed (e.g., 15ms) in config.
