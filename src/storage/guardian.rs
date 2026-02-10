@@ -663,8 +663,5 @@ mod tests {
         // 2. Verify blacklisted
         let rep = guardian.peer_registry.get(&vampire.did).unwrap();
         assert!(rep.is_blacklisted);
-
-        // 3. Verify chunks are now dropped immediately
-        // (This would be verified by checking that micro_layer.process is never called)
     }
 }
