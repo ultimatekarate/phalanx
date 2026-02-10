@@ -294,10 +294,7 @@ fn spawn_hardware_threads(config: &PhalanxConfig, volley_id: String) -> (mpsc::R
     let camera_thread = camera::PhalanxCameraThread::new(&config.hardware);
     camera_thread.spawn(Some(0), v_tx, config.hardware.clone(), volley_id.clone(), Some(session_key));
 
-    let audio_thread: audio::PhalanxAudioThread = audio::PhalanxAudioThread { 
-        sample_rate: config.hardware.audio_sample_rate,
-        channels: config.hardware.audio_channels 
-    };
+    let audio_thread = audio::PhalanxAudioThread::new(&config.hardware);
     audio_thread.spawn(a_tx, config.hardware.clone(), volley_id, Some(session_key));
 
     (v_rx, a_rx)
@@ -367,11 +364,11 @@ mod tests {
         let key = e2ee::generate_session_key();
 
         // 2. Spawn
-        let audio_thread = audio::PhalanxAudioThread { sample_rate: 44100, channels: 2 };
-        audio_thread.spawn(tx, config, volley_id, Some(key));
+        let audio_thread = audio::PhalanxAudioThread::new(&config);
+        audio_thread.spawn(tx, config.clone(), volley_id, Some(key));
 
         // 3. Receive
-        let shard = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        let shard = tokio::time::timeout(Duration::from_secs(3), rx.recv())
             .await
             .expect("Timed out waiting for audio shard")
             .expect("Channel closed");
@@ -384,8 +381,9 @@ mod tests {
                 
                 // 5. Verify Decryptability
                 let decrypted = shard.payload.decrypt(&key).expect("Failed to decrypt audio");
-                // Audio dummy data is 1024 bytes of zeros
-                assert_eq!(decrypted.len(), 1024);
+                
+                let expected_bytes = (config.audio_sample_rate * config.audio_channels as u32 * 2) as usize;
+                assert_eq!(decrypted.len(), expected_bytes, "Shard did not contain 1 second of audio data");
             },
             DataPayload::Clear(_) => panic!("Audio thread produced CLEAR text despite having a key!"),
         }
