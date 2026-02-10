@@ -7,7 +7,7 @@ use crate::security::identity::{PhalanxIdentity, Did, NetworkId};
 use crate::security::sentinel::{Sentinel, ControlMessage};
 use crate::storage::guardian::Guardian;
 use crate::core::config::{PhalanxConfig, PhalanxPhysics};
-use crate::protocol::shards::{ShardChunk};
+use crate::protocol::shards::ShardChunk;
 
 #[derive(Clone)]
 pub enum SimEvent {
@@ -66,7 +66,7 @@ impl SimulationHarness {
 
     pub async fn spawn_node(&mut self, name: &str) -> Did {
         let name_owned = name.to_string();
-        let identity = PhalanxIdentity::generate();
+        let (identity, _) = PhalanxIdentity::generate();
         let node_did = identity.did.clone();
         let return_did = node_did.clone();
         let node_network_id = NetworkId::random();
@@ -167,6 +167,9 @@ impl SimulationHarness {
 
 #[tokio::test]
 async fn test_salvage_on_node_death() {
+
+    use crate::protocol;
+
     let _ = tracing_subscriber::fmt()
         .with_env_filter("phalanx=debug,info")
         .try_init();
@@ -177,7 +180,7 @@ async fn test_salvage_on_node_death() {
 
     use tokio::time::Duration;
     use tracing::{info};
-    use crate::protocol::shards::{self, Evidence, WitnessEnvelope};
+    use crate::protocol::shards::{create_video_shard, Evidence, WitnessEnvelope};
 
     // 1. CONFIGURATION
     let config = PhalanxConfig::test_salvage_on_node_death();
@@ -197,14 +200,14 @@ async fn test_salvage_on_node_death() {
     
     // We generate a separate identity to sign the data. 
     // This represents the "User" of the smashed device node.
-    let victim_identity = crate::security::identity::PhalanxIdentity::generate(); 
+    let (victim_identity, _) = crate::security::identity::PhalanxIdentity::generate(); 
     let victim_did = victim_identity.did.clone();
 
     // FIX: Use constructor instead of struct init
     let frames = vec![vec![1]];
-    let real_shard = shards::create_video_shard(
-        frames, 
-        crate::protocol::shards::StorageSequence(999), 
+    let real_shard = create_video_shard(
+        frames,
+        protocol::shards::StorageSequence(999),
         10,
         "volley_test_999".to_string()
     );
@@ -277,7 +280,7 @@ async fn test_out_of_sequence_salvage_on_node_death() {
     use crate::protocol::shards::{self, StorageSequence, Evidence, WitnessEnvelope};
     use crate::security::identity::NetworkId;
     
-    let identity = PhalanxIdentity::generate();
+    let (identity, _) = PhalanxIdentity::generate();
     let peer_id = NetworkId::random(); 
     let config = PhalanxConfig::default();
     let mut storage = Guardian::new("sim_vault/salvage_test", &config, identity.did.clone());
@@ -288,9 +291,9 @@ async fn test_out_of_sequence_salvage_on_node_death() {
         // FIX: Use constructor
         let frames = vec![vec![i as u8]];
         let shard = shards::create_video_shard(
-            frames, 
-            seq, 
-            30, 
+            frames,
+            seq,
+            30,
             "volley_test_999".to_string()
         );
         
@@ -318,11 +321,9 @@ async fn test_out_of_sequence_salvage_on_node_death() {
         assert_eq!(seq.0, i as u32, "Sequence gap detected at index {}", i);
         let env = session.get(seq).unwrap();
         if let Evidence::Video(ref v) = env.evidence {
-            // FIX: frames are gone, check payload by decrypting or just assume correct for this test
-            // Since we're not encrypting in this test, payload is Clear(bytes).
             if let crate::protocol::shards::DataPayload::Clear(bytes) = &v.payload {
-                 let recovered: Vec<Vec<u8>> = postcard::from_bytes(bytes).unwrap();
-                 assert_eq!(recovered[0][0], i as u8, "Data mismatch at sequence {}", i);
+                let recovered: Vec<Vec<u8>> = postcard::from_bytes(bytes).unwrap();
+                assert_eq!(recovered[0][0], i as u8, "Data mismatch at sequence {}", i);
             }
         }
     }
@@ -337,7 +338,7 @@ async fn test_stronghold_crash_recovery() {
     let vault_path = "sim_vault/crash_test";
     let _ = std::fs::remove_dir_all(vault_path);
 
-    let identity = PhalanxIdentity::generate();
+    let (identity, _) = PhalanxIdentity::generate();
     let peer_id = NetworkId::random();
     let seq = StorageSequence(101);
     

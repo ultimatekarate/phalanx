@@ -10,28 +10,56 @@ pub mod network;
 pub mod sim;
 
 // 2. Re-exports
-// We expose the network logic so main.rs can use it without importing `crate::network::*`
 pub use network::network::{setup_phalanx_swarm, PhalanxBehaviour, PhalanxEvent};
 pub use core::config::PhalanxConfig;
 pub use security::identity::PhalanxIdentity;
 
-
-/// Helper to load identity from disk or generate a new one.
+/// Helper to load identity from disk or prompt for generation/recovery.
 pub fn init_identity() -> PhalanxIdentity {
     let id_path = "identity.bin";
 
     PhalanxIdentity::load_from_disk(id_path).unwrap_or_else(|_| {
-        println!("Status: Generating new Phalanx Identity...");
+        println!("\n==================================================");
+        println!("⚠️  NO IDENTITY FOUND  ⚠️");
+        println!("==================================================");
+        println!("Do you want to (G)enerate a new identity or (R)ecover from a phrase? [G/r]");
+        
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap_or_default();
+        
+        let new_id = if input.trim().eq_ignore_ascii_case("r") {
+            println!("\nEnter your 12-word mnemonic phrase:");
+            let mut phrase = String::new();
+            std::io::stdin().read_line(&mut phrase).expect("Failed to read phrase");
+            
+            match PhalanxIdentity::restore(phrase.trim()) {
+                Ok(id) => {
+                    println!("✅ Identity Restored: {}", id.did);
+                    id
+                },
+                Err(e) => panic!("❌ Failed to restore identity: {}", e),
+            }
+        } else {
+            // GENERATE NEW
+            let (id, phrase) = PhalanxIdentity::generate();
+            println!("\n✅ NEW IDENTITY GENERATED: {}", id.did);
+            println!("--------------------------------------------------");
+            println!("{}", phrase);
+            println!("--------------------------------------------------");
+            println!("🛑 WRITE THIS DOWN. IT WILL NOT BE SHOWN AGAIN. 🛑\n");
+            
+            println!("Press ENTER once you have secured your seed phrase.");
+            let mut ack = String::new();
+            std::io::stdin().read_line(&mut ack).unwrap();
+            
+            id
+        };
 
-        let new_id = PhalanxIdentity::generate();
         new_id.save_to_disk(id_path).expect("Failed to save identity to disk.");
-
         new_id
     })
 }
 
-
-/// I hate having integration tests here but moving them will suuuuuuuuuuuuuuuuuuuuuck.
 #[cfg(test)]
 mod integration_tests {
     use crate::core::config::PhalanxConfig;
@@ -42,24 +70,18 @@ mod integration_tests {
 
     #[test]
     fn test_full_recursive_pipeline() {
-        // 1. SETUP: Configure Guardian (The Vault)
         let mut config = PhalanxConfig::default();
         config.storage.vault_path = "./test_vault".to_string();
-        config.storage.stale_session_threshold = 1; // 1 second for fast testing
+        config.storage.stale_session_threshold = 1;
         
-
-        // Clean up previous runs
         let _ = std::fs::remove_dir_all(&config.storage.vault_path);
-        let identity = PhalanxIdentity::generate();
+        
+        let (identity, _) = PhalanxIdentity::generate();
         let peer_id = NetworkId::random();
         
-        // Note: Ensure your 'Guardian' struct is accessible via crate::storage::guardian
         let mut stronghold = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
 
-
-        // 2. CREATE EVIDENCE: A mock video frame
-        // FIX: Use the constructor instead of struct initialization.
-        // This handles the internal change from 'frames' to 'payload' automatically.
+        // Create Evidence
         let frames = vec![vec![0xFF; 100]]; 
         let shard = shards::create_video_shard(
             frames, 
@@ -68,12 +90,9 @@ mod integration_tests {
             "volley_alpha_001".to_string()
         );
 
-        // 3. ENVELOPE IT (Simulate local hardware capture)
         let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id);
         let envelope_bytes = postcard::to_stdvec(&envelope).unwrap();
 
-        // 4. CHUNK IT (Simulate Network Fragmentation)
-        // Split into tiny 10-byte chunks to force reassembly
         let chunks = shards::chunkify(
             shards::ShardId(0), 
             envelope_bytes, 
@@ -81,55 +100,34 @@ mod integration_tests {
             identity.did.clone()
         );
         
-        println!("Generated {} chunks for transmission.", chunks.len());
-
-        // 5. INGESTION (The Recursive Flow)
-        
-        // Feed all chunks EXCEPT the last one
+        // Ingest
         for i in 0..chunks.len() - 1 {
             stronghold.ingest_chunk(chunks[i].clone());
         }
 
-        // VERIFY 1: Micro Layer State
-        // The Micro Crucible should be holding the incomplete shard
-        // Note: Assuming `micro_layer` is public on Guardian
         let active_shard = stronghold.micro_layer.get(&shards::ShardId(0));
         assert!(active_shard.is_some(), "Micro Layer failed to buffer incomplete chunks");
         
-        // Feed the final chunk
         stronghold.ingest_chunk(chunks.last().unwrap().clone());
 
-        // VERIFY 2: Promotion to Macro Layer
-        // Micro layer should be empty (shard completed and moved up)
         assert!(stronghold.micro_layer.is_empty(), "Micro Layer failed to clear completed shard");
         
-        // Macro layer (Crucible) should now hold the WIP Volley
-        // Note: Assuming `get_active_volley_shards` is public
         let active_shards = stronghold.get_active_volley_shards(&identity.did);
         assert!(active_shards.is_some(), "Stronghold failed to promote Envelope to Macro Layer");
         assert_eq!(active_shards.unwrap().len(), 1, "Macro Layer missing the reassembled shard");
 
-        println!("Success: Data flowed Chunk -> Micro -> Macro.");
-
-        // 6. ARCHIVAL (The Gatekeeper)
-        
-        // Manually trigger archival by simulating a stale session timeout
+        // Archive
         std::thread::sleep(Duration::from_secs(2)); 
         stronghold.archive_stale_sessions(Duration::from_millis(500));
 
-        // VERIFY 3: Persistence
-        // Macro layer should be empty (flushed to disk)
         let remaining_shards = stronghold.get_active_volley_shards(&identity.did);
         assert!(remaining_shards.is_none(), "Stronghold failed to flush stale session from RAM");
 
-        // Check Disk
         let safe_did = identity.did.to_safe_name();
         let path = std::path::Path::new("./test_vault")
             .join(safe_did)
             .join("volley_alpha_001.vid.phlx");
             
         assert!(path.exists(), "Stronghold failed to create .phlx archive file");
-        
-        println!("Success: Pipeline complete. Archive verified at {:?}", path);
     }
 }

@@ -186,7 +186,7 @@ pub struct WitnessEnvelope {
 
 impl WitnessEnvelope {
     pub fn verify(&self) -> bool {
-        let clean_did = self.did.0.replace("did:key:z", "");
+        let clean_did = self.did.0.replace("did:key:", "");
         let Ok(pubkey_bytes) = bs58::decode(clean_did).into_vec() else { return false; };
         let Ok(data_bytes) = postcard::to_stdvec(&self.evidence) else { return false; };
 

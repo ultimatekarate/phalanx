@@ -429,9 +429,9 @@ mod tests {
         let _ = fs::remove_dir_all(&vault_root);
         fs::create_dir_all(&vault_root).expect("Failed to create root");
 
-        let me = PhalanxIdentity::generate();
-        let stranger_1 = PhalanxIdentity::generate();
-        let stranger_2 = PhalanxIdentity::generate();
+        let (me, _) = PhalanxIdentity::generate();
+        let (stranger_1, _) = PhalanxIdentity::generate();
+        let (stranger_2, _) = PhalanxIdentity::generate();
 
         // 1. Create OLD Data (Stranger 1)
         let s1_dir = vault_root.join(stranger_1.did.to_safe_name());
@@ -469,7 +469,7 @@ mod tests {
 
     #[test]
     fn test_invalid_signature_rejection() {
-        let identity = PhalanxIdentity::generate();
+        let (identity, _) = PhalanxIdentity::generate();
         let _attacker = PhalanxIdentity::generate(); // Different key!
         let peer_id = NetworkId::random();
         let config = PhalanxConfig::default();
@@ -507,8 +507,8 @@ mod tests {
 
     #[test]
     fn test_governance_rejection() {
-        let identity = PhalanxIdentity::generate();
-        let stranger = PhalanxIdentity::generate();
+        let (identity, _) = PhalanxIdentity::generate();
+        let (stranger, _) = PhalanxIdentity::generate();
         let peer_id = NetworkId::random();
         
         // 1. Setup Config with TINY limit (0 bytes)
@@ -545,7 +545,7 @@ mod tests {
 
     #[test]
     fn test_replay_protection() {
-        let identity = PhalanxIdentity::generate();
+        let (identity, _) = PhalanxIdentity::generate();
         let peer_id = NetworkId::random();
         let config = PhalanxConfig::default();
         let vault_path = "sim_vault/test_replay";
@@ -579,8 +579,8 @@ mod tests {
 
     #[test]
     fn test_initial_usage_scan() {
-        let identity = PhalanxIdentity::generate();
-        let stranger = PhalanxIdentity::generate();
+        let (identity, _) = PhalanxIdentity::generate();
+        let (stranger, _) = PhalanxIdentity::generate();
         let config = PhalanxConfig::default();
         let vault_path = "sim_vault/test_init_scan";
         let _ = std::fs::remove_dir_all(vault_path);

@@ -32,13 +32,13 @@ This plan synthesizes all specialized roadmaps (Network, Security, Stronghold, H
 
 - [ ] **Network Security**
   - [x] Implement **Private Swarms** (PSK) using `libp2p-pnet` and `swarm.key`.
-  - [ ] Implement **Payload Encryption** (E2EE) for `WitnessEnvelope`.
+  - [x] Implement **Payload Encryption** (E2EE) for `WitnessEnvelope`.
   - [ ] Strictly enforce **Protocol Versioning** in `Identify`.
-- [ ] **Trusted Time**
-  - [ ] **NTP Sync:** Implement `sntpc` (Simple Network Time Protocol) to calculate clock offset before signing evidence, preventing rejection due to local clock drift.
-- [ ] **Identity Security (Recovery)**
-  - [ ] **Deterministic Keys:** Refactor `PhalanxIdentity::generate()` to use a 12-word mnemonic seed (BIP-39).
-  - [ ] **Restore Flow:** Create a CLI utility to regenerate `identity.bin` from a seed phrase (prerequisite for Mobile UI).
+- [x] **Trusted Time**
+  - [x] **NTP Sync:** Implement `sntpc` (Simple Network Time Protocol) to calculate clock offset before signing evidence, preventing rejection due to local clock drift.
+- [x] **Identity Security (Recovery)**
+  - [x] **Deterministic Keys:** Refactor `PhalanxIdentity::generate()` to use a 12-word mnemonic seed (BIP-39).
+  - [x] **Restore Flow:** Create a CLI utility to regenerate `identity.bin` from a seed phrase (prerequisite for Mobile UI).
 - [ ] **Hardware Robustness**
   - [ ] **Camera:** Fix time drift using `Instant` delta calculation and implement hot-plug logic.
   - [ ] **Audio:** Integrate `cpal` for real hardware access and implement buffering.

@@ -188,7 +188,7 @@ mod tests {
         cleanup(); 
 
         // Setup Test Data
-        let id = PhalanxIdentity::generate();
+        let (id, _) = PhalanxIdentity::generate();
         let physics = PhalanxPhysics::test_profile(); 
 
         // --- TEST CASE 1: PUBLIC MODE (No Key) ---

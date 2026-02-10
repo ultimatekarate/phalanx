@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .expect("Failed to load phalanx.toml.");
     
     // Identity is required for signing any salvaged evidence
-    let identity = PhalanxIdentity::generate(); 
+    let (identity, _) = PhalanxIdentity::generate(); 
     let mut storage = Guardian::new("./vault", &config, identity.did.clone());
     let mut sentinel = Sentinel::new(&config);
 
