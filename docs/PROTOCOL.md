@@ -170,22 +170,59 @@ Data is disseminated via libp2p-gossipsub. Topics are segmented by Geohash (Prec
 * Guardian runs ForensicAssembler (Slow Path - FFT/Jello).
 * Guardian archives valid shards to Stronghold storage.
 
-### 6. Security Considerations
+## 6. Security Considerations
 
-## 6.1. Replay Attacks
+### 6.1. Replay Attacks
 
-## 6.2. Deepfake Injection
+* **Bloom Filters:** Guardians MUST maintain a rolling Bloom Filter of recently seen `VideoShard.id`s. Duplicates must be dropped immediately.
+* **Time Window:** Envelopes with a `timestamp_ms` > 5 minutes in the future or > 24 hours in the past MUST be rejected to prevent history rewriting.
 
-## 6.3. Sybil & Identity Inflation
+### 6.2. Deepfake Injection
 
-## 6.4. Eclipse & Routing Isolation
+* **Physics Check:** Guardians MUST run the **Rolling Shutter Verifier**. If `gyro_log` indicates rotation but video geometry lacks skew (and `sensor.readout_speed > 0`), the shard is flagged as `SUSPICIOUS_SCREEN_RECORDING`. Motion blur checking is used for global shutter devices.
+* **Moiré Detection:** Static frames are analyzed via FFT. High-frequency grid artifacts indicate filming a monitor.
 
-## 6.5. Metadata Correlation & Sentinel Privacy
+### 6.3. Sybil & Identity Inflation
 
-## 6.6. Timejacking & NTP Spoofing
+* **Gossip Scoring:** Phalanx utilizes `libp2p-gossipsub` peer scoring. Peers that spam invalid signatures or duplicate shards are negatively scored and disconnected.
+* **Storage Quotas:** Sentinel identity creation is cheap, but storage is expensive. Guardians strictly limit the MBs allocated per `sender_pubkey`.
 
-## 6.7. Sensor Fuzzing & Hardware Emulation
+### 6.4. Eclipse & Routing Isolation
 
-## 6.8. Resource Exhaustion (DDoS) & Spam
+* **Bucket Diversity:** Kademlia routing tables must prefer peers from diverse IP subnets to prevent a single attacker from surrounding a target node.
+* **Private Swarms:** For high-risk operations, Sentinels should use the Pre-Shared Key (PSK) feature to form an isolated, encrypted mesh, ignoring the public DHT.
 
-## 6.9. Cryptographic Downgrade & Key Substitution
+### 6.5. Metadata Correlation & Sentinel Privacy
+
+* **Relay Nodes:** Sentinels SHOULD NOT connect directly to Guardians if possible. They should route via `libp2p-relay` to obfuscate their source IP address.
+* **Ephemeral Topics:** Sentinels allow for random topic hopping if the local Geohash is compromised/jammed.
+
+### 6.6. Timejacking & NTP Spoofing
+
+* **Consensus Engine:** Guardians verify `timestamp_ms` against their local NTP stratum.
+* **Sanity Check:** If `metadata.time_source == 0` (System Time), the shard is marked "Low Confidence." High Confidence requires `3` (GNSS/Atomic).
+
+### 6.7. Sensor Fuzzing & Hardware Emulation
+
+* **Flatline Detection:** Sensors that output perfect variance (0.000) over >1s are flagged as emulated. Real MEMS sensors have thermal noise.
+* **Profile Mismatch:** If a Sentinel claims to be a "Pixel 6" but reports a `readout_speed` of 0.0 (Global Shutter), the handshake is invalid.
+
+### 6.8. Resource Exhaustion (DDoS) & Spam
+
+* **Triage System:** Guardians use a "System Governor" (Thermal/Battery monitor). If load is critical, Forensics are skipped, and only cryptographic signatures are checked.
+* **Back pressure:** Guardians stop reading from the socket if the verification queue is full, forcing TCP flow control to throttle the sender.
+
+### 6.9. Cryptographic Downgrade & Key Substitution
+
+* **No Negotiation:** The protocol supports ONLY Ed25519 and XChaCha20. Any handshake attempting to negotiate weaker ciphers (e.g., RSA, AES-CBC) is immediately terminated.
+
+### 6.10. Operating System Integrity (The "Root" Vector)
+
+* **Remote Attestation:** The Sentinel MUST transmit a signed "Attestation Token" (e.g., Android Play Integrity API or iOS App Attest) with every 10th `WitnessEnvelope`.
+* **Root Detection:** Guardians MUST verify that the Attestation Token indicates a `MEETS_STRONG_INTEGRITY` (Hardware-backed) verdict.
+* **Failure Mode:** If a device is flagged as Rooted/Jailbroken, its shards are downgraded to `UNVERIFIED_SOURCE` and cannot be treated as primary forensic evidence, as the OS kernel may be intercepting and forging sensor syscalls.
+
+### 6.11. Traffic Analysis & Side-Channel Leaks
+
+* **Packet Padding:** To prevent ISPs from identifying Phalanx traffic by the size of the packets (e.g., distinguishing small "Heartbeats" from large "Video Shards"), all encrypted payloads SHOULD be padded to fixed block sizes (e.g., 4KB increments).
+* **Timing Obfuscation:** Sentinels SHOULD introduce randomized jitter (0-50ms) to packet transmission times to mask the exact frame rate of the capture device from passive observers.
