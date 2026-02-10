@@ -46,6 +46,16 @@ pub struct ControlMessage {
     pub storage_remaining_mb: u64,
 }
 
+/// Tracks the behavior and resource usage of remote peers
+#[derive(Debug, Default)]
+pub struct PeerReputation {
+    pub active_buffers: usize,
+    pub invalid_sigs: u32,
+    pub total_shards_sent: u64,
+    pub last_seen_load: f32,
+    pub is_blacklisted: bool,
+}
+
 // =====================
 // SENTINEL CORE
 // =====================

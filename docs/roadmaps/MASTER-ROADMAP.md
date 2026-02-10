@@ -40,8 +40,8 @@ This plan synthesizes all specialized roadmaps (Network, Security, Stronghold, H
   - [x] **Deterministic Keys:** Refactor `PhalanxIdentity::generate()` to use a 12-word mnemonic seed (BIP-39).
   - [x] **Restore Flow:** Create a CLI utility to regenerate `identity.bin` from a seed phrase (prerequisite for Mobile UI).
 - [ ] **Hardware Robustness**
-  - [ ] **Camera:** Fix time drift using `Instant` delta calculation and implement hot-plug logic.
-  - [ ] **Audio:** Integrate `cpal` for real hardware access and implement buffering.
+  - [x] **Camera:** Fix time drift using `Instant` delta calculation and implement hot-plug logic.
+  - [x] **Audio:** Integrate `cpal` for real hardware access and implement buffering.
   - [ ] **Anti-Vampire:** Implement Rate Limiting in `sentinel.rs` to ignore spammy peers.
   - [ ] **Dynamic Heartbeats:** If battery < 20%, increase heartbeat interval from 30s to 300s.
   - [ ] **Leaf Mode:** If battery < 15%, unsubscribe from all Gossipsub topics except `my_volley` to stop relaying traffic.
