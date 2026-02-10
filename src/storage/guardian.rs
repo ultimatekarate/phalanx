@@ -22,14 +22,18 @@ pub enum GuardianError {
     SerializationError(String),
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct PeerReputation {
+    pub invalid_sigs: u32,
+    pub is_blacklisted: bool,
+}
+
 pub struct Guardian {
     pub vault_storage: PathBuf,
     pub wal_directory: PathBuf,
 
-    // Tier 1: Reassembles Packets -> Evidence (Key: ShardId)
+    // Reassembly layers
     pub micro_layer: Crucible<ShardAmalgam>,
-    
-    // Tier 2: Reassembles Evidence -> Volleys (Key: DID)
     pub macro_layer: Crucible<VolleyAmalgam>,
     
     // --- THE POLICY STATE ---
@@ -37,6 +41,12 @@ pub struct Guardian {
     pub session_activity: HashMap<Did, Instant>,
     
     pub stale_threshold: std::time::Duration,
+
+    // --- ANTI-VAMPIRE STATE ---
+    // This is a no shithead zone.
+    pub peer_registry: HashMap<Did, PeerReputation>,
+    pub max_buffers_per_peer: usize, // concurrent reassembly sessions
+    pub max_sig_failures: u32,       // threshold before blacklisting
 
     // --- GOVERNANCE & QUOTAS ---
     pub local_did: Did,                     // "My" Identity
@@ -64,6 +74,10 @@ impl Guardian {
             session_activity: HashMap::new(),
             stale_threshold: std::time::Duration::from_secs(config.storage.stale_session_threshold),
             
+            peer_registry: HashMap::new(),
+            max_buffers_per_peer: config.storage.max_peers,
+            max_sig_failures: 5, // magic constant for now
+
             // Governance Init
             local_did,
             max_storage_bytes: config.storage.max_storage_bytes,
@@ -177,12 +191,27 @@ impl Guardian {
     #[instrument(skip(self, chunk), level = "debug")]
     pub fn ingest_chunk(&mut self, chunk: ShardChunk) {
 
+        let owner = chunk.owner_did.clone();
+
         info!(
             shard_id = %chunk.shard_id, 
             index = chunk.chunk_index, 
             total = chunk.total_chunks,
             "Micro-Layer receiving chunk"
         );
+
+        if let Some(rep) = self.peer_registry.get(&owner) {
+            if rep.is_blacklisted {
+                debug!(did = %owner, "Dropping chunk: Peer is blacklisted.");
+                return;
+            }
+        }
+
+        let active_sessions = self.processed_sequences.get(&owner).map(|s| s.len()).unwrap_or(0);
+        if active_sessions >= self.max_buffers_per_peer {
+            warn!(did = %owner, "Dropping chunk: Peer exceeded concurrent session quota.");
+            return;
+        }
 
         if let Some(envelope) = self.micro_layer.process(chunk) {
             info!(
@@ -231,7 +260,8 @@ impl Guardian {
         }
 
         if !envelope.verify() { 
-            error!(did = %envelope.did, "Rejected invalid signature"); 
+            self.penalize_peer(envelope.did.clone(), "Invalid Signature");
+            error!(did = %envelope.did, "Rejected invalid signature."); 
             return Err(GuardianError::InvalidSignature(envelope.did.to_string()));
         }
         
@@ -251,6 +281,18 @@ impl Guardian {
         }
 
         Ok(())
+    }
+
+    pub fn penalize_peer(&mut self, did: Did, reason: &str) {
+        let rep = self.peer_registry.entry(did.clone()).or_default();
+        rep.invalid_sigs += 1;
+        
+        warn!(%did, %reason, count = rep.invalid_sigs, "Peer penalized for bad behavior.");
+
+        if rep.invalid_sigs >= self.max_sig_failures {
+            rep.is_blacklisted = true;
+            warn!(%did, "PEER BLACKLISTED: Vampire attack detected.");
+        }
     }
 
     pub fn get_active_volley_shards(&self, did: &Did) -> Option<&std::collections::BTreeMap<StorageSequence, WitnessEnvelope>> {
@@ -596,5 +638,33 @@ mod tests {
         // 3. Assert Usage Detected
         assert_eq!(guardian.current_storage_usage, 500);
         assert_eq!(guardian.foreign_storage_usage, 500);
+    }
+
+    #[test]
+    fn test_vampire_blacklisting() {
+        let (me, _) = PhalanxIdentity::generate();
+        let (vampire, _) = PhalanxIdentity::generate();
+        let config = PhalanxConfig::default();
+        let mut guardian = Guardian::new("sim_vault/vampire_test", &config, me.did.clone());
+
+        // 1. Send multiple invalid signatures
+        for _ in 0..6 {
+            let shard = crate::protocol::shards::create_video_shard(
+                vec![vec![1]], StorageSequence(1), 30, "v1".into()
+            );
+            let mut envelope = WitnessEnvelope::new(Evidence::Video(shard), &vampire, NetworkId::random());
+            
+            // TAMPER
+            if let Evidence::Video(ref mut v) = envelope.evidence { v.fps = 99; }
+            
+            _ = guardian.ingest_envelope(envelope);
+        }
+
+        // 2. Verify blacklisted
+        let rep = guardian.peer_registry.get(&vampire.did).unwrap();
+        assert!(rep.is_blacklisted);
+
+        // 3. Verify chunks are now dropped immediately
+        // (This would be verified by checking that micro_layer.process is never called)
     }
 }
