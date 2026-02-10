@@ -6,6 +6,10 @@ use libp2p::PeerId;
 use rand::RngCore;
 use bip39::{Mnemonic, Language};
 
+
+// --- CONSTANTS ---
+pub const IDENTITY_VERSION: u32 = 1;
+
 // --- DIDs & Network IDs ---
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -33,7 +37,7 @@ impl Did {
 
 impl Default for Did {
     fn default() -> Self {
-        Self("anonymous".to_string())
+        Self("did:key:anonymous".to_string())
     }
 }
 
@@ -108,6 +112,7 @@ impl From<&PeerId> for NetworkId {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PhalanxIdentity {
+    pub version: u32,         // <--- Strict Versioning
     pub did: Did,             
     pub keypair: SigningKey,
 }
@@ -115,6 +120,7 @@ pub struct PhalanxIdentity {
 impl fmt::Debug for PhalanxIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PhalanxIdentity")
+        .field("version", &self.version)
         .field("did", &self.did)
         .field("keypair", &"[REDACTED]")
         .finish()
@@ -152,10 +158,10 @@ impl PhalanxIdentity {
             .public()
             .to_peer_id();
 
-        // FIX: Use RAW PeerID string. 'did:key:' prefix confuses libp2p parsers.
         let did_str = peer_id.to_base58();
 
         PhalanxIdentity {
+            version: IDENTITY_VERSION, // Set Version
             did: Did(did_str),
             keypair,
         }
@@ -166,13 +172,9 @@ impl PhalanxIdentity {
     }
 
     pub fn verify(pubkey: &[u8], msg: &[u8], sig: &[u8]) -> bool {
-        // --- SMART EXTRACTION LOGIC ---
         let key_bytes_opt: Option<&[u8]> = if pubkey.len() == 32 {
-            // Standard Raw Key
             Some(pubkey)
         } else if pubkey.len() == 38 && pubkey.starts_with(&[0x00, 0x24, 0x08, 0x01, 0x12, 0x20]) {
-            // Libp2p PeerID Wrapper: [Identity(00), Len(24), Ed25519(0801), Bytes(1220)]
-            // We strip the first 6 bytes to get the raw 32-byte key
             Some(&pubkey[6..])
         } else {
             None
@@ -187,9 +189,6 @@ impl PhalanxIdentity {
                 }
             }
         }
-        
-        // Log failure only if strict debugging is needed, otherwise fail silently for security
-        // println!("Sig Verify Failed. PubKey Len: {}", pubkey.len()); 
         false
     }
 
@@ -199,18 +198,40 @@ impl PhalanxIdentity {
     }
 
     pub fn save_to_disk<P: AsRef<Path>>(&self, path: P) -> std::io::Result<()> {
-        let bytes = self.keypair.to_bytes();
+        let bytes = postcard::to_stdvec(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         fs::write(path, bytes)
     }
 
     pub fn load_from_disk<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
-        let bytes = fs::read(path)?;
-        if bytes.len() != 32 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Key file must be 32 bytes"));
+        let bytes = fs::read(&path)?;
+
+        // 1. Try to load as Versioned Struct (New Format)
+        if let Ok(identity) = postcard::from_bytes::<PhalanxIdentity>(&bytes) {
+            if identity.version != IDENTITY_VERSION {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData, 
+                    format!("Identity version mismatch. Expected {}, got {}", IDENTITY_VERSION, identity.version)
+                ));
+            }
+            return Ok(identity);
         }
-        let arr: [u8; 32] = bytes.try_into().unwrap();
-        let key = SigningKey::from_bytes(&arr);
-        Ok(Self::from_key(key))
+
+        // 2. Fallback: Legacy 32-byte Key Check
+        // If "Strictly Enforce" means "No Legacy", comment this block out. 
+        // But for development continuity, we auto-migrate.
+        if bytes.len() == 32 {
+            println!("WARNING: Legacy Identity Format Detected. Upgrading to v{}...", IDENTITY_VERSION);
+            let arr: [u8; 32] = bytes.try_into().unwrap();
+            let key = SigningKey::from_bytes(&arr);
+            let identity = Self::from_key(key);
+            
+            // Auto-save the upgraded format back to disk
+            identity.save_to_disk(path)?;
+            return Ok(identity);
+        }
+
+        Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Unknown identity format"))
     }
 }
 
@@ -221,9 +242,9 @@ mod tests {
     #[test]
     fn test_identity_generation_and_did() {
         let (identity, _) = PhalanxIdentity::generate();
-        // FIX: Expect raw PeerID string (starts with 1 for Ed25519 identity multihash)
         assert!(!identity.did.0.starts_with("did:key:"));
         assert!(identity.did.0.len() > 40);
+        assert_eq!(identity.version, IDENTITY_VERSION);
     }
 
     #[test]
@@ -245,5 +266,53 @@ mod tests {
 
         assert_eq!(original_did, recovered.did);
         assert_eq!(original.keypair.to_bytes(), recovered.keypair.to_bytes());
+        assert_eq!(recovered.version, IDENTITY_VERSION);
+    }
+    
+    #[test]
+    fn test_libp2p_key_format_handling() {
+        let (identity, _) = PhalanxIdentity::generate();
+        let message = b"compatibility_check";
+        let signature = identity.sign(message);
+        let raw_key = identity.keypair.verifying_key().to_bytes();
+        let mut peer_id_bytes = vec![0x00, 0x24, 0x08, 0x01, 0x12, 0x20];
+        peer_id_bytes.extend_from_slice(&raw_key);
+        
+        assert_eq!(peer_id_bytes.len(), 38);
+        assert!(PhalanxIdentity::verify(&peer_id_bytes, message, &signature.to_bytes()));
+    }
+
+    #[test]
+    fn test_persistence_upgrade() {
+        // Test that we can save and load the new format
+        let (identity, _) = PhalanxIdentity::generate();
+        let path = "test_identity_v1.bin";
+        
+        identity.save_to_disk(path).unwrap();
+        let loaded = PhalanxIdentity::load_from_disk(path).unwrap();
+        
+        assert_eq!(identity.did, loaded.did);
+        assert_eq!(loaded.version, IDENTITY_VERSION);
+        
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_legacy_upgrade() {
+        // Manually create a legacy file (raw 32 bytes)
+        let (identity, _) = PhalanxIdentity::generate();
+        let path = "test_identity_legacy.bin";
+        fs::write(path, identity.keypair.to_bytes()).unwrap();
+
+        // Load it (should trigger upgrade logic)
+        let loaded = PhalanxIdentity::load_from_disk(path).unwrap();
+        assert_eq!(identity.did, loaded.did);
+        assert_eq!(loaded.version, IDENTITY_VERSION);
+
+        // Check that it was rewritten to the new format (size > 32)
+        let new_size = fs::metadata(path).unwrap().len();
+        assert!(new_size > 32);
+
+        let _ = fs::remove_file(path);
     }
 }
