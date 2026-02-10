@@ -30,10 +30,10 @@ This plan synthesizes all specialized roadmaps (Network, Security, Stronghold, H
 *Goal: Secure the mesh against Sybil attacks, spam, and eavesdropping.*
 **Dependencies:** `security-todo.md`, `hardware-hardening-roadmap.md`
 
-- [ ] **Network Security**
+- [x] **Network Security**
   - [x] Implement **Private Swarms** (PSK) using `libp2p-pnet` and `swarm.key`.
   - [x] Implement **Payload Encryption** (E2EE) for `WitnessEnvelope`.
-  - [ ] Strictly enforce **Protocol Versioning** in `Identify`.
+  - [x] Strictly enforce **Protocol Versioning** in `Identify`.
 - [x] **Trusted Time**
   - [x] **NTP Sync:** Implement `sntpc` (Simple Network Time Protocol) to calculate clock offset before signing evidence, preventing rejection due to local clock drift.
 - [x] **Identity Security (Recovery)**

@@ -168,13 +168,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
     // 3. SYNC TIME (Blocking or Async)
     // We do this BEFORE starting the network to ensure we don't accept bad data.
-    // Since sntpc uses blocking sockets by default in simple_get_time, 
-    // wrapping it in spawn_blocking is safer if inside tokio.
     println!("[PHALANX] Synchronizing Clock with NTP...");
     let clock_ref = storage.clock.clone();
     tokio::task::spawn_blocking(move || {
-        // Create a temporary async runtime or use blocking call if available
-        // For simplicity with the code provided above which implies async:
         tokio::runtime::Handle::current().block_on(async {
             let _ = clock_ref.synchronize().await;
         });
@@ -294,7 +290,8 @@ fn spawn_hardware_threads(config: &PhalanxConfig, volley_id: String) -> (mpsc::R
     let session_key: [u8; 32] = e2ee::generate_session_key();
     tracing::info!("E2EE Enabled. Session Key Generated.");
 
-    let camera_thread: camera::PhalanxCameraThread = camera::PhalanxCameraThread { fps: config.hardware.camera_fps };
+    // FIX: Use new constructor for PhalanxCameraThread
+    let camera_thread = camera::PhalanxCameraThread::new(&config.hardware);
     camera_thread.spawn(Some(0), v_tx, config.hardware.clone(), volley_id.clone(), Some(session_key));
 
     let audio_thread: audio::PhalanxAudioThread = audio::PhalanxAudioThread { 
@@ -328,8 +325,9 @@ mod tests {
         let key = e2ee::generate_session_key();
 
         // 2. Spawn Thread
-        let cam_thread = camera::PhalanxCameraThread { fps: 10 };
-        // Passing None for index forces MockCamera
+        // FIX: Use new constructor
+        let cam_thread = camera::PhalanxCameraThread::new(&config);
+        // Passing None for index forces MockCamera (via default behavior in CameraDriver)
         cam_thread.spawn(None, tx, config, volley_id.clone(), Some(key));
 
         // 3. Receive Shard (Wait max 2s)
@@ -393,3 +391,4 @@ mod tests {
         }
     }
 }
+
