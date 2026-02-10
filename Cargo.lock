@@ -3025,6 +3025,7 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "serde_json",
+ "sntpc",
  "tokio",
  "toml",
  "tracing",
@@ -3837,6 +3838,15 @@ dependencies = [
  "rustc_version",
  "sha2",
  "subtle",
+]
+
+[[package]]
+name = "sntpc"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3334dc3b0fc8775d320764f947eec3dd5e63d15117b6bde6305989b3558134ef"
+dependencies = [
+ "cfg-if",
 ]
 
 [[package]]
