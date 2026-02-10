@@ -9,6 +9,7 @@ use serde::{Serialize, Deserialize};
 use image::{DynamicImage, ImageFormat}; 
 
 use crate::security::identity::{PhalanxIdentity, Did, NetworkId};
+use crate::security::e2ee;
 
 // =====================
 // DATA STRUCTURES
@@ -45,7 +46,7 @@ impl ReassemblyBuffer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Evidence {
     Video(VideoShard),
-    Audio(crate::hardware::audio::AudioShard),
+    Audio(AudioShard),
     // Future expansion: Telemetry(TelemetryShard),
 }
 
@@ -139,10 +140,31 @@ impl fmt::Display for ShardId {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoShard {
     pub timestamp: u64,
-    pub frames: Vec<Vec<u8>>,
     pub sequence_id: StorageSequence,
     pub fps: u8,
-    pub volley_id: String
+    pub volley_id: String,
+    pub payload: DataPayload
+}
+
+impl VideoShard {
+    pub fn encrypt(&mut self, key: &[u8; 32]) -> Result<(), e2ee::CryptoError> {
+        self.payload.encrypt(key)
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioShard {
+    pub timestamp: u64,
+    pub sequence_id: StorageSequence,
+    pub sample_rate: u32,
+    pub channels: u8,
+    pub volley_id: String,
+    pub payload: DataPayload,
+}
+
+impl AudioShard {
+    pub fn encrypt(&mut self, key: &[u8; 32]) -> Result<(), e2ee::CryptoError> {
+        self.payload.encrypt(key)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -186,6 +208,43 @@ impl WitnessEnvelope {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DataPayload {
+    Clear(Vec<u8>),
+    Encrypted {
+        nonce: Vec<u8>,
+        ciphertext: Vec<u8>,
+    }
+}
+
+// Default to empty Clear payload
+impl Default for DataPayload {
+    fn default() -> Self {
+        DataPayload::Clear(Vec::new())
+    }
+}
+
+impl DataPayload {
+    pub fn encrypt(&mut self, key: &[u8; 32]) -> Result<(), e2ee::CryptoError> {
+        if let DataPayload::Clear(data) = self {
+            let (nonce, ciphertext) = e2ee::encrypt_bytes(key, data)?;
+            *self = DataPayload::Encrypted { nonce, ciphertext };
+        }
+        Ok(())
+    }
+
+
+    pub fn decrypt(&self, key: &[u8; 32]) -> Result<Vec<u8>, e2ee::CryptoError> {
+        match self {
+            DataPayload::Clear(data) => Ok(data.clone()),
+            DataPayload::Encrypted { nonce, ciphertext } => {
+                e2ee::decrypt_bytes(key, nonce, ciphertext)
+            }
+        }
+    }
+}
+/// HELPER FUNCTIONS
+
 pub fn chunkify(shard_id: ShardId, data: Vec<u8>, chunk_size: usize, owner_did: Did) -> Vec<ShardChunk> {
     let total_chunks = (data.len() as f64 / chunk_size as f64).ceil() as u32;
     data.chunks(chunk_size)
@@ -216,17 +275,177 @@ pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<
     Ok(jpeg_bytes)
 }
 
-pub fn create_video_shard(buffer: Vec<Vec<u8>>, sequence_id: StorageSequence, fps: u8, volley_id: String) -> VideoShard {
+pub fn create_video_shard(frames: Vec<Vec<u8>>, sequence_id: StorageSequence, fps: u8, volley_id: String) -> VideoShard {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
 
+    let raw_bytes = postcard::to_stdvec(&frames).unwrap_or_default();
+
     VideoShard {
         timestamp: now,
-        frames: buffer,
         sequence_id,
+        payload: DataPayload::Clear(raw_bytes),
         fps,
         volley_id: volley_id.clone(),
+    }
+}
+
+pub fn create_audio_shard(
+    audio_data: Vec<u8>,
+    sequence_id: StorageSequence,
+    sample_rate: u32,
+    channels: u8,
+    volley_id: String
+) -> AudioShard {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    AudioShard {
+        timestamp: now,
+        sequence_id,
+        payload: DataPayload::Clear(audio_data),
+        sample_rate,
+        channels,
+        volley_id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper: A deterministic key for testing
+    fn get_test_key() -> [u8; 32] {
+        [0x42; 32] 
+    }
+
+    #[test]
+    fn test_video_shard_encryption_cycle() {
+        // 1. Create Clear Shard
+        let frames = vec![vec![1, 2, 3], vec![4, 5, 6]];
+        let seq = StorageSequence(100);
+        let mut shard = create_video_shard(frames.clone(), seq, 30, "volley_1".into());
+
+        // Verify Initial State (Clear)
+        if let DataPayload::Clear(data) = &shard.payload {
+            // VideoShard uses postcard to serialize frames inside the payload
+            let deserialized_frames: Vec<Vec<u8>> = postcard::from_bytes(data).unwrap();
+            assert_eq!(deserialized_frames, frames);
+        } else {
+            panic!("Newly created shard should be DataPayload::Clear");
+        }
+
+        // 2. Encrypt
+        let key = get_test_key();
+        shard.payload.encrypt(&key).expect("Encryption failed");
+
+        // Verify Encrypted State
+        match &shard.payload {
+            DataPayload::Encrypted { nonce, ciphertext } => {
+                assert_eq!(nonce.len(), 24, "XChaCha20Poly1305 requires 24-byte nonce");
+                assert!(!ciphertext.is_empty(), "Ciphertext should not be empty");
+                // Ensure ciphertext is NOT the same as the original cleartext (sanity check)
+                assert_ne!(ciphertext, &vec![1, 2, 3, 4, 5, 6]); 
+            },
+            _ => panic!("Shard payload should be DataPayload::Encrypted after .encrypt()"),
+        }
+
+        // 3. Decrypt
+        let decrypted_bytes = shard.payload.decrypt(&key).expect("Decryption failed");
+        
+        // 4. Verify Content
+        let recovered_frames: Vec<Vec<u8>> = postcard::from_bytes(&decrypted_bytes).unwrap();
+        assert_eq!(recovered_frames, frames);
+    }
+
+    #[test]
+    fn test_audio_shard_encryption_cycle() {
+        // 1. Create Clear Audio Shard
+        let audio_data = vec![10, 20, 30, 40]; // Raw audio bytes
+        let seq = StorageSequence(200);
+        let mut shard = create_audio_shard(audio_data.clone(), seq, 44100, 2, "volley_2".into());
+
+        // 2. Encrypt
+        let key = get_test_key();
+        shard.payload.encrypt(&key).expect("Encryption failed");
+
+        // 3. Decrypt
+        let decrypted_bytes = shard.payload.decrypt(&key).expect("Decryption failed");
+        
+        // 4. Verify Content
+        assert_eq!(decrypted_bytes, audio_data);
+    }
+
+    #[test]
+    fn test_wrong_key_decryption_fails() {
+        let audio_data = vec![1, 2, 3, 4];
+        let mut shard = create_audio_shard(audio_data, StorageSequence(1), 44100, 2, "v1".into());
+        
+        let correct_key = [1u8; 32];
+        let wrong_key = [2u8; 32];
+
+        shard.payload.encrypt(&correct_key).unwrap();
+
+        // Attempt decrypt with wrong key
+        let result = shard.payload.decrypt(&wrong_key);
+        assert!(result.is_err(), "Decryption should fail with wrong key");
+    }
+
+    #[test]
+    fn test_double_encryption_idempotency() {
+        // Calling .encrypt() twice shouldn't double-encrypt (which would corrupt data)
+        let frames = vec![vec![1]];
+        let mut shard = create_video_shard(frames, StorageSequence(1), 30, "v1".into());
+        let key = get_test_key();
+
+        // First encryption
+        shard.payload.encrypt(&key).unwrap();
+        
+        // Capture the state
+        let (nonce1, cipher1) = match &shard.payload {
+            DataPayload::Encrypted { nonce, ciphertext } => (nonce.clone(), ciphertext.clone()),
+            _ => panic!("Should be encrypted"),
+        };
+
+        // Second encryption call
+        shard.payload.encrypt(&key).unwrap();
+
+        // Verify state is unchanged
+        match &shard.payload {
+            DataPayload::Encrypted { nonce, ciphertext } => {
+                assert_eq!(nonce, &nonce1, "Nonce changed on second encrypt call");
+                assert_eq!(ciphertext, &cipher1, "Ciphertext changed on second encrypt call");
+            },
+            _ => panic!("Should remain encrypted"),
+        }
+    }
+
+    #[test]
+    fn test_serialization_roundtrip_encrypted() {
+        // Ensure the Encrypted Shard can travel over the network (serialize/deserialize)
+        let frames = vec![vec![255, 0, 255]];
+        let mut shard = create_video_shard(frames, StorageSequence(50), 60, "v_net".into());
+        let key = get_test_key();
+        
+        // Encrypt locally
+        shard.payload.encrypt(&key).unwrap();
+
+        // 1. Network Transmission (Serialize)
+        let wire_data = postcard::to_stdvec(&shard).unwrap();
+
+        // 2. Reception (Deserialize)
+        let received_shard: VideoShard = postcard::from_bytes(&wire_data).unwrap();
+
+        // 3. Access (Decrypt)
+        let decrypted_payload = received_shard.payload.decrypt(&key).unwrap();
+        let recovered_frames: Vec<Vec<u8>> = postcard::from_bytes(&decrypted_payload).unwrap();
+
+        assert_eq!(recovered_frames[0], vec![255, 0, 255]);
+        assert_eq!(received_shard.sequence_id.0, 50);
+        assert_eq!(received_shard.volley_id, "v_net");
     }
 }

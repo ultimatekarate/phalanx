@@ -3,10 +3,10 @@ use tokio::time::Instant;
 use tracing::{info, warn, debug, instrument};
 
 use crate::protocol::shards::{
-    Evidence, VideoShard, ReassemblyBuffer, ShardChunk, 
+    Evidence, VideoShard, AudioShard, ReassemblyBuffer, ShardChunk, 
     ShardId, WitnessEnvelope
 };
-use crate::hardware::audio::AudioShard;
+
 use crate::core::config::{PhalanxPhysics, PhalanxConfig};
 use crate::security::identity::{NetworkId, PhalanxIdentity};
 

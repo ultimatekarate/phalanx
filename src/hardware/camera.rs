@@ -75,7 +75,13 @@ pub struct PhalanxCameraThread {
 
 impl PhalanxCameraThread {
     /// Spawns the camera capture thread using values from the HardwareConfig.
-    pub fn spawn(self, index: Option<usize>, tx: Sender<VideoShard>, config: HardwareConfig, volley_id: String) {
+    pub fn spawn(self, 
+        index: Option<usize>, 
+        tx: Sender<VideoShard>, 
+        config: HardwareConfig, 
+        volley_id: String,
+        secret_key: Option<[u8; 32]>
+    ) {
         let fps = config.camera_fps as u8;
         let frame_duration = Duration::from_millis(1000 / fps as u64);
 
@@ -104,13 +110,22 @@ impl PhalanxCameraThread {
 
                 if frames.len() >= fps as usize {
 
-                    let shard = shards::create_video_shard(
+                    let mut shard = shards::create_video_shard(
                         frames.split_off(0), 
                         sequence_id, 
                         fps,
                         volley_id.clone()
                     );
                     
+                    if let Some(key) = secret_key {
+                        if let Err(e) = shard.encrypt(&key) {
+                            eprintln!("[Camera] Encryption failed for seq {}: {}", sequence_id, e);
+                            // Secure Default: Do not send unencrypted frames if key was provided.
+                            // Continue to next loop without sending.
+                            continue; 
+                        }
+                    }
+
                     if tx.blocking_send(shard).is_err() { break; }
                     sequence_id += 1;
                 }

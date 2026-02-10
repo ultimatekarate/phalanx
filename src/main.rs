@@ -9,6 +9,7 @@ use phalanx::protocol::shards::{self, Evidence, WitnessEnvelope};
 use phalanx::hardware::{camera, audio};
 use phalanx::security::identity::{NetworkId, PhalanxIdentity};
 use phalanx::security::sentinel::{Sentinel, ControlMessage};
+use phalanx::security::e2ee;
 use phalanx::core::config::{PhalanxConfig, PhalanxPhysics};
 use phalanx::storage::guardian::Guardian;
 use phalanx::{PhalanxBehaviour, PhalanxEvent}; 
@@ -272,18 +273,109 @@ fn setup_shutdown_handler() {
     }).expect("Error setting Ctrl-C handler");
 }
 
-fn spawn_hardware_threads(config: &PhalanxConfig, volley_id: String) -> (mpsc::Receiver<shards::VideoShard>, mpsc::Receiver<audio::AudioShard>) {
+fn spawn_hardware_threads(config: &PhalanxConfig, volley_id: String) -> (mpsc::Receiver<shards::VideoShard>, mpsc::Receiver<shards::AudioShard>) {
     let (v_tx, v_rx) = mpsc::channel(64);
     let (a_tx, a_rx) = mpsc::channel(64);
 
-    let camera_thread = camera::PhalanxCameraThread { fps: config.hardware.camera_fps };
-    camera_thread.spawn(Some(0), v_tx, config.hardware.clone(), volley_id.clone());
+    let session_key: [u8; 32] = e2ee::generate_session_key();
+    tracing::info!("E2EE Enabled. Session Key Generated.");
 
-    let audio_thread = audio::PhalanxAudioThread { 
+    let camera_thread: camera::PhalanxCameraThread = camera::PhalanxCameraThread { fps: config.hardware.camera_fps };
+    camera_thread.spawn(Some(0), v_tx, config.hardware.clone(), volley_id.clone(), Some(session_key));
+
+    let audio_thread: audio::PhalanxAudioThread = audio::PhalanxAudioThread { 
         sample_rate: config.hardware.audio_sample_rate,
         channels: config.hardware.audio_channels 
     };
-    audio_thread.spawn(a_tx, config.hardware.clone(), volley_id);
+    audio_thread.spawn(a_tx, config.hardware.clone(), volley_id, Some(session_key));
 
     (v_rx, a_rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use phalanx::hardware::{camera, audio};
+    use phalanx::core::config::HardwareConfig;
+    use phalanx::protocol::shards::DataPayload;
+    use phalanx::security::e2ee;
+    use tokio::sync::mpsc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_camera_thread_produces_encrypted_shards() {
+        // 1. Setup
+        let (tx, mut rx) = mpsc::channel(10);
+        let config = HardwareConfig {
+            camera_fps: 10, // Fast FPS for quick test
+            audio_sample_rate: 44100,
+            audio_channels: 2,
+        };
+        let volley_id = "test_volley".to_string();
+        let key = e2ee::generate_session_key();
+
+        // 2. Spawn Thread
+        let cam_thread = camera::PhalanxCameraThread { fps: 10 };
+        // Passing None for index forces MockCamera
+        cam_thread.spawn(None, tx, config, volley_id.clone(), Some(key));
+
+        // 3. Receive Shard (Wait max 2s)
+        let shard = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("Timed out waiting for camera shard")
+            .expect("Channel closed unexpectedly");
+
+        // 4. Verification
+        assert_eq!(shard.volley_id, volley_id);
+        
+        match &shard.payload {
+            DataPayload::Encrypted { nonce, ciphertext } => {
+                assert_eq!(nonce.len(), 24);
+                assert!(!ciphertext.is_empty());
+                
+                // 5. Verify Decryptability
+                let decrypted = shard.payload.decrypt(&key).expect("Failed to decrypt shard");
+                // VideoShard frames are serialized Vec<Vec<u8>>
+                let frames: Vec<Vec<u8>> = postcard::from_bytes(&decrypted).unwrap();
+                assert!(!frames.is_empty(), "Decrypted frames should not be empty");
+            },
+            DataPayload::Clear(_) => panic!("Camera thread produced CLEAR text despite having a key!"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_audio_thread_produces_encrypted_shards() {
+        // 1. Setup
+        let (tx, mut rx) = mpsc::channel(10);
+        let config = HardwareConfig {
+            camera_fps: 1, 
+            audio_sample_rate: 44100,
+            audio_channels: 2,
+        };
+        let volley_id = "test_volley_audio".to_string();
+        let key = e2ee::generate_session_key();
+
+        // 2. Spawn
+        let audio_thread = audio::PhalanxAudioThread { sample_rate: 44100, channels: 2 };
+        audio_thread.spawn(tx, config, volley_id, Some(key));
+
+        // 3. Receive
+        let shard = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("Timed out waiting for audio shard")
+            .expect("Channel closed");
+
+        // 4. Verification
+        match &shard.payload {
+            DataPayload::Encrypted { nonce, ciphertext } => {
+                assert_eq!(nonce.len(), 24);
+                assert!(!ciphertext.is_empty());
+                
+                // 5. Verify Decryptability
+                let decrypted = shard.payload.decrypt(&key).expect("Failed to decrypt audio");
+                // Audio dummy data is 1024 bytes of zeros
+                assert_eq!(decrypted.len(), 1024);
+            },
+            DataPayload::Clear(_) => panic!("Audio thread produced CLEAR text despite having a key!"),
+        }
+    }
 }

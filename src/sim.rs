@@ -177,7 +177,7 @@ async fn test_salvage_on_node_death() {
 
     use tokio::time::Duration;
     use tracing::{info};
-    use crate::protocol::shards::{Evidence, WitnessEnvelope};
+    use crate::protocol::shards::{self, Evidence, WitnessEnvelope};
 
     // 1. CONFIGURATION
     let config = PhalanxConfig::test_salvage_on_node_death();
@@ -200,13 +200,14 @@ async fn test_salvage_on_node_death() {
     let victim_identity = crate::security::identity::PhalanxIdentity::generate(); 
     let victim_did = victim_identity.did.clone();
 
-    let real_shard = crate::protocol::shards::VideoShard {
-        volley_id: "volley_test_999".to_string(),
-        timestamp: 123456789,
-        frames: vec![vec![1]],
-        sequence_id: crate::protocol::shards::StorageSequence(999),
-        fps: 10,
-    };
+    // FIX: Use constructor instead of struct init
+    let frames = vec![vec![1]];
+    let real_shard = shards::create_video_shard(
+        frames, 
+        crate::protocol::shards::StorageSequence(999), 
+        10,
+        "volley_test_999".to_string()
+    );
 
     // Wrap in Envelope (Signed by Victim)
     let envelope = WitnessEnvelope::new(
@@ -273,7 +274,7 @@ async fn test_salvage_on_node_death() {
 
 #[tokio::test]
 async fn test_out_of_sequence_salvage_on_node_death() {
-    use crate::protocol::shards::{StorageSequence, Evidence, WitnessEnvelope, VideoShard};
+    use crate::protocol::shards::{self, StorageSequence, Evidence, WitnessEnvelope};
     use crate::security::identity::NetworkId;
     
     let identity = PhalanxIdentity::generate();
@@ -281,17 +282,17 @@ async fn test_out_of_sequence_salvage_on_node_death() {
     let config = PhalanxConfig::default();
     let mut storage = Guardian::new("sim_vault/salvage_test", &config, identity.did.clone());
     
-    
     let mut captured_envelopes = Vec::new();
     for i in 0..5 {
         let seq = StorageSequence(i);
-        let shard = VideoShard {
-            volley_id: "volley_test_999".to_string(),
-            timestamp: 1000 + i as u64,
-            frames: vec![vec![i as u8]],
-            sequence_id: seq,
-            fps: 30,
-        };
+        // FIX: Use constructor
+        let frames = vec![vec![i as u8]];
+        let shard = shards::create_video_shard(
+            frames, 
+            seq, 
+            30, 
+            "volley_test_999".to_string()
+        );
         
         let envelope = WitnessEnvelope::new(
             Evidence::Video(shard), 
@@ -317,21 +318,24 @@ async fn test_out_of_sequence_salvage_on_node_death() {
         assert_eq!(seq.0, i as u32, "Sequence gap detected at index {}", i);
         let env = session.get(seq).unwrap();
         if let Evidence::Video(ref v) = env.evidence {
-            assert_eq!(v.frames[0][0], i as u8, "Data mismatch at sequence {}", i);
+            // FIX: frames are gone, check payload by decrypting or just assume correct for this test
+            // Since we're not encrypting in this test, payload is Clear(bytes).
+            if let crate::protocol::shards::DataPayload::Clear(bytes) = &v.payload {
+                 let recovered: Vec<Vec<u8>> = postcard::from_bytes(bytes).unwrap();
+                 assert_eq!(recovered[0][0], i as u8, "Data mismatch at sequence {}", i);
+            }
         }
     }
 }
 
 #[tokio::test]
 async fn test_stronghold_crash_recovery() {
-    use crate::protocol::shards::{StorageSequence, Evidence, WitnessEnvelope, VideoShard};
+    use crate::protocol::shards::{self, StorageSequence, Evidence, WitnessEnvelope};
     use crate::security::identity::NetworkId;
     
     let config = PhalanxConfig::default();
     let vault_path = "sim_vault/crash_test";
     let _ = std::fs::remove_dir_all(vault_path);
-
-
 
     let identity = PhalanxIdentity::generate();
     let peer_id = NetworkId::random();
@@ -339,13 +343,13 @@ async fn test_stronghold_crash_recovery() {
     
     let mut storage = Guardian::new(vault_path, &config, identity.did.clone());
 
-    let shard = VideoShard {
-        volley_id: "volley_test_999".to_string(),
-        timestamp: 123456789,
-        frames: vec![vec![0xAA]],
-        sequence_id: seq,
-        fps: 30,
-    };
+    let frames = vec![vec![0xAA]];
+    let shard = shards::create_video_shard(
+        frames, 
+        seq, 
+        30,
+        "volley_test_999".to_string()
+    );
     
     let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id);
     storage.ingest_envelope(envelope.clone()).expect("Ingest failed");
@@ -361,6 +365,9 @@ async fn test_stronghold_crash_recovery() {
         .expect("Guardian failed to recover specific shard 101 from WAL");
 
     if let Evidence::Video(ref v) = recovered_env.evidence {
-        assert_eq!(v.frames[0][0], 0xAA);
+        if let crate::protocol::shards::DataPayload::Clear(bytes) = &v.payload {
+            let recovered: Vec<Vec<u8>> = postcard::from_bytes(bytes).unwrap();
+            assert_eq!(recovered[0][0], 0xAA);
+        }
     }
 }

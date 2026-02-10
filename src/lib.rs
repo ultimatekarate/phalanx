@@ -30,11 +30,13 @@ pub fn init_identity() -> PhalanxIdentity {
     })
 }
 
+
+/// I hate having integration tests here but moving them will suuuuuuuuuuuuuuuuuuuuuck.
 #[cfg(test)]
 mod integration_tests {
     use crate::core::config::PhalanxConfig;
     use crate::storage::guardian::Guardian;
-    use crate::protocol::shards::{self, Evidence, VideoShard, StorageSequence, WitnessEnvelope};
+    use crate::protocol::shards::{self, Evidence, StorageSequence, WitnessEnvelope};
     use crate::security::identity::{NetworkId, PhalanxIdentity};
     use std::time::Duration;
 
@@ -50,17 +52,21 @@ mod integration_tests {
         let _ = std::fs::remove_dir_all(&config.storage.vault_path);
         let identity = PhalanxIdentity::generate();
         let peer_id = NetworkId::random();
+        
+        // Note: Ensure your 'Guardian' struct is accessible via crate::storage::guardian
         let mut stronghold = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
 
 
         // 2. CREATE EVIDENCE: A mock video frame
-        let shard = VideoShard {
-            volley_id: "volley_alpha_001".to_string(),
-            timestamp: 1000,
-            sequence_id: StorageSequence(0),
-            frames: vec![vec![0xFF; 100]], // Mock pixel data
-            fps: 30,
-        };
+        // FIX: Use the constructor instead of struct initialization.
+        // This handles the internal change from 'frames' to 'payload' automatically.
+        let frames = vec![vec![0xFF; 100]]; 
+        let shard = shards::create_video_shard(
+            frames, 
+            StorageSequence(0), 
+            30, 
+            "volley_alpha_001".to_string()
+        );
 
         // 3. ENVELOPE IT (Simulate local hardware capture)
         let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id);
@@ -86,6 +92,7 @@ mod integration_tests {
 
         // VERIFY 1: Micro Layer State
         // The Micro Crucible should be holding the incomplete shard
+        // Note: Assuming `micro_layer` is public on Guardian
         let active_shard = stronghold.micro_layer.get(&shards::ShardId(0));
         assert!(active_shard.is_some(), "Micro Layer failed to buffer incomplete chunks");
         
@@ -97,6 +104,7 @@ mod integration_tests {
         assert!(stronghold.micro_layer.is_empty(), "Micro Layer failed to clear completed shard");
         
         // Macro layer (Crucible) should now hold the WIP Volley
+        // Note: Assuming `get_active_volley_shards` is public
         let active_shards = stronghold.get_active_volley_shards(&identity.did);
         assert!(active_shards.is_some(), "Stronghold failed to promote Envelope to Macro Layer");
         assert_eq!(active_shards.unwrap().len(), 1, "Macro Layer missing the reassembled shard");

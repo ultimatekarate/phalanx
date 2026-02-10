@@ -1,17 +1,6 @@
 use tokio::sync::mpsc::Sender;
-use serde::{Serialize, Deserialize};
-use std::time::{SystemTime, UNIX_EPOCH};
-use crate::{core::config::HardwareConfig, protocol::shards::StorageSequence};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AudioShard {
-    pub timestamp: u64,
-    pub sequence_id: StorageSequence,
-    pub data: Vec<u8>, // Compressed audio bytes (AAC/Opus)
-    pub sample_rate: u32,
-    pub channels: u8,
-    pub volley_id: String,
-}
+use crate::core::config::HardwareConfig;
+use crate::protocol::shards::{self, AudioShard, StorageSequence};
 
 pub struct PhalanxAudioThread {
     pub sample_rate: u32,
@@ -20,7 +9,7 @@ pub struct PhalanxAudioThread {
 
 impl PhalanxAudioThread {
     /// Spawns the audio capture thread using values from the HardwareConfig.
-    pub fn spawn(self, tx: Sender<AudioShard>, config: HardwareConfig, volley_id: String,) {
+    pub fn spawn(self, tx: Sender<AudioShard>, config: HardwareConfig, volley_id: String, secret_key: Option<[u8; 32]>) {
         let sample_rate = config.audio_sample_rate;
         let channels = config.audio_channels;
 
@@ -28,19 +17,20 @@ impl PhalanxAudioThread {
             let mut sequence_id: StorageSequence = StorageSequence(0);
             
             loop {
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-
-                let shard = AudioShard {
-                    timestamp: now,
+                let mut shard = shards::create_audio_shard(
+                    vec![0u8; 1024], // Dummy data
                     sequence_id,
-                    data: vec![0u8; 1024], // Simulation placeholder
                     sample_rate,
                     channels,
-                    volley_id: volley_id.clone()
-                };
+                    volley_id.clone()
+                );
+
+                if let Some(key) = secret_key {
+                    if let Err(e) = shard.encrypt(&key) {
+                        eprintln!("[Audio] Encryption failed for seq {}: {}", sequence_id, e);
+                        continue;
+                    }
+                }
 
                 if tx.blocking_send(shard).is_err() {
                     break;

@@ -382,7 +382,7 @@ mod tests {
     use super::*;
     use crate::core::config::{StorageConfig, NetworkConfig, HardwareConfig};
     use crate::security::identity::{PhalanxIdentity, NetworkId};
-    use crate::protocol::shards::VideoShard;
+    use crate::protocol::shards;
     use std::fs::File;
     use std::io::Write;
 
@@ -461,18 +461,16 @@ mod tests {
 
         let mut guardian = Guardian::new(vault_path, &config, identity.did.clone());
 
-        // 1. Create a Shard
-        let shard = VideoShard {
-            volley_id: "v1".to_string(),
-            timestamp: 100,
-            frames: vec![vec![1]],
-            sequence_id: StorageSequence(1),
-            fps: 30,
-        };
+        // 1. Create a Shard using constructor
+        let frames = vec![vec![1]];
+        let shard = shards::create_video_shard(
+            frames, 
+            StorageSequence(1), 
+            30, 
+            "v1".to_string()
+        );
 
         // 2. Sign it with the WRONG identity (Attacker signs, claims to be Victim?)
-        // Actually, WitnessEnvelope::new signs with the 'owner' passed in.
-        // To forge it, we need to tamper with the payload AFTER signing.
         let mut envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id);
         
         // 3. TAMPER: Modify the payload without updating the signature
@@ -506,16 +504,15 @@ mod tests {
         let mut guardian = Guardian::new(vault_path, &config, identity.did.clone());
 
         // 2. Artificially inflate usage to simulate a "stuck" state
-        // (Simulating a state where pruning failed to free space)
         guardian.foreign_storage_usage = 1000; 
 
-        let shard = VideoShard {
-            volley_id: "v1".to_string(),
-            timestamp: 100,
-            frames: vec![vec![1]],
-            sequence_id: StorageSequence(1),
-            fps: 30,
-        };
+        let frames = vec![vec![1]];
+        let shard = shards::create_video_shard(
+            frames, 
+            StorageSequence(1), 
+            30, 
+            "v1".to_string()
+        );
         let envelope = WitnessEnvelope::new(Evidence::Video(shard), &stranger, peer_id);
 
         // 3. Ingest Foreign Data
@@ -540,28 +537,25 @@ mod tests {
         let mut guardian = Guardian::new(vault_path, &config, identity.did.clone());
 
         let seq_num = StorageSequence(50);
-        let shard = VideoShard {
-            volley_id: "v1".to_string(),
-            timestamp: 100,
-            frames: vec![vec![1]],
-            sequence_id: seq_num, 
-            fps: 30,
-        };
+        let frames = vec![vec![1]];
+        let shard = shards::create_video_shard(
+            frames,
+            seq_num,
+            30,
+            "v1".to_string()
+        );
         let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id);
 
         // 1. MANUALLY SEED HISTORY
-        // Simulate that Sequence #50 was already archived in the past.
         guardian.processed_sequences
             .entry(identity.did.clone())
             .or_default()
             .insert(seq_num);
 
         // 2. Ingest the "Replay" Envelope
-        // The Replay Guard should catch this and return Ok() immediately.
         assert!(guardian.ingest_envelope(envelope).is_ok());
 
         // 3. Verify it was BLOCKED
-        // If it was blocked, it should NOT be in the active macro layer buffer.
         let active_session = guardian.get_active_volley_shards(&identity.did);
         assert!(active_session.is_none(), "Replayed envelope leaked into active buffer!");
     }
