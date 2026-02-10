@@ -31,7 +31,7 @@ This plan synthesizes all specialized roadmaps (Network, Security, Stronghold, H
 **Dependencies:** `security-todo.md`, `hardware-hardening-roadmap.md`
 
 - [ ] **Network Security**
-  - [ ] Implement **Private Swarms** (PSK) using `libp2p-pnet` and `swarm.key`.
+  - [x] Implement **Private Swarms** (PSK) using `libp2p-pnet` and `swarm.key`.
   - [ ] Implement **Payload Encryption** (E2EE) for `WitnessEnvelope`.
   - [ ] Strictly enforce **Protocol Versioning** in `Identify`.
 - [ ] **Trusted Time**
