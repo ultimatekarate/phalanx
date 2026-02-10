@@ -3,6 +3,7 @@ use crate::storage::crucible::{Crucible};
 use crate::storage::strategies::{ShardAmalgam, VolleyAmalgam, Volley}; 
 use crate::core::config::PhalanxConfig;
 use crate::security::identity::Did;
+use crate::security::time::TrustedClock;
 
 use std::collections::{HashSet, HashMap};
 use std::fs::{self, File};
@@ -43,6 +44,8 @@ pub struct Guardian {
     pub max_foreign_storage_bytes: u64,           // Foreign Limit
     pub current_storage_usage: u64,         // Current Total Usage
     pub foreign_storage_usage: u64,         // Current Foreign Usage
+
+    pub clock: TrustedClock,
 }
 
 impl Guardian {
@@ -67,6 +70,7 @@ impl Guardian {
             max_foreign_storage_bytes: config.storage.max_foreign_storage_bytes,
             current_storage_usage: 0,
             foreign_storage_usage: 0,
+            clock: TrustedClock::new(),
         };
         
         guardian.calculate_initial_usage();
@@ -206,6 +210,19 @@ impl Guardian {
                     return Err(GuardianError::QuotaExceeded(self.max_foreign_storage_bytes));
                 }
             }
+        }
+
+        // Allow +/- 10 seconds drift (generous for WAN, tight enough to stop replay)
+        let tolerance = 10; 
+        if !self.clock.is_valid(envelope.evidence.timestamp(), tolerance) {
+            warn!(
+                did = %envelope.did, 
+                claim = envelope.evidence.timestamp(), 
+                now = self.clock.now(),
+                "Rejected Time-Travel/Replay Attack"
+            );
+            // We reuse InvalidSignature for now, or add a new variant TimeSyncFailure
+            return Err(GuardianError::ReplayDetected(envelope.evidence.sequence_id().0));
         }
 
         if let Err(e) = self.write_to_wal(&envelope) {
@@ -475,7 +492,7 @@ mod tests {
         
         // 3. TAMPER: Modify the payload without updating the signature
         if let Evidence::Video(ref mut v) = envelope.evidence {
-            v.timestamp = 999999; // Malicious timestamp edit
+            v.fps = 120; // Malicious edit, it used to be 30
         }
 
         // 4. Ingest & Assert Failure

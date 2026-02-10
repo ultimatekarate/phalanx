@@ -166,6 +166,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let sentinel = Sentinel::new(&config);
     let storage = Guardian::new(&config.storage.vault_path, &config, my_identity.did.clone());
     
+    // 3. SYNC TIME (Blocking or Async)
+    // We do this BEFORE starting the network to ensure we don't accept bad data.
+    // Since sntpc uses blocking sockets by default in simple_get_time, 
+    // wrapping it in spawn_blocking is safer if inside tokio.
+    println!("[PHALANX] Synchronizing Clock with NTP...");
+    let clock_ref = storage.clock.clone();
+    tokio::task::spawn_blocking(move || {
+        // Create a temporary async runtime or use blocking call if available
+        // For simplicity with the code provided above which implies async:
+        tokio::runtime::Handle::current().block_on(async {
+            let _ = clock_ref.synchronize().await;
+        });
+    }).await?;
+
     let stronghold_flag = true;
     // Setup Network with proper key conversion
     let physics = PhalanxPhysics::default_wan();

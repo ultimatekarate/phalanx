@@ -34,6 +34,7 @@ toml = "0.9.8"
 ctrlc = "3.4"
 chrono = "0.4.43"
 void = "1.0.2"
+bip39 = "2.0"
 
 # --- Hardware & Media ---
 nokhwa = { version = "0.10", features = ["input-msmf"] }
@@ -41,7 +42,7 @@ ndarray = "0.17.2"
 image = { version = "0.25.9", features = ["jpeg"] }
 tracing-appender = "0.2.4"
 chacha20poly1305 = "0.10.1"
-sntpc = "0.8.1"
+sntpc = { version = "0.3", features = ["std"] }
 
 # --- Networking (Consolidated) ---
 [dependencies.libp2p]
