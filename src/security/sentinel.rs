@@ -217,7 +217,7 @@ impl Sentinel {
 mod leaf_mode_tests {
     use super::*;
     use crate::security::identity::PhalanxIdentity;
-    use crate::protocol::shards::ShardChunk;
+    use crate::protocol::shards::{ShardChunk, ShardId};
 
     #[test]
     fn test_sentinel_leaf_mode_filtering() {
@@ -231,46 +231,43 @@ mod leaf_mode_tests {
         // 1. Enter Leaf Mode
         sentinel.set_power_state(PowerState::Leaf);
 
-        // 2. Create a foreign chunk
+        // 2. Create a foreign chunk (Part 1 of 2 to stay in buffer)
         let foreign_chunk = ShardChunk {
             shard_id: ShardId(1),
             chunk_index: 0,
-            total_chunks: 1,
+            total_chunks: 2,
             data: vec![1, 2, 3],
-            owner_did: stranger.did.clone(), // Non-local DID
+            owner_did: stranger.did.clone(),
         };
 
-        // 3. Create a local chunk
+        // 3. Create a local chunk (Part 1 of 2 to stay in buffer)
         let local_chunk = ShardChunk {
             shard_id: ShardId(2),
             chunk_index: 0,
-            total_chunks: 1,
+            total_chunks: 2,
             data: vec![4, 5, 6],
-            owner_did: identity.did.clone(), // Local DID
+            owner_did: identity.did.clone(),
         };
 
         // 4. Verification: Foreign data must be ignored in Leaf Mode
-        let foreign_result = sentinel.process_chunk(
+        sentinel.process_chunk(
             foreign_chunk, 
-            "video_topic", 
+            &config.network.video_topic, // Match config topic
             &config, 
             &identity, 
             local_peer
         );
-        assert!(foreign_result.is_none(), "Sentinel processed foreign data while in Leaf Mode");
-        assert_eq!(sentinel.video_buffers.len(), 0, "Sentinel allocated memory for foreign data in Leaf Mode");
+        assert_eq!(sentinel.video_buffers.len(), 0, "Sentinel leaked foreign data in Leaf Mode");
 
-        // 5. Verification: Local data must still be processed
-        // (Note: This might return None if reassembly isn't complete, 
-        // but it SHOULD create a buffer entry)
+        // 5. Verification: Local data must still be accepted
         sentinel.process_chunk(
             local_chunk, 
-            "video_topic", 
+            &config.network.video_topic, // Match config topic
             &config, 
             &identity, 
             local_peer
         );
+        // It stays in buffer because total_chunks is 2
         assert_eq!(sentinel.video_buffers.len(), 1, "Sentinel failed to process local data in Leaf Mode");
     }
-
 }
