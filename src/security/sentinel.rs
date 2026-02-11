@@ -185,3 +185,65 @@ impl Sentinel {
         });
     }
 }
+
+#[cfg(test)]
+mod leaf_mode_tests {
+    use super::*;
+    use crate::security::identity::PhalanxIdentity;
+    use crate::protocol::shards::ShardChunk;
+
+    #[test]
+    fn test_sentinel_leaf_mode_filtering() {
+        let (identity, _) = PhalanxIdentity::generate();
+        let (stranger, _) = PhalanxIdentity::generate();
+        let config = PhalanxConfig::default();
+        let local_peer = NetworkId::random();
+        
+        let mut sentinel = Sentinel::new(&config);
+        
+        // 1. Enter Leaf Mode
+        sentinel.set_power_state(PowerState::Leaf);
+
+        // 2. Create a foreign chunk
+        let foreign_chunk = ShardChunk {
+            shard_id: ShardId(1),
+            chunk_index: 0,
+            total_chunks: 1,
+            data: vec![1, 2, 3],
+            owner_did: stranger.did.clone(), // Non-local DID
+        };
+
+        // 3. Create a local chunk
+        let local_chunk = ShardChunk {
+            shard_id: ShardId(2),
+            chunk_index: 0,
+            total_chunks: 1,
+            data: vec![4, 5, 6],
+            owner_did: identity.did.clone(), // Local DID
+        };
+
+        // 4. Verification: Foreign data must be ignored in Leaf Mode
+        let foreign_result = sentinel.process_chunk(
+            foreign_chunk, 
+            "video_topic", 
+            &config, 
+            &identity, 
+            local_peer
+        );
+        assert!(foreign_result.is_none(), "Sentinel processed foreign data while in Leaf Mode");
+        assert_eq!(sentinel.video_buffers.len(), 0, "Sentinel allocated memory for foreign data in Leaf Mode");
+
+        // 5. Verification: Local data must still be processed
+        // (Note: This might return None if reassembly isn't complete, 
+        // but it SHOULD create a buffer entry)
+        sentinel.process_chunk(
+            local_chunk, 
+            "video_topic", 
+            &config, 
+            &identity, 
+            local_peer
+        );
+        assert_eq!(sentinel.video_buffers.len(), 1, "Sentinel failed to process local data in Leaf Mode");
+    }
+
+}

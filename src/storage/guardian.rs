@@ -681,3 +681,49 @@ mod tests {
         assert!(rep.is_blacklisted);
     }
 }
+
+#[cfg(test)]
+mod guardian_leaf_tests {
+    use super::*;
+    use crate::security::identity::PhalanxIdentity;
+    use crate::protocol::shards;
+
+    #[test]
+    fn test_guardian_leaf_mode_ingestion() {
+        let (identity, _) = PhalanxIdentity::generate();
+        let (stranger, _) = PhalanxIdentity::generate();
+        let config = PhalanxConfig::default();
+        let mut guardian = Guardian::new("sim_vault/leaf_unit_test", &config, identity.did.clone());
+
+        let foreign_chunk = ShardChunk {
+            shard_id: shards::ShardId(100),
+            chunk_index: 0,
+            total_chunks: 1,
+            data: vec![0],
+            owner_did: stranger.did.clone(),
+        };
+
+        // 1. Ingest while Leaf Mode is ACTIVE
+        let is_leaf_mode = true;
+        guardian.ingest_chunk(foreign_chunk.clone(), is_leaf_mode);
+
+        // 2. Verify: The Micro-Layer (reassembly) should be empty
+        assert_eq!(
+            guardian.micro_layer.len(), 
+            0, 
+            "Guardian permitted foreign disk I/O while in Leaf Mode"
+        );
+
+        // 3. Ingest while Leaf Mode is INACTIVE (Normal)
+        guardian.ingest_chunk(foreign_chunk, false);
+        
+        // 4. Verify: Data is now accepted into the workbench
+        assert_eq!(
+            guardian.micro_layer.len(), 
+            1, 
+            "Guardian failed to ingest salvage data in Normal mode"
+        );
+
+        let _ = std::fs::remove_dir_all("sim_vault/leaf_unit_test");
+    }
+}
