@@ -102,6 +102,32 @@ impl Sentinel {
         }
     }
 
+    // Automatically adjusts the internal PowerState based on environmental data.
+    pub fn update_power_strategy(&mut self) {
+        let battery = self.get_system_battery();
+        let target_state = if battery < 0.15 {
+            PowerState::Leaf
+        } else {
+            PowerState::Normal
+        };
+
+        if self.power_state != target_state {
+            warn!(battery = %battery, old = ?self.power_state, new = ?target_state, "Power strategy shift");
+            self.power_state = target_state;
+        }
+    }
+
+    // Returns true if the node should ignore all foreign traffic.
+    pub fn is_leaf_mode(&self) -> bool {
+        self.power_state == PowerState::Leaf
+    }
+
+    fn get_system_battery(&self) -> f32 {
+        // Current Simulation: 80% (Normal Mode)
+        // Change to < 0.15 to test Leaf Mode logic.
+        0.80 
+    }
+
     pub fn set_power_state(&mut self, state: PowerState) {
         if self.power_state != state {
             warn!(new_state = ?state, "Sentinel power state transition");
