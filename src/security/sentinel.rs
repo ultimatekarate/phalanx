@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use tokio::time::Instant;
+
+use tokio::time::{Instant, Duration};
 use tracing::{info, warn, debug, instrument};
 
 use crate::protocol::shards::{
@@ -18,6 +19,7 @@ use crate::security::identity::{NetworkId, PhalanxIdentity};
 pub struct HealthTracker {
     pub heartbeats: HashMap<NetworkId, Instant>,
     pub capacities: HashMap<NetworkId, ControlMessage>,
+    pub peer_contracts: HashMap<NetworkId, Duration>,
 }
 
 impl HealthTracker {
@@ -25,25 +27,41 @@ impl HealthTracker {
         Self {
             heartbeats: HashMap::new(),
             capacities: HashMap::new(),
+            peer_contracts: HashMap::new(),
         }
     }
 
-    pub fn register_activity(&mut self, peer_id: NetworkId) {
+    pub fn register_activity(&mut self, msg: ControlMessage) {
+        let peer_id = msg.sender;
         self.heartbeats.insert(peer_id, Instant::now());
+        self.peer_contracts.insert(peer_id, Duration::from_millis(msg.heartbeat_ms));
+        self.capacities.insert(peer_id, msg);
     }
 
     pub fn is_peer_stale(&self, peer_id: &NetworkId, physics: &PhalanxPhysics) -> bool {
-        self.heartbeats.get(peer_id)
-            .map(|t| t.elapsed() > physics.heartbeat_interval())
-            .unwrap_or(true)
-    }
-}
+        let last_time = match self.heartbeats.get(peer_id) {
+            Some(t) => t,
+            None => return true,
+        };
 
+        // Use the peer's reported interval, or fall back to physics default if unknown
+        let default_load_factor = 0.0;
+        let contract = self.peer_contracts.get(peer_id)
+            .cloned()
+            .unwrap_or_else(|| physics.heartbeat_interval(default_load_factor));
+
+        // Apply physics jitter_factor to allow for network variance
+        let grace_period = contract * physics.jitter_factor as u32;
+        
+        last_time.elapsed() > grace_period
+    }   
+}
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ControlMessage {
     pub sender: NetworkId,
     pub load_factor: f32,
     pub storage_remaining_mb: u64,
+    pub heartbeat_ms: u64
 }
 
 /// Tracks the behavior and resource usage of remote peers
@@ -64,6 +82,7 @@ pub struct Sentinel {
     pub video_buffers: HashMap<ShardId, ReassemblyBuffer>,
     pub audio_buffers: HashMap<ShardId, ReassemblyBuffer>,
     pub health_tracker: HealthTracker,
+    pub peer_registry: Vec<NetworkId>
 }
 
 impl Sentinel {
@@ -72,6 +91,7 @@ impl Sentinel {
             video_buffers: HashMap::new(),
             audio_buffers: HashMap::new(),
             health_tracker: HealthTracker::new(),
+            peer_registry: Vec::new()
         }
     }
 

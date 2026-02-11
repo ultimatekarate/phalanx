@@ -51,6 +51,10 @@ impl<S: Mold> Crucible<S> {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.contexts.len()
+    }
+    
     #[instrument(skip(self, item), level = "info")]
     pub fn process(&mut self, item: S::Input) -> Option<S::Output> {
         self.perform_cleanup();

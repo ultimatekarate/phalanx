@@ -139,11 +139,18 @@ impl PhalanxNode {
     }
 
     /// Broadcast System Status
-    fn broadcast_heartbeat(&self, swarm: &mut Swarm<PhalanxBehaviour>) {
+    fn broadcast_heartbeat(&self, swarm: &mut Swarm<PhalanxBehaviour>, physics: &PhalanxPhysics) {
+        let load_factor = (self.sentinel.video_buffers.len() + self.sentinel.audio_buffers.len()) as f32 
+                    / self.config.storage.max_peers as f32;
+    
+        // 2. Derive dynamic interval
+        let current_interval = physics.heartbeat_interval(load_factor);
+        
         let hb = ControlMessage {
             sender: self.local_peer_id,
-            load_factor: 0.0, // Placeholder
+            load_factor: load_factor, 
             storage_remaining_mb: 1024, // Placeholder
+            heartbeat_ms: current_interval.as_millis() as u64,
         };
     
         if let Ok(encoded) = postcard::to_stdvec(&hb) {
@@ -204,7 +211,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (mut video_rx, mut audio_rx) = spawn_hardware_threads(&config, current_volley_id);
 
     // 3. Timers
-    let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(config.network.heartbeat_interval_secs));
     let mut cleanup_timer = tokio::time::interval(Duration::from_secs(config.network.cleanup_interval_secs));
     let mut discovery_timer = tokio::time::interval(Duration::from_secs(30)); // Service Discovery
 
@@ -225,6 +231,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // 5. The Clean Loop
     loop {
+        let load_factor = (node.sentinel.video_buffers.len() + node.sentinel.audio_buffers.len()) as f32 
+                    / node.config.storage.max_peers as f32;
+        let load_factor = load_factor.clamp(0.0, 1.0);
+
+        let next_heartbeat = physics.heartbeat_interval(load_factor);
+
         select! {
             // --- Hardware Inputs ---
             Some(v_shard) = video_rx.recv() => {
@@ -244,8 +256,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
 
             // --- Maintenance Timers ---
-            _ = heartbeat_timer.tick() => {
-                node.broadcast_heartbeat(&mut swarm);
+            // 
+            _ = tokio::time::sleep(next_heartbeat) => {
+                node.broadcast_heartbeat(&mut swarm, &physics);
+
+                if load_factor > 0.7 {
+                    tracing::warn!(load = %load_factor, interval = ?next_heartbeat, "Node under stress: Throttling heartbeats");
+                }
             }
 
             _ = discovery_timer.tick() => {

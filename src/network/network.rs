@@ -98,10 +98,12 @@ pub fn setup_phalanx_swarm(
         local_key.public(),
     ));
 
+    let gossip_heartbeat = physics.heartbeat_interval(0.0);
+
     let gossipsub = gossipsub::Behaviour::new(
         gossipsub::MessageAuthenticity::Signed(local_key.clone()),
         gossipsub::ConfigBuilder::default()
-            .heartbeat_interval(physics.heartbeat_interval())
+            .heartbeat_interval(gossip_heartbeat)
             .validation_mode(gossipsub::ValidationMode::Strict)
             .build()
             .map_err(|msg| io::Error::new(io::ErrorKind::Other, msg))?,

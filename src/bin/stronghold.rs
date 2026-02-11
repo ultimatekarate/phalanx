@@ -10,7 +10,7 @@ use libp2p::{
 use phalanx::{
     storage::guardian::Guardian, 
     security::{
-        sentinel::Sentinel,
+        sentinel::{Sentinel, ControlMessage},
         identity::{
             PhalanxIdentity,
             NetworkId
@@ -24,20 +24,18 @@ use phalanx::{
 
 use std::error::Error;
 use std::time::Duration;
-use tracing::{info};
+use tracing::{info, warn};
 
 use phalanx::{PhalanxEvent};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Initialize tracing (replacing env_logger for forensic-grade logging)
     let _guard = telemetry::init_observability();
     info!("PHALANX STRONGHOLD: Initializing Headless PDS...");
 
     let config = PhalanxConfig::load("phalanx.toml")
         .expect("Failed to load phalanx.toml.");
     
-    // Identity is required for signing any salvaged evidence
     let (identity, _) = PhalanxIdentity::generate(); 
     let mut storage = Guardian::new("./vault", &config, identity.did.clone());
     let mut sentinel = Sentinel::new(&config);
@@ -47,14 +45,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut swarm = phalanx::setup_phalanx_swarm(identity.to_libp2p_keypair(), stronghold_flag, physics)?;
 
     let storage_key = phalanx::network::network::get_storage_key();
-    
-    // This tells the DHT: "I am a provider for this key"
     swarm.behaviour_mut().kademlia.start_providing(storage_key.clone())
         .expect("Failed to start providing storage service");
 
     let local_peer_id = NetworkId(*swarm.local_peer_id());
 
-    // 1. Subscribe to configured topics
+    // Subscribe to topics
     swarm.behaviour_mut().gossipsub.subscribe(&gossipsub::IdentTopic::new(&config.network.video_topic))?;
     swarm.behaviour_mut().gossipsub.subscribe(&gossipsub::IdentTopic::new(&config.network.audio_topic))?;
     swarm.behaviour_mut().gossipsub.subscribe(&gossipsub::IdentTopic::new(&config.network.control_topic))?;
@@ -63,75 +59,87 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}", port).parse()?)?;
 
     let mut cleanup_timer = tokio::time::interval(Duration::from_secs(10));
-    let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(30));
+    
+    // 1. DYNAMIC HEARTBEAT INITIALIZATION
+    // We use a base interval and will reset it based on load.
+    let mut heartbeat_timer = tokio::time::interval(physics.heartbeat_interval(0.0));
 
     info!(peer_id = %local_peer_id, "Stronghold Status: Online.");
 
     loop {
+        // 2. CALCULATE DYNAMIC LOAD FACTOR
+        // Heuristic: Sum of reassembly buffers divided by configured capacity.
+        let micro_load = storage.micro_layer.len() as f32 / (config.storage.max_peers * 5) as f32;
+        let macro_load = storage.macro_layer.len() as f32 / config.storage.max_peers as f32;
+        let load_factor = (micro_load + macro_load).clamp(0.0, 1.0);
+
+        let current_interval = physics.heartbeat_interval(load_factor);
+        heartbeat_timer.reset_after(current_interval);
+
         tokio::select! {
-            // 1. Handle Incoming Network Traffic
-
             event = swarm.select_next_some() => {
-
                 match event {
-                    // 1. Correctly destructure the nested Enums
                     SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(gossipsub::Event::Message { message, .. })) => {
-                        // NOW you have access to the `message` variable
                         let topic_str = message.topic.as_str();
 
-                        if let Ok(chunk) = postcard::from_bytes::<phalanx::protocol::shards::ShardChunk>(&message.data) {
-                            println!("Stronghold received chunk from: {}", chunk.owner_did);
-                            
-                            // Reassembly logic
-                            if let Some(envelope) = sentinel.process_chunk(chunk, topic_str, &config, &identity, local_peer_id) {
-                                _ = storage.ingest_envelope(envelope);
-                                println!("Stronghold archived full envelope.");
+                        // Handle Evidence Chunks
+                        if topic_str != config.network.control_topic {
+                            if let Ok(chunk) = postcard::from_bytes::<phalanx::protocol::shards::ShardChunk>(&message.data) {
+                                if let Some(envelope) = sentinel.process_chunk(chunk, topic_str, &config, &identity, local_peer_id) {
+                                    _ = storage.ingest_envelope(envelope);
+                                }
                             }
+                        } 
+                        // 3. HANDLE INCOMING DYNAMIC HEARTBEATS
+                        else if let Ok(msg) = postcard::from_bytes::<ControlMessage>(&message.data) {
+                            // Register the peer's contract for staleness tracking
+                            sentinel.health_tracker.register_activity(msg);
                         }
                     }
                     
-                    // 2. Handle mDNS to bridge local peers to Kademlia
                     SwarmEvent::Behaviour(PhalanxEvent::Mdns(mdns::Event::Discovered(list))) => {
                         for (peer_id, multiaddr) in list {
                             swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr);
                         }
                     }
 
-                    // 3. Handle Identify to update routing table
                     SwarmEvent::Behaviour(PhalanxEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
                         for addr in info.listen_addrs {
                             swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
                         }
                     }
                     
-                    // 4. Kademlia Events handling
                     SwarmEvent::Behaviour(PhalanxEvent::Kademlia(kad::Event::OutboundQueryProgressed { 
                         result: kad::QueryResult::StartProviding(Ok(_)), .. 
                     })) => {
-                        tracing::info!("Successfully announced Storage capability to the network.");
+                        info!("Successfully announced Storage capability to the network.");
                     }
 
                     _ => {}
                 }
             }
 
-            // 2. Periodic Buffer Pruning
             _ = cleanup_timer.tick() => {
                 sentinel.prune_stale_buffers(&config, &physics);
                 storage.archive_stale_sessions(Duration::from_secs(config.storage.stale_session_threshold));
             }
 
-            // 3. Outgoing Heartbeats (Capacity Announcements)
+            // 4. BROADCAST DYNAMIC HEARTBEAT
             _ = heartbeat_timer.tick() => {
-                let hb = phalanx::security::sentinel::ControlMessage {
+                let hb = ControlMessage {
                     sender: local_peer_id,
-                    load_factor: 0.0, // Stronghold-specific metric
-                    storage_remaining_mb: 10240, // Mock value
+                    load_factor,
+                    storage_remaining_mb: 10240, // TODO: Implement disk space check
+                    heartbeat_ms: current_interval.as_millis() as u64,
                 };
                 
                 if let Ok(data) = postcard::to_stdvec(&hb) {
                     let topic = gossipsub::IdentTopic::new(&config.network.control_topic);
                     let _ = swarm.behaviour_mut().gossipsub.publish(topic, data);
+                }
+
+                if load_factor > 0.8 {
+                    warn!(load = %load_factor, next_interval = ?current_interval, "Stronghold under high load. Throttling heartbeats.");
                 }
             }
         }

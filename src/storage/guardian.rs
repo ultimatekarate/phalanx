@@ -199,7 +199,18 @@ impl Guardian {
             total = chunk.total_chunks,
             "Micro-Layer receiving chunk"
         );
+        
+        let micro_load = self.micro_layer.len() as f32 / (self.max_buffers_per_peer * 5) as f32;
+        let macro_load = self.macro_layer.len() as f32 / self.max_buffers_per_peer as f32;
+        let load_factor = (micro_load + macro_load).clamp(0.0, 1.0);
 
+        // 2. CIRCUIT BREAKER
+        // If load is > 80%, stop accepting new foreign reassemblies to save local resources.
+        if load_factor > 0.8 && chunk.owner_did != self.local_did {
+            warn!(load = %load_factor, did = %chunk.owner_did, "Circuit Breaker: Shedding foreign load");
+            return;
+        }
+        
         if let Some(rep) = self.peer_registry.get(&owner) {
             if rep.is_blacklisted {
                 debug!(did = %owner, "Dropping chunk: Peer is blacklisted.");

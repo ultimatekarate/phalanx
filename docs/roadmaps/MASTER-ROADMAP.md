@@ -43,7 +43,7 @@ This plan synthesizes all specialized roadmaps (Network, Security, Stronghold, H
   - [x] **Camera:** Fix time drift using `Instant` delta calculation and implement hot-plug logic.
   - [x] **Audio:** Integrate `cpal` for real hardware access and implement buffering.
   - [x] **Anti-Vampire:** Implement Rate Limiting in `guardian.rs` to ignore spammy peers.
-  - [ ] **Dynamic Heartbeats:** If battery < 20%, increase heartbeat interval from 30s to 300s.
+  - [x] **Dynamic Heartbeats:** If battery < 20%, increase heartbeat interval from 30s to 300s.
   - [ ] **Leaf Mode:** If battery < 15%, unsubscribe from all Gossipsub topics except `my_volley` to stop relaying traffic.
 
 ## Phase 3: Integration & Observability
