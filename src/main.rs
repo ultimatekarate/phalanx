@@ -231,6 +231,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // 5. The Clean Loop
     loop {
+
+        let battery_level = get_system_battery(); // Placeholder for platform-specific call
+
+        if battery_level < 0.15 {
+            node.sentinel.set_power_state(phalanx::security::sentinel::PowerState::Leaf);
+        } else {
+            node.sentinel.set_power_state(phalanx::security::sentinel::PowerState::Normal);
+        }
+        
         let load_factor = (node.sentinel.video_buffers.len() + node.sentinel.audio_buffers.len()) as f32 
                     / node.config.storage.max_peers as f32;
         let load_factor = load_factor.clamp(0.0, 1.0);
@@ -280,6 +289,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 // --- HELPERS ---
+
+fn get_system_battery() -> f32 {
+    // For now, we return a value that can be toggled or simulated.
+    // To test Leaf Mode, set this below 0.15.
+
+    // 14% - Triggering Leaf Mode
+    0.8 
+}
 
 fn subscribe_to_topics(swarm: &mut Swarm<PhalanxBehaviour>, config: &PhalanxConfig) {
     let topics = [

@@ -189,7 +189,12 @@ impl Guardian {
     }
 
     #[instrument(skip(self, chunk), level = "debug")]
-    pub fn ingest_chunk(&mut self, chunk: ShardChunk) {
+    pub fn ingest_chunk(&mut self, chunk: ShardChunk, is_leaf_mode: bool) {
+
+        // Leaf-mode circuit breaker
+        if is_leaf_mode && chunk.owner_did != self.local_did {
+            return; 
+        }
 
         let owner = chunk.owner_did.clone();
 

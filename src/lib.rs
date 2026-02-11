@@ -20,7 +20,7 @@ pub fn init_identity() -> PhalanxIdentity {
 
     PhalanxIdentity::load_from_disk(id_path).unwrap_or_else(|_| {
         println!("\n==================================================");
-        println!("⚠️  NO IDENTITY FOUND  ⚠️");
+        println!("  NO IDENTITY FOUND  ");
         println!("==================================================");
         println!("Do you want to (G)enerate a new identity or (R)ecover from a phrase? [G/r]");
         
@@ -37,16 +37,16 @@ pub fn init_identity() -> PhalanxIdentity {
                     println!("✅ Identity Restored: {}", id.did);
                     id
                 },
-                Err(e) => panic!("❌ Failed to restore identity: {}", e),
+                Err(e) => panic!("Failed to restore identity: {}", e),
             }
         } else {
             // GENERATE NEW
             let (id, phrase) = PhalanxIdentity::generate();
-            println!("\n✅ NEW IDENTITY GENERATED: {}", id.did);
+            println!("\n NEW IDENTITY GENERATED: {}", id.did);
             println!("--------------------------------------------------");
             println!("{}", phrase);
             println!("--------------------------------------------------");
-            println!("🛑 WRITE THIS DOWN. IT WILL NOT BE SHOWN AGAIN. 🛑\n");
+            println!(" WRITE THIS DOWN. IT WILL NOT BE SHOWN AGAIN. \n");
             
             println!("Press ENTER once you have secured your seed phrase.");
             let mut ack = String::new();
@@ -73,7 +73,8 @@ mod integration_tests {
         let mut config = PhalanxConfig::default();
         config.storage.vault_path = "./test_vault".to_string();
         config.storage.stale_session_threshold = 1;
-        
+        let is_leaf_mode: bool = false;
+
         let _ = std::fs::remove_dir_all(&config.storage.vault_path);
         
         let (identity, _) = PhalanxIdentity::generate();
@@ -102,13 +103,13 @@ mod integration_tests {
         
         // Ingest
         for i in 0..chunks.len() - 1 {
-            stronghold.ingest_chunk(chunks[i].clone());
+            stronghold.ingest_chunk(chunks[i].clone(), is_leaf_mode);
         }
 
         let active_shard = stronghold.micro_layer.get(&shards::ShardId(0));
         assert!(active_shard.is_some(), "Micro Layer failed to buffer incomplete chunks");
         
-        stronghold.ingest_chunk(chunks.last().unwrap().clone());
+        stronghold.ingest_chunk(chunks.last().unwrap().clone(), is_leaf_mode);
 
         assert!(stronghold.micro_layer.is_empty(), "Micro Layer failed to clear completed shard");
         

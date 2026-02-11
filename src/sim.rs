@@ -146,7 +146,9 @@ impl SimulationHarness {
                                     // 2. If a Peer sent it, I must Salvage it (Store Only)
                                     // Bypassing Sentinel prevents re-signing the data as my own.
                                     // This assumes the chunk contains a fragment of a valid WitnessEnvelope.
-                                    storage.ingest_chunk(chunk);
+                                    // Assume we are not in leaf mode
+                                    let is_leaf_mode = false;
+                                    storage.ingest_chunk(chunk, is_leaf_mode);
                                 }
                             }
                             SimEvent::Heartbeat(_source_peer, data) => {
@@ -381,6 +383,28 @@ async fn test_stronghold_crash_recovery() {
             assert_eq!(recovered[0][0], 0xAA);
         }
     }
+}
+
+#[tokio::test]
+async fn test_leaf_mode_isolation() {
+
+    use crate::protocol::shards::{self, StorageSequence};
+
+    let (me, _) = PhalanxIdentity::generate();
+    let (stranger, _) = PhalanxIdentity::generate();
+    let config = PhalanxConfig::default();
+    let mut storage = Guardian::new("sim_vault/leaf_test", &config, me.did.clone());
+
+    // 1. Create a foreign chunk
+    let shard = shards::create_video_shard(vec![vec![1]], StorageSequence(1), 30, "v1".into());
+    let chunk = shards::chunkify(shards::ShardId(1), postcard::to_stdvec(&shard).unwrap(), 100, stranger.did.clone());
+
+    // 2. Ingest while in Leaf Mode
+    let is_leaf_mode = true;
+    storage.ingest_chunk(chunk[0].clone(), is_leaf_mode);
+
+    // 3. Verify: The Micro-Layer should be empty because the chunk was dropped
+    assert_eq!(storage.micro_layer.len(), 0, "Guardian stored foreign data while in Leaf Mode!");
 }
 
 // =====================

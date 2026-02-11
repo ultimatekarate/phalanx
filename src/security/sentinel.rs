@@ -14,6 +14,11 @@ use crate::security::identity::{NetworkId, PhalanxIdentity};
 // =====================
 // HEALTH & CAPACITY
 // =====================
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PowerState {
+    Normal,
+    Leaf, // Focus strictly on self-preservation
+}
 
 /// Tracks peer vitality and their reported resource availability.
 pub struct HealthTracker {
@@ -82,7 +87,8 @@ pub struct Sentinel {
     pub video_buffers: HashMap<ShardId, ReassemblyBuffer>,
     pub audio_buffers: HashMap<ShardId, ReassemblyBuffer>,
     pub health_tracker: HealthTracker,
-    pub peer_registry: Vec<NetworkId>
+    pub peer_registry: Vec<NetworkId>,
+    pub power_state: PowerState,
 }
 
 impl Sentinel {
@@ -91,7 +97,15 @@ impl Sentinel {
             video_buffers: HashMap::new(),
             audio_buffers: HashMap::new(),
             health_tracker: HealthTracker::new(),
-            peer_registry: Vec::new()
+            peer_registry: Vec::new(),
+            power_state: PowerState::Normal,
+        }
+    }
+
+    pub fn set_power_state(&mut self, state: PowerState) {
+        if self.power_state != state {
+            warn!(new_state = ?state, "Sentinel power state transition");
+            self.power_state = state;
         }
     }
 
@@ -105,6 +119,11 @@ impl Sentinel {
         identity: &PhalanxIdentity,
         local_peer_id: NetworkId,
     ) -> Option<WitnessEnvelope> {
+        if self.power_state == PowerState::Leaf && chunk.owner_did != identity.did {
+            debug!(did = %chunk.owner_did, "Leaf Mode: Dropping foreign chunk to save battery");
+            return None;
+        }
+
         // 1. Route to correct buffer based on network topic
         let is_video = topic == config.network.video_topic;
         let buffers = if is_video {
