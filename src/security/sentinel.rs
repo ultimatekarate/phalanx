@@ -66,7 +66,8 @@ pub struct ControlMessage {
     pub sender: NetworkId,
     pub load_factor: f32,
     pub storage_remaining_mb: u64,
-    pub heartbeat_ms: u64
+    pub heartbeat_ms: u64,
+    pub is_leaf: bool
 }
 
 /// Tracks the behavior and resource usage of remote peers

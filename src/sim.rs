@@ -118,6 +118,7 @@ impl SimulationHarness {
                             load_factor,
                             storage_remaining_mb: 1024, // Placeholder for Disk I/O check
                             heartbeat_ms: current_interval.as_millis() as u64, // The Vitality Contract
+                            is_leaf: false
                         };
                         if let Ok(data) = postcard::to_stdvec(&msg) {
                             let _ = broadcast_tx.send((node_did.clone(), node_network_id, SimEvent::Heartbeat(node_network_id, data))).await;

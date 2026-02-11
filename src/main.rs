@@ -29,7 +29,8 @@ impl PhalanxNode {
     fn handle_network_event(
         &mut self, 
         event: PhalanxEvent, 
-        swarm: &mut Swarm<PhalanxBehaviour>
+        swarm: &mut Swarm<PhalanxBehaviour>,
+        is_leaf: bool
     ) {
         match event {
             // 1. DATA LAYER: Receive Evidence Shards
@@ -40,7 +41,7 @@ impl PhalanxNode {
                 if let Ok(chunk) = postcard::from_bytes::<shards::ShardChunk>(&message.data) {
                     // Pass to Sentinel for Reassembly
                     if let Some(envelope) = self.sentinel.process_chunk(
-                        chunk, 
+                        chunk.clone(), 
                         topic_str, 
                         &self.config, 
                         &self.identity, 
@@ -49,6 +50,8 @@ impl PhalanxNode {
                         // If reassembly is complete, save to vault
                         _ = self.storage.ingest_envelope(envelope);
                     }
+
+                    self.storage.ingest_chunk(chunk.clone(), is_leaf);
                 }
             }
 
@@ -151,6 +154,7 @@ impl PhalanxNode {
             load_factor: load_factor, 
             storage_remaining_mb: 1024, // Placeholder
             heartbeat_ms: current_interval.as_millis() as u64,
+            is_leaf: self.sentinel.is_leaf_mode(),
         };
     
         if let Ok(encoded) = postcard::to_stdvec(&hb) {
@@ -231,6 +235,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // 5. The Clean Loop
     loop {
+        node.sentinel.update_power_strategy();
+        let is_leaf = node.sentinel.is_leaf_mode();
+        
         let load_factor = (node.sentinel.video_buffers.len() + node.sentinel.audio_buffers.len()) as f32 
                     / node.config.storage.max_peers as f32;
         let load_factor = load_factor.clamp(0.0, 1.0);
@@ -251,7 +258,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // The swarm yields events; we delegate processing to the Node struct.
             event = swarm.select_next_some() => {
                 if let SwarmEvent::Behaviour(phalanx_event) = event {
-                    node.handle_network_event(phalanx_event, &mut swarm);
+                    node.handle_network_event(phalanx_event, &mut swarm, is_leaf);
                 }
             }
 

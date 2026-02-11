@@ -131,6 +131,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     load_factor,
                     storage_remaining_mb: 10240, // TODO: Implement disk space check
                     heartbeat_ms: current_interval.as_millis() as u64,
+                    is_leaf: sentinel.is_leaf_mode()
                 };
                 
                 if let Ok(data) = postcard::to_stdvec(&hb) {
