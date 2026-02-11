@@ -39,17 +39,24 @@ This plan synthesizes all specialized roadmaps (Network, Security, Stronghold, H
 - [x] **Identity Security (Recovery)**
   - [x] **Deterministic Keys:** Refactor `PhalanxIdentity::generate()` to use a 12-word mnemonic seed (BIP-39).
   - [x] **Restore Flow:** Create a CLI utility to regenerate `identity.bin` from a seed phrase (prerequisite for Mobile UI).
-- [ ] **Hardware Robustness**
+- [x] **Hardware Robustness**
   - [x] **Camera:** Fix time drift using `Instant` delta calculation and implement hot-plug logic.
   - [x] **Audio:** Integrate `cpal` for real hardware access and implement buffering.
   - [x] **Anti-Vampire:** Implement Rate Limiting in `guardian.rs` to ignore spammy peers.
   - [x] **Dynamic Heartbeats:** If battery < 20%, increase heartbeat interval from 30s to 300s.
-  - [ ] **Leaf Mode:** If battery < 15%, unsubscribe from all Gossipsub topics except `my_volley` to stop relaying traffic.
+  - [ x] **Leaf Mode:** If battery < 15%, unsubscribe from all Gossipsub topics except `my_volley` to stop relaying traffic.
 
 ## Phase 3: Integration & Observability
 
 *Goal: Verify the system works at scale without physical deployment.*
-**Dependencies:** `monitoring-roadmap.md`
+**Dependencies:** `monitoring-roadmap.md` `justiciar-roadmap.md`
+
+- [ ] **Justiciar Playback and Recovery**
+  - [ ] Phase 1
+  - [ ] Phase 2
+  - [ ] Phase 3
+  - [ ] Phase 4
+  - [ ] Phase 5
 
 - [ ] **Simulation Dashboard**
   - [ ] Implement `SimMetrics` struct and telemetry channel in `sim.rs`.
