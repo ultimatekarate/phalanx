@@ -1,3 +1,4 @@
+use crate::core::types::ByteCapacity;
 use crate::protocol::shards::{StorageSequence, Evidence, WitnessEnvelope, ShardChunk};
 use crate::storage::crucible::{Crucible};
 use crate::storage::strategies::{ShardAmalgam, VolleyAmalgam, Volley}; 
@@ -15,7 +16,7 @@ use tracing::{info, error, warn, debug, instrument};
 // Error handling because people are going to be assholes.
 #[derive(Debug)]
 pub enum GuardianError {
-    QuotaExceeded(u64),      // Peer is spamming
+    QuotaExceeded(ByteCapacity),      // Peer is spamming
     InvalidSignature(String), // Peer is lying
     ReplayDetected(u32),      // Peer is replaying old data
     WalWriteFailed(String),   // Disk IO failure
@@ -50,10 +51,10 @@ pub struct Guardian {
 
     // --- GOVERNANCE & QUOTAS ---
     pub local_did: Did,                     // "My" Identity
-    pub max_storage_bytes: u64,                   // Total Limit
-    pub max_foreign_storage_bytes: u64,           // Foreign Limit
-    pub current_storage_usage: u64,         // Current Total Usage
-    pub foreign_storage_usage: u64,         // Current Foreign Usage
+    pub max_storage_bytes: ByteCapacity,                   // Total Limit
+    pub max_foreign_storage_bytes: ByteCapacity,           // Foreign Limit
+    pub current_storage_usage: ByteCapacity,         // Current Total Usage
+    pub foreign_storage_usage: ByteCapacity,         // Current Foreign Usage
 
     pub clock: TrustedClock,
 }
@@ -82,8 +83,8 @@ impl Guardian {
             local_did,
             max_storage_bytes: config.storage.max_storage_bytes,
             max_foreign_storage_bytes: config.storage.max_foreign_storage_bytes,
-            current_storage_usage: 0,
-            foreign_storage_usage: 0,
+            current_storage_usage: ByteCapacity(0),
+            foreign_storage_usage: ByteCapacity(0),
             clock: TrustedClock::new(),
         };
         
@@ -121,8 +122,8 @@ impl Guardian {
                 }
             }
         }
-        self.current_storage_usage = total;
-        self.foreign_storage_usage = foreign;
+        self.current_storage_usage = ByteCapacity(total);
+        self.foreign_storage_usage = ByteCapacity(foreign);
         info!(
             total_mb = total / 1_000_000, 
             foreign_mb = foreign / 1_000_000, 
@@ -138,8 +139,8 @@ impl Guardian {
         }
 
         warn!(
-            usage = self.foreign_storage_usage, 
-            limit = self.max_foreign_storage_bytes, 
+            usage = %self.foreign_storage_usage, 
+            limit = %self.max_foreign_storage_bytes, 
             "Foreign storage quota exceeded. Pruning..."
         );
 
@@ -473,7 +474,7 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
 
-    fn mock_config(max_foreign_bytes: u64) -> PhalanxConfig {
+    fn mock_config(max_foreign_bytes: ByteCapacity) -> PhalanxConfig {
         PhalanxConfig {
             network: NetworkConfig { 
                 heartbeat_interval_secs: 1, pulse_timeout_secs: 1, chunk_size_bytes: 100, 
@@ -485,7 +486,7 @@ mod tests {
                 vault_path: "test_vault_governance".into(),
                 max_video_buffer: 1, max_audio_buffer: 1, max_peers: 1, 
                 stale_session_threshold: 1, shards_needed_to_archive: 1,
-                max_storage_bytes: 100_000,
+                max_storage_bytes: ByteCapacity(100_000),
                 max_foreign_storage_bytes: max_foreign_bytes, 
             },
             hardware: HardwareConfig { camera_fps: 1, audio_sample_rate: 1, audio_channels: 1 },
@@ -521,10 +522,10 @@ mod tests {
         f2.sync_all().unwrap(); 
 
         // 3. Init Guardian
-        let config = mock_config(1500); 
+        let config = mock_config(ByteCapacity(1500)); 
         let mut guardian = Guardian::new("test_vault_governance", &config, me.did.clone());
 
-        assert_eq!(guardian.foreign_storage_usage, 2000, "Initial usage calculation failed");
+        assert_eq!(guardian.foreign_storage_usage, ByteCapacity(2000), "Initial usage calculation failed");
 
         // 4. Trigger Pruning
         guardian.prune_foreign_evidence(); 
@@ -532,7 +533,7 @@ mod tests {
         // 5. Verification
         assert!(!s1_dir.join("old_evidence.phlx").exists(), "Old evidence should be evicted");
         assert!(s2_dir.join("new_evidence.phlx").exists(), "New evidence should be kept");
-        assert!(guardian.foreign_storage_usage <= 1500, "Usage should be under limit");
+        assert!(guardian.foreign_storage_usage <= ByteCapacity(1500), "Usage should be under limit");
         
         let _ = fs::remove_dir_all(&vault_root);
     }
@@ -583,7 +584,7 @@ mod tests {
         
         // 1. Setup Config with TINY limit (0 bytes)
         let mut config = PhalanxConfig::default();
-        config.storage.max_foreign_storage_bytes = 0; // Strict mode
+        config.storage.max_foreign_storage_bytes = ByteCapacity(0); // Strict mode
         
         let vault_path = "sim_vault/test_quota_reject";
         let _ = std::fs::remove_dir_all(vault_path);
@@ -591,7 +592,7 @@ mod tests {
         let mut guardian = Guardian::new(vault_path, &config, identity.did.clone());
 
         // 2. Artificially inflate usage to simulate a "stuck" state
-        guardian.foreign_storage_usage = 1000; 
+        guardian.foreign_storage_usage = ByteCapacity(1000); 
 
         let frames = vec![vec![1]];
         let shard = shards::create_video_shard(
@@ -608,7 +609,7 @@ mod tests {
         // 4. Assert Quota Error
         assert!(result.is_err(), "Guardian ignored quota limits!");
         match result {
-            Err(GuardianError::QuotaExceeded(limit)) => assert_eq!(limit, 0),
+            Err(GuardianError::QuotaExceeded(limit)) => assert_eq!(limit, ByteCapacity(0)),
             _ => panic!("Wrong error type"),
         }
     }
@@ -664,8 +665,8 @@ mod tests {
         let guardian = Guardian::new(vault_path, &config, identity.did.clone());
 
         // 3. Assert Usage Detected
-        assert_eq!(guardian.current_storage_usage, 500);
-        assert_eq!(guardian.foreign_storage_usage, 500);
+        assert_eq!(guardian.current_storage_usage, ByteCapacity(500));
+        assert_eq!(guardian.foreign_storage_usage, ByteCapacity(500));
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use std::ops::{AddAssign, SubAssign};
 use serde::{Serialize, Deserialize};
 use std::fmt;
 
@@ -37,5 +38,63 @@ impl From<f32> for UnitInterval {
 impl fmt::Display for UnitInterval {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:.2}%", self.0 * 100.0)
+    }
+}
+
+/// A type-safe wrapper for storage measurements.
+/// Prevents primitive obsession with u64 and provides safe arithmetic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+pub struct ByteCapacity(pub u64);
+
+impl ByteCapacity {
+    pub fn from_mib(mib: u64) -> Self {
+        Self(mib * 1024 * 1024)
+    }
+
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+
+    pub fn as_mib(&self) -> u64 {
+        self.0 / (1024 * 1024)
+    }
+
+    /// Safe addition that prevents overflow.
+    pub fn saturating_add(self, other: u64) -> Self {
+        Self(self.0.saturating_add(other))
+    }
+
+    /// Safe subtraction that prevents underflow.
+    pub fn saturating_sub(self, other: u64) -> Self {
+        Self(self.0.saturating_sub(other))
+    }
+}
+
+impl fmt::Display for ByteCapacity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0 >= 1024 * 1024 * 1024 {
+            write!(f, "{:.2} GiB", self.0 as f64 / (1024.0 * 1024.0 * 1024.0))
+        } else {
+            write!(f, "{} MiB", self.as_mib())
+        }
+    }
+}
+
+impl AddAssign<u64> for ByteCapacity {
+    fn add_assign(&mut self, rhs: u64) {
+        self.0 = self.0.saturating_add(rhs);
+    }
+}
+
+impl SubAssign<u64> for ByteCapacity {
+    fn sub_assign(&mut self, rhs: u64) {
+        self.0 = self.0.saturating_sub(rhs);
+    }
+}
+
+// Also helpful for Comparing types
+impl AddAssign<ByteCapacity> for ByteCapacity {
+    fn add_assign(&mut self, rhs: ByteCapacity) {
+        self.0 = self.0.saturating_add(rhs.0);
     }
 }

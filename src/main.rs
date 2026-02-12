@@ -268,7 +268,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             _ = tokio::time::sleep(next_heartbeat) => {
                 node.broadcast_heartbeat(&mut swarm, &physics);
 
-                if load_factor > 0.7 {
+                if load_factor > UnitInterval::new(0.7) {
                     tracing::warn!(load = %load_factor, interval = ?next_heartbeat, "Node under stress: Throttling heartbeats");
                 }
             }

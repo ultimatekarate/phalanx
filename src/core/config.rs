@@ -14,7 +14,9 @@ use libp2p::swarm::{
     dummy
 };
 use libp2p::{PeerId, Multiaddr};
-use libp2p::core::{transport::PortUse}; 
+use libp2p::core::{transport::PortUse};
+
+use crate::core::types::ByteCapacity; 
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PhalanxPhysics {
@@ -177,13 +179,13 @@ pub struct StorageConfig {
     
     // --- GOVERNANCE QUOTAS ---
     #[serde(default = "default_max_storage")]
-    pub max_storage_bytes: u64,          // Total disk limit
+    pub max_storage_bytes: ByteCapacity,          // Total disk limit
     #[serde(default = "default_max_foreign")]
-    pub max_foreign_storage_bytes: u64,  // Limit for non-owned data
+    pub max_foreign_storage_bytes: ByteCapacity,  // Limit for non-owned data
 }
 
-fn default_max_storage() -> u64 { 1_000_000_000 } // 1GB
-fn default_max_foreign() -> u64 { 500_000_000 }   // 500MB
+fn default_max_storage() -> ByteCapacity { ByteCapacity(1_000_000_000) } // 1GB
+fn default_max_foreign() -> ByteCapacity { ByteCapacity(500_000_000) }   // 500MB
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct HardwareConfig {
@@ -235,8 +237,8 @@ impl PhalanxConfig {
                 stale_session_threshold: 5,      
                 shards_needed_to_archive: 100,
                 // Quotas
-                max_storage_bytes: 100_000_000,         // 100 MB
-                max_foreign_storage_bytes: 50_000_000,  // 50 MB
+                max_storage_bytes: ByteCapacity(100_000_000),         // 100 MB
+                max_foreign_storage_bytes: ByteCapacity(50_000_000),  // 50 MB
             },
             hardware: HardwareConfig {
                 camera_fps: 10,                 
@@ -268,8 +270,8 @@ impl PhalanxConfig {
                 stale_session_threshold: 0,      
                 shards_needed_to_archive: 1,
                 // Quotas
-                max_storage_bytes: 100_000_000,
-                max_foreign_storage_bytes: 50_000_000,
+                max_storage_bytes: ByteCapacity(100_000_000),
+                max_foreign_storage_bytes: ByteCapacity(50_000_000),
             },
             hardware: HardwareConfig {
                 camera_fps: 10,                 
@@ -304,8 +306,8 @@ impl Default for PhalanxConfig {
                 stale_session_threshold: 3600,
                 shards_needed_to_archive: 10,
                 // Default Mobile Limits
-                max_storage_bytes: 5_000_000_000,        // 5 GB Total
-                max_foreign_storage_bytes: 1_000_000_000, // 1 GB Foreign
+                max_storage_bytes: ByteCapacity(5_000_000_000),        // 5 GB Total
+                max_foreign_storage_bytes: ByteCapacity(1_000_000_000), // 1 GB Foreign
             },
             hardware: HardwareConfig {
                 camera_fps: 30,
