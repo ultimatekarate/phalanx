@@ -1,7 +1,7 @@
 use libp2p::{
-    gossipsub, identify, kad, mdns, noise, 
+    gossipsub, dns, identify, kad, mdns, noise, 
     relay, dcutr, autonat, pnet, 
-    swarm::{NetworkBehaviour, SwarmEvent}, 
+    swarm::{NetworkBehaviour}, 
     tcp, yamux, Swarm, Transport, SwarmBuilder, 
     core::upgrade::Version,
     PeerId,
@@ -14,6 +14,8 @@ use std::error::Error;
 use std::time::Duration;
 use std::path::Path;
 use std::fs;
+
+use futures::future::Either;
 
 // Domain Imports
 use crate::core::config::{PhalanxConfig, PhalanxPhysics};
@@ -77,7 +79,7 @@ fn build_transport(
     let base_transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true));
     
     // Upgrade to DNS (Non-Panicking)
-    let dns_transport = libp2p::dns::TokioDnsConfig::system(base_transport)?;
+    let dns_transport =  dns::tokio::Transport::system(base_transport)?;
 
     // Handle Optional Private Network (PNet) Encryption
     // We utilize libp2p's EitherTransport to avoid complex type erasure early on
@@ -194,24 +196,104 @@ pub fn generate_swarm_key(path: &str) -> std::io::Result<()> {
 /// - `physics`: Physics engine for timing parameters.
 /// - `psk`: Optional Private Network key (Inject this!).
 pub fn setup_phalanx_swarm(
-    local_key: Keypair,
-    config: &PhalanxConfig,
-    physics: &PhalanxPhysics,
-    psk: Option<PreSharedKey> 
-) -> Result<Swarm<PhalanxBehaviour>, Box<dyn Error>> {
+    local_key: libp2p::identity::Keypair,
+    is_stronghold: bool,
+    physics: PhalanxPhysics,
+) -> Result<Swarm<PhalanxBehaviour>, Box<dyn std::error::Error>> {
+    let local_peer_id = libp2p::PeerId::from(local_key.public());
+
+    // ... [PSK loading logic remains the same] ...
+    let psk = if let Ok(key_bytes) = fs::read("swarm.key") {
+        match key_bytes.try_into() {
+            Ok(bytes) => Some(pnet::PreSharedKey::new(bytes)),
+            Err(_) => None
+        }
+    } else {
+        None
+    };
+
+    // ... [Behaviour initialization remains the same] ...
+    let kad_store = kad::store::MemoryStore::new(local_peer_id);
+    let kademlia = kad::Behaviour::with_config(local_peer_id, kad_store, kad::Config::default());
     
-    let local_peer_id = local_key.public().to_peer_id();
-    tracing::info!(peer_id=%local_peer_id, "Initializing Network Stack...");
+    let identify = identify::Behaviour::new(identify::Config::new(
+        "/phalanx/1.0.0".to_string(),
+        local_key.public(),
+    ));
 
-    // 1. Build Transport
-    let transport = build_transport(&local_key, psk)?;
+    let gossip_heartbeat = VitalityRate::calculate(
+        &physics, 
+        PowerState::Normal, 
+        UnitInterval::new(0.0)
+    ).as_duration();
 
-    // 2. Build Behaviour
-    let behaviour = build_behaviour(&local_key, config, physics)?;
+    let gossipsub = gossipsub::Behaviour::new(
+        gossipsub::MessageAuthenticity::Signed(local_key.clone()),
+        gossipsub::ConfigBuilder::default()
+            .heartbeat_interval(gossip_heartbeat)
+            .validation_mode(gossipsub::ValidationMode::Strict)
+            .build()
+            .map_err(|msg| std::io::Error::new(std::io::ErrorKind::Other, msg))?,
+    )?;
 
-    // 3. Build Swarm
-    // We use the tokio executor explicitly
-    let swarm = SwarmBuilder::with_tokio_executor(transport, behaviour, local_peer_id)
+    // ... [Other behaviours: mdns, relay, dcutr, autonat] ...
+    let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
+    let relay_config = if is_stronghold { relay::Config::default() } else { relay::Config { max_reservations: 0, ..Default::default() } };
+    let relay_server = relay::Behaviour::new(local_peer_id, relay_config);
+    let (relay_transport, relay_client) = relay::client::new(local_peer_id);
+    let dcutr = dcutr::Behaviour::new(local_peer_id);
+    let autonat_config = autonat::Config { use_connected: true, ..Default::default() };
+    let autonat = autonat::Behaviour::new(local_peer_id, autonat_config);
+
+    let behaviour = PhalanxBehaviour {
+        gossipsub, mdns, kademlia, identify,
+        relay_server, relay_client, dcutr, autonat
+    };
+
+    // --- SWARM BUILDER (Fixed DNS) ---
+    let swarm = SwarmBuilder::with_existing_identity(local_key.clone())
+        .with_tokio()
+        .with_other_transport(|key| {
+            let base_transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true));
+            
+            // FIX: Use `libp2p::dns::tokio::Transport`
+            // In libp2p 0.56, TokioDnsConfig is gone. You must use the `tokio` module.
+            let dns_transport = libp2p::dns::tokio::Transport::system(base_transport)
+                .unwrap_or_else(|e| {
+                    panic!("Failed to initialize DNS transport: {:?}", e);
+                });
+
+            // Handle PSK Encryption (Type Unification)
+            let transport = if let Some(psk_key) = psk.clone() {
+                dns_transport.and_then(move |socket, _| {
+                    pnet::PnetConfig::new(psk_key).handshake(socket)
+                })
+                .map(|stream, _| Either::Left(stream)) 
+                .boxed()
+            } else {
+                dns_transport
+                .map(|stream, _| Either::Right(stream)) 
+                .boxed()
+            };
+
+            let noise_config = noise::Config::new(key).unwrap();
+            let yamux_config = yamux::Config::default();
+
+            transport
+                .upgrade(Version::V1)
+                .authenticate(noise_config)
+                .multiplex(yamux_config)
+        })?
+        .with_other_transport(|key| {
+            let noise_config = noise::Config::new(&key).unwrap();
+            let yamux_config = yamux::Config::default();
+            relay_transport
+                .upgrade(Version::V1)
+                .authenticate(noise_config)
+                .multiplex(yamux_config)
+        })?
+        .with_behaviour(|_| behaviour)?
+        .with_swarm_config(|c: libp2p::swarm::Config| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
     Ok(swarm)
