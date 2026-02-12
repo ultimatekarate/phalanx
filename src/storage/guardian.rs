@@ -273,6 +273,15 @@ impl Guardian {
     }
 
     pub fn ingest_envelope(&mut self, envelope: WitnessEnvelope) -> Result<(), GuardianError> {
+        
+        // Verify that the signature is valid before doing anything else
+        if !envelope.verify() { 
+            self.penalize_peer(envelope.did.clone(), "Invalid Signature");
+            error!(did = %envelope.did, "Rejected invalid signature."); 
+            return Err(GuardianError::InvalidSignature(envelope.did.to_string()));
+        }
+        
+
         // 0. GOVERNANCE CHECK
         // If this is foreign data, ensure we have space.
         if envelope.did != self.local_did {
@@ -306,12 +315,6 @@ impl Guardian {
             return Err(GuardianError::WalWriteFailed(e.to_string()));
         }
 
-        if !envelope.verify() { 
-            self.penalize_peer(envelope.did.clone(), "Invalid Signature");
-            error!(did = %envelope.did, "Rejected invalid signature."); 
-            return Err(GuardianError::InvalidSignature(envelope.did.to_string()));
-        }
-        
         let did = envelope.did.clone();
         let seq = envelope.evidence.sequence_id();
 
