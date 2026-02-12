@@ -2,6 +2,9 @@ use std::ops::{AddAssign, SubAssign};
 use serde::{Serialize, Deserialize};
 use std::fmt;
 
+use std::time::Duration;
+use crate::security::sentinel::PowerState;
+
 /// A type-safe wrapper for values that MUST be between 0.0 and 1.0.
 /// Replaces raw f32 for Battery and Load metrics.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -179,5 +182,39 @@ impl From<&MeshTopic> for String {
 impl AsRef<str> for MeshTopic {
     fn as_ref(&self) -> &str {
         &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct VitalityRate(pub u64); // Milliseconds
+
+impl VitalityRate {
+    /// Minimum allowed heartbeat (100ms) to prevent CPU/Radio thrashing.
+    const MIN_MS: u64 = 100;
+    /// Maximum allowed heartbeat (30s) to prevent node timeout in the mesh.
+    const MAX_MS: u64 = 30_000;
+
+    pub fn new(ms: u64) -> Self {
+        Self(ms.clamp(Self::MIN_MS, Self::MAX_MS))
+    }
+
+    /// Derives a heartbeat interval based on current system power and load.
+    pub fn calculate(state: PowerState, load: UnitInterval) -> Self {
+        let base_rate = match state {
+            PowerState::Normal => 1000.0, // 1s base
+            PowerState::Leaf => 5000.0,   // 5s base to conserve power
+        };
+        
+        // Scale by load: more load = slower heartbeats
+        let scaled = base_rate * (1.0 + load.as_f32());
+        Self::new(scaled as u64)
+    }
+
+    pub fn as_duration(&self) -> Duration {
+        Duration::from_millis(self.0)
+    }
+
+    pub fn as_u64(&self) -> u64 {
+        self.0
     }
 }

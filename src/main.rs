@@ -12,6 +12,7 @@ use phalanx::security::identity::{NetworkId, PhalanxIdentity};
 use phalanx::security::sentinel::{Sentinel, ControlMessage};
 use phalanx::security::e2ee;
 use phalanx::core::config::{PhalanxConfig, PhalanxPhysics};
+use phalanx::core::types::{VitalityRate};
 use phalanx::storage::guardian::Guardian;
 use phalanx::{PhalanxBehaviour, PhalanxEvent}; 
 
@@ -240,12 +241,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         node.sentinel.update_power_strategy();
         let is_leaf = node.sentinel.is_leaf_mode();
-        
-        let raw_load = (node.sentinel.video_buffers.len() + node.sentinel.audio_buffers.len()) as f32
-                    / node.config.storage.max_peers as f32;
-        let load_factor = UnitInterval::new(raw_load);
+        let power_state = node.sentinel.power_state;
+        let active_tasks = (node.sentinel.video_buffers.len() + node.sentinel.audio_buffers.len()) as f32;
+        let max_capacity = node.config.storage.max_peers as f32;
+    
+        // UnitInterval ensures this value is strictly between 0.0 and 1.0
+        let current_load = UnitInterval::new(active_tasks / max_capacity);
 
-        let next_heartbeat = physics.heartbeat_interval(load_factor.as_f32());
+        // 2. Calculate next interval using the domain type logic
+        let vitality = VitalityRate::calculate(power_state, current_load); 
+        let next_heartbeat = vitality.as_duration();
 
         select! {
             // --- Hardware Inputs ---
@@ -270,8 +275,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             _ = tokio::time::sleep(next_heartbeat) => {
                 node.broadcast_heartbeat(&mut swarm, &physics);
 
-                if load_factor > UnitInterval::new(0.7) {
-                    tracing::warn!(load = %load_factor, interval = ?next_heartbeat, "Node under stress: Throttling heartbeats");
+                if current_load > UnitInterval::new(0.8) {
+                    tracing::warn!(load = %current_load, interval = ?next_heartbeat, "Node under stress: Throttling heartbeats");
                 }
             }
 
