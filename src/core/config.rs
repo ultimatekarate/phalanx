@@ -73,14 +73,11 @@ impl PhalanxPhysics {
     }
 }
 
+// Ensure Physics can be embedded in the Swarm Behaviour
 impl NetworkBehaviour for PhalanxPhysics {
-    // 1. Define the Handler (Dummy because we don't talk to peers)
     type ConnectionHandler = dummy::ConnectionHandler;
-    
-    // 2. Define the Event (Void because we never emit events)
     type ToSwarm = Void; 
 
-    // 3. Handle Inbound Connections (Just accept them, but do nothing)
     fn handle_established_inbound_connection(
         &mut self,
         _connection_id: ConnectionId,
@@ -91,7 +88,6 @@ impl NetworkBehaviour for PhalanxPhysics {
         Ok(dummy::ConnectionHandler)
     }
 
-    // 4. Handle Outbound Connections (Just accept them)
     fn handle_established_outbound_connection(
         &mut self,
         _connection_id: ConnectionId,
@@ -103,22 +99,17 @@ impl NetworkBehaviour for PhalanxPhysics {
         Ok(dummy::ConnectionHandler)
     }
 
-    // 5. Handle Events from the Handler (Void, so unreachable)
     fn on_connection_handler_event(
         &mut self,
         _peer_id: PeerId,
         _connection_id: ConnectionId,
         _event: THandlerOutEvent<Self>,
     ) {
-        // No events to handle
     }
 
-    // 6. Handle Events from the Swarm
     fn on_swarm_event(&mut self, _event: libp2p::swarm::FromSwarm) {
-        // Physics doesn't care about swarm events
     }
 
-    // 7. The Polling Loop (Updated Signature: No PollParameters!)
     fn poll(
         &mut self,
         _cx: &mut Context<'_>,
@@ -126,6 +117,7 @@ impl NetworkBehaviour for PhalanxPhysics {
         Poll::Pending
     }
 }
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct PhalanxConfig {
     pub network: NetworkConfig,
@@ -135,13 +127,19 @@ pub struct PhalanxConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct NetworkConfig {
-    pub heartbeat_interval_secs: u64,
-    pub pulse_timeout_secs: u64,
-    pub chunk_size_bytes: usize,
+    // --- IDENTITY ---
+    #[serde(default = "default_protocol_version")]
+    pub protocol_version: String, //
+
+    // --- MESH PARAMETERS ---
+    pub max_chunk_size_bytes: usize, // Renamed from chunk_size_bytes to align with network.rs
     pub video_topic: MeshTopic,
     pub audio_topic: MeshTopic,
     pub control_topic: MeshTopic,
-    pub grace_period: u64,
+    
+    // Note: heartbeat_interval, pulse_timeout, and grace_period removed.
+    // They are now strictly governed by PhalanxPhysics and VitalityRate.
+    
     pub cleanup_interval_secs: u64,
     
     #[serde(default)] 
@@ -150,9 +148,8 @@ pub struct NetworkConfig {
     pub guardian_service_key: String,
 }
 
-fn default_service_key() -> String {
-    "phalanx/service/storage/v1".to_string()
-}
+fn default_service_key() -> String { "phalanx/service/storage/v1".to_string() }
+fn default_protocol_version() -> String { "/phalanx/1.0.0".to_string() }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct StorageConfig {
@@ -165,13 +162,13 @@ pub struct StorageConfig {
     
     // --- GOVERNANCE QUOTAS ---
     #[serde(default = "default_max_storage")]
-    pub max_storage_bytes: ByteCapacity,          // Total disk limit
+    pub max_storage_bytes: ByteCapacity,          
     #[serde(default = "default_max_foreign")]
-    pub max_foreign_storage_bytes: ByteCapacity,  // Limit for non-owned data
+    pub max_foreign_storage_bytes: ByteCapacity,  
 }
 
-fn default_max_storage() -> ByteCapacity { ByteCapacity(1_000_000_000) } // 1GB
-fn default_max_foreign() -> ByteCapacity { ByteCapacity(500_000_000) }   // 500MB
+fn default_max_storage() -> ByteCapacity { ByteCapacity(1_000_000_000) } 
+fn default_max_foreign() -> ByteCapacity { ByteCapacity(500_000_000) }   
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct HardwareConfig {
@@ -204,13 +201,11 @@ impl PhalanxConfig {
     pub fn test_defaults() -> Self {
         Self {
             network: NetworkConfig {
-                heartbeat_interval_secs: 1,      
-                pulse_timeout_secs: 2,           
-                chunk_size_bytes: 1024,          
+                protocol_version: default_protocol_version(),
+                max_chunk_size_bytes: 1024,          
                 video_topic: "test/video".into(),
                 audio_topic: "test/audio".into(),
                 control_topic: "test/control".into(),
-                grace_period: 10,
                 cleanup_interval_secs: 5,
                 bootstrap_peers: vec![],
                 guardian_service_key: "test/service/storage".to_string(),
@@ -222,9 +217,8 @@ impl PhalanxConfig {
                 max_peers: 5,
                 stale_session_threshold: 5,      
                 shards_needed_to_archive: 100,
-                // Quotas
-                max_storage_bytes: ByteCapacity(100_000_000),         // 100 MB
-                max_foreign_storage_bytes: ByteCapacity(50_000_000),  // 50 MB
+                max_storage_bytes: ByteCapacity(100_000_000),         
+                max_foreign_storage_bytes: ByteCapacity(50_000_000),  
             },
             hardware: HardwareConfig {
                 camera_fps: 10,                 
@@ -237,13 +231,11 @@ impl PhalanxConfig {
     pub fn test_salvage_on_node_death() -> Self {
         Self {
             network: NetworkConfig {
-                heartbeat_interval_secs: 1,      
-                pulse_timeout_secs: 2,           
-                chunk_size_bytes: 1024,          
+                protocol_version: default_protocol_version(),
+                max_chunk_size_bytes: 1024,          
                 video_topic: "test/video".into(),
                 audio_topic: "test/audio".into(),
                 control_topic: "test/control".into(),
-                grace_period: 10,
                 cleanup_interval_secs: 1,
                 bootstrap_peers: vec![],
                 guardian_service_key: "test/service/storage".to_string(),
@@ -255,7 +247,6 @@ impl PhalanxConfig {
                 max_peers: 5,
                 stale_session_threshold: 0,      
                 shards_needed_to_archive: 1,
-                // Quotas
                 max_storage_bytes: ByteCapacity(100_000_000),
                 max_foreign_storage_bytes: ByteCapacity(50_000_000),
             },
@@ -266,20 +257,17 @@ impl PhalanxConfig {
             },
         }
     }
-
 }
 
 impl Default for PhalanxConfig {
     fn default() -> Self {
         Self {
             network: NetworkConfig {
-                heartbeat_interval_secs: 30,
-                pulse_timeout_secs: 60,
-                chunk_size_bytes: 8192,
+                protocol_version: default_protocol_version(),
+                max_chunk_size_bytes: 8192,
                 video_topic: "phalanx/video".into(),
                 audio_topic: "phalanx/audio".into(),
                 control_topic: "phalanx/control".into(),
-                grace_period: 10,
                 cleanup_interval_secs: 60,
                 bootstrap_peers: vec![],
                 guardian_service_key: "phalanx/service/storage/v1".to_string(),
@@ -291,9 +279,8 @@ impl Default for PhalanxConfig {
                 max_peers: 10,
                 stale_session_threshold: 3600,
                 shards_needed_to_archive: 10,
-                // Default Mobile Limits
-                max_storage_bytes: ByteCapacity(5_000_000_000),        // 5 GB Total
-                max_foreign_storage_bytes: ByteCapacity(1_000_000_000), // 1 GB Foreign
+                max_storage_bytes: ByteCapacity(5_000_000_000),        
+                max_foreign_storage_bytes: ByteCapacity(1_000_000_000), 
             },
             hardware: HardwareConfig {
                 camera_fps: 30,
