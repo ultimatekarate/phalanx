@@ -4,34 +4,58 @@ use tokio::time::Instant;
 use std::collections::btree_map::Entry;
 use tracing::{info, warn, debug, instrument};
 
-// --- THE GENERIC TRAIT (The Strategy) ---
+/// A stateful aggregation strategy for transforming stream-based inputs into unified outputs.
+///
+/// The `Mold` trait defines the "logic of completion" for a specific data type. It utilizes 
+/// an **Accumulator** pattern, where incoming data is held in a temporary stateful buffer 
+/// (the `Accumulator`) until it satisfies specific readiness criteria. 
+///
+/// This pattern is essential for reconstructing high-level objects from fragmented network 
+/// data, such as reassembling shards into envelopes or grouping envelopes into volleys.
 pub trait Mold {
     type Input;
     type Output;
     type Key: Ord + Clone + std::fmt::Debug;      
     type Accumulator;           
 
-    /// Identity derivation: Who does this item belong to?
+    /// Identity derivation: Determines which bucket (Accumulator) an item belongs to.
     fn get_key(item: &Self::Input) -> Self::Key;
 
-    /// Initialize a new buffer (accumulator)
+    /// Initialize a new buffer (accumulator) when a new key is encountered.
     fn init_accumulator(item: &Self::Input) -> Self::Accumulator;
 
-    /// Add data to the buffer
+    /// Ingests data into the existing buffer, updating the internal state of the Accumulator.
     fn ingest(acc: &mut Self::Accumulator, item: Self::Input);
 
-    /// Check if the buffer is ready to be sealed (Size or Time)
+    /// Evaluates whether the Accumulator has met the threshold for finalization.
+    /// This can be based on the number of received items, total byte size, or elapsed time.
     fn is_ready(acc: &Self::Accumulator, elapsed: Duration) -> bool;
 
-    /// Transform the buffer into the final Output
+     /// The final transformation step: Consumes the Accumulator and produces the final Output.
     fn assemble(key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output>;
 }
 
-// --- THE CONTAINER (The Workbench) ---
+/// A generic execution engine and container for stateful data aggregation.
+///
+/// `Crucible` acts as a "workbench" that manages multiple active **WorkContexts**. 
+/// It routes incoming inputs to their respective **Accumulators** based on keys derived 
+/// via the associated [`Mold`] strategy.
+///
+/// ### The Salvage Protocol: Handling Stale Data
+/// In distributed mesh networks, there is no guarantee that every fragment of a data set 
+/// will arrive. To prevent memory exhaustion and "zombie" sessions, `Crucible` implements 
+/// a **Salvage Protocol** through methods like [`flush_stale`].
+///
+/// By tracking the `created_at` timestamp for every Accumulator, the system can identify 
+/// items that have exceeded a Time-To-Live (TTL) threshold. These stale items 
+/// are force-sealed and assembled, allowing the system to recover partial data (such as 
+/// a Volley with detected gaps) rather than losing the information entirely.
 pub struct Crucible<S: Mold> {
-    // PUBLIC: Allows Stronghold to inspect active work (e.g., for tests or status API)
+    /// Active work units currently being aggregated.
     contexts: BTreeMap<S::Key, WorkContext<S>>,
+    /// Frequency at which internal house-cleaning is performed.
     cleanup_interval: Duration,
+    /// The last time the workbench was pruned.
     last_cleanup: Instant,
 }
 

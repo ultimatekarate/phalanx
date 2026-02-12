@@ -18,13 +18,39 @@ use phalanx::{PhalanxBehaviour, PhalanxEvent};
 
 use tracing::info;
 
-// --- THE STATE STRUCT ---
-// Encapsulates the "Self" so the main loop doesn't have to manage variables.
+/// The central orchestrator and state manager for a Phalanx network participant.
+///
+/// `PhalanxNode` acts as the "Central Brain" of the system. It is responsible for 
+/// managing the lifecycle of data as it transitions through three primary stages:
+///
+/// 1. **Ingress & Filtering**: It monitors the `libp2p` swarm for [`PhalanxEvent`]s. 
+///    When a data shard arrives via Gossipsub, the node validates its origin and 
+///    determines if it should be processed based on the current system load and power state.
+///
+/// 2. **Reassembly & Processing**: It delegates fragmented network data to the 
+///    [`Sentinel`]. The Sentinel uses internal [`Crucible`] logic to reassemble 
+///    shards into complete [`WitnessEnvelope`]s. This stage is where the "Identity" 
+///    of the data is verified against the project's security protocols.
+///
+/// 3. **Persistence & Governance**: Once a data unit is verified and reassembled, 
+///    it is passed to the [`Guardian`]. The Guardian acts as the "Vault," ensuring 
+///    that evidence is stored securely (using the WAL/Write-Ahead Log) and that 
+///    local storage quotas are strictly enforced to prevent disk exhaustion. 
+///
+/// Beyond network handling, `PhalanxNode` also orchestrates local hardware inputs. 
+/// It captures raw [`Evidence`] from camera and audio threads, wraps them in 
+/// signed envelopes, and "chunkifies" them for broadcast back into the mesh, 
+/// completing the loop from sensor to distributed storage.
 struct PhalanxNode {
+    /// The witness and reassembly engine.
     sentinel: Sentinel,
+    /// The long-term storage and vault manager.
     storage: Guardian,
+    /// The cryptographic identity of this specific node.
     identity: PhalanxIdentity,
+    /// Global system and network settings.
     config: PhalanxConfig,
+    /// The unique network identifier used within the libp2p swarm.
     local_peer_id: NetworkId,
 }
 
