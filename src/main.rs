@@ -55,57 +55,76 @@ struct PhalanxNode {
 }
 
 impl PhalanxNode {
-    /// The Central Brain: Decides what to do with a Network Event
-    fn handle_network_event(
+    /// The central brain that dispatches incoming network events to specialized protocol handlers.
+    ///
+    /// This serves as a top-level switchboard, ensuring the main orchestration loop 
+    /// remains clean and readable as the number of supported protocols grows.
+    pub fn handle_network_event(
         &mut self, 
         event: PhalanxEvent, 
         swarm: &mut Swarm<PhalanxBehaviour>,
         is_leaf: bool
     ) {
         match event {
-            // 1. DATA LAYER: Receive Evidence Shards
-            PhalanxEvent::Gossipsub(gossipsub::Event::Message { message, .. }) => {
-                let topic= MeshTopic::new(message.topic.as_str());
-                
-                // Deserialize the shard
-                if let Ok(chunk) = postcard::from_bytes::<shards::ShardChunk>(&message.data) {
-                    // Pass to Sentinel for Reassembly
-                    if let Some(envelope) = self.sentinel.process_chunk(
-                        chunk.clone(), 
-                        &topic, 
-                        &self.config, 
-                        &self.identity, 
-                        self.local_peer_id
-                    ) {
-                        // If reassembly is complete, save to vault
-                        _ = self.storage.ingest_envelope(envelope);
-                    }
+            PhalanxEvent::Gossipsub(e) => self.handle_gossipsub_event(e, is_leaf),
+            PhalanxEvent::Kademlia(e) => self.handle_kademlia_event(e, swarm),
+            PhalanxEvent::Mdns(e) => self.handle_mdns_event(e, swarm),
+            PhalanxEvent::Identify(e) => self.handle_identify_event(e, swarm),
+            _ => tracing::trace!("Received unhandled or noise network event"),
+        }
+    }
 
-                    self.storage.ingest_chunk(chunk.clone(), is_leaf);
-                }
+    /// Processes high-volume data shards received from the Gossipsub mesh.
+    ///
+    /// It coordinates reassembly via the Sentinel and persistence via the Guardian. 
+    /// Using guard clauses here prevents deeply nested logic and improves clarity.
+    fn handle_gossipsub_event(&mut self, event: gossipsub::Event, is_leaf: bool) {
+        // Guard: Only process actual messages
+        let gossipsub::Event::Message { message, .. } = event else { return; };
+        
+        let topic = MeshTopic::new(message.topic.as_str());
+        
+        // Guard: Ensure data can be deserialized into a valid Shard
+        let Ok(chunk) = postcard::from_bytes::<shards::ShardChunk>(&message.data) else {
+            tracing::error!(?topic, "Data corruption: Failed to deserialize Gossipsub shard");
+            return;
+        };
+
+        // 1. Reassembly Logic: Sentinel uses Crucible to rebuild envelopes
+        if let Some(envelope) = self.sentinel.process_chunk(
+            chunk.clone(), 
+            &topic, 
+            &self.config, 
+            &self.identity, 
+            self.local_peer_id
+        ) {
+            // 2. Storage Logic: If complete, commit the WitnessEnvelope to the vault
+            if let Err(e) = self.storage.ingest_envelope(envelope) {
+                let err_msg = e.to_string();
+                tracing::error!(error = err_msg, "Guardian failed to persist reassembled envelope");
             }
+        }
 
-            // 2. DISCOVERY: mDNS (Local Network)
-            PhalanxEvent::Mdns(mdns::Event::Discovered(list)) => {
-                for (peer_id, multiaddr) in list {
-                    tracing::debug!(%peer_id, "mDNS: Discovered local peer");
-                    swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr);
-                }
+        // 3. Governance: Always track raw chunks for quota management
+        self.storage.ingest_chunk(chunk, is_leaf);
+    }
+
+    /// Handles local peer discovery via mDNS to update the routing table.
+    fn handle_mdns_event(&self, event: mdns::Event, swarm: &mut Swarm<PhalanxBehaviour>) {
+        if let mdns::Event::Discovered(list) = event {
+            for (peer_id, multiaddr) in list {
+                tracing::debug!(%peer_id, "mDNS: Discovered local peer; updating DHT");
+                swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr);
             }
+        }
+    }
 
-            // 3. ROUTING: Kademlia (WAN/DHT)
-            PhalanxEvent::Kademlia(kad_event) => {
-                self.handle_kademlia_event(kad_event, swarm);
+    /// Resolves external addresses and ensures proper peer identification.
+    fn handle_identify_event(&self, event: identify::Event, swarm: &mut Swarm<PhalanxBehaviour>) {
+        if let identify::Event::Received { peer_id, info, .. } = event {
+            for addr in info.listen_addrs {
+                swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
             }
-
-            // 4. IDENTITY: Public IP Resolution
-            PhalanxEvent::Identify(identify::Event::Received { peer_id, info, .. }) => {
-                for addr in info.listen_addrs {
-                    swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
-                }
-            }
-
-            _ => {}
         }
     }
 
