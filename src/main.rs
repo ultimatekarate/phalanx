@@ -134,6 +134,7 @@ impl PhalanxNode {
                 encoded,
                 self.config.network.chunk_size_bytes,
                 self.identity.did.clone(),
+                shards::ChunkType::ForensicUnit
             );
     
             let topic = gossipsub::IdentTopic::new(topic_str);
@@ -147,17 +148,22 @@ impl PhalanxNode {
 
     /// Broadcast System Status
     fn broadcast_heartbeat(&self, swarm: &mut Swarm<PhalanxBehaviour>, physics: &PhalanxPhysics) {
-        let load_factor = (self.sentinel.video_buffers.len() + self.sentinel.audio_buffers.len()) as f32 
-                    / self.config.storage.max_peers as f32;
+        let active_tasks = (self.sentinel.video_buffers.len() + self.sentinel.audio_buffers.len()) as f32;
+        let max_capacity = self.config.storage.max_peers as f32;
+        let current_load = UnitInterval::new(active_tasks / max_capacity);
     
-        // 2. Derive dynamic interval
-        let current_interval = physics.heartbeat_interval(load_factor);
+        // 2. Derive dynamic interval using unified logic
+        let vitality = VitalityRate::calculate(
+            physics, 
+            self.sentinel.power_state, 
+            current_load
+        );
         
         let hb = ControlMessage {
             sender: self.local_peer_id,
-            load_factor: load_factor, 
+            load_factor: current_load.as_f32(), 
             storage_remaining_mb: 1024, // Placeholder
-            heartbeat_ms: current_interval.as_millis() as u64,
+            heartbeat_ms: vitality.as_u64(), // Unified MS
             is_leaf: self.sentinel.is_leaf_mode(),
         };
     
@@ -249,7 +255,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let current_load = UnitInterval::new(active_tasks / max_capacity);
 
         // 2. Calculate next interval using the domain type logic
-        let vitality = VitalityRate::calculate(power_state, current_load); 
+        let vitality = VitalityRate::calculate(&physics, power_state, current_load); 
         let next_heartbeat = vitality.as_duration();
 
         select! {

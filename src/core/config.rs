@@ -45,20 +45,6 @@ impl PhalanxPhysics {
     }
 
     // --- The Derived Inequalities ---
-
-    pub fn heartbeat_interval(&self, load_factor: f32) -> std::time::Duration {
-        let load = load_factor.clamp(0.0, 1.0);
-        
-        // Base interval is half the RTT
-        let base_ms = (self.tau_rtt / 2) as f32;
-        
-        // Scaling: At 0% load, we heartbeat at base_ms. 
-        // At 100% load, we heartbeat at base_ms * 2.
-        let dynamic_ms = base_ms * (1.0 + load);
-
-        std::time::Duration::from_millis(dynamic_ms.max(1.0) as u64)
-    }
-
     pub fn shard_timeout(&self) -> std::time::Duration {
         let ms = self.jitter_factor * (self.tau_rtt + self.delta_cpu);
         std::time::Duration::from_millis(ms)
@@ -315,31 +301,5 @@ impl Default for PhalanxConfig {
                 audio_channels: 2,
             },
         }
-    }
-}
-
-#[cfg(test)]
-mod physics_tests {
-    use super::*;
-
-    #[test]
-    fn test_heartbeat_adaptation() {
-        let physics = PhalanxPhysics {
-            tau_rtt: 300,
-            delta_cpu: 20,
-            jitter_factor: 3,
-        };
-
-        // Idle node: Should be ~150ms
-        let idle = physics.heartbeat_interval(0.0);
-        assert_eq!(idle.as_millis(), 150);
-
-        // Stressed node (50% load): Should be ~225ms
-        let busy = physics.heartbeat_interval(0.5);
-        assert_eq!(busy.as_millis(), 225);
-
-        // Maxed node (100% load): Should be ~300ms
-        let maxed = physics.heartbeat_interval(1.0);
-        assert_eq!(maxed.as_millis(), 300);
     }
 }

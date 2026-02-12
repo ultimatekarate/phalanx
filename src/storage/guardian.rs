@@ -699,7 +699,7 @@ mod tests {
 mod guardian_leaf_tests {
     use super::*;
     use crate::security::identity::{PhalanxIdentity, NetworkId};
-    use crate::protocol::shards::{self, ShardId, StorageSequence, Evidence, WitnessEnvelope};
+    use crate::protocol::shards::{self, ShardId, StorageSequence, Evidence, WitnessEnvelope, ChunkType};
 
     #[tokio::test] // Use tokio::test for Instant::now() compatibility
     async fn test_guardian_leaf_mode_ingestion() {
@@ -743,6 +743,7 @@ mod guardian_leaf_tests {
             total_chunks: 1,
             data: envelope_bytes, // This is now the full signed data
             owner_did: identity.did.clone(),
+            chunk_type: ChunkType::Witnessed,
         };
 
         // 5. Ingest while Leaf Mode is ACTIVE

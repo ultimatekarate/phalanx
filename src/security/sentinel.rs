@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 
-use tokio::time::{Instant, Duration};
+use tokio::time::Instant;
 use tracing::{info, warn, debug, instrument};
 
 use crate::protocol::shards::{
     Evidence, VideoShard, AudioShard, ReassemblyBuffer, ShardChunk, 
-    ShardId, WitnessEnvelope
+    ShardId, WitnessEnvelope, ChunkType
 };
 
-use crate::core::types::{MeshTopic, UnitInterval};
+use crate::core::types::{MeshTopic, UnitInterval, VitalityRate};
 
 use crate::core::config::{PhalanxPhysics, PhalanxConfig};
 use crate::security::identity::{NetworkId, PhalanxIdentity};
@@ -26,7 +26,7 @@ pub enum PowerState {
 pub struct HealthTracker {
     pub heartbeats: HashMap<NetworkId, Instant>,
     pub capacities: HashMap<NetworkId, ControlMessage>,
-    pub peer_contracts: HashMap<NetworkId, Duration>,
+    pub peer_contracts: HashMap<NetworkId, VitalityRate>,
 }
 
 impl HealthTracker {
@@ -41,7 +41,7 @@ impl HealthTracker {
     pub fn register_activity(&mut self, msg: ControlMessage) {
         let peer_id = msg.sender;
         self.heartbeats.insert(peer_id, Instant::now());
-        self.peer_contracts.insert(peer_id, Duration::from_millis(msg.heartbeat_ms));
+        self.peer_contracts.insert(peer_id, VitalityRate::new(msg.heartbeat_ms));
         self.capacities.insert(peer_id, msg);
     }
 
@@ -55,10 +55,12 @@ impl HealthTracker {
         let default_load_factor = 0.0;
         let contract = self.peer_contracts.get(peer_id)
             .cloned()
-            .unwrap_or_else(|| physics.heartbeat_interval(default_load_factor));
+            .unwrap_or_else(|| {
+                VitalityRate::calculate(physics, PowerState::Normal, UnitInterval::new(default_load_factor))
+            });
 
         // Apply physics jitter_factor to allow for network variance
-        let grace_period = contract * physics.jitter_factor as u32;
+        let grace_period = contract.as_duration() * physics.jitter_factor as u32;
         
         last_time.elapsed() > grace_period
     }   
@@ -177,26 +179,36 @@ impl Sentinel {
         // 3. Finalize if reassembly is complete
         if buffer.is_complete() {
             debug!(%shard_id, "Reassembly complete. Finalizing evidence.");
-            let data = buffer.assemble();
-            
-            let evidence = if is_video {
-                postcard::from_bytes::<VideoShard>(&data).ok().map(Evidence::Video)
-            } else {
-                postcard::from_bytes::<AudioShard>(&data).ok().map(Evidence::Audio)
-            };
+            let raw_data = buffer.assemble();
 
             // Immediate cleanup of the completed buffer
             buffers.remove(&shard_id);
 
-            if let Some(ev) = evidence {
-                info!(%shard_id, "Successfully witnessed forensic unit.");
-                return Some(WitnessEnvelope::new(ev, identity, local_peer_id));
-            } else {
-                warn!(%shard_id, "Deserialization failed for reassembled shard.");
-            }
-        }
+            match chunk.chunk_type {
+                ChunkType::Witnessed => {
+                    // This was a relayed envelope from the mesh; deserialize as such
+                    postcard::from_bytes::<WitnessEnvelope>(&raw_data).ok()
+                }
+                ChunkType::ForensicUnit => {
+                    // This was local raw data; we must wrap it in an envelope now
+                    let evidence = if is_video {
+                        postcard::from_bytes::<VideoShard>(&raw_data).ok().map(Evidence::Video)
+                    } else {
+                        postcard::from_bytes::<AudioShard>(&raw_data).ok().map(Evidence::Audio)
+                    };
 
-        None
+                    if let Some(ev) = evidence {
+                        info!(%shard_id, "Successfully witnessed local forensic unit.");
+                        Some(WitnessEnvelope::new(ev, identity, local_peer_id))
+                    } else {
+                        warn!(%shard_id, "Deserialization failed for reassembled raw shard.");
+                        None
+                    }
+                }
+            }
+        } else { 
+            None
+        }
     }
 
     /// Garbage collection for incomplete reassemblies that have timed out.
@@ -220,8 +232,6 @@ impl Sentinel {
 #[cfg(test)]
 mod leaf_mode_tests {
     use super::*;
-    use crate::security::identity::PhalanxIdentity;
-    use crate::protocol::shards::{ShardChunk, ShardId};
 
     #[test]
     fn test_sentinel_leaf_mode_filtering() {
@@ -231,47 +241,34 @@ mod leaf_mode_tests {
         let local_peer = NetworkId::random();
         
         let mut sentinel = Sentinel::new(&config);
-        
-        // 1. Enter Leaf Mode
         sentinel.set_power_state(PowerState::Leaf);
 
-        // 2. Create a foreign chunk (Part 1 of 2 to stay in buffer)
+        // 1. Foreign chunk (labeled as Witnessed/Relayed)
         let foreign_chunk = ShardChunk {
             shard_id: ShardId(1),
             chunk_index: 0,
             total_chunks: 2,
             data: vec![1, 2, 3],
             owner_did: stranger.did.clone(),
+            chunk_type: ChunkType::Witnessed, // Corrected
         };
 
-        // 3. Create a local chunk (Part 1 of 2 to stay in buffer)
+        // 2. Local chunk (labeled as ForensicUnit/Raw)
         let local_chunk = ShardChunk {
             shard_id: ShardId(2),
             chunk_index: 0,
             total_chunks: 2,
             data: vec![4, 5, 6],
             owner_did: identity.did.clone(),
+            chunk_type: ChunkType::ForensicUnit, // Added
         };
 
-        // 4. Verification: Foreign data must be ignored in Leaf Mode
-        sentinel.process_chunk(
-            foreign_chunk, 
-            &config.network.video_topic, // Match config topic
-            &config, 
-            &identity, 
-            local_peer
-        );
+        // 3. Process Foreign
+        sentinel.process_chunk(foreign_chunk, &config.network.video_topic, &config, &identity, local_peer);
         assert_eq!(sentinel.video_buffers.len(), 0, "Sentinel leaked foreign data in Leaf Mode");
 
-        // 5. Verification: Local data must still be accepted
-        sentinel.process_chunk(
-            local_chunk, 
-            &config.network.video_topic, // Match config topic
-            &config, 
-            &identity, 
-            local_peer
-        );
-        // It stays in buffer because total_chunks is 2
+        // 4. Process Local
+        sentinel.process_chunk(local_chunk, &config.network.video_topic, &config, &identity, local_peer);
         assert_eq!(sentinel.video_buffers.len(), 1, "Sentinel failed to process local data in Leaf Mode");
     }
 }

@@ -9,9 +9,13 @@ use std::time::Duration;
 use tokio::io;
 use libp2p::kad::RecordKey;
 use crate::core::config::PhalanxPhysics;
+use crate::core::types::{UnitInterval, VitalityRate};
+use crate::security::sentinel::PowerState;
+
 use void::Void;
 use std::path::Path;
 use std::fs;
+
 
 use libp2p::core::ConnectedPoint;
 use libp2p::futures::future::Either;
@@ -98,7 +102,11 @@ pub fn setup_phalanx_swarm(
         local_key.public(),
     ));
 
-    let gossip_heartbeat = physics.heartbeat_interval(0.0);
+    let gossip_heartbeat = VitalityRate::calculate(
+        &physics, 
+        PowerState::Normal, 
+        UnitInterval::new(0.0)
+    ).as_duration();
 
     let gossipsub = gossipsub::Behaviour::new(
         gossipsub::MessageAuthenticity::Signed(local_key.clone()),

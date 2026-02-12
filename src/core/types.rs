@@ -1,7 +1,7 @@
 use std::ops::{AddAssign, SubAssign};
 use serde::{Serialize, Deserialize};
 use std::fmt;
-
+use crate::core::config::PhalanxPhysics;
 use std::time::Duration;
 use crate::security::sentinel::PowerState;
 
@@ -199,15 +199,18 @@ impl VitalityRate {
     }
 
     /// Derives a heartbeat interval based on current system power and load.
-    pub fn calculate(state: PowerState, load: UnitInterval) -> Self {
-        let base_rate = match state {
-            PowerState::Normal => 1000.0, // 1s base
-            PowerState::Leaf => 5000.0,   // 5s base to conserve power
-        };
+    pub fn calculate(physics: &PhalanxPhysics, state: PowerState, load: UnitInterval) -> Self {
+        let base_ms = (physics.tau_rtt / 2) as f32;
         
-        // Scale by load: more load = slower heartbeats
-        let scaled = base_rate * (1.0 + load.as_f32());
-        Self::new(scaled as u64)
+        // 2. Load Scaling: Scaled by 1.0 + load factor
+        let mut dynamic_ms = base_ms * (1.0 + load.as_f32());
+
+        // 3. Power State Modifier: If in Leaf Mode, slow down significantly to save radio
+        if state == PowerState::Leaf {
+            dynamic_ms *= 5.0; // 5x slower for self-preservation
+        }
+
+        Self::new(dynamic_ms as u64)
     }
 
     pub fn as_duration(&self) -> Duration {

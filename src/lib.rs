@@ -64,7 +64,7 @@ pub fn init_identity() -> PhalanxIdentity {
 mod integration_tests {
     use crate::core::config::PhalanxConfig;
     use crate::storage::guardian::Guardian;
-    use crate::protocol::shards::{self, Evidence, StorageSequence, WitnessEnvelope};
+    use crate::protocol::shards::{self, Evidence, StorageSequence, WitnessEnvelope, ChunkType};
     use crate::security::identity::{NetworkId, PhalanxIdentity};
     use std::time::Duration;
 
@@ -98,7 +98,8 @@ mod integration_tests {
             shards::ShardId(0), 
             envelope_bytes, 
             10, 
-            identity.did.clone()
+            identity.did.clone(),
+            ChunkType::Witnessed
         );
         
         // Ingest

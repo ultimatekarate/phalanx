@@ -167,10 +167,24 @@ impl AudioShard {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub enum ChunkType {
+    /// Raw forensic data (VideoShard/AudioShard). 
+    /// Reassembled into a local evidence unit 
+    /// Assume this is the default state.
+    #[default]
+    ForensicUnit, 
+    /// Data wrapped in a WitnessEnvelope. 
+    /// Reassembled into a signed, verifiable envelope.
+    Witnessed,  
+    
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ShardChunk {
     pub shard_id: ShardId,
     pub chunk_index: u32,   // 0, 1, 2...
+    pub chunk_type: ChunkType,
     pub total_chunks: u32,
     pub data: Vec<u8>,
     pub owner_did: Did,
@@ -245,12 +259,13 @@ impl DataPayload {
 }
 /// HELPER FUNCTIONS
 
-pub fn chunkify(shard_id: ShardId, data: Vec<u8>, chunk_size: usize, owner_did: Did) -> Vec<ShardChunk> {
+pub fn chunkify(shard_id: ShardId, data: Vec<u8>, chunk_size: usize, owner_did: Did, chunk_type: ChunkType) -> Vec<ShardChunk> {
     let total_chunks = (data.len() as f64 / chunk_size as f64).ceil() as u32;
     data.chunks(chunk_size)
         .enumerate()
         .map(|(i, chunk)| ShardChunk {
             shard_id,
+            chunk_type,
             chunk_index: i as u32,
             total_chunks,
             data: chunk.to_vec(),

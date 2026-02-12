@@ -4,7 +4,8 @@ use tracing::{error, info, warn, debug, span, Level};
 use std::sync::Arc;
 
 use crate::security::identity::{PhalanxIdentity, Did, NetworkId};
-use crate::security::sentinel::{Sentinel, ControlMessage};
+use crate::security::sentinel::{Sentinel, ControlMessage, PowerState};
+use crate::core::types::{UnitInterval, VitalityRate};
 use crate::storage::guardian::Guardian;
 use crate::core::config::{PhalanxConfig, PhalanxPhysics};
 use crate::protocol::shards::ShardChunk;
@@ -99,23 +100,22 @@ impl SimulationHarness {
             let _enter = span.enter();
             info!("Virtual node loop started");
 
-            let mut heartbeat_tick = tokio::time::interval(physics.heartbeat_interval(0.0));
             let mut cleanup_tick = tokio::time::interval(physics.shard_timeout());
 
             loop {
                 let micro_load = storage.micro_layer.len() as f32 / (config.storage.max_peers * 5) as f32;
                 let macro_load = storage.macro_layer.len() as f32 / config.storage.max_peers as f32;
                 
-                let load_factor = (micro_load + macro_load).clamp(0.0, 1.0);
-                
+                let load = UnitInterval::new(micro_load + macro_load);
                 // Derive the dynamic interval based on this stress factor.
-                let current_interval = physics.heartbeat_interval(load_factor);
+                let vitality = VitalityRate::calculate(&physics, PowerState::Normal, load);
+                let current_interval = vitality.as_duration();
 
                 tokio::select! {
-                    _ = heartbeat_tick.tick() => {
+                    _ = tokio::time::sleep(current_interval)=> {
                         let msg = ControlMessage {
                             sender: node_network_id,
-                            load_factor,
+                            load_factor: load.as_f32(),
                             storage_remaining_mb: 1024, // Placeholder for Disk I/O check
                             heartbeat_ms: current_interval.as_millis() as u64, // The Vitality Contract
                             is_leaf: false
@@ -193,8 +193,8 @@ async fn test_salvage_on_node_death() {
 
     use tokio::time::Duration;
     use tracing::{info};
-    use crate::protocol::shards::{create_video_shard, Evidence, WitnessEnvelope};
-
+    use crate::protocol::shards::{create_video_shard, Evidence, WitnessEnvelope, ChunkType};
+    
     // 1. CONFIGURATION
     let config = PhalanxConfig::test_salvage_on_node_death();
     let physics = PhalanxPhysics::test_profile();
@@ -240,7 +240,8 @@ async fn test_salvage_on_node_death() {
         crate::protocol::shards::ShardId(999), 
         serialized_envelope, 
         10, 
-        victim_did.clone()
+        victim_did.clone(),
+        ChunkType::Witnessed
     );
 
     info!(victim = %victim_did, chunk_count = chunks.len(), "Broadcasting Signed Envelope Chunks");
@@ -398,7 +399,12 @@ async fn test_leaf_mode_isolation() {
 
     // 1. Create a foreign chunk
     let shard = shards::create_video_shard(vec![vec![1]], StorageSequence(1), 30, "v1".into());
-    let chunk = shards::chunkify(shards::ShardId(1), postcard::to_stdvec(&shard).unwrap(), 100, stranger.did.clone());
+    let chunk = shards::chunkify(
+        shards::ShardId(1),
+        postcard::to_stdvec(&shard).unwrap(),
+        100, 
+        stranger.did.clone(),
+        shards::ChunkType::Witnessed);
 
     // 2. Ingest while in Leaf Mode
     let is_leaf_mode = true;
@@ -440,7 +446,8 @@ async fn test_vampire_attack_defense() {
             crate::protocol::shards::ShardId(i as u32), 
             postcard::to_stdvec(&envelope).unwrap(), 
             100, 
-            attacker_did.clone()
+            attacker_did.clone(),
+            crate::protocol::shards::ChunkType::Witnessed
         );
 
         harness.broadcast(&attacker_did, SimEvent::Chunk(attacker_net_id, chunk[0].clone())).await;

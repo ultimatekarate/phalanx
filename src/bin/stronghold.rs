@@ -10,11 +10,16 @@ use libp2p::{
 use phalanx::{
     core::{
         config::{PhalanxConfig, PhalanxPhysics},
-        telemetry, types::MeshTopic
-    }, security::{
+        telemetry, 
+        types::{MeshTopic, UnitInterval, VitalityRate}
+    }, 
+    security::{
         identity::{
             NetworkId, PhalanxIdentity
-        }, sentinel::{ControlMessage, Sentinel}
+        }, 
+        sentinel::{
+            ControlMessage, Sentinel, PowerState
+        }
     }, storage::guardian::Guardian
 };
 
@@ -58,19 +63,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     
     // 1. DYNAMIC HEARTBEAT INITIALIZATION
     // We use a base interval and will reset it based on load.
-    let mut heartbeat_timer = tokio::time::interval(physics.heartbeat_interval(0.0));
+    //let mut heartbeat_timer = tokio::time::interval(physics.heartbeat_interval(0.0));
 
     info!(peer_id = %local_peer_id, "Stronghold Status: Online.");
 
     loop {
         // 2. CALCULATE DYNAMIC LOAD FACTOR
         // Heuristic: Sum of reassembly buffers divided by configured capacity.
-        let micro_load = storage.micro_layer.len() as f32 / (config.storage.max_peers * 5) as f32;
-        let macro_load = storage.macro_layer.len() as f32 / config.storage.max_peers as f32;
-        let load_factor = (micro_load + macro_load).clamp(0.0, 1.0);
-
-        let current_interval = physics.heartbeat_interval(load_factor);
-        heartbeat_timer.reset_after(current_interval);
+        let active_storage_tasks = storage.micro_layer.len() as f32;
+        let max_capacity = config.storage.max_peers as f32;
+        let current_load = UnitInterval::new(active_storage_tasks / max_capacity);
+        
+        let vitality = VitalityRate::calculate(&physics, PowerState::Normal, current_load);
+        let next_heartbeat = vitality.as_duration();
 
         tokio::select! {
             event = swarm.select_next_some() => {
@@ -121,12 +126,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
 
             // 4. BROADCAST DYNAMIC HEARTBEAT
-            _ = heartbeat_timer.tick() => {
+            _ = tokio::time::sleep(next_heartbeat) => {
                 let hb = ControlMessage {
                     sender: local_peer_id,
-                    load_factor,
+                    load_factor: current_load.as_f32(),
                     storage_remaining_mb: 10240, // TODO: Implement disk space check
-                    heartbeat_ms: current_interval.as_millis() as u64,
+                    heartbeat_ms: vitality.as_u64(),
                     is_leaf: sentinel.is_leaf_mode()
                 };
                 
@@ -135,8 +140,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let _ = swarm.behaviour_mut().gossipsub.publish(topic, data);
                 }
 
-                if load_factor > 0.8 {
-                    warn!(load = %load_factor, next_interval = ?current_interval, "Stronghold under high load. Throttling heartbeats.");
+                if current_load > UnitInterval::new(0.8) {
+                    warn!(load = %current_load, next_interval = ?next_heartbeat, "Stronghold under high load. Throttling heartbeats.");
                 }
             }
         }
