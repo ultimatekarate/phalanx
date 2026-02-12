@@ -1,5 +1,5 @@
 use libp2p::{
-    gossipsub, dns, identify, kad, mdns, noise, 
+    gossipsub, identify, kad, mdns, noise, 
     relay, dcutr, autonat, pnet, 
     swarm::{NetworkBehaviour}, 
     tcp, yamux, Swarm, Transport, SwarmBuilder, 
@@ -9,13 +9,12 @@ use libp2p::{
 };
 use libp2p::kad::RecordKey;
 use libp2p::pnet::PreSharedKey;
+use futures::future::Either; // Required for Transport unification
 
 use std::error::Error;
 use std::time::Duration;
 use std::path::Path;
 use std::fs;
-
-use futures::future::Either;
 
 // Domain Imports
 use crate::core::config::{PhalanxConfig, PhalanxPhysics};
@@ -23,7 +22,6 @@ use crate::core::types::{UnitInterval, VitalityRate, PowerState};
 
 // --- CONSTANTS ---
 pub type PhalanxKadStore = kad::store::MemoryStore;
-// Protocol ID is now derived from Config, but we keep the service key constant
 pub const SERVICE_STORAGE: &[u8] = b"phalanx/service/storage/v1";
 
 pub fn get_storage_key() -> RecordKey {
@@ -39,7 +37,7 @@ pub struct PhalanxBehaviour {
     pub kademlia: kad::Behaviour<PhalanxKadStore>,
     pub identify: identify::Behaviour,
     pub relay_server: relay::Behaviour,      
-    pub relay_client: relay::client::Behaviour,
+    pub relay_client: relay::client::Behaviour, // The Client Behaviour
     pub dcutr: dcutr::Behaviour,
     pub autonat: autonat::Behaviour,
 }
@@ -56,7 +54,6 @@ pub enum PhalanxEvent {
     Autonat(autonat::Event),
 }
 
-// Macro to delegate enum variants (Boilerplate reduction)
 impl From<gossipsub::Event> for PhalanxEvent { fn from(v: gossipsub::Event) -> Self { Self::Gossipsub(v) } }
 impl From<mdns::Event> for PhalanxEvent { fn from(v: mdns::Event) -> Self { Self::Mdns(v) } }
 impl From<kad::Event> for PhalanxEvent { fn from(v: kad::Event) -> Self { Self::Kademlia(v) } }
@@ -66,8 +63,9 @@ impl From<relay::client::Event> for PhalanxEvent { fn from(v: relay::client::Eve
 impl From<dcutr::Event> for PhalanxEvent { fn from(v: dcutr::Event) -> Self { Self::Dcutr(v) } }
 impl From<autonat::Event> for PhalanxEvent { fn from(v: autonat::Event) -> Self { Self::Autonat(v) } }
 
-// --- 1. TRANSPORT BUILDER (Pure, No Side Effects) ---
-fn build_transport(
+// --- 1. TRANSPORT BUILDER ---
+// Note: Relay transport is now handled in the main setup to resolve dependencies
+fn build_base_transport(
     local_key: &Keypair, 
     psk: Option<PreSharedKey>
 ) -> Result<libp2p::core::transport::Boxed<(PeerId, libp2p::core::muxing::StreamMuxerBox)>, Box<dyn Error>> {
@@ -75,17 +73,20 @@ fn build_transport(
     let noise_config = noise::Config::new(local_key)?;
     let yamux_config = yamux::Config::default();
 
-    // Base TCP Transport
     let base_transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true));
-    
-    // Upgrade to DNS (Non-Panicking)
-    let dns_transport =  dns::tokio::Transport::system(base_transport)?;
+    let dns_transport = libp2p::dns::tokio::Transport::system(base_transport)?;
 
-    // Handle Optional Private Network (PNet) Encryption
-    // We utilize libp2p's EitherTransport to avoid complex type erasure early on
+    // Define the Stream Type Alias to make the annotation readable
+    // The "Right" side is a raw TCP Stream
+    type RawStream = libp2p::tcp::tokio::TcpStream;
+    // The "Left" side is a TCP Stream wrapped in PNet encryption
+    type EncryptedStream = libp2p::pnet::PnetOutput<RawStream>;
+
     let transport = if let Some(key) = psk {
         let pnet_config = pnet::PnetConfig::new(key);
         dns_transport.and_then(move |socket, _| pnet_config.handshake(socket))
+            // FIX: Explicitly tell compiler the Right side is RawStream
+            .map(|stream, _| Either::<EncryptedStream, RawStream>::Left(stream))
             .upgrade(Version::V1)
             .authenticate(noise_config)
             .multiplex(yamux_config)
@@ -93,6 +94,8 @@ fn build_transport(
             .boxed()
     } else {
         dns_transport
+            // FIX: Explicitly tell compiler the Left side is EncryptedStream
+            .map(|stream, _| Either::<EncryptedStream, RawStream>::Right(stream))
             .upgrade(Version::V1)
             .authenticate(noise_config)
             .multiplex(yamux_config)
@@ -103,32 +106,30 @@ fn build_transport(
     Ok(transport)
 }
 
-// --- 2. BEHAVIOUR BUILDER (Config Driven) ---
+// --- 2. BEHAVIOUR BUILDER ---
 fn build_behaviour(
     local_key: &Keypair, 
     config: &PhalanxConfig,
-    physics: &PhalanxPhysics
+    physics: &PhalanxPhysics,
+    relay_client: relay::client::Behaviour // FIX: Receive injected behaviour
 ) -> Result<PhalanxBehaviour, Box<dyn Error>> {
     let local_peer_id = local_key.public().to_peer_id();
 
-    // A. Gossipsub with VitalityRate
-    // We use the unified physics logic to set the mesh heartbeat
+    // A. Gossipsub
     let gossip_heartbeat = VitalityRate::calculate(
         physics, 
         PowerState::Normal, 
-        UnitInterval::new(0.0) // Assume baseline load for initialization
+        UnitInterval::new(0.0) 
     ).as_duration();
-
-    let gossipsub_config = gossipsub::ConfigBuilder::default()
-        .heartbeat_interval(gossip_heartbeat) 
-        .validation_mode(gossipsub::ValidationMode::Strict)
-        .max_transmit_size(config.network.max_chunk_size_bytes as usize * 2) // Allow overhead
-        .build()
-        .map_err(|msg| std::io::Error::new(std::io::ErrorKind::Other, msg))?;
 
     let gossipsub = gossipsub::Behaviour::new(
         gossipsub::MessageAuthenticity::Signed(local_key.clone()), 
-        gossipsub_config
+        gossipsub::ConfigBuilder::default()
+            .heartbeat_interval(gossip_heartbeat) 
+            .validation_mode(gossipsub::ValidationMode::Strict)
+            .max_transmit_size(config.network.max_chunk_size_bytes as usize * 2)
+            .build()
+            .map_err(|msg| std::io::Error::new(std::io::ErrorKind::Other, msg))?, // FIX: Explicit std::io
     )?;
 
     // B. Kademlia
@@ -138,16 +139,18 @@ fn build_behaviour(
     );
     kademlia.set_mode(Some(kad::Mode::Server));
 
-    // C. Identify (Dynamic Protocol Version)
+    // C. Identify
     let identify = identify::Behaviour::new(identify::Config::new(
-        config.network.protocol_version.clone(), // "/phalanx/1.0.0"
+        config.network.protocol_version.clone(),
         local_key.public(),
     ));
 
-    // D. Other Behaviours
+    // D. Others
     let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
-    let (relay_client, _) = relay::client::Behaviour::new(local_peer_id, relay::client::Config::default());
+    
+    // Relay Server (For hosting)
     let relay_server = relay::Behaviour::new(local_peer_id, relay::Config::default());
+    
     let dcutr = dcutr::Behaviour::new(local_peer_id);
     let autonat = autonat::Behaviour::new(local_peer_id, autonat::Config::default());
 
@@ -157,14 +160,13 @@ fn build_behaviour(
         kademlia,
         identify,
         relay_server,
-        relay_client,
+        relay_client, // Injected
         dcutr,
         autonat,
     })
 }
 
-// --- 3. HELPER: SWARM KEY LOADER (Separated I/O) ---
-/// Reads the swarm key from disk. Caller handles this in a blocking context if needed.
+// --- 3. HELPER: SWARM KEY LOADER ---
 pub fn load_swarm_key(path: &Path) -> Option<PreSharedKey> {
     match fs::read(path) {
         Ok(bytes) => {
@@ -177,7 +179,7 @@ pub fn load_swarm_key(path: &Path) -> Option<PreSharedKey> {
                 None
             }
         },
-        Err(_) => None // No key found, strictly Public Mode
+        Err(_) => None 
     }
 }
 
@@ -189,111 +191,47 @@ pub fn generate_swarm_key(path: &str) -> std::io::Result<()> {
 }
 
 // --- 4. MAIN ORCHESTRATOR ---
-/// Initializes the Phalanx Swarm.
-/// 
-/// - `local_key`: Identity of the node.
-/// - `config`: Dynamic configuration source.
-/// - `physics`: Physics engine for timing parameters.
-/// - `psk`: Optional Private Network key (Inject this!).
 pub fn setup_phalanx_swarm(
-    local_key: libp2p::identity::Keypair,
-    is_stronghold: bool,
-    physics: PhalanxPhysics,
-) -> Result<Swarm<PhalanxBehaviour>, Box<dyn std::error::Error>> {
-    let local_peer_id = libp2p::PeerId::from(local_key.public());
-
-    // ... [PSK loading logic remains the same] ...
-    let psk = if let Ok(key_bytes) = fs::read("swarm.key") {
-        match key_bytes.try_into() {
-            Ok(bytes) => Some(pnet::PreSharedKey::new(bytes)),
-            Err(_) => None
-        }
-    } else {
-        None
-    };
-
-    // ... [Behaviour initialization remains the same] ...
-    let kad_store = kad::store::MemoryStore::new(local_peer_id);
-    let kademlia = kad::Behaviour::with_config(local_peer_id, kad_store, kad::Config::default());
+    local_key: Keypair,
+    config: &PhalanxConfig,
+    physics: &PhalanxPhysics,
+    psk: Option<PreSharedKey> 
+) -> Result<Swarm<PhalanxBehaviour>, Box<dyn Error>> {
     
-    let identify = identify::Behaviour::new(identify::Config::new(
-        "/phalanx/1.0.0".to_string(),
-        local_key.public(),
-    ));
+    let local_peer_id = local_key.public().to_peer_id();
+    tracing::info!(peer_id=%local_peer_id, "Initializing Network Stack...");
 
-    let gossip_heartbeat = VitalityRate::calculate(
-        &physics, 
-        PowerState::Normal, 
-        UnitInterval::new(0.0)
-    ).as_duration();
-
-    let gossipsub = gossipsub::Behaviour::new(
-        gossipsub::MessageAuthenticity::Signed(local_key.clone()),
-        gossipsub::ConfigBuilder::default()
-            .heartbeat_interval(gossip_heartbeat)
-            .validation_mode(gossipsub::ValidationMode::Strict)
-            .build()
-            .map_err(|msg| std::io::Error::new(std::io::ErrorKind::Other, msg))?,
-    )?;
-
-    // ... [Other behaviours: mdns, relay, dcutr, autonat] ...
-    let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
-    let relay_config = if is_stronghold { relay::Config::default() } else { relay::Config { max_reservations: 0, ..Default::default() } };
-    let relay_server = relay::Behaviour::new(local_peer_id, relay_config);
+    // 1. Initialize Relay Client (Returns Transport + Behaviour)
     let (relay_transport, relay_client) = relay::client::new(local_peer_id);
-    let dcutr = dcutr::Behaviour::new(local_peer_id);
-    let autonat_config = autonat::Config { use_connected: true, ..Default::default() };
-    let autonat = autonat::Behaviour::new(local_peer_id, autonat_config);
 
-    let behaviour = PhalanxBehaviour {
-        gossipsub, mdns, kademlia, identify,
-        relay_server, relay_client, dcutr, autonat
-    };
+    // 2. Build Base Transport (TCP/DNS/Noise/Yamux)
+    let transport = build_base_transport(&local_key, psk)?;
 
-    // --- SWARM BUILDER (Fixed DNS) ---
+    // 3. Build Behaviour (Inject Relay Client)
+    let behaviour = build_behaviour(&local_key, config, physics, relay_client)?;
+
+    // 4. Build Swarm (NEW API v0.56+)
     let swarm = SwarmBuilder::with_existing_identity(local_key.clone())
-        .with_tokio()
+        .with_tokio() // Set the executor first
+        
+        // Primary Transport (TCP/DNS/PNet)
+        // We wrap the pre-built transport in a closure to satisfy the API
+        .with_other_transport(|_key| transport)? 
+        
+        // Secondary Transport (Relay)
         .with_other_transport(|key| {
-            let base_transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true));
-            
-            // FIX: Use `libp2p::dns::tokio::Transport`
-            // In libp2p 0.56, TokioDnsConfig is gone. You must use the `tokio` module.
-            let dns_transport = libp2p::dns::tokio::Transport::system(base_transport)
-                .unwrap_or_else(|e| {
-                    panic!("Failed to initialize DNS transport: {:?}", e);
-                });
-
-            // Handle PSK Encryption (Type Unification)
-            let transport = if let Some(psk_key) = psk.clone() {
-                dns_transport.and_then(move |socket, _| {
-                    pnet::PnetConfig::new(psk_key).handshake(socket)
-                })
-                .map(|stream, _| Either::Left(stream)) 
-                .boxed()
-            } else {
-                dns_transport
-                .map(|stream, _| Either::Right(stream)) 
-                .boxed()
-            };
-
             let noise_config = noise::Config::new(key).unwrap();
             let yamux_config = yamux::Config::default();
-
-            transport
-                .upgrade(Version::V1)
-                .authenticate(noise_config)
-                .multiplex(yamux_config)
-        })?
-        .with_other_transport(|key| {
-            let noise_config = noise::Config::new(&key).unwrap();
-            let yamux_config = yamux::Config::default();
+            
             relay_transport
                 .upgrade(Version::V1)
                 .authenticate(noise_config)
                 .multiplex(yamux_config)
         })?
+        
+        // Behaviour & Configuration
         .with_behaviour(|_| behaviour)?
-        .with_swarm_config(|c: libp2p::swarm::Config| c.with_idle_connection_timeout(Duration::from_secs(60)))
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
     Ok(swarm)

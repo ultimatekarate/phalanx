@@ -71,7 +71,7 @@ mod integration_tests {
     #[test]
     fn test_full_recursive_pipeline() {
         let mut config = PhalanxConfig::default();
-        config.storage.vault_path = "./test_vault".to_string();
+        config.storage.vault_path = "./sim_vault".to_string();
         config.storage.stale_session_threshold = 1;
         let is_leaf_mode: bool = false;
 
@@ -126,7 +126,7 @@ mod integration_tests {
         assert!(remaining_shards.is_none(), "Stronghold failed to flush stale session from RAM");
 
         let safe_did = identity.did.to_safe_name();
-        let path = std::path::Path::new("./test_vault")
+        let path = std::path::Path::new("./sim_vault")
             .join(safe_did)
             .join("volley_alpha_001.vid.phlx");
             

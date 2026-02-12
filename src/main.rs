@@ -4,6 +4,7 @@ use std::error::Error;
 use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc;
+use std::path::Path; // Added for PSK loading
 
 // Internal Modules
 use phalanx::protocol::shards::{self, Evidence, WitnessEnvelope};
@@ -15,6 +16,9 @@ use phalanx::core::config::{PhalanxConfig, PhalanxPhysics};
 use phalanx::core::types::{VitalityRate};
 use phalanx::storage::guardian::Guardian;
 use phalanx::{PhalanxBehaviour, PhalanxEvent}; 
+
+// - Import new network utilities
+use phalanx::network::network::{setup_phalanx_swarm, load_swarm_key, get_storage_key};
 
 use tracing::info;
 
@@ -141,7 +145,7 @@ impl PhalanxNode {
                 ..
             } => {
                 // Ensure it is the correct service key
-                if key == phalanx::network::network::get_storage_key() {
+                if key == get_storage_key() { // Updated to use imported function
                     for peer in providers {
                         tracing::info!(%peer, "DISCOVERY: Found Stronghold Node!");
                         // Auto-dial to establish direct data link
@@ -177,7 +181,7 @@ impl PhalanxNode {
             let chunks = shards::chunkify(
                 shards::ShardId(evidence.sequence_id().0),
                 encoded,
-                self.config.network.chunk_size_bytes,
+                self.config.network.max_chunk_size_bytes,
                 self.identity.did.clone(),
                 shards::ChunkType::ForensicUnit
             );
@@ -242,10 +246,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }).await?;
 
-    let stronghold_flag = true;
-    // Setup Network with proper key conversion
+    // 4. SETUP NETWORK (Dependency Injection Pattern)
+    // - Use updated network API
     let physics = PhalanxPhysics::default_wan();
-    let mut swarm = phalanx::setup_phalanx_swarm(my_identity.to_libp2p_keypair(), stronghold_flag, physics)?;
+    
+    // Explicitly load the PSK from disk
+    let psk_path = Path::new("swarm.key");
+    let psk = load_swarm_key(psk_path);
+    
+    if psk.is_some() {
+        println!("[PHALANX] Joining Private Swarm (Key Loaded).");
+    } else {
+        println!("[PHALANX] Joining Public Swarm.");
+    }
+
+    let mut swarm = setup_phalanx_swarm(
+        my_identity.to_libp2p_keypair(), 
+        &config,  // Pass full config
+        &physics, 
+        psk       // Pass loaded key (or None)
+    )?;
     
     // Bind to Random Port (Client Mode)
     // Use Port 0 to let OS assign an available port
@@ -333,7 +353,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             _ = discovery_timer.tick() => {
                 // Periodically ask the network: "Who provides storage?"
-                let key = phalanx::network::network::get_storage_key();
+                let key = get_storage_key(); // Updated
                 swarm.behaviour_mut().kademlia.get_providers(key);
             }
 
@@ -475,4 +495,3 @@ mod tests {
         }
     }
 }
-

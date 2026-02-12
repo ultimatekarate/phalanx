@@ -9,6 +9,7 @@ use crate::security::time::TrustedClock;
 use std::collections::{HashSet, HashMap};
 use std::fs::{self, File};
 use std::io::Write;
+use std::fmt;
 use std::path::PathBuf;
 use tokio::time::Instant;
 use tracing::{info, error, warn, debug, instrument};
@@ -22,6 +23,20 @@ pub enum GuardianError {
     WalWriteFailed(String),   // Disk IO failure
     SerializationError(String),
 }
+
+impl fmt::Display for GuardianError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::QuotaExceeded(cap) => write!(f, "Storage quota exceeded. Current usage: {:?}", cap),
+            Self::InvalidSignature(did) => write!(f, "Invalid signature detected from DID: {}", did),
+            Self::ReplayDetected(seq) => write!(f, "Replay attack prevented. Sequence ID: {}", seq),
+            Self::WalWriteFailed(path) => write!(f, "Write Ahead Log failure at path: {}", path),
+            Self::SerializationError(msg) => write!(f, "Serialization failure: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for GuardianError {}
 
 #[derive(Debug, Default, Clone)]
 pub struct PeerReputation {
@@ -498,10 +513,14 @@ mod tests {
     fn mock_config(max_foreign_bytes: ByteCapacity) -> PhalanxConfig {
         PhalanxConfig {
             network: NetworkConfig { 
-                heartbeat_interval_secs: 1, pulse_timeout_secs: 1, chunk_size_bytes: 100, 
-                video_topic: "t".into(), audio_topic: "t".into(), control_topic: "t".into(), 
-                grace_period: 1, cleanup_interval_secs: 1, 
-                bootstrap_peers: vec![], guardian_service_key: "k".into() 
+                max_chunk_size_bytes: 100, 
+                video_topic: "t".into(), 
+                audio_topic: "t".into(), 
+                control_topic: "t".into(), 
+                cleanup_interval_secs: 1, 
+                bootstrap_peers: vec![], guardian_service_key: "k".into() ,
+                protocol_version: "v0.1.0".to_string(),
+
             },
             storage: StorageConfig {
                 vault_path: "test_vault_governance".into(),
