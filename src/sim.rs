@@ -4,8 +4,8 @@ use tracing::{error, info, warn, debug, span, Level};
 use std::sync::Arc;
 
 use crate::security::identity::{PhalanxIdentity, Did, NetworkId};
-use crate::security::sentinel::{Sentinel, ControlMessage, PowerState};
-use crate::core::types::{UnitInterval, VitalityRate};
+use crate::security::sentinel::{Sentinel, ControlMessage};
+use crate::core::types::{UnitInterval, VitalityRate, PowerState};
 use crate::storage::guardian::Guardian;
 use crate::core::config::{PhalanxConfig, PhalanxPhysics};
 use crate::protocol::shards::ShardChunk;

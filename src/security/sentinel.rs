@@ -8,7 +8,7 @@ use crate::protocol::shards::{
     ShardId, WitnessEnvelope, ChunkType
 };
 
-use crate::core::types::{MeshTopic, UnitInterval, VitalityRate};
+use crate::core::types::{MeshTopic, PowerState, TrafficGovernor, UnitInterval, VitalityRate};
 
 use crate::core::config::{PhalanxPhysics, PhalanxConfig};
 use crate::security::identity::{NetworkId, PhalanxIdentity};
@@ -16,12 +16,6 @@ use crate::security::identity::{NetworkId, PhalanxIdentity};
 // =====================
 // HEALTH & CAPACITY
 // =====================
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PowerState {
-    Normal,
-    Leaf, // Focus strictly on self-preservation
-}
-
 /// Tracks peer vitality and their reported resource availability.
 pub struct HealthTracker {
     pub heartbeats: HashMap<NetworkId, Instant>,
@@ -89,6 +83,7 @@ pub struct PeerReputation {
 // =====================
 
 pub struct Sentinel {
+    pub governor: TrafficGovernor,
     pub video_buffers: HashMap<ShardId, ReassemblyBuffer>,
     pub audio_buffers: HashMap<ShardId, ReassemblyBuffer>,
     pub health_tracker: HealthTracker,
@@ -106,12 +101,14 @@ impl Sentinel {
             peer_registry: Vec::new(),
             power_state: PowerState::Normal,
             battery_level: UnitInterval::new(1.0),
+            governor: TrafficGovernor::new(),
         }
     }
 
     // Automatically adjusts the internal PowerState based on environmental data.
     pub fn update_power_strategy(&mut self) {
         let battery = self.get_system_battery();
+
         let target_state = if battery.is_critical() {
             PowerState::Leaf
         } else {
@@ -121,6 +118,8 @@ impl Sentinel {
         if self.power_state != target_state {
             warn!(battery = %battery, old = ?self.power_state, new = ?target_state, "Power strategy shift");
             self.power_state = target_state;
+
+            self.governor.set_state(target_state);
         }
     }
 
@@ -139,6 +138,8 @@ impl Sentinel {
         if self.power_state != state {
             warn!(new_state = ?state, "Sentinel power state transition");
             self.power_state = state;
+
+            self.governor.set_state(state);
         }
     }
 
@@ -152,11 +153,10 @@ impl Sentinel {
         identity: &PhalanxIdentity,
         local_peer_id: NetworkId,
     ) -> Option<WitnessEnvelope> {
-        if self.power_state == PowerState::Leaf && chunk.owner_did != identity.did {
-            debug!(did = %chunk.owner_did, "Leaf Mode: Dropping foreign chunk to save battery");
+        if !self.governor.should_accept(&chunk.owner_did, &identity.did) {
+            debug!(did = %chunk.owner_did, "TrafficGovernor: Rejecting foreign chunk in Leaf Mode");
             return None;
         }
-
         // 1. Route to correct buffer based on network topic
         let is_video = topic == &config.network.video_topic;
         let buffers = if is_video {

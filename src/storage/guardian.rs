@@ -1,4 +1,4 @@
-use crate::core::types::ByteCapacity;
+use crate::core::types::{ByteCapacity, TrafficGovernor};
 use crate::protocol::shards::{StorageSequence, Evidence, WitnessEnvelope, ShardChunk};
 use crate::storage::crucible::{Crucible};
 use crate::storage::strategies::{ShardAmalgam, VolleyAmalgam, Volley}; 
@@ -57,6 +57,8 @@ pub struct Guardian {
     pub foreign_storage_usage: ByteCapacity,         // Current Foreign Usage
 
     pub clock: TrustedClock,
+
+    pub governor: TrafficGovernor,
 }
 
 impl Guardian {
@@ -86,6 +88,8 @@ impl Guardian {
             current_storage_usage: ByteCapacity(0),
             foreign_storage_usage: ByteCapacity(0),
             clock: TrustedClock::new(),
+
+            governor: TrafficGovernor::new()
         };
         
         guardian.calculate_initial_usage();
@@ -199,7 +203,21 @@ impl Guardian {
             match_found = %(chunk.owner_did == self.local_did),
             "Ingestion Decision Gate"
         );
-        
+
+        // 1. SYNC STATE
+        // Ensure Governor matches the Sentinel's decision from the main loop
+        if is_leaf_mode {
+            self.governor.set_state(crate::core::types::PowerState::Leaf);
+        } else {
+            self.governor.set_state(crate::core::types::PowerState::Normal);
+        }
+
+        // 2. CENTRALIZED SECURITY CHECK
+        // "Method Injection": We provide the subject (chunk owner) and context (self)
+        if !self.governor.should_accept(&chunk.owner_did, &self.local_did) {
+            warn!(did = %chunk.owner_did, "TrafficGovernor: Shedding foreign storage task");
+            return;
+        }
         // Leaf-mode circuit breaker
         if is_leaf_mode && chunk.owner_did != self.local_did {
             warn!(

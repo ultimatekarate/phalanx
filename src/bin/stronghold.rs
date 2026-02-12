@@ -11,14 +11,14 @@ use phalanx::{
     core::{
         config::{PhalanxConfig, PhalanxPhysics},
         telemetry, 
-        types::{MeshTopic, UnitInterval, VitalityRate}
+        types::{MeshTopic, PowerState, UnitInterval, VitalityRate}
     }, 
     security::{
         identity::{
             NetworkId, PhalanxIdentity
         }, 
         sentinel::{
-            ControlMessage, Sentinel, PowerState
+            ControlMessage, Sentinel
         }
     }, storage::guardian::Guardian
 };

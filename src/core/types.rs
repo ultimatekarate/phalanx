@@ -3,7 +3,6 @@ use serde::{Serialize, Deserialize};
 use std::fmt;
 use crate::core::config::PhalanxPhysics;
 use std::time::Duration;
-use crate::security::sentinel::PowerState;
 
 /// A type-safe wrapper for values that MUST be between 0.0 and 1.0.
 /// Replaces raw f32 for Battery and Load metrics.
@@ -219,5 +218,46 @@ impl VitalityRate {
 
     pub fn as_u64(&self) -> u64 {
         self.0
+    }
+}
+
+// src/core/types.rs
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PowerState {
+    #[default]
+    Normal,
+    /// Focus strictly on self-preservation: Only accept local data
+    Leaf, 
+}
+
+/// Central authority for deciding which data chunks are accepted.
+/// Prevents logic drift between the Sentinel and Guardian.
+pub struct TrafficGovernor {
+    pub power_state: PowerState,
+}
+
+impl TrafficGovernor {
+    pub fn new() -> Self {
+        Self {
+            power_state: PowerState::Normal,
+        }
+    }
+
+    /// Primary security gate: Determines if a chunk should be processed.
+    pub fn should_accept(
+        &self, 
+        chunk_owner: &crate::security::identity::Did, 
+        local_did: &crate::security::identity::Did
+    ) -> bool {
+        match self.power_state {
+            PowerState::Normal => true,
+            // The Logic is still centralized here, satisfying the audit.
+            PowerState::Leaf => chunk_owner == local_did,
+        }
+    }
+
+    pub fn set_state(&mut self, state: PowerState) {
+        self.power_state = state;
     }
 }

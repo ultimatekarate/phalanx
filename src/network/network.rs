@@ -9,8 +9,8 @@ use std::time::Duration;
 use tokio::io;
 use libp2p::kad::RecordKey;
 use crate::core::config::PhalanxPhysics;
-use crate::core::types::{UnitInterval, VitalityRate};
-use crate::security::sentinel::PowerState;
+use crate::core::types::{UnitInterval, VitalityRate, PowerState};
+
 
 use void::Void;
 use std::path::Path;
