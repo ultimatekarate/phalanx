@@ -7,10 +7,9 @@ use libp2p::{
     kad
 };
 
-use phalanx::{
+use phalanx_core::{
     core::{
         config::{PhalanxConfig, PhalanxPhysics},
-        telemetry, 
         types::{MeshTopic, PowerState, UnitInterval, VitalityRate}
     }, 
     security::{
@@ -19,19 +18,20 @@ use phalanx::{
         }, 
         sentinel::{
             ControlMessage, Sentinel
-        }
+        },
+        telemetry,
     }, storage::guardian::Guardian
 };
 
 // - Import the new setup function and key loader
-use phalanx::network::network::{setup_phalanx_swarm, load_swarm_key, get_storage_key}; 
+use phalanx_core::network::network::{setup_phalanx_swarm, load_swarm_key, get_storage_key}; 
 use std::path::Path;
 
 use std::error::Error;
 use std::time::Duration;
 use tracing::{info, warn};
 
-use phalanx::{PhalanxEvent};
+use phalanx_core::{PhalanxEvent};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         let topic: MeshTopic = message.topic.as_str().into();
 
                         if topic != config.network.control_topic {
-                            if let Ok(chunk) = postcard::from_bytes::<phalanx::protocol::shards::ShardChunk>(&message.data) {
+                            if let Ok(chunk) = postcard::from_bytes::<phalanx_core::protocol::shards::ShardChunk>(&message.data) {
                                 if let Some(envelope) = sentinel.process_chunk(chunk, &topic, &config, &identity, local_peer_id) {
                                     _ = storage.ingest_envelope(envelope);
                                 }

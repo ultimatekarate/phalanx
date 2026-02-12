@@ -1,23 +1,11 @@
-use serde::{Serialize,Deserialize};
+use serde::{Serialize, Deserialize};
 use std::fs;
 use std::path::Path;
 use std::env;
-use std::task::{Context, Poll};
-use void::Void;
-use libp2p::swarm::{
-    NetworkBehaviour, 
-    ToSwarm, 
-    ConnectionDenied, 
-    ConnectionId, 
-    THandlerInEvent, 
-    THandlerOutEvent, 
-    dummy
-};
-use libp2p::{PeerId, Multiaddr};
-use libp2p::core::{transport::PortUse};
-
 use crate::core::types::{ByteCapacity, MeshTopic}; 
 
+/// The physical constraints governing the network's timing and safety margins.
+/// Extracted implementation logic now resides in `crate::networking::physics`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PhalanxPhysics {
     pub tau_rtt: u64,      // The fundamental independent variable
@@ -26,10 +14,7 @@ pub struct PhalanxPhysics {
 }
 
 impl PhalanxPhysics {
-    /// Provides a network configuration optimized for high-latency mobile WANs.
-    ///
-    /// Adjusts Gossipsub and Kademlia parameters (timeouts, backoffs) to 
-    /// accommodate the intermittent connectivity of cellular networks.
+    /// Optimized for high-latency mobile WANs.
     pub fn default_wan() -> Self {
         Self {
             tau_rtt: 300,
@@ -38,89 +23,23 @@ impl PhalanxPhysics {
         }
     }
 
-    // CI/Test Profile: "Slow Time" for unstable environments
+    /// Optimized for local/CI environments.
     pub fn test_profile() -> Self {
         Self {
-            tau_rtt: 50,      // Fast local network
-            delta_cpu: 100,   // BUT high CPU contention (slow runner)
-            jitter_factor: 5, // Extra safety margin
+            tau_rtt: 50,
+            delta_cpu: 100,
+            jitter_factor: 5,
         }
     }
 
-    // --- The Derived Inequalities ---
+    /// Calculates the maximum allowed time for a shard to transit the mesh.
     pub fn shard_timeout(&self) -> std::time::Duration {
         let ms = self.jitter_factor * (self.tau_rtt + self.delta_cpu);
         std::time::Duration::from_millis(ms)
     }
-
-    pub fn from_env() -> Self {
-        match env::var("PHALANX_PHYSICS_PROFILE").as_deref() {
-            Ok("LAN") => Self {
-                tau_rtt: 10,       // 10ms (Data Center / Local)
-                delta_cpu: 5,
-                jitter_factor: 3,
-            },
-            Ok("SAT") => Self {
-                tau_rtt: 1500,     // 1.5s (Starlink/Iridium edge case)
-                delta_cpu: 50,
-                jitter_factor: 2,  // Tighter margin to force efficiency
-            },
-            Ok("CHAOS") => Self {
-                tau_rtt: 500,      // Unstable Mix
-                delta_cpu: 500,    // Massive CPU contention (simulating heavy load)
-                jitter_factor: 5,  // High safety margin
-            },
-            Ok("TEST") => Self::test_profile(),
-            _ => Self::default_wan(), // Default to Standard WAN
-        }
-    }
 }
 
-// Ensure Physics can be embedded in the Swarm Behaviour
-impl NetworkBehaviour for PhalanxPhysics {
-    type ConnectionHandler = dummy::ConnectionHandler;
-    type ToSwarm = Void; 
-
-    fn handle_established_inbound_connection(
-        &mut self,
-        _connection_id: ConnectionId,
-        _peer: PeerId,
-        _local_addr: &Multiaddr,
-        _remote_addr: &Multiaddr,
-    ) -> Result<Self::ConnectionHandler, ConnectionDenied> {
-        Ok(dummy::ConnectionHandler)
-    }
-
-    fn handle_established_outbound_connection(
-        &mut self,
-        _connection_id: ConnectionId,
-        _peer: PeerId,
-        _addr: &Multiaddr,
-        _role_override: libp2p::core::Endpoint,
-        _port_use: PortUse,
-    ) -> Result<Self::ConnectionHandler, ConnectionDenied> {
-        Ok(dummy::ConnectionHandler)
-    }
-
-    fn on_connection_handler_event(
-        &mut self,
-        _peer_id: PeerId,
-        _connection_id: ConnectionId,
-        _event: THandlerOutEvent<Self>,
-    ) {
-    }
-
-    fn on_swarm_event(&mut self, _event: libp2p::swarm::FromSwarm) {
-    }
-
-    fn poll(
-        &mut self,
-        _cx: &mut Context<'_>,
-    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
-        Poll::Pending
-    }
-}
-
+/// The Root Configuration for the Phalanx Engine.
 #[derive(Debug, Deserialize, Clone)]
 pub struct PhalanxConfig {
     pub network: NetworkConfig,
@@ -130,29 +49,18 @@ pub struct PhalanxConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct NetworkConfig {
-    // --- IDENTITY ---
     #[serde(default = "default_protocol_version")]
-    pub protocol_version: String, //
-
-    // --- MESH PARAMETERS ---
-    pub max_chunk_size_bytes: usize, // Renamed from chunk_size_bytes to align with network.rs
+    pub protocol_version: String, 
+    pub max_chunk_size_bytes: usize, 
     pub video_topic: MeshTopic,
     pub audio_topic: MeshTopic,
     pub control_topic: MeshTopic,
-    
-    // Note: heartbeat_interval, pulse_timeout, and grace_period removed.
-    // They are now strictly governed by PhalanxPhysics and VitalityRate.
-    
     pub cleanup_interval_secs: u64,
-    
     #[serde(default)] 
     pub bootstrap_peers: Vec<String>,
     #[serde(default = "default_service_key")]
     pub guardian_service_key: String,
 }
-
-fn default_service_key() -> String { "phalanx/service/storage/v1".to_string() }
-fn default_protocol_version() -> String { "/phalanx/1.0.0".to_string() }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct StorageConfig {
@@ -162,16 +70,11 @@ pub struct StorageConfig {
     pub max_peers: usize,
     pub stale_session_threshold: u64,
     pub shards_needed_to_archive: usize,
-    
-    // --- GOVERNANCE QUOTAS ---
     #[serde(default = "default_max_storage")]
     pub max_storage_bytes: ByteCapacity,          
     #[serde(default = "default_max_foreign")]
     pub max_foreign_storage_bytes: ByteCapacity,  
 }
-
-fn default_max_storage() -> ByteCapacity { ByteCapacity(1_000_000_000) } 
-fn default_max_foreign() -> ByteCapacity { ByteCapacity(500_000_000) }   
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct HardwareConfig {
@@ -179,6 +82,13 @@ pub struct HardwareConfig {
     pub audio_sample_rate: u32,
     pub audio_channels: u8,
 }
+
+// --- Helper Functions and Initializers ---
+
+fn default_service_key() -> String { "phalanx/service/storage/v1".to_string() }
+fn default_protocol_version() -> String { "/phalanx/1.0.0".to_string() }
+fn default_max_storage() -> ByteCapacity { ByteCapacity(1_000_000_000) } 
+fn default_max_foreign() -> ByteCapacity { ByteCapacity(500_000_000) }   
 
 impl PhalanxConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
@@ -192,77 +102,23 @@ impl PhalanxConfig {
     }
 
     pub fn load_from_env() -> Self {
-        let path = env::var("PHALANX_CONFIG_PATH")
-            .unwrap_or_else(|_| "phalanx.toml".to_string());
-            
-        Self::load(&path).unwrap_or_else(|_| {
-            eprintln!("Config not found at {}. Loading defaults.", path);
-            Self::default()
-        })
+        let path = env::var("PHALANX_CONFIG").unwrap_or_else(|_| "phalanx.toml".to_string());
+        Self::load(path).unwrap_or_else(|_| Self::default())
     }
 
+    /// Restored: Specifically for simulation environments (src/sim.rs).
     pub fn test_defaults() -> Self {
-        Self {
-            network: NetworkConfig {
-                protocol_version: default_protocol_version(),
-                max_chunk_size_bytes: 1024,          
-                video_topic: "test/video".into(),
-                audio_topic: "test/audio".into(),
-                control_topic: "test/control".into(),
-                cleanup_interval_secs: 5,
-                bootstrap_peers: vec![],
-                guardian_service_key: "test/service/storage".to_string(),
-            },
-            storage: StorageConfig {
-                vault_path: "sim_vault".into(),
-                max_video_buffer: 10,
-                max_audio_buffer: 10,
-                max_peers: 5,
-                stale_session_threshold: 5,      
-                shards_needed_to_archive: 100,
-                max_storage_bytes: ByteCapacity(100_000_000),         
-                max_foreign_storage_bytes: ByteCapacity(50_000_000),  
-            },
-            hardware: HardwareConfig {
-                camera_fps: 10,                 
-                audio_sample_rate: 16000,
-                audio_channels: 1,
-            },
-        }
-    }
-
-    pub fn test_salvage_on_node_death() -> Self {
-        Self {
-            network: NetworkConfig {
-                protocol_version: default_protocol_version(),
-                max_chunk_size_bytes: 1024,          
-                video_topic: "test/video".into(),
-                audio_topic: "test/audio".into(),
-                control_topic: "test/control".into(),
-                cleanup_interval_secs: 1,
-                bootstrap_peers: vec![],
-                guardian_service_key: "test/service/storage".to_string(),
-            },
-            storage: StorageConfig {
-                vault_path: "sim_vault".into(),
-                max_video_buffer: 10,
-                max_audio_buffer: 10,
-                max_peers: 5,
-                stale_session_threshold: 0,      
-                shards_needed_to_archive: 1,
-                max_storage_bytes: ByteCapacity(100_000_000),
-                max_foreign_storage_bytes: ByteCapacity(50_000_000),
-            },
-            hardware: HardwareConfig {
-                camera_fps: 10,                 
-                audio_sample_rate: 16000,
-                audio_channels: 1,
-            },
-        }
+        let mut cfg = Self::default();
+        cfg.network.cleanup_interval_secs = 5; // Aggressive cleanup for tests
+        cfg
     }
 }
 
 impl Default for PhalanxConfig {
+    /// Provides the standard clinical default configuration.
+    /// 
+    /// Behavior: This implementation mirrors the structure required for 
+    /// local development, providing safe defaults for topics and buffer sizes.
     fn default() -> Self {
         Self {
             network: NetworkConfig {
@@ -282,13 +138,13 @@ impl Default for PhalanxConfig {
                 max_peers: 10,
                 stale_session_threshold: 3600,
                 shards_needed_to_archive: 10,
-                max_storage_bytes: ByteCapacity(5_000_000_000),        
-                max_foreign_storage_bytes: ByteCapacity(1_000_000_000), 
+                max_storage_bytes: default_max_storage(),
+                max_foreign_storage_bytes: default_max_foreign(),
             },
             hardware: HardwareConfig {
-                camera_fps: 30,
-                audio_sample_rate: 44100,
-                audio_channels: 2,
+                camera_fps: 10,
+                audio_sample_rate: 16000,
+                audio_channels: 1,
             },
         }
     }

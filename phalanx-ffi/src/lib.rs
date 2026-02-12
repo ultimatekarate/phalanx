@@ -1,5 +1,5 @@
 use phalanx_core::engine::PhalanxEngine;
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_char};
 use std::ffi::CStr;
 
 /// Manages the global singleton instance of the PhalanxEngine for the FFI layer.

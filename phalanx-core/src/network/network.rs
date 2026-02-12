@@ -8,7 +8,7 @@ use libp2p::{
     identity::Keypair,
 };
 use libp2p::kad::RecordKey;
-use libp2p::pnet::PreSharedKey;
+pub use libp2p::pnet::PreSharedKey;
 use futures::future::Either; // Required for Transport unification
 
 use std::error::Error;

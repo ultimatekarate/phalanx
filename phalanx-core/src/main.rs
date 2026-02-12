@@ -1,502 +1,65 @@
-use libp2p::{gossipsub, identify, kad, mdns, swarm::SwarmEvent, Swarm, futures::StreamExt};
-use phalanx::core::types::{MeshTopic, UnitInterval};
 use std::error::Error;
-use std::time::Duration;
-use tokio::select;
-use tokio::sync::mpsc;
-use std::path::Path; // Added for PSK loading
-
-// Internal Modules
-use phalanx::protocol::shards::{self, Evidence, WitnessEnvelope};
-use phalanx::hardware::{camera, audio};
-use phalanx::security::identity::{NetworkId, PhalanxIdentity};
-use phalanx::security::sentinel::{Sentinel, ControlMessage};
-use phalanx::security::e2ee;
-use phalanx::core::config::{PhalanxConfig, PhalanxPhysics};
-use phalanx::core::types::{VitalityRate};
-use phalanx::storage::guardian::Guardian;
-use phalanx::{PhalanxBehaviour, PhalanxEvent}; 
-
-// - Import new network utilities
-use phalanx::network::network::{setup_phalanx_swarm, load_swarm_key, get_storage_key};
-
+use std::path::Path;
 use tracing::info;
 
-/// The central orchestrator and state manager for a Phalanx network participant.
+// Internal Modules from Workspace
+use phalanx_core::core::config::{PhalanxConfig, PhalanxPhysics};
+use phalanx_core::engine::PhalanxEngine;
+// Corrected naming: network.rs likely defines load_swarm_key
+use phalanx_core::network::network::load_swarm_key;
+use phalanx_core::security::telemetry;
+
+/// The entry point for the Phalanx Stronghold binary.
 ///
-/// `PhalanxNode` acts as the "Central Brain" of the system. It is responsible for 
-/// managing the lifecycle of data as it transitions through three primary stages:
-///
-/// 1. **Ingress & Filtering**: It monitors the `libp2p` swarm for [`PhalanxEvent`]s. 
-///    When a data shard arrives via Gossipsub, the node validates its origin and 
-///    determines if it should be processed based on the current system load and power state.
-///
-/// 2. **Reassembly & Processing**: It delegates fragmented network data to the 
-///    [`Sentinel`]. The Sentinel uses internal [`Crucible`] logic to reassemble 
-///    shards into complete [`WitnessEnvelope`]s. This stage is where the "Identity" 
-///    of the data is verified against the project's security protocols.
-///
-/// 3. **Persistence & Governance**: Once a data unit is verified and reassembled, 
-///    it is passed to the [`Guardian`]. The Guardian acts as the "Vault," ensuring 
-///    that evidence is stored securely (using the WAL/Write-Ahead Log) and that 
-///    local storage quotas are strictly enforced to prevent disk exhaustion. 
-///
-/// Beyond network handling, `PhalanxNode` also orchestrates local hardware inputs. 
-/// It captures raw [`Evidence`] from camera and audio threads, wraps them in 
-/// signed envelopes, and "chunkifies" them for broadcast back into the mesh, 
-/// completing the loop from sensor to distributed storage.
-struct PhalanxNode {
-    /// The witness and reassembly engine.
-    sentinel: Sentinel,
-    /// The long-term storage and vault manager.
-    storage: Guardian,
-    /// The cryptographic identity of this specific node.
-    identity: PhalanxIdentity,
-    /// Global system and network settings.
-    config: PhalanxConfig,
-    /// The unique network identifier used within the libp2p swarm.
-    local_peer_id: NetworkId,
-}
-
-impl PhalanxNode {
-    /// The central brain that dispatches incoming network events to specialized protocol handlers.
-    ///
-    /// This serves as a top-level switchboard, ensuring the main orchestration loop 
-    /// remains clean and readable as the number of supported protocols grows.
-    pub fn handle_network_event(
-        &mut self, 
-        event: PhalanxEvent, 
-        swarm: &mut Swarm<PhalanxBehaviour>,
-        is_leaf: bool
-    ) {
-        match event {
-            PhalanxEvent::Gossipsub(e) => self.handle_gossipsub_event(e, is_leaf),
-            PhalanxEvent::Kademlia(e) => self.handle_kademlia_event(e, swarm),
-            PhalanxEvent::Mdns(e) => self.handle_mdns_event(e, swarm),
-            PhalanxEvent::Identify(e) => self.handle_identify_event(e, swarm),
-            _ => tracing::trace!("Received unhandled or noise network event"),
-        }
-    }
-
-    /// Processes high-volume data shards received from the Gossipsub mesh.
-    ///
-    /// It coordinates reassembly via the Sentinel and persistence via the Guardian. 
-    /// Using guard clauses here prevents deeply nested logic and improves clarity.
-    fn handle_gossipsub_event(&mut self, event: gossipsub::Event, is_leaf: bool) {
-        // Guard: Only process actual messages
-        let gossipsub::Event::Message { message, .. } = event else { return; };
-        
-        let topic = MeshTopic::new(message.topic.as_str());
-        
-        // Guard: Ensure data can be deserialized into a valid Shard
-        let Ok(chunk) = postcard::from_bytes::<shards::ShardChunk>(&message.data) else {
-            tracing::error!(?topic, "Data corruption: Failed to deserialize Gossipsub shard");
-            return;
-        };
-
-        // 1. Reassembly Logic: Sentinel uses Crucible to rebuild envelopes
-        if let Some(envelope) = self.sentinel.process_chunk(
-            chunk.clone(), 
-            &topic, 
-            &self.config, 
-            &self.identity, 
-            self.local_peer_id
-        ) {
-            // 2. Storage Logic: If complete, commit the WitnessEnvelope to the vault
-            if let Err(e) = self.storage.ingest_envelope(envelope) {
-                let err_msg = e.to_string();
-                tracing::error!(error = err_msg, "Guardian failed to persist reassembled envelope");
-            }
-        }
-
-        // 3. Governance: Always track raw chunks for quota management
-        self.storage.ingest_chunk(chunk, is_leaf);
-    }
-
-    /// Handles local peer discovery via mDNS to update the routing table.
-    fn handle_mdns_event(&self, event: mdns::Event, swarm: &mut Swarm<PhalanxBehaviour>) {
-        if let mdns::Event::Discovered(list) = event {
-            for (peer_id, multiaddr) in list {
-                tracing::debug!(%peer_id, "mDNS: Discovered local peer; updating DHT");
-                swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr);
-            }
-        }
-    }
-
-    /// Resolves external addresses and ensures proper peer identification.
-    fn handle_identify_event(&self, event: identify::Event, swarm: &mut Swarm<PhalanxBehaviour>) {
-        if let identify::Event::Received { peer_id, info, .. } = event {
-            for addr in info.listen_addrs {
-                swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
-            }
-        }
-    }
-
-    /// Sub-handler for DHT logic (Service Discovery)
-    fn handle_kademlia_event(
-        &self, 
-        event: libp2p::kad::Event, 
-        swarm: &mut Swarm<PhalanxBehaviour>
-    ) {
-        match event {
-            // Found a Service Provider (Stronghold)
-            kad::Event::OutboundQueryProgressed {
-                result: kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders { providers, key, .. })),
-                ..
-            } => {
-                // Ensure it is the correct service key
-                if key == get_storage_key() { // Updated to use imported function
-                    for peer in providers {
-                        tracing::info!(%peer, "DISCOVERY: Found Stronghold Node!");
-                        // Auto-dial to establish direct data link
-                        swarm.dial(peer).unwrap_or_else(|_| {});
-                    }
-                }
-            }
-            // Ignore other DHT events (routing updates, etc)
-            _ => {}
-        }
-    }
-    
-    /// Handler for Local Hardware Inputs (Camera/Mic)
-    fn handle_local_evidence(
-        &mut self,
-        swarm: &mut Swarm<PhalanxBehaviour>,
-        evidence: Evidence
-    ) {
-        // 1. Create Witness Envelope
-        let envelope = WitnessEnvelope::new(evidence.clone(), &self.identity, self.local_peer_id);
-        
-        // 2. Persist Locally (Always save your own data first)
-        _ = self.storage.ingest_envelope(envelope.clone());
-    
-        // 3. Select Topic
-        let topic_str = match evidence {
-            Evidence::Video(_) => &self.config.network.video_topic,
-            Evidence::Audio(_) => &self.config.network.audio_topic,
-        };
-    
-        // 4. Chunkify and Broadcast
-        if let Ok(encoded) = postcard::to_stdvec(&envelope) {
-            let chunks = shards::chunkify(
-                shards::ShardId(evidence.sequence_id().0),
-                encoded,
-                self.config.network.max_chunk_size_bytes,
-                self.identity.did.clone(),
-                shards::ChunkType::ForensicUnit
-            );
-    
-            let topic = gossipsub::IdentTopic::new(topic_str);
-            for chunk in chunks {
-                if let Ok(chunk_bytes) = postcard::to_stdvec(&chunk) {
-                    let _ = swarm.behaviour_mut().gossipsub.publish(topic.clone(), chunk_bytes);
-                }
-            }
-        }
-    }
-
-    /// Broadcast System Status
-    fn broadcast_heartbeat(&self, swarm: &mut Swarm<PhalanxBehaviour>, physics: &PhalanxPhysics) {
-        let active_tasks = (self.sentinel.video_buffers.len() + self.sentinel.audio_buffers.len()) as f32;
-        let max_capacity = self.config.storage.max_peers as f32;
-        let current_load = UnitInterval::new(active_tasks / max_capacity);
-    
-        // 2. Derive dynamic interval using unified logic
-        let vitality = VitalityRate::calculate(
-            physics, 
-            self.sentinel.power_state, 
-            current_load
-        );
-        
-        let hb = ControlMessage {
-            sender: self.local_peer_id,
-            load_factor: current_load.as_f32(), 
-            storage_remaining_mb: 1024, // Placeholder
-            heartbeat_ms: vitality.as_u64(), // Unified MS
-            is_leaf: self.sentinel.is_leaf_mode(),
-        };
-    
-        if let Ok(encoded) = postcard::to_stdvec(&hb) {
-            let topic = gossipsub::IdentTopic::new(&self.config.network.control_topic);
-            let _ = swarm.behaviour_mut().gossipsub.publish(topic, encoded);
-        }
-    }
-}
-
-// --- MAIN ENTRY POINT ---
+/// Behavior: This function initializes the logging sub-system, loads system 
+/// configuration, and boots the `PhalanxEngine`. It acts as the high-level 
+/// supervisor for the long-running async runtime.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    phalanx::core::telemetry::init_observability();
-
-    // 1. Initialization Phase
-    let config = PhalanxConfig::load_from_env();
+    // 1. Telemetry & Initialization
+    // WorkerGuard is kept in main to ensure logs flush on shutdown
+    let _guard = telemetry::init_observability();
     setup_shutdown_handler();
-    
-    let my_identity = phalanx::init_identity();
-    let sentinel = Sentinel::new(&config);
-    let storage = Guardian::new(&config.storage.vault_path, &config, my_identity.did.clone());
-    
-    // 3. SYNC TIME (Blocking or Async)
-    // We do this BEFORE starting the network to ensure we don't accept bad data.
-    println!("[PHALANX] Synchronizing Clock with NTP...");
-    let clock_ref = storage.clock.clone();
-    tokio::task::spawn_blocking(move || {
-        tokio::runtime::Handle::current().block_on(async {
-            let _ = clock_ref.synchronize().await;
-        });
-    }).await?;
 
-    // 4. SETUP NETWORK (Dependency Injection Pattern)
-    // - Use updated network API
+    // 2. Configuration Loading
+    // Resolves "no function or associated item named `load_from_env` found"
+    // Precedence: PHALANX_CONFIG_PATH -> phalanx.toml -> Default
+    let config = PhalanxConfig::load_from_env();
     let physics = PhalanxPhysics::default_wan();
     
-    // Explicitly load the PSK from disk
+    // 3. Identity & Security Setup
+    let my_identity = phalanx_core::init_identity();
     let psk_path = Path::new("swarm.key");
     let psk = load_swarm_key(psk_path);
+    let psk = psk_wrapped.map(|key| key.0);
     
     if psk.is_some() {
-        println!("[PHALANX] Joining Private Swarm (Key Loaded).");
+        info!("Joining Private Swarm (Static PSK Loaded).");
     } else {
-        println!("[PHALANX] Joining Public Swarm.");
+        info!("Joining Public Swarm (No PSK).");
     }
 
-    let mut swarm = setup_phalanx_swarm(
-        my_identity.to_libp2p_keypair(), 
-        &config,  // Pass full config
-        &physics, 
-        psk       // Pass loaded key (or None)
-    )?;
-    
-    // Bind to Random Port (Client Mode)
-    // Use Port 0 to let OS assign an available port
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    // 4. Engine Initialization
+    // Consumes the identity and config to build the background Swarm
+    let mut engine = PhalanxEngine::new(config, my_identity, physics, psk).await?;
 
-    let local_peer_id = NetworkId(*swarm.local_peer_id());
-
-    // Initialize State Bundle
-    let mut node = PhalanxNode {
-        sentinel,
-        storage,
-        identity: my_identity,
-        config: config.clone(),
-        local_peer_id,
-    };
-
-    // 2. Hardware Orchestration
-    let current_volley_id = format!("volley_{}_{}", node.identity.did.to_safe_name(), chrono::Utc::now().timestamp());
-    tracing::info!(volley = %current_volley_id, "New Forensic Volley Initialized");
-    
-    subscribe_to_topics(&mut swarm, &config);
-    let (mut video_rx, mut audio_rx) = spawn_hardware_threads(&config, current_volley_id);
-
-    // 3. Timers
-    let mut cleanup_timer = tokio::time::interval(Duration::from_secs(config.network.cleanup_interval_secs));
-    let mut discovery_timer = tokio::time::interval(Duration::from_secs(30)); // Service Discovery
-
-    // 4. Bootstrap (Optional - Add your VPS here)
-    let bootnodes: Vec<&str> = vec![]; 
-    for peer_str in bootnodes {
-        if let Ok(multiaddr) = peer_str.parse::<libp2p::Multiaddr>() {
-            tracing::info!("Bootstrapping: Dialing {}", peer_str);
-            let _ = swarm.dial(multiaddr.clone());
-            // Add to DHT
-            if let Some(libp2p::multiaddr::Protocol::P2p(peer_id)) = multiaddr.iter().last() {
-                swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr);
-            }
-        }
-    }
-    
     println!("--- PHALANX SENSOR: ONLINE (WAN + LAN) ---");
 
-    // 5. The Clean Loop
-    loop {
-        node.sentinel.update_power_strategy();
-        let is_leaf = node.sentinel.is_leaf_mode();
-        let power_state = node.sentinel.power_state;
-        let active_tasks = (node.sentinel.video_buffers.len() + node.sentinel.audio_buffers.len()) as f32;
-        let max_capacity = node.config.storage.max_peers as f32;
-    
-        // UnitInterval ensures this value is strictly between 0.0 and 1.0
-        let current_load = UnitInterval::new(active_tasks / max_capacity);
+    // 5. Execution
+    // Multiplexes hardware polling, gossipsub, and crucible reassembly
+    engine.run().await?;
 
-        // 2. Calculate next interval using the domain type logic
-        let vitality = VitalityRate::calculate(&physics, power_state, current_load); 
-        let next_heartbeat = vitality.as_duration();
-
-        select! {
-            // --- Hardware Inputs ---
-            Some(v_shard) = video_rx.recv() => {
-                node.handle_local_evidence(&mut swarm, Evidence::Video(v_shard));
-            }
-            
-            Some(a_shard) = audio_rx.recv() => {
-                node.handle_local_evidence(&mut swarm, Evidence::Audio(a_shard));
-            }
-
-            // --- Network Events ---
-            // The swarm yields events; we delegate processing to the Node struct.
-            event = swarm.select_next_some() => {
-                if let SwarmEvent::Behaviour(phalanx_event) = event {
-                    node.handle_network_event(phalanx_event, &mut swarm, is_leaf);
-                }
-            }
-
-            // --- Maintenance Timers ---
-            // 
-            _ = tokio::time::sleep(next_heartbeat) => {
-                node.broadcast_heartbeat(&mut swarm, &physics);
-
-                if current_load > UnitInterval::new(0.8) {
-                    tracing::warn!(load = %current_load, interval = ?next_heartbeat, "Node under stress: Throttling heartbeats");
-                }
-            }
-
-            _ = discovery_timer.tick() => {
-                // Periodically ask the network: "Who provides storage?"
-                let key = get_storage_key(); // Updated
-                swarm.behaviour_mut().kademlia.get_providers(key);
-            }
-
-            _ = cleanup_timer.tick() => {
-                node.sentinel.prune_stale_buffers(&node.config, &physics);
-                node.storage.archive_stale_sessions(Duration::from_secs(node.config.storage.stale_session_threshold));
-            }
-        }
-    }
+    Ok(())
 }
 
-// --- HELPERS ---
-
-fn subscribe_to_topics(swarm: &mut Swarm<PhalanxBehaviour>, config: &PhalanxConfig) {
-    let topics = [
-        &config.network.video_topic,
-        &config.network.audio_topic,
-        &config.network.control_topic,
-    ];
-
-    for t in topics {
-        // Automatically converts via the 'From' trait we implemented
-        let ident_topic: libp2p::gossipsub::IdentTopic = (*t).clone().into(); 
-        let _ = swarm.behaviour_mut().gossipsub.subscribe(&ident_topic);
-        info!(topic = %t, "Subscribed to mesh channel");
-    }
-}
-
+/// Configures global signal handlers for clean system termination.
+///
+/// Behavior: Ensures that the Guardian seals the vault and flushes the 
+/// Write-Ahead Log (WAL) before the process exits.
 fn setup_shutdown_handler() {
     ctrlc::set_handler(move || {
         println!("\n[PHALANX] Shutdown initiated. Sealing vault...");
+        // Phase 3: Engine will eventually handle graceful drops
         std::process::exit(0);
     }).expect("Error setting Ctrl-C handler");
-}
-
-/// Spawns high-priority asynchronous tasks for hardware interaction.
-/// 
-/// Returns a tuple of MPSC receivers for Video and Audio shards. 
-/// Utilizes the volley_id to tag all outgoing data for session-level 
-/// correlation within the mesh.
-fn spawn_hardware_threads(config: &PhalanxConfig, volley_id: String) -> (mpsc::Receiver<shards::VideoShard>, mpsc::Receiver<shards::AudioShard>) {
-    let (v_tx, v_rx) = mpsc::channel(64);
-    let (a_tx, a_rx) = mpsc::channel(64);
-
-    let session_key: [u8; 32] = e2ee::generate_session_key();
-    tracing::info!("E2EE Enabled. Session Key Generated.");
-
-    // FIX: Use new constructor for PhalanxCameraThread
-    let camera_thread = camera::PhalanxCameraThread::new(&config.hardware);
-    camera_thread.spawn(Some(0), v_tx, config.hardware.clone(), volley_id.clone(), Some(session_key));
-
-    let audio_thread = audio::PhalanxAudioThread::new(&config.hardware);
-    audio_thread.spawn(a_tx, config.hardware.clone(), volley_id, Some(session_key));
-
-    (v_rx, a_rx)
-}
-
-#[cfg(test)]
-mod tests {
-    use phalanx::hardware::{camera, audio};
-    use phalanx::core::config::HardwareConfig;
-    use phalanx::protocol::shards::DataPayload;
-    use phalanx::security::e2ee;
-    use tokio::sync::mpsc;
-    use std::time::Duration;
-
-    #[tokio::test]
-    async fn test_camera_thread_produces_encrypted_shards() {
-        // 1. Setup
-        let (tx, mut rx) = mpsc::channel(10);
-        let config = HardwareConfig {
-            camera_fps: 10, // Fast FPS for quick test
-            audio_sample_rate: 44100,
-            audio_channels: 2,
-        };
-        let volley_id = "test_volley".to_string();
-        let key = e2ee::generate_session_key();
-
-        // 2. Spawn Thread
-        // FIX: Use new constructor
-        let cam_thread = camera::PhalanxCameraThread::new(&config);
-        // Passing None for index forces MockCamera (via default behavior in CameraDriver)
-        cam_thread.spawn(None, tx, config, volley_id.clone(), Some(key));
-
-        // 3. Receive Shard (Wait max 2s)
-        let shard = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("Timed out waiting for camera shard")
-            .expect("Channel closed unexpectedly");
-
-        // 4. Verification
-        assert_eq!(shard.volley_id, volley_id);
-        
-        match &shard.payload {
-            DataPayload::Encrypted { nonce, ciphertext } => {
-                assert_eq!(nonce.len(), 24);
-                assert!(!ciphertext.is_empty());
-                
-                // 5. Verify Decryptability
-                let decrypted = shard.payload.decrypt(&key).expect("Failed to decrypt shard");
-                // VideoShard frames are serialized Vec<Vec<u8>>
-                let frames: Vec<Vec<u8>> = postcard::from_bytes(&decrypted).unwrap();
-                assert!(!frames.is_empty(), "Decrypted frames should not be empty");
-            },
-            DataPayload::Clear(_) => panic!("Camera thread produced CLEAR text despite having a key!"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_audio_thread_produces_encrypted_shards() {
-        // 1. Setup
-        let (tx, mut rx) = mpsc::channel(10);
-        let config = HardwareConfig {
-            camera_fps: 1, 
-            audio_sample_rate: 44100,
-            audio_channels: 2,
-        };
-        let volley_id = "test_volley_audio".to_string();
-        let key = e2ee::generate_session_key();
-
-        // 2. Spawn
-        let audio_thread = audio::PhalanxAudioThread::new(&config);
-        audio_thread.spawn(tx, config.clone(), volley_id, Some(key));
-
-        // 3. Receive
-        let shard = tokio::time::timeout(Duration::from_secs(3), rx.recv())
-            .await
-            .expect("Timed out waiting for audio shard")
-            .expect("Channel closed");
-
-        // 4. Verification
-        match &shard.payload {
-            DataPayload::Encrypted { nonce, ciphertext } => {
-                assert_eq!(nonce.len(), 24);
-                assert!(!ciphertext.is_empty());
-                
-                // 5. Verify Decryptability
-                let decrypted = shard.payload.decrypt(&key).expect("Failed to decrypt audio");
-                
-                let expected_bytes = (config.audio_sample_rate * config.audio_channels as u32 * 2) as usize;
-                assert_eq!(decrypted.len(), expected_bytes, "Shard did not contain 1 second of audio data");
-            },
-            DataPayload::Clear(_) => panic!("Audio thread produced CLEAR text despite having a key!"),
-        }
-    }
 }

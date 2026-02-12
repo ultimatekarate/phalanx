@@ -8,6 +8,7 @@ pub mod security;
 pub mod protocol;
 pub mod network;
 pub mod sim;
+pub mod engine;
 
 // 2. Re-exports
 pub use network::network::{setup_phalanx_swarm, PhalanxBehaviour, PhalanxEvent};

@@ -110,6 +110,12 @@ impl From<&PeerId> for NetworkId {
 
 // --- THE IDENTITY ---
 
+/// The sovereign cryptographic root for a Phalanx Node.
+///
+/// Constraints: Contains a `SigningKey` used for Ed25519 forensic proofs. 
+/// When transitioning to the networking layer, this must be transcoded 
+/// into a `libp2p::identity::Keypair` to ensure the NodeId matches 
+/// the forensic signature authority.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PhalanxIdentity {
     pub version: u32,         // <--- Strict Versioning
