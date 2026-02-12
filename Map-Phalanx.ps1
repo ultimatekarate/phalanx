@@ -1,9 +1,45 @@
-# Configuration
+# --- CONFIGURATION ---
 $srcPath = "src"
-$outputFile = "GEMINI_CONTEXT.md"
+$rootPath = "." 
+$roadmapRootDir = "roadmaps" # Your local root for the roadmap hierarchy
+$outputFile = "C:\Users\joevo\GoogleDrive\PROJECT_CONTEXT.md"
 $noiseTraits = "Debug|Clone|PartialEq|PartialOrd|Serialize|Deserialize|Default|Copy"
 
-$results = @("# Project API & Documentation Summary`nGenerated: $(Get-Date)`n")
+$results = @("# Project API, Documentation & Roadmap Summary`nGenerated: $(Get-Date)`n")
+
+# --- 1. INGEST CARGO.TOML ---
+$cargoPath = Join-Path $rootPath "Cargo.toml"
+if (Test-Path $cargoPath) {
+    $results += "## Project Configuration (Cargo.toml)"
+    $results += "````toml"
+    $results += Get-Content $cargoPath
+    $results += "````"
+    $results += "---`n"
+    Write-Host "Manifest Loaded." -ForegroundColor Green
+}
+
+# --- 2. INGEST ROADMAP HIERARCHY (Recursive) ---
+if (Test-Path $roadmapRootDir) {
+    $results += "## PROJECT ROADMAP HIERARCHY"
+    $results += "The following sections represent the project's strategic hierarchy. Nested paths indicate domain-specific sub-plans."
+    
+    $roadmapFiles = Get-ChildItem -Path $roadmapRootDir -Filter "*.md" -Recurse
+    foreach ($file in $roadmapFiles) {
+        # Create a breadcrumb label (e.g., roadmaps > ui > mobile-ui-roadmap.md)
+        $relativePath = $file.FullName.Replace((Get-Item $roadmapRootDir).Parent.FullName, "").TrimStart("\").Replace("\", " > ")
+        
+        $results += "### ROADMAP LOCATION: $relativePath"
+        $results += "````markdown"
+        $results += Get-Content $file.FullName
+        $results += "````"
+        $results += "---"
+    }
+    Write-Host "Roadmaps Ingested: $($roadmapFiles.Count) files mapped." -ForegroundColor Green
+} else {
+    Write-Host "Warning: Roadmap directory not found at $roadmapRootDir" -ForegroundColor Yellow
+}
+
+# --- 3. INGEST RUST SOURCE FILES ---
 $files = Get-ChildItem -Path $srcPath -Filter "*.rs" -Recurse | Where-Object { $_.FullName -notmatch "target" }
 
 foreach ($file in $files) {
@@ -19,48 +55,38 @@ foreach ($file in $files) {
         $trimmed = $line.Trim()
         if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
 
-        # 1. Collect Doc Comments
         if ($trimmed.StartsWith("///")) {
             $currentDocs += $trimmed
             continue
         }
 
-        # 2. Detect the start of a signature
         if ($trimmed -match "^(?:pub(?:\(.*\))?\s+)?(?:async\s+)?(struct|enum|trait|impl|fn)\s+") {
             $isCollectingSig = $true
             $currentSignature = $trimmed
         } 
         elseif ($isCollectingSig) {
-            $currentSignature += " " + $trimmed
+            $currentSignature += " $trimmed"
         }
 
-        # 3. Handle completion of a signature
-        if ($isCollectingSig -and ($trimmed -match "\{" -or $trimmed -match ";")) {
-            $finalSig = $currentSignature -replace '\{.*$', ''
+        if ($isCollectingSig -and ($trimmed.EndsWith("{") -or $trimmed.EndsWith(";"))) {
+            $cleanSig = $currentSignature -replace "\s+", " " -replace "\s*\{\s*$", ""
             
-            # Check for noise traits
-            $isNoise = $finalSig -match "impl\s+(?:$noiseTraits)\s+for"
-
-            if ($currentDocs.Count -eq 0 -and $finalSig -match "fn\s+") {
-                $fileSignatures += "    // MISSING DOCUMENTATION"
-            }
-            
-            if (-not $isNoise) {
-                # Add docs first, then the signature
+            if ($cleanSig -notmatch "(?:derive|impl)\s+\($noiseTraits\)") {
+                # Documentation Check
                 if ($currentDocs.Count -gt 0) {
                     $fileSignatures += $currentDocs
+                } else {
+                    $fileSignatures += "// WARNING: NO FUNCTIONAL DOCUMENTATION PROVIDED"
                 }
-                $fileSignatures += $finalSig.Trim() + ";"
-                $fileSignatures += "" # Add a newline for readability
+                
+                $fileSignatures += $cleanSig
+                $fileSignatures += ""
             }
-
             
-            # Reset state for next item
             $currentSignature = ""
             $currentDocs = @()
             $isCollectingSig = $false
         } else {
-            # If we hit a non-doc, non-sig line while not collecting, clear doc buffer
             if (-not $isCollectingSig -and -not $trimmed.StartsWith("///")) {
                 $currentDocs = @()
             }
@@ -68,7 +94,7 @@ foreach ($file in $files) {
     }
 
     if ($fileSignatures.Count -gt 0) {
-        $results += "### File: $relativePath"
+        $results += "### Source: $relativePath"
         $results += "````rust"
         $results += $fileSignatures
         $results += "````"
@@ -76,12 +102,13 @@ foreach ($file in $files) {
     }
 }
 
-# Add this to the very end of your .ps1 script
-$charCount = (Get-Item $outputFile).Length
-$estimatedTokens = [Math]::Ceiling($charCount / 4)
-Write-Host "------------------------------------"
-Write-Host "Estimated Token Count: $estimatedTokens" -ForegroundColor Yellow
-Write-Host "Status: $(if($estimatedTokens -gt 30000){"Approaching UI limits"}else{"Safe to upload"})"
+# --- 4. SAVE AND SYNC ---
+$results | Out-File -FilePath $outputFile -Encoding utf8 -Force
+(Get-Item $outputFile).LastWriteTime = Get-Date
 
-$results | Out-File -FilePath $outputFile -Encoding utf8
-Write-Host "Doc-aware context generated: $outputFile" -ForegroundColor Green
+if (Test-Path $outputFile) {
+    $charCount = (Get-Item $outputFile).Length
+    $estimatedTokens = [Math]::Ceiling($charCount / 4)
+    Write-Host "`n Phalanx Context updated with Roadmap Hierarchy." -ForegroundColor Cyan
+    Write-Host "Total Estimated Tokens: $estimatedTokens" -ForegroundColor Yellow
+}

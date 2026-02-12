@@ -69,6 +69,11 @@ mod integration_tests {
     use std::time::Duration;
 
     #[test]
+    /// Executes a comprehensive validation of the reassembly engine.
+    ///
+    /// This test simulates a fragmented network stream, pushing raw shards through
+    /// the Sentinel into the Crucible to verify that the forensic integrity of
+    /// the WitnessEnvelope remains intact after reconstruction.
     fn test_full_recursive_pipeline() {
         let mut config = PhalanxConfig::default();
         config.storage.vault_path = "./sim_vault".to_string();

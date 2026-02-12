@@ -138,7 +138,11 @@ impl<S: Mold> Crucible<S> {
         }
     }
     
-    /// Salvage Protocol: Force-finish items that have been on the workbench too long
+    /// Orchestrates the "Salvage Protocol" for the workbench.
+    /// 
+    /// Iterates through all active WorkContexts and force-seals any Accumulators 
+    /// that have exceeded the defined Duration. This ensures partial data is 
+    /// archived rather than leaked during peer disconnection.
     pub fn flush_stale(&mut self, ttl: Duration) -> Vec<S::Output> {
         let mut ready_keys = Vec::new();
         

@@ -305,7 +305,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-
+    
     println!("--- PHALANX SENSOR: ONLINE (WAN + LAN) ---");
 
     // 5. The Clean Loop
@@ -389,6 +389,11 @@ fn setup_shutdown_handler() {
     }).expect("Error setting Ctrl-C handler");
 }
 
+/// Spawns high-priority asynchronous tasks for hardware interaction.
+/// 
+/// Returns a tuple of MPSC receivers for Video and Audio shards. 
+/// Utilizes the volley_id to tag all outgoing data for session-level 
+/// correlation within the mesh.
 fn spawn_hardware_threads(config: &PhalanxConfig, volley_id: String) -> (mpsc::Receiver<shards::VideoShard>, mpsc::Receiver<shards::AudioShard>) {
     let (v_tx, v_rx) = mpsc::channel(64);
     let (a_tx, a_rx) = mpsc::channel(64);

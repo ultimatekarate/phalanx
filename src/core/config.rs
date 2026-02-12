@@ -26,7 +26,10 @@ pub struct PhalanxPhysics {
 }
 
 impl PhalanxPhysics {
-    // Production Default: Assuming standard WAN (300ms latency)
+    /// Provides a network configuration optimized for high-latency mobile WANs.
+    ///
+    /// Adjusts Gossipsub and Kademlia parameters (timeouts, backoffs) to 
+    /// accommodate the intermittent connectivity of cellular networks.
     pub fn default_wan() -> Self {
         Self {
             tau_rtt: 300,
