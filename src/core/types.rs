@@ -98,3 +98,86 @@ impl AddAssign<ByteCapacity> for ByteCapacity {
         self.0 = self.0.saturating_add(rhs.0);
     }
 }
+
+/// A type-safe wrapper for Phalanx network topics.
+/// Enforces naming conventions and prevents case-mismatch errors.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MeshTopic(String);
+
+impl MeshTopic {
+    pub fn new(name: &str) -> Self {
+        // Ensure the topic is lowercase and follows our namespace
+        let formatted = if name.starts_with("/phalanx/") {
+            name.to_lowercase()
+        } else {
+            format!("/phalanx/{}", name.to_lowercase())
+        };
+        Self(formatted)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+// Facilitate conversion to libp2p types
+impl From<MeshTopic> for libp2p::gossipsub::IdentTopic {
+    fn from(topic: MeshTopic) -> Self {
+        libp2p::gossipsub::IdentTopic::new(topic.0)
+    }
+}
+
+impl fmt::Display for MeshTopic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<&str> for MeshTopic {
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<String> for MeshTopic {
+    fn from(s: String) -> Self {
+        Self::new(&s)
+    }
+}
+
+impl PartialEq<&str> for MeshTopic {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<MeshTopic> for &str {
+    fn eq(&self, other: &MeshTopic) -> bool {
+        *self == other.0
+    }
+}
+
+impl PartialEq<String> for MeshTopic {
+    fn eq(&self, other: &String) -> bool {
+        self.0 == *other
+    }
+}
+
+impl From<MeshTopic> for String {
+    fn from(topic: MeshTopic) -> Self {
+        topic.0
+    }
+}
+
+impl From<&MeshTopic> for String {
+    fn from(topic: &MeshTopic) -> Self {
+        topic.0.clone()
+    }
+}
+
+// This specifically helps with libp2p's IdentTopic::new() requirements
+impl AsRef<str> for MeshTopic {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}

@@ -16,7 +16,7 @@ use libp2p::swarm::{
 use libp2p::{PeerId, Multiaddr};
 use libp2p::core::{transport::PortUse};
 
-use crate::core::types::ByteCapacity; 
+use crate::core::types::{ByteCapacity, MeshTopic}; 
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PhalanxPhysics {
@@ -152,9 +152,9 @@ pub struct NetworkConfig {
     pub heartbeat_interval_secs: u64,
     pub pulse_timeout_secs: u64,
     pub chunk_size_bytes: usize,
-    pub video_topic: String,
-    pub audio_topic: String,
-    pub control_topic: String,
+    pub video_topic: MeshTopic,
+    pub audio_topic: MeshTopic,
+    pub control_topic: MeshTopic,
     pub grace_period: u64,
     pub cleanup_interval_secs: u64,
     
@@ -290,9 +290,9 @@ impl Default for PhalanxConfig {
                 heartbeat_interval_secs: 30,
                 pulse_timeout_secs: 60,
                 chunk_size_bytes: 8192,
-                video_topic: "phalanx/video".to_string(),
-                audio_topic: "phalanx/audio".to_string(),
-                control_topic: "phalanx/control".to_string(),
+                video_topic: "phalanx/video".into(),
+                audio_topic: "phalanx/audio".into(),
+                control_topic: "phalanx/control".into(),
                 grace_period: 10,
                 cleanup_interval_secs: 60,
                 bootstrap_peers: vec![],

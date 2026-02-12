@@ -8,7 +8,7 @@ use crate::protocol::shards::{
     ShardId, WitnessEnvelope
 };
 
-use crate::core::types::UnitInterval;
+use crate::core::types::{MeshTopic, UnitInterval};
 
 use crate::core::config::{PhalanxPhysics, PhalanxConfig};
 use crate::security::identity::{NetworkId, PhalanxIdentity};
@@ -145,7 +145,7 @@ impl Sentinel {
     pub fn process_chunk(
         &mut self,
         chunk: ShardChunk,
-        topic: &str,
+        topic: &MeshTopic,
         config: &PhalanxConfig,
         identity: &PhalanxIdentity,
         local_peer_id: NetworkId,
@@ -156,7 +156,7 @@ impl Sentinel {
         }
 
         // 1. Route to correct buffer based on network topic
-        let is_video = topic == config.network.video_topic;
+        let is_video = topic == &config.network.video_topic;
         let buffers = if is_video {
             &mut self.video_buffers
         } else {

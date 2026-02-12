@@ -1,5 +1,5 @@
 use libp2p::{gossipsub, identify, kad, mdns, swarm::SwarmEvent, Swarm, futures::StreamExt};
-use phalanx::core::types::UnitInterval;
+use phalanx::core::types::{MeshTopic, UnitInterval};
 use std::error::Error;
 use std::time::Duration;
 use tokio::select;
@@ -14,6 +14,8 @@ use phalanx::security::e2ee;
 use phalanx::core::config::{PhalanxConfig, PhalanxPhysics};
 use phalanx::storage::guardian::Guardian;
 use phalanx::{PhalanxBehaviour, PhalanxEvent}; 
+
+use tracing::info;
 
 // --- THE STATE STRUCT ---
 // Encapsulates the "Self" so the main loop doesn't have to manage variables.
@@ -36,14 +38,14 @@ impl PhalanxNode {
         match event {
             // 1. DATA LAYER: Receive Evidence Shards
             PhalanxEvent::Gossipsub(gossipsub::Event::Message { message, .. }) => {
-                let topic_str = message.topic.as_str();
+                let topic= MeshTopic::new(message.topic.as_str());
                 
                 // Deserialize the shard
                 if let Ok(chunk) = postcard::from_bytes::<shards::ShardChunk>(&message.data) {
                     // Pass to Sentinel for Reassembly
                     if let Some(envelope) = self.sentinel.process_chunk(
                         chunk.clone(), 
-                        topic_str, 
+                        &topic, 
                         &self.config, 
                         &self.identity, 
                         self.local_peer_id
@@ -297,7 +299,10 @@ fn subscribe_to_topics(swarm: &mut Swarm<PhalanxBehaviour>, config: &PhalanxConf
     ];
 
     for t in topics {
-        let _ = swarm.behaviour_mut().gossipsub.subscribe(&gossipsub::IdentTopic::new(t));
+        // Automatically converts via the 'From' trait we implemented
+        let ident_topic: libp2p::gossipsub::IdentTopic = (*t).clone().into(); 
+        let _ = swarm.behaviour_mut().gossipsub.subscribe(&ident_topic);
+        info!(topic = %t, "Subscribed to mesh channel");
     }
 }
 

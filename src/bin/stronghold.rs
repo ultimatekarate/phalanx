@@ -8,18 +8,14 @@ use libp2p::{
 };
 
 use phalanx::{
-    storage::guardian::Guardian, 
-    security::{
-        sentinel::{Sentinel, ControlMessage},
-        identity::{
-            PhalanxIdentity,
-            NetworkId
-        }
-    },
     core::{
         config::{PhalanxConfig, PhalanxPhysics},
-        telemetry
-    }
+        telemetry, types::MeshTopic
+    }, security::{
+        identity::{
+            NetworkId, PhalanxIdentity
+        }, sentinel::{ControlMessage, Sentinel}
+    }, storage::guardian::Guardian
 };
 
 use std::error::Error;
@@ -80,12 +76,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             event = swarm.select_next_some() => {
                 match event {
                     SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(gossipsub::Event::Message { message, .. })) => {
-                        let topic_str = message.topic.as_str();
+                        let topic: MeshTopic = message.topic.as_str().into();
 
                         // Handle Evidence Chunks
-                        if topic_str != config.network.control_topic {
+                        if topic != config.network.control_topic {
                             if let Ok(chunk) = postcard::from_bytes::<phalanx::protocol::shards::ShardChunk>(&message.data) {
-                                if let Some(envelope) = sentinel.process_chunk(chunk, topic_str, &config, &identity, local_peer_id) {
+                                if let Some(envelope) = sentinel.process_chunk(chunk, &topic, &config, &identity, local_peer_id) {
                                     _ = storage.ingest_envelope(envelope);
                                 }
                             }
