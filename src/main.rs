@@ -1,4 +1,5 @@
 use libp2p::{gossipsub, identify, kad, mdns, swarm::SwarmEvent, Swarm, futures::StreamExt};
+use phalanx::core::types::UnitInterval;
 use std::error::Error;
 use std::time::Duration;
 use tokio::select;
@@ -238,11 +239,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         node.sentinel.update_power_strategy();
         let is_leaf = node.sentinel.is_leaf_mode();
         
-        let load_factor = (node.sentinel.video_buffers.len() + node.sentinel.audio_buffers.len()) as f32 
+        let raw_load = (node.sentinel.video_buffers.len() + node.sentinel.audio_buffers.len()) as f32
                     / node.config.storage.max_peers as f32;
-        let load_factor = load_factor.clamp(0.0, 1.0);
+        let load_factor = UnitInterval::new(raw_load);
 
-        let next_heartbeat = physics.heartbeat_interval(load_factor);
+        let next_heartbeat = physics.heartbeat_interval(load_factor.as_f32());
 
         select! {
             // --- Hardware Inputs ---

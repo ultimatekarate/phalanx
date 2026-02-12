@@ -8,6 +8,8 @@ use crate::protocol::shards::{
     ShardId, WitnessEnvelope
 };
 
+use crate::core::types::UnitInterval;
+
 use crate::core::config::{PhalanxPhysics, PhalanxConfig};
 use crate::security::identity::{NetworkId, PhalanxIdentity};
 
@@ -90,6 +92,7 @@ pub struct Sentinel {
     pub health_tracker: HealthTracker,
     pub peer_registry: Vec<NetworkId>,
     pub power_state: PowerState,
+    pub battery_level: UnitInterval,
 }
 
 impl Sentinel {
@@ -100,13 +103,14 @@ impl Sentinel {
             health_tracker: HealthTracker::new(),
             peer_registry: Vec::new(),
             power_state: PowerState::Normal,
+            battery_level: UnitInterval::new(1.0),
         }
     }
 
     // Automatically adjusts the internal PowerState based on environmental data.
     pub fn update_power_strategy(&mut self) {
         let battery = self.get_system_battery();
-        let target_state = if battery < 0.15 {
+        let target_state = if battery.is_critical() {
             PowerState::Leaf
         } else {
             PowerState::Normal
@@ -123,10 +127,10 @@ impl Sentinel {
         self.power_state == PowerState::Leaf
     }
 
-    fn get_system_battery(&self) -> f32 {
+    fn get_system_battery(&self) -> UnitInterval {
         // Current Simulation: 80% (Normal Mode)
         // Change to < 0.15 to test Leaf Mode logic.
-        0.80 
+        UnitInterval::new(0.80) 
     }
 
     pub fn set_power_state(&mut self, state: PowerState) {
