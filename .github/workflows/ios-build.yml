@@ -2,9 +2,9 @@ name: iOS Cross-Compilation
 
 on:
   push:
-    branches: [ "main", "phase2-cleanup" ]
+    branches: [ "master" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "master" ]
 
 jobs:
   build-ios:
