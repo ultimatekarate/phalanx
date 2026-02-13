@@ -44,10 +44,12 @@ pub const DLMALLOC_INIT: Dlmalloc = Dlmalloc(dlmalloc::DLMALLOC_INIT);
 #[path = "wasm.rs"]
 mod sys;
 
-#[cfg(target_os = "macos")]
+// Cross compile hack
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 #[path = "macos.rs"]
 mod sys;
 
+// Another cross compile hack
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[path = "linux.rs"]
 mod sys;

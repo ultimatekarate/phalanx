@@ -3,6 +3,9 @@ use std::ffi::CStr;
 use std::ptr;
 use phalanx_core::engine::PhalanxEngine;
 
+#[cfg(target_os = "android")]
+pub mod jni;
+
 #[no_mangle]
 pub extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut PhalanxEngine {
     if storage_path.is_null() {
