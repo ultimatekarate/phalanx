@@ -31,7 +31,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let my_identity = phalanx_core::init_identity();
     let psk_path = Path::new("swarm.key");
     let psk = load_swarm_key(psk_path);
-    let psk = psk_wrapped.map(|key| key.0);
     
     if psk.is_some() {
         info!("Joining Private Swarm (Static PSK Loaded).");
@@ -41,7 +40,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // 4. Engine Initialization
     // Consumes the identity and config to build the background Swarm
-    let mut engine = PhalanxEngine::new(config, my_identity, physics, psk).await?;
+    let mut engine = PhalanxEngine::new(config, my_identity, physics, psk)?;
 
     println!("--- PHALANX SENSOR: ONLINE (WAN + LAN) ---");
 

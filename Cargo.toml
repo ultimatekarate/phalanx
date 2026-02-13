@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "phalanx-core",
+    "phalanx-ffi",
+]
+
+[workspace.dependencies]
+tokio = { version = "1.49", features = ["full"] }
+libp2p = { version = "0.56", features = ["gossipsub", "kad", "tcp", "noise", "yamux"] }
+postcard = { version = "1.1.3", features = ["alloc"] }
+tracing = "0.1.44"

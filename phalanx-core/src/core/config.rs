@@ -112,6 +112,14 @@ impl PhalanxConfig {
         cfg.network.cleanup_interval_secs = 5; // Aggressive cleanup for tests
         cfg
     }
+
+    pub fn test_salvage_on_node_death() -> Self {
+        let mut cfg = Self::default();
+        cfg.storage.vault_path = "sim_vault".to_string();
+        // Aggressive cleanup to trigger salvage within the test's sleep window
+        cfg.network.cleanup_interval_secs = 1; 
+        cfg
+    }
 }
 
 impl Default for PhalanxConfig {

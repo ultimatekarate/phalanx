@@ -1,33 +1,42 @@
-use phalanx_core::engine::PhalanxEngine;
-use std::os::raw::{c_char};
+use std::os::raw::{c_char, c_int};
 use std::ffi::CStr;
-
-/// Manages the global singleton instance of the PhalanxEngine for the FFI layer.
-/// This pointer is opaque to the host language and must be passed back 
-/// to all engine-dependent functions.
-pub struct OpaqueEngine(*mut PhalanxEngine);
+use std::ptr;
+use phalanx_core::engine::PhalanxEngine;
 
 #[no_mangle]
-pub extern "C" fn phalanx_init_engine(identity_path: *const c_char) -> *mut PhalanxEngine {
-    // 1. Safety check for null pointer
-    if identity_path.is_null() { return std::ptr::null_mut(); }
-    
-    // 2. Convert C-string to Rust path
-    let c_str = unsafe { CStr::from_ptr(identity_path) };
-    let path = match c_str.to_str() {
+pub extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut PhalanxEngine {
+    if storage_path.is_null() {
+        return ptr::null_mut();
+    }
+
+    // Safely convert C string to Rust string
+    let c_str = unsafe { CStr::from_ptr(storage_path) };
+    let path_str = match c_str.to_str() {
         Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
+        Err(_) => return ptr::null_mut(), // Invalid UTF-8
     };
 
-    // 3. Initialize engine (Simplified for sync FFI example)
-    // Note: In Phase 3, we wrap the engine in a Runtime handle to manage async tasks.
-    let engine = PhalanxEngine::new_at_path(path);
-    Box::into_raw(Box::new(engine))
+    // Initialize the engine (Synchronously)
+    match PhalanxEngine::new_at_path(path_str) {
+        Ok(engine) => {
+            // Success: Move engine to heap and return raw pointer
+            Box::into_raw(Box::new(engine))
+        },
+        Err(e) => {
+            // Failure: Log error and return Null
+            eprintln!("Failed to init Phalanx Engine: {}", e);
+            ptr::null_mut()
+        }
+    }
 }
 
 #[no_mangle]
-pub extern "C" fn phalanx_free_engine(engine: *mut PhalanxEngine) {
-    if !engine.is_null() {
-        unsafe { drop(Box::from_raw(engine)); }
+pub extern "C" fn phalanx_engine_free(ptr: *mut PhalanxEngine) {
+    if ptr.is_null() {
+        return;
+    }
+    // Take ownership back to Rust to drop it safely
+    unsafe {
+        let _ = Box::from_raw(ptr);
     }
 }
