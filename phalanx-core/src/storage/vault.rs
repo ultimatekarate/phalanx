@@ -1,10 +1,10 @@
-use crate::core::types::{ByteCapacity, TrafficGovernor};
-use crate::protocol::shards::{StorageSequence, Evidence, WitnessEnvelope, ShardChunk};
+use crate::base::types::{ByteCapacity, TrafficGovernor};
+use crate::primitives::shards::{StorageSequence, Evidence, WitnessEnvelope, ShardChunk};
 use crate::storage::crucible::{Crucible};
 use crate::storage::strategies::{ShardAmalgam, VolleyAmalgam, Volley}; 
-use crate::core::config::PhalanxConfig;
-use crate::security::identity::Did;
-use crate::security::time::TrustedClock;
+use crate::base::config::PhalanxConfig;
+use crate::primitives::identity::Did;
+use crate::primitives::time::TrustedClock;
 
 use std::collections::{HashSet, HashMap};
 use std::fs::{self, File};
@@ -222,9 +222,9 @@ impl Guardian {
         // 1. SYNC STATE
         // Ensure Governor matches the Sentinel's decision from the main loop
         if is_leaf_mode {
-            self.governor.set_state(crate::core::types::PowerState::Leaf);
+            self.governor.set_state(crate::base::types::PowerState::Leaf);
         } else {
-            self.governor.set_state(crate::core::types::PowerState::Normal);
+            self.governor.set_state(crate::base::types::PowerState::Normal);
         }
 
         // 2. CENTRALIZED SECURITY CHECK
@@ -504,9 +504,9 @@ impl Guardian {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::config::{StorageConfig, NetworkConfig, HardwareConfig};
-    use crate::security::identity::{PhalanxIdentity, NetworkId};
-    use crate::protocol::shards;
+    use crate::base::config::{StorageConfig, NetworkConfig, HardwareConfig};
+    use crate::primitives::identity::{PhalanxIdentity, NetworkId};
+    use crate::primitives::shards;
     use std::fs::File;
     use std::io::Write;
 
@@ -718,7 +718,7 @@ mod tests {
 
         // 1. Send multiple invalid signatures
         for _ in 0..6 {
-            let shard = crate::protocol::shards::create_video_shard(
+            let shard = crate::primitives::shards::create_video_shard(
                 vec![vec![1]], StorageSequence(1), 30, "v1".into()
             );
             let mut envelope = WitnessEnvelope::new(Evidence::Video(shard), &vampire, NetworkId::random());
@@ -738,8 +738,8 @@ mod tests {
 #[cfg(test)]
 mod guardian_leaf_tests {
     use super::*;
-    use crate::security::identity::{PhalanxIdentity, NetworkId};
-    use crate::protocol::shards::{self, ShardId, StorageSequence, Evidence, WitnessEnvelope, ChunkType};
+    use crate::primitives::identity::{PhalanxIdentity, NetworkId};
+    use crate::primitives::shards::{self, ShardId, StorageSequence, Evidence, WitnessEnvelope, ChunkType};
 
     #[tokio::test] // Use tokio::test for Instant::now() compatibility
     async fn test_guardian_leaf_mode_ingestion() {

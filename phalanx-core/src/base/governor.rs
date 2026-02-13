@@ -1,6 +1,12 @@
 use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskCost {
+    Light, // e.g., signature verification
+    Heavy, // e.g., FFTs, video encoding
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemStress {
     Nominal,    // Cool & Charged. Full Speed.
     Fair,       // Warm or < 50% Battery. Throttle background tasks.
@@ -34,6 +40,27 @@ impl SystemGovernor {
         *self.current_state.write().unwrap() = new_state;
     }
 
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn get_thermal_status(&self) -> SystemStress {
+        SystemStress::Nominal // Desktops/Strongholds rarely throttle
+    }
+
+    fn get_battery_status(&self) -> SystemStress {
+        // Placeholder for cross-platform battery crate or native bridge
+        SystemStress::Nominal
+    }
+
+    #[cfg(target_os = "android")]
+    fn get_thermal_status(&self) -> SystemStress {
+        // TODO: In Phase 3, we'll link this to a JNI call to PowerManager
+        SystemStress::Nominal 
+    }
+
+    #[cfg(target_os = "ios")]
+    fn get_thermal_status(&self) -> SystemStress {
+        // TODO: Map to NSProcessInfo.thermalState
+        SystemStress::Nominal
+    }
     // Platform-Specific Logic (Simplified)
     #[cfg(target_os = "android")]
     fn get_thermal_status(&self) -> SystemStress {

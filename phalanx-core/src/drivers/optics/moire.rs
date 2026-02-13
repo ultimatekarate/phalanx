@@ -38,3 +38,4 @@ pub fn detect_moire(img: &DynamicImage) -> f32 {
     score
 }
 
+

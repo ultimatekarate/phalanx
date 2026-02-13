@@ -3,12 +3,12 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn, debug, span, Level};
 use std::sync::Arc;
 
-use crate::security::identity::{PhalanxIdentity, Did, NetworkId};
+use crate::primitives::identity::{PhalanxIdentity, Did, NetworkId};
 use crate::security::sentinel::{Sentinel, ControlMessage};
-use crate::core::types::{UnitInterval, VitalityRate, PowerState};
-use crate::storage::guardian::Guardian;
-use crate::core::config::{PhalanxConfig, PhalanxPhysics};
-use crate::protocol::shards::ShardChunk;
+use crate::base::types::{UnitInterval, VitalityRate, PowerState};
+use crate::storage::vault::Guardian;
+use crate::base::config::{PhalanxConfig, PhalanxPhysics};
+use crate::primitives::shards::ShardChunk;
 
 #[derive(Clone)]
 pub enum SimEvent {
@@ -193,7 +193,7 @@ async fn test_salvage_on_node_death() {
 
     use tokio::time::Duration;
     use tracing::{info};
-    use crate::protocol::shards::{create_video_shard, Evidence, WitnessEnvelope, ChunkType};
+    use crate::primitives::shards::{create_video_shard, Evidence, WitnessEnvelope, ChunkType};
     
     // 1. CONFIGURATION
     let config = PhalanxConfig::test_salvage_on_node_death();
@@ -213,7 +213,7 @@ async fn test_salvage_on_node_death() {
     
     // We generate a separate identity to sign the data. 
     // This represents the "User" of the smashed device node.
-    let (victim_identity, _) = crate::security::identity::PhalanxIdentity::generate(); 
+    let (victim_identity, _) = crate::primitives::identity::PhalanxIdentity::generate(); 
     let victim_did = victim_identity.did.clone();
 
     // FIX: Use constructor instead of struct init
@@ -236,8 +236,8 @@ async fn test_salvage_on_node_death() {
     let serialized_envelope = postcard::to_stdvec(&envelope).expect("Failed to serialize envelope");
     
     // Chunkify the ENVELOPE bytes
-    let chunks = crate::protocol::shards::chunkify(
-        crate::protocol::shards::ShardId(999), 
+    let chunks = crate::primitives::shards::chunkify(
+        crate::primitives::shards::ShardId(999), 
         serialized_envelope, 
         10, 
         victim_did.clone(),
@@ -291,8 +291,8 @@ async fn test_salvage_on_node_death() {
 
 #[tokio::test]
 async fn test_out_of_sequence_salvage_on_node_death() {
-    use crate::protocol::shards::{self, StorageSequence, Evidence, WitnessEnvelope};
-    use crate::security::identity::NetworkId;
+    use crate::primitives::shards::{self, StorageSequence, Evidence, WitnessEnvelope};
+    use crate::primitives::identity::NetworkId;
     
     let (identity, _) = PhalanxIdentity::generate();
     let peer_id = NetworkId::random(); 
@@ -335,7 +335,7 @@ async fn test_out_of_sequence_salvage_on_node_death() {
         assert_eq!(seq.0, i as u32, "Sequence gap detected at index {}", i);
         let env = session.get(seq).unwrap();
         if let Evidence::Video(ref v) = env.evidence {
-            if let crate::protocol::shards::DataPayload::Clear(bytes) = &v.payload {
+            if let crate::primitives::shards::DataPayload::Clear(bytes) = &v.payload {
                 let recovered: Vec<Vec<u8>> = postcard::from_bytes(bytes).unwrap();
                 assert_eq!(recovered[0][0], i as u8, "Data mismatch at sequence {}", i);
             }
@@ -345,8 +345,8 @@ async fn test_out_of_sequence_salvage_on_node_death() {
 
 #[tokio::test]
 async fn test_stronghold_crash_recovery() {
-    use crate::protocol::shards::{self, StorageSequence, Evidence, WitnessEnvelope};
-    use crate::security::identity::NetworkId;
+    use crate::primitives::shards::{self, StorageSequence, Evidence, WitnessEnvelope};
+    use crate::primitives::identity::NetworkId;
     
     let config = PhalanxConfig::default();
     let vault_path = "sim_vault/crash_test";
@@ -380,7 +380,7 @@ async fn test_stronghold_crash_recovery() {
         .expect("Guardian failed to recover specific shard 101 from WAL");
 
     if let Evidence::Video(ref v) = recovered_env.evidence {
-        if let crate::protocol::shards::DataPayload::Clear(bytes) = &v.payload {
+        if let crate::primitives::shards::DataPayload::Clear(bytes) = &v.payload {
             let recovered: Vec<Vec<u8>> = postcard::from_bytes(bytes).unwrap();
             assert_eq!(recovered[0][0], 0xAA);
         }
@@ -390,7 +390,7 @@ async fn test_stronghold_crash_recovery() {
 #[tokio::test]
 async fn test_leaf_mode_isolation() {
 
-    use crate::protocol::shards::{self, StorageSequence};
+    use crate::primitives::shards::{self, StorageSequence};
 
     let (me, _) = PhalanxIdentity::generate();
     let (stranger, _) = PhalanxIdentity::generate();
@@ -420,7 +420,7 @@ async fn test_leaf_mode_isolation() {
 
 #[tokio::test]
 async fn test_vampire_attack_defense() {
-    use crate::protocol::shards::{create_video_shard, Evidence, WitnessEnvelope, StorageSequence};
+    use crate::primitives::shards::{create_video_shard, Evidence, WitnessEnvelope, StorageSequence};
     
     // 1. Setup mesh with standard physics.
     let config = PhalanxConfig::test_defaults();
@@ -442,12 +442,12 @@ async fn test_vampire_attack_defense() {
         // TAMPER: Invalidate signature by changing payload after signing.
         if let Evidence::Video(ref mut v) = envelope.evidence { v.fps = 145; }
 
-        let chunk = crate::protocol::shards::chunkify(
-            crate::protocol::shards::ShardId(i as u32), 
+        let chunk = crate::primitives::shards::chunkify(
+            crate::primitives::shards::ShardId(i as u32), 
             postcard::to_stdvec(&envelope).unwrap(), 
             100, 
             attacker_did.clone(),
-            crate::protocol::shards::ChunkType::Witnessed
+            crate::primitives::shards::ChunkType::Witnessed
         );
 
         harness.broadcast(&attacker_did, SimEvent::Chunk(attacker_net_id, chunk[0].clone())).await;

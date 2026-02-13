@@ -5,8 +5,8 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn, error};
 
 // Bridge Imports
-use crate::protocol::shards::{self, VideoShard, StorageSequence};
-use crate::core::config::HardwareConfig;
+use crate::primitives::shards::{self, VideoShard, StorageSequence};
+use crate::base::config::HardwareConfig;
 
 /// Represents a raw frame captured from the sensor.
 /// The "Truth" from the hardware before sharding/encryption.

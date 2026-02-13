@@ -2,7 +2,7 @@ use serde::{Serialize, Deserialize};
 use std::fs;
 use std::path::Path;
 use std::env;
-use crate::core::types::{ByteCapacity, MeshTopic}; 
+use crate::base::types::{ByteCapacity, MeshTopic}; 
 
 /// The physical constraints governing the network's timing and safety margins.
 /// Extracted implementation logic now resides in `crate::networking::physics`.

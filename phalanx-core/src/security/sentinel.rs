@@ -3,15 +3,15 @@ use std::collections::HashMap;
 use tokio::time::Instant;
 use tracing::{info, warn, debug, instrument};
 
-use crate::protocol::shards::{
+use crate::primitives::shards::{
     Evidence, VideoShard, AudioShard, ReassemblyBuffer, ShardChunk, 
     ShardId, WitnessEnvelope, ChunkType
 };
 
-use crate::core::types::{MeshTopic, PowerState, TrafficGovernor, UnitInterval, VitalityRate};
+use crate::base::types::{MeshTopic, PowerState, TrafficGovernor, UnitInterval, VitalityRate};
 
-use crate::core::config::{PhalanxPhysics, PhalanxConfig};
-use crate::security::identity::{NetworkId, PhalanxIdentity};
+use crate::base::config::{PhalanxPhysics, PhalanxConfig};
+use crate::primitives::identity::{NetworkId, PhalanxIdentity};
 
 // =====================
 // HEALTH & CAPACITY

@@ -5,8 +5,8 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn, error};
 
 // Bridge Imports
-use crate::protocol::shards::{self, AudioShard, StorageSequence};
-use crate::core::config::HardwareConfig;
+use crate::primitives::shards::{self, AudioShard, StorageSequence};
+use crate::base::config::HardwareConfig;
 
 /// Represents a raw audio buffer captured from the microphone.
 #[derive(Debug, Clone)]

@@ -44,3 +44,4 @@ pub fn decrypt_bytes(key: &[u8; 32], nonce: &[u8], ciphertext: &[u8]) -> Result<
         .map_err(|_| CryptoError::DecryptionFailure)
 }
 
+

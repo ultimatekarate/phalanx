@@ -8,7 +8,7 @@ use std::fmt;
 use serde::{Serialize, Deserialize};
 use image::{DynamicImage, ImageFormat}; 
 
-use crate::security::identity::{PhalanxIdentity, Did, NetworkId};
+use crate::primitives::identity::{PhalanxIdentity, Did, NetworkId};
 use crate::security::e2ee;
 
 // =====================

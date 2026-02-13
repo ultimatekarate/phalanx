@@ -17,8 +17,8 @@ use std::path::Path;
 use std::fs;
 
 // Domain Imports
-use crate::core::config::{PhalanxConfig, PhalanxPhysics};
-use crate::core::types::{UnitInterval, VitalityRate, PowerState};
+use crate::base::config::{PhalanxConfig, PhalanxPhysics};
+use crate::base::types::{UnitInterval, VitalityRate, PowerState};
 
 // --- CONSTANTS ---
 pub type PhalanxKadStore = kad::store::MemoryStore;
