@@ -3482,6 +3482,7 @@ dependencies = [
  "libc",
  "phalanx-core",
  "postcard",
+ "tokio",
 ]
 
 [[package]]

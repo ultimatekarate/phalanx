@@ -2,7 +2,6 @@
 name = "phalanx-ffi"
 version = "0.1.0"
 edition = "2021"
-publish = false
 
 [lib]
 # "cdylib" is required for dynamic linking with Dart (Flutter) or Swift.
@@ -11,7 +10,7 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 # Link to the sibling crate in the workspace
 phalanx-core = { path = "../phalanx-core" }
-
+tokio = { version = "1.0", features = ["full"] }
 # FFI helper crates for clinical memory safety
 libc = "0.2"
 # Required for passing complex types to the Mobile UI safely
