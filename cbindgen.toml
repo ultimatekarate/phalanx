@@ -1,0 +1,19 @@
+after_includes = "typedef struct PhalanxEngine PhalanxEngine;"
+# The language to generate headers for
+language = "C"
+
+# Formatting options
+line_length = 100
+tab_width = 4
+style = "type"
+
+# Phalanx Specifics
+[parse]
+parse_deps = true
+include = ["phalanx-ffi"] # Only scan the FFI crate
+
+[export]
+
+[defines]
+"target_os = ios" = "PHALANX_IOS"
+"target_os = android" = "PHALANX_ANDROID"
