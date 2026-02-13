@@ -1452,8 +1452,6 @@ dependencies = [
 [[package]]
 name = "gear-dlmalloc"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b88fcd5524e7ab9f156c17b14e754d6ba122ef9b00586d632d2ae3dbc7bfadb"
 dependencies = [
  "libc",
  "libc-print",
