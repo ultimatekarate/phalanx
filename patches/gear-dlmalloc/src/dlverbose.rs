@@ -1,4 +1,5 @@
 use core::fmt::Arguments;
+use core::ptr::addr_of_mut;
 
 pub static DL_DEBUG: bool = cfg!(feature = "debug");
 pub static DL_CHECKS: bool = cfg!(feature = "checks");
@@ -42,9 +43,11 @@ static mut OUT_BUFFER: StaticStr = StaticStr::new();
 #[inline(never)]
 pub fn dlprint_fn(args: Arguments<'_>) {
     unsafe {
-        core::fmt::write(&mut OUT_BUFFER, args).unwrap();
-        ext::debug(&OUT_BUFFER, OUT_BUFFER.len());
-        OUT_BUFFER.set_len(0);
+        // Rust is ridiculous some times. Look at this pointer bullshit.
+        let buffer_ptr = addr_of_mut!(OUT_BUFFER);
+        core::fmt::write(&mut *buffer_ptr, args).expect("Failed to write to OUT_BUFFER");
+        ext::debug(&(*buffer_ptr), (*buffer_ptr).len());
+        (*buffer_ptr).set_len(0);
     }
 }
 
@@ -52,8 +55,11 @@ pub fn dlprint_fn(args: Arguments<'_>) {
 /// What is the out stream defines in @ext module.
 #[inline(never)]
 pub fn dlwrite_fn(args: Arguments<'_>) {
+    // I signed up for this. If I didn't want to worry about memory I would
+    // have written this in python.
     unsafe {
-        core::fmt::write(&mut OUT_BUFFER, args).unwrap();
+        let buffer_ptr = addr_of_mut!(OUT_BUFFER);
+        core::fmt::write(&mut *buffer_ptr, args).expect("Failed to write to OUT_BUFFER");
     }
 }
 

@@ -1,7 +1,7 @@
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_char};
 use std::ffi::CStr;
 use std::ptr;
-use phalanx_core::engine::PhalanxEngine;
+use phalanx_core::base::engine::PhalanxEngine;
 
 #[cfg(target_os = "android")]
 pub mod jni;

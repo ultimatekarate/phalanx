@@ -5,6 +5,7 @@ pub mod base {
     pub mod types;
     pub mod config;
     pub mod governor;
+    pub mod engine;
 }
 
 // --- 2. PRIMITIVES ---
@@ -30,6 +31,7 @@ pub mod transport {
 pub mod security {
     pub mod e2ee;
     pub mod sentinel;
+    pub mod telemetry;
 }
 
 // --- 6. DRIVERS (Conditional) ---
@@ -66,6 +68,5 @@ pub fn init_identity() -> PhalanxIdentity {
 #[cfg(test)]
 mod integration_tests {
     // Note the path change: storage::vault instead of storage::guardian
-    use crate::storage::vault::Guardian; 
-    // ... (Keep the rest of your test logic)
+    // use crate::storage::vault::Guardian; 
 }

@@ -3,10 +3,10 @@ use std::path::Path;
 use tracing::info;
 
 // Internal Modules from Workspace
-use phalanx_core::core::config::{PhalanxConfig, PhalanxPhysics};
-use phalanx_core::engine::PhalanxEngine;
+use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
+use phalanx_core::base::engine::PhalanxEngine;
 // Corrected naming: network.rs likely defines load_swarm_key
-use phalanx_core::network::network::load_swarm_key;
+use phalanx_core::transport::swarm::load_swarm_key;
 use phalanx_core::security::telemetry;
 
 /// The entry point for the Phalanx Stronghold binary.

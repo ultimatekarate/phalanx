@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+// use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskCost {
@@ -6,12 +6,12 @@ pub enum TaskCost {
     Heavy, // e.g., FFTs, video encoding
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SystemStress {
-    Nominal,    // Cool & Charged. Full Speed.
-    Fair,       // Warm or < 50% Battery. Throttle background tasks.
-    Serious,    // Hot or < 20% Battery. Stop all forensics.
-    Critical,   // Melting or < 5% Battery. Emergency shutdown.
+    Nominal,    // 0, Cool & Charged. Full Speed.
+    Fair,       // 1, Warm or < 50% Battery. Throttle background tasks.
+    Serious,    // 2, Hot or < 20% Battery. Stop all forensics.
+    Critical,   // 3, Melting or < 5% Battery. Emergency shutdown.
 }
 
 pub struct SystemGovernor {

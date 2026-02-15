@@ -1,5 +1,6 @@
 use core::alloc::{GlobalAlloc, Layout};
 use core::ops::{Deref, DerefMut};
+use core::ptr::addr_of_mut;
 
 use Dlmalloc;
 
@@ -48,13 +49,13 @@ unsafe fn get() -> Instance {
 impl Deref for Instance {
     type Target = Dlmalloc;
     fn deref(&self) -> &Dlmalloc {
-        unsafe { &DLMALLOC }
+        unsafe { &*addr_of_mut!(DLMALLOC) }
     }
 }
 
 impl DerefMut for Instance {
     fn deref_mut(&mut self) -> &mut Dlmalloc {
-        unsafe { &mut DLMALLOC }
+        unsafe { &mut *addr_of_mut!(DLMALLOC) }
     }
 }
 

@@ -3,12 +3,12 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn, debug, span, Level};
 use std::sync::Arc;
 
-use crate::primitives::identity::{PhalanxIdentity, Did, NetworkId};
-use crate::security::sentinel::{Sentinel, ControlMessage};
-use crate::base::types::{UnitInterval, VitalityRate, PowerState};
-use crate::storage::vault::Guardian;
-use crate::base::config::{PhalanxConfig, PhalanxPhysics};
-use crate::primitives::shards::ShardChunk;
+use phalanx_core::primitives::identity::{PhalanxIdentity, Did, NetworkId};
+use phalanx_core::security::sentinel::{Sentinel, ControlMessage};
+use phalanx_core::base::types::{UnitInterval, VitalityRate, PowerState};
+use phalanx_core::storage::vault::Guardian;
+use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
+use phalanx_core::primitives::shards::ShardChunk;
 
 #[derive(Clone)]
 pub enum SimEvent {
@@ -103,11 +103,11 @@ impl SimulationHarness {
             let mut cleanup_tick = tokio::time::interval(physics.shard_timeout());
 
             loop {
+                // Determine load for Vitality rate
                 let micro_load = storage.micro_layer.len() as f32 / (config.storage.max_peers * 5) as f32;
                 let macro_load = storage.macro_layer.len() as f32 / config.storage.max_peers as f32;
                 
                 let load = UnitInterval::new(micro_load + macro_load);
-                // Derive the dynamic interval based on this stress factor.
                 let vitality = VitalityRate::calculate(&physics, PowerState::Normal, load);
                 let current_interval = vitality.as_duration();
 
@@ -116,8 +116,8 @@ impl SimulationHarness {
                         let msg = ControlMessage {
                             sender: node_network_id,
                             load_factor: load.as_f32(),
-                            storage_remaining_mb: 1024, // Placeholder for Disk I/O check
-                            heartbeat_ms: current_interval.as_millis() as u64, // The Vitality Contract
+                            storage_remaining_mb: 1024,
+                            heartbeat_ms: current_interval.as_millis() as u64,
                             is_leaf: false
                         };
                         if let Ok(data) = postcard::to_stdvec(&msg) {
@@ -134,7 +134,6 @@ impl SimulationHarness {
                         match event {
                             SimEvent::Shutdown => break,
                             SimEvent::Chunk(source_peer, chunk) => {
-                                // 1. If I am the source, I must Witness it (Sign & Store)
                                 if source_peer == node_network_id {
                                     debug!("Processing self-generated chunk");
                                     if let Some(envelope) = sentinel.process_chunk(chunk, &config.network.video_topic, &config, &identity, node_network_id) {
@@ -144,17 +143,12 @@ impl SimulationHarness {
                                     }
                                 } else {
                                     info!(source = %source_peer, "Ingesting foreign chunk (Salvage)");
-                                    // 2. If a Peer sent it, I must Salvage it (Store Only)
-                                    // Bypassing Sentinel prevents re-signing the data as my own.
-                                    // This assumes the chunk contains a fragment of a valid WitnessEnvelope.
-                                    // Assume we are not in leaf mode
                                     let is_leaf_mode = false;
                                     storage.ingest_chunk(chunk, is_leaf_mode);
                                 }
                             }
                             SimEvent::Heartbeat(_source_peer, data) => {
                                 if let Ok(msg) = postcard::from_bytes::<ControlMessage>(&data) {
-                                    // Sentinel now tracks vitality based on the peer's reported interval.
                                     sentinel.health_tracker.register_activity(msg);
                                 }
                             }
@@ -178,24 +172,47 @@ impl SimulationHarness {
     }
 }
 
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter("phalanx_core=debug,info")
+        .init();
+    
+    info!("Starting Phalanx Simulation Sandbox...");
+    
+    let config = PhalanxConfig::test_defaults();
+    let physics = PhalanxPhysics::test_profile();
+    let (mut harness, relay_rx) = SimulationHarness::init_mesh(config, physics);
+    
+    let nodes_ref = Arc::clone(&harness.nodes);
+    tokio::spawn(async move { 
+        SimulationHarness::run_mesh_relay(nodes_ref, relay_rx).await 
+    });
+
+    let _node_a = harness.spawn_node("Alpha").await;
+    let _node_b = harness.spawn_node("Beta").await;
+
+    // Run for a bit then exit
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    info!("Simulation complete.");
+}
+
+// TESTS ======================================================================
+
 #[tokio::test]
 async fn test_salvage_on_node_death() {
-
-    use crate::protocol;
+    use tokio::time::Duration;
+    use tracing::{info};
+    use phalanx_core::primitives::shards::{create_video_shard, Evidence, WitnessEnvelope, ChunkType};
+    use phalanx_core::primitives as protocol;
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter("phalanx=debug,info")
         .try_init();
 
-    // 1. SETUP
     let _ = std::fs::remove_dir_all("sim_vault/VictimDevice");
     let _ = std::fs::remove_dir_all("sim_vault/GuardianDevice");
 
-    use tokio::time::Duration;
-    use tracing::{info};
-    use crate::primitives::shards::{create_video_shard, Evidence, WitnessEnvelope, ChunkType};
-    
-    // 1. CONFIGURATION
     let config = PhalanxConfig::test_salvage_on_node_death();
     let physics = PhalanxPhysics::test_profile();
     let (mut harness, relay_rx) = SimulationHarness::init_mesh(config.clone(), physics);
@@ -208,15 +225,10 @@ async fn test_salvage_on_node_death() {
     let _guardian_device_did = harness.spawn_node("GuardianDevice").await;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // 2. CREATE DATA (Signed by a Victim Identity)
     let victim_device_network_id = harness.resolve_did(&victim_device_did).await.unwrap();
-    
-    // We generate a separate identity to sign the data. 
-    // This represents the "User" of the smashed device node.
-    let (victim_identity, _) = crate::primitives::identity::PhalanxIdentity::generate(); 
+    let (victim_identity, _) = phalanx_core::primitives::identity::PhalanxIdentity::generate(); 
     let victim_did = victim_identity.did.clone();
 
-    // FIX: Use constructor instead of struct init
     let frames = vec![vec![1]];
     let real_shard = create_video_shard(
         frames,
@@ -225,19 +237,16 @@ async fn test_salvage_on_node_death() {
         "volley_test_999".to_string()
     );
 
-    // Wrap in Envelope (Signed by Victim)
     let envelope = WitnessEnvelope::new(
         Evidence::Video(real_shard), 
         &victim_identity, 
         victim_device_network_id
     );
 
-    // Serialize the ENVELOPE (not just the shard)
     let serialized_envelope = postcard::to_stdvec(&envelope).expect("Failed to serialize envelope");
     
-    // Chunkify the ENVELOPE bytes
-    let chunks = crate::primitives::shards::chunkify(
-        crate::primitives::shards::ShardId(999), 
+    let chunks = phalanx_core::primitives::shards::chunkify(
+        phalanx_core::primitives::shards::ShardId(999), 
         serialized_envelope, 
         10, 
         victim_did.clone(),
@@ -247,23 +256,17 @@ async fn test_salvage_on_node_death() {
     info!(victim = %victim_did, chunk_count = chunks.len(), "Broadcasting Signed Envelope Chunks");
 
     for chunk in chunks {
-        // Broadcast from Alpha's Network ID
         harness.broadcast(&victim_device_did, SimEvent::Chunk(victim_device_network_id, chunk)).await;
     }
 
     tokio::time::sleep(Duration::from_secs(1)).await;
-
-    // 3. TRIGGER SALVAGE
-    info!("Waiting for 5 seconds");
+    info!("Waiting for 5 seconds for salvage...");
     tokio::time::sleep(Duration::from_millis(5000)).await;
 
-    // 4. VERIFICATION
     let victim_safe_did = victim_did.to_safe_name();
-    
-    // Check Beta's Vault for Victim's Folder
     let evidence_dir = std::path::PathBuf::from("sim_vault")
-        .join("GuardianDevice") // Guardian Folder
-        .join(&victim_safe_did); // File name associated with smashed device
+        .join("GuardianDevice")
+        .join(&victim_safe_did);
     
     info!(path = ?evidence_dir, "Checking for salvaged archive");
 
@@ -286,13 +289,12 @@ async fn test_salvage_on_node_death() {
     }
 
     assert!(found_file, "Salvage failed: .phlx file not found in correct DID folder.");
-    info!("SUCCESS: Salvage operation verified.");
 }
 
 #[tokio::test]
 async fn test_out_of_sequence_salvage_on_node_death() {
-    use crate::primitives::shards::{self, StorageSequence, Evidence, WitnessEnvelope};
-    use crate::primitives::identity::NetworkId;
+    use phalanx_core::primitives::shards::{self, StorageSequence, Evidence, WitnessEnvelope};
+    use phalanx_core::primitives::identity::NetworkId;
     
     let (identity, _) = PhalanxIdentity::generate();
     let peer_id = NetworkId::random(); 
@@ -302,7 +304,6 @@ async fn test_out_of_sequence_salvage_on_node_death() {
     let mut captured_envelopes = Vec::new();
     for i in 0..5 {
         let seq = StorageSequence(i);
-        // FIX: Use constructor
         let frames = vec![vec![i as u8]];
         let shard = shards::create_video_shard(
             frames,
@@ -335,7 +336,7 @@ async fn test_out_of_sequence_salvage_on_node_death() {
         assert_eq!(seq.0, i as u32, "Sequence gap detected at index {}", i);
         let env = session.get(seq).unwrap();
         if let Evidence::Video(ref v) = env.evidence {
-            if let crate::primitives::shards::DataPayload::Clear(bytes) = &v.payload {
+            if let phalanx_core::primitives::shards::DataPayload::Clear(bytes) = &v.payload {
                 let recovered: Vec<Vec<u8>> = postcard::from_bytes(bytes).unwrap();
                 assert_eq!(recovered[0][0], i as u8, "Data mismatch at sequence {}", i);
             }
@@ -345,8 +346,8 @@ async fn test_out_of_sequence_salvage_on_node_death() {
 
 #[tokio::test]
 async fn test_stronghold_crash_recovery() {
-    use crate::primitives::shards::{self, StorageSequence, Evidence, WitnessEnvelope};
-    use crate::primitives::identity::NetworkId;
+    use phalanx_core::primitives::shards::{self, StorageSequence, Evidence, WitnessEnvelope};
+    use phalanx_core::primitives::identity::NetworkId;
     
     let config = PhalanxConfig::default();
     let vault_path = "sim_vault/crash_test";
@@ -380,7 +381,7 @@ async fn test_stronghold_crash_recovery() {
         .expect("Guardian failed to recover specific shard 101 from WAL");
 
     if let Evidence::Video(ref v) = recovered_env.evidence {
-        if let crate::primitives::shards::DataPayload::Clear(bytes) = &v.payload {
+        if let phalanx_core::primitives::shards::DataPayload::Clear(bytes) = &v.payload {
             let recovered: Vec<Vec<u8>> = postcard::from_bytes(bytes).unwrap();
             assert_eq!(recovered[0][0], 0xAA);
         }
@@ -389,15 +390,13 @@ async fn test_stronghold_crash_recovery() {
 
 #[tokio::test]
 async fn test_leaf_mode_isolation() {
-
-    use crate::primitives::shards::{self, StorageSequence};
+    use phalanx_core::primitives::shards::{self, StorageSequence};
 
     let (me, _) = PhalanxIdentity::generate();
     let (stranger, _) = PhalanxIdentity::generate();
     let config = PhalanxConfig::default();
     let mut storage = Guardian::new("sim_vault/leaf_test", &config, me.did.clone());
 
-    // 1. Create a foreign chunk
     let shard = shards::create_video_shard(vec![vec![1]], StorageSequence(1), 30, "v1".into());
     let chunk = shards::chunkify(
         shards::ShardId(1),
@@ -406,23 +405,16 @@ async fn test_leaf_mode_isolation() {
         stranger.did.clone(),
         shards::ChunkType::Witnessed);
 
-    // 2. Ingest while in Leaf Mode
     let is_leaf_mode = true;
     storage.ingest_chunk(chunk[0].clone(), is_leaf_mode);
 
-    // 3. Verify: The Micro-Layer should be empty because the chunk was dropped
     assert_eq!(storage.micro_layer.len(), 0, "Guardian stored foreign data while in Leaf Mode!");
 }
 
-// =====================
-// VAMPIRE DEFENSE TEST
-// =====================
-
 #[tokio::test]
 async fn test_vampire_attack_defense() {
-    use crate::primitives::shards::{create_video_shard, Evidence, WitnessEnvelope, StorageSequence};
+    use phalanx_core::primitives::shards::{create_video_shard, Evidence, WitnessEnvelope, StorageSequence};
     
-    // 1. Setup mesh with standard physics.
     let config = PhalanxConfig::test_defaults();
     let physics = PhalanxPhysics::test_profile();
     let (mut harness, _rx) = SimulationHarness::init_mesh(config.clone(), physics);
@@ -430,32 +422,26 @@ async fn test_vampire_attack_defense() {
     let _victim_did = harness.spawn_node("Victim").await;
     let attacker_did = harness.spawn_node("Attacker").await;
     
-    // 2. SIMULATE VAMPIRE ATTACK
-    // Attacker floods the Victim with invalidly signed shards.
     let (attacker_identity, _) = PhalanxIdentity::generate();
     let attacker_net_id = NetworkId::random();
 
-    for i in 0..7 { // Threshold is 5 signature failures.
+    for i in 0..7 {
         let shard = create_video_shard(vec![vec![1]], StorageSequence(i), 30, "vampire_volley".into());
         let mut envelope = WitnessEnvelope::new(Evidence::Video(shard), &attacker_identity, attacker_net_id);
         
-        // TAMPER: Invalidate signature by changing payload after signing.
         if let Evidence::Video(ref mut v) = envelope.evidence { v.fps = 145; }
 
-        let chunk = crate::primitives::shards::chunkify(
-            crate::primitives::shards::ShardId(i as u32), 
+        let chunk = phalanx_core::primitives::shards::chunkify(
+            phalanx_core::primitives::shards::ShardId(i as u32), 
             postcard::to_stdvec(&envelope).unwrap(), 
             100, 
             attacker_did.clone(),
-            crate::primitives::shards::ChunkType::Witnessed
+            phalanx_core::primitives::shards::ChunkType::Witnessed
         );
 
         harness.broadcast(&attacker_did, SimEvent::Chunk(attacker_net_id, chunk[0].clone())).await;
     }
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    // 3. VERIFICATION
-    // Blacklisting logic is verified in the Guardian unit tests.
     info!("Vampire test completed: Attacker signatures penalized by Victim Guardian.");
 }

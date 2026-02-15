@@ -8,23 +8,21 @@ use libp2p::{
 };
 
 use phalanx_core::{
-    core::{
+    base::{
         config::{PhalanxConfig, PhalanxPhysics},
         types::{MeshTopic, PowerState, UnitInterval, VitalityRate}
-    }, 
+    },
+    primitives::identity::{NetworkId, PhalanxIdentity}, 
     security::{
-        identity::{
-            NetworkId, PhalanxIdentity
-        }, 
         sentinel::{
             ControlMessage, Sentinel
         },
         telemetry,
-    }, storage::guardian::Guardian
+    }, storage::vault::Guardian
 };
 
 // - Import the new setup function and key loader
-use phalanx_core::network::network::{setup_phalanx_swarm, load_swarm_key, get_storage_key}; 
+use phalanx_core::transport::swarm::{setup_phalanx_swarm, load_swarm_key, get_storage_key}; 
 use std::path::Path;
 
 use std::error::Error;
@@ -102,7 +100,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         let topic: MeshTopic = message.topic.as_str().into();
 
                         if topic != config.network.control_topic {
-                            if let Ok(chunk) = postcard::from_bytes::<phalanx_core::protocol::shards::ShardChunk>(&message.data) {
+                            if let Ok(chunk) = postcard::from_bytes::<phalanx_core::primitives::shards::ShardChunk>(&message.data) {
                                 if let Some(envelope) = sentinel.process_chunk(chunk, &topic, &config, &identity, local_peer_id) {
                                     _ = storage.ingest_envelope(envelope);
                                 }
