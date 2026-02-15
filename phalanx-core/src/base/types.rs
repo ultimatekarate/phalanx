@@ -72,6 +72,7 @@ impl ByteCapacity {
     }
 }
 
+// Type safe wrapper for storage constraints
 impl fmt::Display for ByteCapacity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.0 >= 1024 * 1024 * 1024 {
@@ -220,8 +221,6 @@ impl VitalityRate {
         self.0
     }
 }
-
-// src/core/types.rs
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PowerState {
