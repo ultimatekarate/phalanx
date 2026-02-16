@@ -53,8 +53,6 @@ foreach ($file in $files) {
                 # Documentation Check
                 if ($currentDocs.Count -gt 0) {
                     $fileSignatures += $currentDocs
-                } else {
-                    $fileSignatures += "// WARNING: NO FUNCTIONAL DOCUMENTATION PROVIDED"
                 }
                 
                 $fileSignatures += $cleanSig

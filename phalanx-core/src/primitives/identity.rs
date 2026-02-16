@@ -11,7 +11,12 @@ use bip39::{Mnemonic, Language};
 // --- CONSTANTS ---
 pub const IDENTITY_VERSION: u32 = 1;
 
-// --- DIDs & Network IDs ---
+// id types because I kept I was a moron man that kept using strings. 
+
+/// A strong type for Decentralized Identifiers (DIDs).
+///
+/// Wraps a standard string to ensure semantic distinction from other string types.
+/// Defaults to `did:key:anonymous` if not initialized.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct Did(pub String);
@@ -20,6 +25,9 @@ impl Did {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Sanitizes the DID string for use in file paths or unsafe contexts.
+    /// Replaces colons `:` with underscores `_`.
     pub fn to_safe_name(&self) -> String {
         self.0.replace(":", "_")
     }
@@ -55,10 +63,22 @@ impl AsRef<str> for Did {
     }
 }
 
+/// A strong type for network routing addresses.
+///
+/// Wraps `libp2p::PeerId`.
+/// Implements `serde` serialization to/from Base58 strings, ensuring
+/// that JSON/Postcard representations remain human-readable or standard-compliant.
+
+// I won't pretend to understand why it's needed, I'm just
+// trusting the nerds that came before me that decided it was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NetworkId(pub libp2p::PeerId);
 
 impl NetworkId {
+
+    /// Generates a random NetworkId (wrapping a random PeerId).
+    /// I wrote this purely for testing purposes. This stupid thing
+    /// has saved me so much trouble.
     pub fn random() -> Self {
         Self(PeerId::random())
     }
@@ -114,8 +134,6 @@ impl AsRef<PeerId> for NetworkId {
     }
 }
 
-// --- THE IDENTITY ---
-
 /// The sovereign cryptographic root for a Phalanx Node.
 ///
 /// Constraints: Contains a `SigningKey` used for Ed25519 forensic proofs. 
@@ -140,6 +158,16 @@ impl fmt::Debug for PhalanxIdentity {
 }
 
 impl PhalanxIdentity {
+    /// Generates a pristine PhalanxIdentity using system entropy.
+    ///
+    /// This process involves:
+    /// 1. Sampling 16 bytes of entropy from the OS RNG.
+    /// 2. Generating a BIP39 mnemonic phrase (English) for human-readable backup.
+    /// 3. Deriving an Ed25519 private key from the mnemonic seed.
+    /// 4. wrapping the key in the versioned `PhalanxIdentity` struct.
+    ///
+    /// # Returns
+    /// * `(PhalanxIdentity, String)` - The identity struct and the BIP39 mnemonic phrase.
     pub fn generate() -> (Self, String) {
         let mut rng = rand::rng(); 
         let mut entropy = [0u8; 16]; 
@@ -155,6 +183,17 @@ impl PhalanxIdentity {
         (Self::from_key(signing_key), phrase)
     }
 
+    /// Recovers a PhalanxIdentity from a BIP39 mnemonic phrase.
+    ///
+    /// This method is deterministic; the same phrase will always yield the same
+    /// private key and resulting PeerID.
+    ///
+    /// # Arguments
+    /// * `phrase` - A string containing the space-separated BIP39 mnemonic words.
+    ///
+    /// # Returns
+    /// * `Ok(Self)` - The recovered identity.
+    /// * `Err(String)` - If the mnemonic is invalid or the checksum fails.
     pub fn restore(phrase: &str) -> Result<Self, String> {
         let mnemonic = Mnemonic::parse_in(Language::English, phrase)
             .map_err(|e| format!("Invalid mnemonic: {}", e))?;
@@ -179,10 +218,23 @@ impl PhalanxIdentity {
         }
     }
 
+    /// Cryptographically signs a byte slice using the internal Ed25519 private key.
+    ///
+    /// Used for attaching forensic proof to data shards or network messages.
     pub fn sign(&self, msg: &[u8]) -> Signature {
         self.keypair.sign(msg)
     }
 
+
+    /// Verifies a signature against a public key.
+    ///
+    /// This method supports two public key formats for interoperability:
+    /// 1. **Raw Ed25519**: 32 bytes.
+    /// 2. **Libp2p Protobuf**: 38 bytes (includes the `0x00240801...` multicodec prefix).
+    ///
+    /// # Returns
+    /// * `true` if the signature is valid for the given message and key.
+    /// * `false` if the key format is unrecognized or the signature is invalid.
     pub fn verify(pubkey: &[u8], msg: &[u8], sig: &[u8]) -> bool {
         let key_bytes_opt: Option<&[u8]> = if pubkey.len() == 32 {
             Some(pubkey)
@@ -204,17 +256,36 @@ impl PhalanxIdentity {
         false
     }
 
+    /// Converts the internal forensic key into a Libp2p Keypair.
+    ///
+    /// This transformation allows the networking stack to use the same cryptographic
+    /// root for TLS handshakes and peer routing. 
     pub fn to_libp2p_keypair(&self) -> libp2p::identity::Keypair {
         let mut bytes = self.keypair.to_bytes();
         libp2p::identity::Keypair::ed25519_from_bytes(&mut bytes).unwrap()
     }
 
+    /// Serializes the identity to disk using Postcard binary encoding.
+    ///
+    /// # Arguments
+    /// * `path` - The file path for the output.
     pub fn save_to_disk<P: AsRef<Path>>(&self, path: P) -> std::io::Result<()> {
         let bytes = postcard::to_stdvec(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         fs::write(path, bytes)
     }
 
+    /// Loads an identity from disk with automatic version handling.
+    ///
+    /// # Migration Logic
+    /// 1. **Primary**: Attempts to deserialize as a versioned `PhalanxIdentity` struct.
+    ///    - Checks `identity.version` against `IDENTITY_VERSION` (currently 1).
+    /// 2. **Fallback**: If deserialization fails, checks if the file is exactly 32 bytes.
+    ///    - If yes, treats it as a legacy raw key, upgrades it to v1, and **overwrites the file** with the new format.
+    ///
+    /// # Returns
+    /// * `Ok(Self)` - The loaded (and potentially migrated) identity.
+    /// * `Err(io::Error)` - If the file is missing, corrupt, or has a version mismatch.
     pub fn load_from_disk<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
         let bytes = fs::read(&path)?;
 

@@ -10,7 +10,6 @@ use std::time::Duration;
 use tracing::{info, warn, error}; // <--- ADDED TRACING
 
 // --- STRATEGY 1: SHARD REASSEMBLY (Chunks -> Envelope) ---
-
 pub struct ShardAmalgam;
 
 pub struct ShardBuffer {
