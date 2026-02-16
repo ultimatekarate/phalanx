@@ -3,10 +3,11 @@ use crate::base::config::PhalanxConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 use std::path::PathBuf;
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 use thiserror::Error;
+use crate::primitives::time::TrustedClock;
 
 /// Defines the explicit relationship between the local user and a remote peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,7 +51,7 @@ pub struct PeerRecord {
 }
 
 /// Manages the "Social Graph" of the node with bi-directional lookup.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TrustRegistry {
     /// Primary storage: DID -> Record
     contacts: HashMap<Did, PeerRecord>,
@@ -64,7 +65,15 @@ pub struct TrustRegistry {
 impl TrustRegistry {
     /// Initialize the registry, loading from disk if available.
     pub fn new(config: &PhalanxConfig) -> Self {
-        let storage_path = config.data_dir.join("trust_registry.bin");
+
+        let vault = PathBuf::from(&config.storage.vault_path);
+        
+        // Ensure the directory exists before trying to access the file
+        if !vault.exists() {
+            let _ = fs::create_dir_all(&vault);
+        }
+
+        let storage_path = vault.join("trust_registry.bin");
         
         let mut registry = Self {
             contacts: HashMap::new(),
@@ -88,7 +97,8 @@ impl TrustRegistry {
         &mut self, 
         did: Did, 
         alias: String, 
-        level: TrustLevel
+        level: TrustLevel,
+        clock: &TrustedClock
     ) -> Result<(), TrustError> {
         // 1. Check Alias Uniqueness
         if let Some(existing_did) = self.alias_index.get(&alias) {
@@ -104,8 +114,10 @@ impl TrustRegistry {
             }
         }
 
-        // 3. Update Indices
-        let timestamp = crate::security::time::TrustedClock::now();
+        // 3. Update Indices - no need to use trusted time here, this is local
+        // to the device.
+        let timestamp = clock.now();
+
         let record = PeerRecord {
             did: did.clone(),
             alias: alias.clone(),
@@ -121,6 +133,17 @@ impl TrustRegistry {
         
         self.save()?;
         Ok(())
+    }
+
+    /// Updates the last interaction timestamp.
+    /// Call this when we receive valid data from a peer.
+    pub fn touch(&mut self, did: &Did, clock: &TrustedClock) {
+        if let Some(record) = self.contacts.get_mut(did) {
+            record.last_interaction = clock.now();
+            // We don't error check save() here to avoid spamming logs 
+            // on high-frequency touches.
+            let _ = self.save(); 
+        }
     }
 
     /// Resolves a local Alias (e.g., "Alice") to a global DID.
@@ -194,6 +217,7 @@ impl TrustRegistry {
 mod tests {
     use super::*;
     use crate::base::config::PhalanxConfig;
+    use crate::primitives::time::TrustedClock;
 
     #[test]
     fn test_aliasing() {
@@ -203,19 +227,20 @@ mod tests {
         let did1 = Did::from("did:phx:user_one");
         let did2 = Did::from("did:phx:user_two");
 
+        let clock = TrustedClock::new();
         // Set Alice
-        registry.set_peer(did1.clone(), "Alice".into(), TrustLevel::Ally).unwrap();
+        registry.set_peer(did1.clone(), "Alice".into(), TrustLevel::Ally, &clock).unwrap();
         
         // Resolve Alice
         assert_eq!(registry.resolve_alias("Alice"), Some(&did1));
         assert_eq!(registry.get_alias(&did1), Some("Alice"));
 
         // Attempt Collision
-        let err = registry.set_peer(did2.clone(), "Alice".into(), TrustLevel::Ignored);
+        let err = registry.set_peer(did2.clone(), "Alice".into(), TrustLevel::Ignored, &clock);
         assert!(matches!(err, Err(TrustError::AliasCollision(_))));
 
         // Rename Alice -> BigAlice
-        registry.set_peer(did1.clone(), "BigAlice".into(), TrustLevel::Ally).unwrap();
+        registry.set_peer(did1.clone(), "BigAlice".into(), TrustLevel::Ally, &clock).unwrap();
         assert_eq!(registry.resolve_alias("BigAlice"), Some(&did1));
         assert_eq!(registry.resolve_alias("Alice"), None); // Old alias freed
     }
