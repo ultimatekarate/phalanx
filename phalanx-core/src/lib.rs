@@ -32,6 +32,9 @@ pub mod security {
     pub mod e2ee;
     pub mod sentinel;
     pub mod telemetry;
+    pub mod grant;
+    pub mod locator;
+    pub mod trust;
 }
 
 // --- 6. DRIVERS (Conditional) ---
