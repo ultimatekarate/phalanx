@@ -25,6 +25,17 @@ pub struct PhalanxPhysics {
 }
 
 impl PhalanxPhysics {
+    /// Default profile.
+    pub fn default() -> Self {
+        // This is intentionally the same as default_wan.
+        Self {
+            tau_rtt: 300,
+            delta_cpu: 20,
+            jitter_factor: 3,
+        }
+    }
+
+
     /// Optimized for high-latency mobile WANs.
     pub fn default_wan() -> Self {
         Self {

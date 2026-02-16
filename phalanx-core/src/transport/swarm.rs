@@ -60,6 +60,8 @@ impl PhalanxBehaviour {
     ///
     /// This publishes a provider record to the Kademlia DHT using the deterministic
     /// 'phalanx.stronghold.v1' namespace.
+    /// This is NOT redundant. All nodes on the network can provide storage. This 
+    /// allows a the Stronghold binary to announce itself as a high availability node.
     pub fn announce_stronghold(&mut self) -> Result<kad::QueryId, DiscoveryError> {
         let record_key = RecordKey::new(&STRONGHOLD_NAMESPACE);
         
@@ -456,6 +458,62 @@ mod tests {
             *swarm.local_peer_id(), 
             expected_peer_id, 
             "Swarm should be initialized with the provided identity"
+        );
+    }
+}
+
+#[cfg(test)]
+mod discovery_logic_tests {
+    use super::*;
+    use libp2p::identity::Keypair;
+    use crate::base::config::{PhalanxConfig, PhalanxPhysics};
+
+    fn setup_test_behaviour() -> PhalanxBehaviour {
+        let id_keys = Keypair::generate_ed25519();
+        let config = PhalanxConfig::default();
+        let physics = PhalanxPhysics::default();
+        
+        // Mocking the relay client for behaviour initialization
+        let local_peer_id = id_keys.public().to_peer_id();
+        let (_, relay_client) = libp2p::relay::client::new(local_peer_id);
+
+        build_behaviour(&id_keys, &config, &physics, relay_client)
+            .expect("Failed to initialize PhalanxBehaviour for testing")
+    }
+
+    #[test]
+    fn test_stronghold_announcement_query_generation() {
+        let mut behaviour = setup_test_behaviour();
+        
+        // Verify that the announcement returns a valid QueryId and does not panic
+        let result = behaviour.announce_stronghold();
+        assert!(result.is_ok(), "Announce stronghold should succeed in a clean memory store");
+    }
+
+    #[test]
+    fn test_find_strongholds_namespace_alignment() {
+        let mut behaviour = setup_test_behaviour();
+        
+        // Initiate discovery
+        let query_id = behaviour.find_strongholds();
+        
+        // In libp2p v0.56.x, we verify that the query is tracked in the Kademlia state
+        // This confirms the namespace was correctly transformed into a RecordKey
+        assert!(
+            behaviour.kademlia.query(&query_id).is_some(), 
+            "The find_strongholds query must be active in the Kademlia engine"
+        );
+    }
+
+    #[test]
+    fn test_namespace_consistency() {
+        let storage_key = get_storage_key();
+        let stronghold_key = RecordKey::new(&STRONGHOLD_NAMESPACE);
+        
+        assert_ne!(
+            storage_key, 
+            stronghold_key, 
+            "Storage and Stronghold namespaces must remain distinct to prevent query pollution"
         );
     }
 }
