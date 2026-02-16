@@ -14,13 +14,18 @@ use std::path::PathBuf;
 use tokio::time::Instant;
 use tracing::{info, error, warn, debug, instrument};
 
-// Error handling because people are going to be assholes.
+/// Enumerates specific failure modes for storage and security operations.
+///
+/// * `QuotaExceeded`: A foreign peer has pushed the node over its `max_foreign_storage_bytes`.
+/// * `InvalidSignature`: Cryptographic verification failed (potential tampering).
+/// * `ReplayDetected`: The sequence ID or timestamp indicates an attempt to reuse old data.
+/// * `WalWriteFailed`: Critical IO failure (disk full or permissions).
 #[derive(Debug)]
 pub enum GuardianError {
-    QuotaExceeded(ByteCapacity),      // Peer is spamming
-    InvalidSignature(String), // Peer is lying
-    ReplayDetected(u32),      // Peer is replaying old data
-    WalWriteFailed(String),   // Disk IO failure
+    QuotaExceeded(ByteCapacity), 
+    InvalidSignature(String), 
+    ReplayDetected(u32),      
+    WalWriteFailed(String),   
     SerializationError(String),
 }
 
@@ -38,12 +43,23 @@ impl fmt::Display for GuardianError {
 
 impl std::error::Error for GuardianError {}
 
+/// Tracks the behavior of remote peers to prevent "Vampire Attacks" (Resource Exhaustion).
+///
+/// If `invalid_sigs` exceeds `max_sig_failures`, `is_blacklisted` becomes true,
+/// causing the Guardian to silently drop all future traffic from that DID.
 #[derive(Debug, Default, Clone)]
 pub struct PeerReputation {
     pub invalid_sigs: u32,
     pub is_blacklisted: bool,
 }
 
+/// The central storage controller and policy enforcer.
+///
+/// Responsibilities:
+/// 1. **Reassembly**: Manages `Crucible` instances for Micro (Chunk) and Macro (Volley) layers.
+/// 2. **Governance**: Enforces storage quotas and evicts old foreign data.
+/// 3. **Security**: Verifies signatures and tracks peer reputation.
+/// 4. **Persistence**: Manages the Write-Ahead Log (WAL) and final archiving.
 pub struct Guardian {
     pub vault_storage: PathBuf,
     pub wal_directory: PathBuf,
@@ -77,6 +93,12 @@ pub struct Guardian {
 }
 
 impl Guardian {
+    /// Initializes the storage vault, recovers state from the Write-Ahead Log (WAL), 
+    /// and performs an initial filesystem scan to calculate current usage.
+    ///
+    /// # Side Effects
+    /// * Creates `vault_path` and `vault_path/wal` if they do not exist.
+    /// * Populates `current_storage_usage` and `foreign_storage_usage` by scanning disk.
     pub fn new(vault_path: &str, config: &PhalanxConfig, local_did: Did) -> Self {
         let root = PathBuf::from(vault_path);
         let wal = root.join("wal");
@@ -150,7 +172,11 @@ impl Guardian {
         );
     }
 
-    /// Enforce Quotas: Delete oldest foreign data if limits exceeded
+    /// Enforces storage limits by evicting the oldest foreign data.
+    ///
+    /// *Strategy*: "Oldest-File-First" eviction.
+    /// *Constraint*: Never deletes "Local" (Own) data or WAL files.
+    /// *Trigger*: Called automatically by `ingest_envelope` when `foreign_storage_usage` exceeds limits.
     fn prune_foreign_evidence(&mut self) {
         if self.foreign_storage_usage <= self.max_foreign_storage_bytes {
             info!(max_store = %self.max_foreign_storage_bytes, "No evidence to prune.");
@@ -208,6 +234,15 @@ impl Guardian {
         }
     }
 
+    /// Stage 1: Ingests raw network chunks (Micro-Layer).
+    ///
+    /// This method acts as the primary firewall for the storage layer. It applies:
+    /// 1. **Power Governance**: Checks `TrafficGovernor` to see if we should accept foreign data.
+    /// 2. **Leaf Mode**: If active, rejects all foreign chunks to save battery.
+    /// 3. **Circuit Breaking**: If memory load > 80%, sheds foreign load.
+    /// 4. **Reputation Check**: Silently drops chunks from blacklisted peers.
+    ///
+    /// If a chunk completes a shard, it is promoted to `ingest_envelope`.
     #[instrument(skip(self, chunk), level = "debug")]
     pub fn ingest_chunk(&mut self, chunk: ShardChunk, is_leaf_mode: bool) {
 
@@ -287,6 +322,13 @@ impl Guardian {
         }
     }
 
+    /// Stage 2: Ingests reassembled Witness Envelopes (Macro-Layer).
+    ///
+    /// Performed on full, reassembled shards. It applies:
+    /// 1. **Cryptographic Verification**: Checks Ed25519 signatures.
+    /// 2. **Quota Enforcement**: Prunes old foreign data if limits are hit.
+    /// 3. **Replay Protection**: Checks timestamps and sequence IDs against history.
+    /// 4. **WAL Persistence**: Writes the verified envelope to the Write-Ahead Log.
     pub fn ingest_envelope(&mut self, envelope: WitnessEnvelope) -> Result<(), GuardianError> {
         
         // Verify that the signature is valid before doing anything else
@@ -348,6 +390,10 @@ impl Guardian {
         Ok(())
     }
 
+    /// Increments the violation count for a specific Peer DID.
+    ///
+    /// If the count exceeds `max_sig_failures`, the peer is permanently blacklisted
+    /// in memory, preventing further resource consumption.
     pub fn penalize_peer(&mut self, did: Did, reason: &str) {
         let rep = self.peer_registry.entry(did.clone()).or_default();
         rep.invalid_sigs += 1;
@@ -365,6 +411,12 @@ impl Guardian {
             .map(|buffer| &buffer.artifacts)
     }
 
+    /// Finalizes a `Volley` (collection of shards) into a permanent archive file.
+    ///
+    /// 1. Serializes the Volley to a temporary file (`.tmp`).
+    /// 2. Performs an atomic rename to the final `.phlx` extension.
+    /// 3. Deletes the corresponding entries from the WAL.
+    /// 4. Updates governance counters.
     fn archive_volley(&mut self, volley: Volley) {
         info!(id = %volley.id, artifacts = volley.artifacts.len(), "Guardian: archive_volley called");
 
@@ -439,6 +491,11 @@ impl Guardian {
         info!(path = ?archive_dir, "Guardian: Archive Write Success");
     }
 
+    /// Maintenance cycle to clean up incomplete or abandoned upload sessions.
+    ///
+    /// 1. Checks both Micro and Macro layers for items older than `ttl`.
+    /// 2. Flushes them from memory.
+    /// 3. Attempts to salvage/archive whatever data is present (even if incomplete).
     pub fn archive_stale_sessions(&mut self, ttl: std::time::Duration) {
         // 1. Flush Micro Layer
 
@@ -469,6 +526,10 @@ impl Guardian {
         }
     }
 
+    /// Writes a verified envelope to the Write-Ahead Log (WAL).
+    ///
+    /// Uses `file.sync_all()` to ensure physical disk persistence before acknowledging
+    /// receipt, protecting against power loss during ingestion.
     fn write_to_wal(&self, envelope: &WitnessEnvelope) -> std::io::Result<()> {
         let safe_did = envelope.did.to_safe_name();
         let file_name = format!("{}_{}.wal", safe_did, envelope.evidence.sequence_id().0);
