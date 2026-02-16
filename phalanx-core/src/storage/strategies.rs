@@ -3,11 +3,10 @@ const VOLLEY_TIME_THRESHOLD: Duration = Duration::from_secs(1);
 
 use crate::storage::crucible::Mold;
 use crate::primitives::identity::Did;
-use crate::primitives::shards::{ShardChunk, ShardId, StorageSequence, WitnessEnvelope};
+use crate::primitives::shards::{ForensicGap, ShardChunk, ShardId, StorageSequence, Volley, WitnessEnvelope};
 use std::collections::BTreeMap;
 use std::time::Duration;
-use std::fmt;
-use serde::{Serialize, Deserialize};
+
 use tracing::{info, warn, error}; // <--- ADDED TRACING
 
 // --- STRATEGY 1: SHARD REASSEMBLY (Chunks -> Envelope) ---
@@ -84,72 +83,11 @@ impl Mold for ShardAmalgam {
 }
 
 // --- STRATEGY 2: VOLLEY ASSEMBLY (Envelopes -> Volley) ---
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ForensicGap {
-    pub start_seq: u32,
-    pub end_seq: u32,
-    pub detected_at: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
-pub struct VolleyId(String);
-
-impl VolleyId {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for VolleyId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::str::FromStr for VolleyId {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.trim().is_empty() {
-            Err("VolleyId cannot be empty".to_string())
-        } else {
-            Ok(Self(s.to_string()))
-        }
-    }
-}
-
-// Allow cheap conversion from String
-impl From<String> for VolleyId {
-    fn from(s: String) -> Self {
-        Self(s)
-    }
-}
-
-impl From<&str> for VolleyId {
-    fn from(s: &str) -> Self {
-        Self(s.to_string())
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct Volley {
-    pub id: VolleyId,
-    pub owner_did: String,
-    pub artifacts: Vec<WitnessEnvelope>,
-    pub gaps: Vec<ForensicGap>,
-    pub is_complete: bool
-}
-
 pub struct VolleyAmalgam;
 
 pub struct VolleyBuffer {
     pub artifacts: BTreeMap<StorageSequence, WitnessEnvelope>,
-    pub volley_id: String,
+    pub volley_id: String, // keep this string for now
     pub owner_did: Did
 }
 
@@ -217,7 +155,7 @@ impl Mold for VolleyAmalgam {
         info!(id=%acc.volley_id, "VolleyAmalgam: Assembly SUCCESS");
         
         Some(Volley {
-            id: VolleyId(acc.volley_id),
+            id: acc.volley_id.into(),
             owner_did: acc.owner_did.to_string(),
             artifacts: sorted_artifacts,
             gaps,

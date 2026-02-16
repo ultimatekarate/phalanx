@@ -1,7 +1,7 @@
 use crate::base::types::{ByteCapacity, TrafficGovernor};
-use crate::primitives::shards::{StorageSequence, Evidence, WitnessEnvelope, ShardChunk};
+use crate::primitives::shards::{StorageSequence, Evidence, WitnessEnvelope, Volley, ShardChunk};
 use crate::storage::crucible::{Crucible};
-use crate::storage::strategies::{ShardAmalgam, VolleyAmalgam, Volley}; 
+use crate::storage::strategies::{ShardAmalgam, VolleyAmalgam}; 
 use crate::base::config::PhalanxConfig;
 use crate::primitives::identity::Did;
 use crate::primitives::time::TrustedClock;

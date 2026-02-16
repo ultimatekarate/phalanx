@@ -49,6 +49,10 @@ sntpc = { version = "0.3", features = ["std"] }
 io = "0.0.2"
 futures = "0.3.31"
 thiserror = "2.0.18"
+base64 = "0.22.1"
+sha2 = "0.10.9"
+curve25519-dalek = "4.1.3"
+x25519-dalek = {version = "2.0.1", features = ["static_secrets"]}
 
 # --- Networking (Consolidated) ---
 [dependencies.libp2p]

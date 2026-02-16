@@ -1,3 +1,6 @@
+// This binary should probably be renamed to 'Witness' or something like that.
+
+
 use std::error::Error;
 use std::path::Path;
 use tracing::info;

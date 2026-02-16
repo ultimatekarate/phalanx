@@ -1,5 +1,5 @@
-use crate::primitives::identity::NetworkId;
-use crate::storage::strategies::VolleyId;
+use crate::primitives::identity::Did;
+use crate::primitives::shards::VolleyId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -22,7 +22,7 @@ pub struct PhalanxLocator {
     /// The symmetric key (base64 encoded) to decrypt the WitnessEnvelope.
     pub secret: String, 
     /// The Decentralized Identifier of the original witness (Author).
-    pub author: NetworkId,
+    pub author: Did,
 }
 
 #[derive(Debug, Error)]
@@ -73,8 +73,7 @@ impl FromStr for PhalanxLocator {
         Ok(PhalanxLocator {
             id: VolleyId::from_str(id_str).map_err(|_| LocatorError::ParseError)?,
             secret: secret_str.to_string(),
-            author: NetworkId::from_str(author_str)
-                .map_err(|e| LocatorError::InvalidNetworkId(e.to_string()))?,
+            author: Did(author_str.to_string()),
         })
     }
 }
@@ -85,10 +84,15 @@ mod tests {
 
     #[test]
     fn test_locator_roundtrip() {
-        let original_uri = "phx://volley-hash-123#secret-key-456@did:phx:user-789";
-        let locator = PhalanxLocator::from_str(original_uri).expect("Should parse");
+        // Hardcoded id for testing purposes
+        let valid_peer_id = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+
+        let original_uri = format!("phx://volley-hash-123#secret-key-456@{}",valid_peer_id);
+        let locator = PhalanxLocator::from_str(&original_uri).expect("Should parse");
         
         assert_eq!(locator.secret, "secret-key-456");
+        assert_eq!(locator.id.to_string(), "volley-hash-123");
+        assert_eq!(locator.author.to_string(), valid_peer_id);
         assert_eq!(locator.to_string(), original_uri);
     }
 }

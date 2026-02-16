@@ -3484,11 +3484,13 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 name = "phalanx-core"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bip39",
  "bs58",
  "chacha20poly1305",
  "chrono",
  "ctrlc",
+ "curve25519-dalek",
  "ed25519-dalek",
  "env_logger",
  "futures",
@@ -3504,6 +3506,7 @@ dependencies = [
  "rand_core 0.6.4",
  "serde",
  "serde_json",
+ "sha2",
  "sntpc",
  "thiserror 2.0.18",
  "tokio",
@@ -3512,6 +3515,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "void",
+ "x25519-dalek",
 ]
 
 [[package]]

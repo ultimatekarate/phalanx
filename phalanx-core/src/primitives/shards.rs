@@ -10,7 +10,6 @@ use image::{DynamicImage, ImageFormat};
 
 use crate::primitives::identity::{PhalanxIdentity, Did, NetworkId};
 use crate::security::e2ee;
-use crate::storage::strategies::{VolleyId};
 
 // =====================
 // DATA STRUCTURES
@@ -190,6 +189,67 @@ pub struct ShardChunk {
     pub data: Vec<u8>,
     pub owner_did: Did,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForensicGap {
+    pub start_seq: u32,
+    pub end_seq: u32,
+    pub detected_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+pub struct VolleyId(String);
+
+impl VolleyId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for VolleyId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::str::FromStr for VolleyId {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.trim().is_empty() {
+            Err("VolleyId cannot be empty".to_string())
+        } else {
+            Ok(Self(s.to_string()))
+        }
+    }
+}
+
+// Allow cheap conversion from String
+impl From<String> for VolleyId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for VolleyId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Volley {
+    pub id: VolleyId,
+    pub owner_did: String,
+    pub artifacts: Vec<WitnessEnvelope>,
+    pub gaps: Vec<ForensicGap>,
+    pub is_complete: bool
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WitnessEnvelope {
