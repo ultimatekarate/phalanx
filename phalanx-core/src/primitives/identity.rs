@@ -13,12 +13,13 @@ pub const IDENTITY_VERSION: u32 = 1;
 
 // id types because I kept I was a moron man that kept using strings. 
 
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 /// A strong type for Decentralized Identifiers (DIDs).
 ///
 /// Wraps a standard string to ensure semantic distinction from other string types.
 /// Defaults to `did:key:anonymous` if not initialized.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
 pub struct Did(pub String);
 
 impl Did {
@@ -63,6 +64,7 @@ impl AsRef<str> for Did {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// A strong type for network routing addresses.
 ///
 /// Wraps `libp2p::PeerId`.
@@ -70,15 +72,14 @@ impl AsRef<str> for Did {
 /// that JSON/Postcard representations remain human-readable or standard-compliant.
 
 // I won't pretend to understand why it's needed, I'm just
-// trusting the nerds that came before me that decided it was.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+// trusting the nerds that came before me that decided it was. 
 pub struct NetworkId(pub libp2p::PeerId);
 
 impl NetworkId {
 
     /// Generates a random NetworkId (wrapping a random PeerId).
     /// I wrote this purely for testing purposes. This stupid thing
-    /// has saved me so much trouble.
+    /// has saved me so much trouble. 
     pub fn random() -> Self {
         Self(PeerId::random())
     }

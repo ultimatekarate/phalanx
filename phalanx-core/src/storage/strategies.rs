@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tracing::{info, warn, error}; // <--- ADDED TRACING
 
-// --- STRATEGY 1: SHARD REASSEMBLY (Chunks -> Envelope) ---
+// --- STRATEGY 1: SHARD REASSEMBLY (Chunks -> Envelope) -- 
 pub struct ShardAmalgam;
 
 pub struct ShardBuffer {
@@ -105,7 +105,7 @@ impl Mold for VolleyAmalgam {
         artifacts.insert(item.evidence.sequence_id(), item.clone());
 
         VolleyBuffer {
-            artifacts,
+            artifacts, 
             volley_id: item.evidence.volley_id().to_string(),
             owner_did: item.did.clone(),
         }
@@ -122,7 +122,7 @@ impl Mold for VolleyAmalgam {
 
     fn assemble(key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output> {
         // 🔍 DEBUG: Log Volley Assembly
-        info!(key=%key, count=%acc.artifacts.len(), "VolleyAmalgam: Assembling volley...");
+        info!(key=%key, count=%acc.artifacts.len(), "VolleyAmalgam: Assembling volley..."); 
 
         if acc.artifacts.is_empty() { 
             warn!(key=%key, "VolleyAmalgam: Artifacts empty. Aborting.");

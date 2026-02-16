@@ -132,7 +132,7 @@ impl PhalanxTimestamp {
     }
 
     /// Strict validation for LIVE traffic.
-    /// 
+    ///  
     /// Call this immediately after receiving a packet from the network
     /// to ensure it isn't a replay attack.
     pub fn verify_freshness(&self, clock: &TrustedClock, tolerance_secs: u64) -> Result<(), TimeError> {
@@ -146,7 +146,7 @@ impl PhalanxTimestamp {
         // Check for Past (Replays)
         if self.0 < now.saturating_sub(tolerance_secs) {
             return Err(TimeError::Stale(now - self.0));
-        }
+        } 
 
         Ok(())
     }
@@ -188,14 +188,14 @@ mod tests {
         
         // Attack: Message claiming to be from next year
         let future_timestamp = now + 3600;
-        assert!(!clock.is_valid(future_timestamp, 5), "Far future timestamp should be rejected");
+        assert!(!clock.is_valid(future_timestamp, 5), "Far future timestamp should be rejected"); 
     }
 
     #[test]
     fn test_clock_skew_correction() {
         let clock = TrustedClock::new();
         
-        // SCENARIO: Local machine is 10 seconds BEHIND reality.
+        // SCENARIO: Local machine is 10 seconds BEHIND reality. 
         // Real time is 100. Local thinks it is 90.
         // We set offset to +10,000ms.
         clock.set_offset(10_000); 
