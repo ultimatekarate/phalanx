@@ -595,7 +595,7 @@ mod tests {
             frames, 
             StorageSequence(1), 
             30, 
-            "v1".to_string()
+            "v1".into()
         );
 
         // 2. Sign it with the WRONG identity (Attacker signs, claims to be Victim?)
@@ -639,7 +639,7 @@ mod tests {
             frames, 
             StorageSequence(1), 
             30, 
-            "v1".to_string()
+            "v1".into()
         );
         let envelope = WitnessEnvelope::new(Evidence::Video(shard), &stranger, peer_id);
 
@@ -670,7 +670,7 @@ mod tests {
             frames,
             seq_num,
             30,
-            "v1".to_string()
+            "v1".into()
         );
         let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id);
 
@@ -761,7 +761,7 @@ mod guardian_leaf_tests {
             frames, 
             StorageSequence(200), 
             30, 
-            "volley_test".to_string()
+            "volley_test".into()
         );
 
         // 2. WRAP in an Envelope

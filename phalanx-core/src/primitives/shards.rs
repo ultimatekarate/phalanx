@@ -10,6 +10,7 @@ use image::{DynamicImage, ImageFormat};
 
 use crate::primitives::identity::{PhalanxIdentity, Did, NetworkId};
 use crate::security::e2ee;
+use crate::storage::strategies::{VolleyId};
 
 // =====================
 // DATA STRUCTURES
@@ -60,7 +61,7 @@ impl Evidence {
     }
 
     // gotta group everything into a cohesive file
-    pub fn volley_id(&self) -> &str {
+    pub fn volley_id(&self) -> &VolleyId {
         match self {
             Evidence::Video(s) => &s.volley_id,
             Evidence::Audio(s) => &s.volley_id,
@@ -142,7 +143,7 @@ pub struct VideoShard {
     pub timestamp: u64,
     pub sequence_id: StorageSequence,
     pub fps: u8,
-    pub volley_id: String,
+    pub volley_id: VolleyId,
     pub payload: DataPayload
 }
 
@@ -157,7 +158,7 @@ pub struct AudioShard {
     pub sequence_id: StorageSequence,
     pub sample_rate: u32,
     pub channels: u8,
-    pub volley_id: String,
+    pub volley_id: VolleyId,
     pub payload: DataPayload,
 }
 
@@ -290,7 +291,7 @@ pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<
     Ok(jpeg_bytes)
 }
 
-pub fn create_video_shard(frames: Vec<Vec<u8>>, sequence_id: StorageSequence, fps: u8, volley_id: String) -> VideoShard {
+pub fn create_video_shard(frames: Vec<Vec<u8>>, sequence_id: StorageSequence, fps: u8, volley_id: VolleyId) -> VideoShard {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -312,7 +313,7 @@ pub fn create_audio_shard(
     sequence_id: StorageSequence,
     sample_rate: u32,
     channels: u8,
-    volley_id: String
+    volley_id: VolleyId
 ) -> AudioShard {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -461,6 +462,6 @@ mod tests {
 
         assert_eq!(recovered_frames[0], vec![255, 0, 255]);
         assert_eq!(received_shard.sequence_id.0, 50);
-        assert_eq!(received_shard.volley_id, "v_net");
+        assert_eq!(received_shard.volley_id, "v_net".into());
     }
 }

@@ -1,5 +1,5 @@
 # --- CONFIGURATION ---
-$srcPath = "src"
+$srcPath = "phalanx-core\src"
 $rootPath = "." 
 $roadmapRootDir = "roadmaps" # Your local root for the roadmap hierarchy
 $outputFile = "C:\Users\joevo\GoogleDrive\PROJECT_CONTEXT.md"

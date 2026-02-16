@@ -253,7 +253,7 @@ impl TrafficGovernor {
             PowerState::Normal => true,
             // The Logic is still centralized here, satisfying the audit.
             PowerState::Leaf => chunk_owner == local_did,
-        }
+        }        
     }
 
     pub fn set_state(&mut self, state: PowerState) {

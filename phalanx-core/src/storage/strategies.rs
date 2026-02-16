@@ -6,6 +6,7 @@ use crate::primitives::identity::Did;
 use crate::primitives::shards::{ShardChunk, ShardId, StorageSequence, WitnessEnvelope};
 use std::collections::BTreeMap;
 use std::time::Duration;
+use std::fmt;
 use serde::{Serialize, Deserialize};
 use tracing::{info, warn, error}; // <--- ADDED TRACING
 
@@ -91,9 +92,53 @@ pub struct ForensicGap {
     pub detected_at: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+pub struct VolleyId(String);
+
+impl VolleyId {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for VolleyId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::str::FromStr for VolleyId {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.trim().is_empty() {
+            Err("VolleyId cannot be empty".to_string())
+        } else {
+            Ok(Self(s.to_string()))
+        }
+    }
+}
+
+// Allow cheap conversion from String
+impl From<String> for VolleyId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for VolleyId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Volley {
-    pub id: String,
+    pub id: VolleyId,
     pub owner_did: String,
     pub artifacts: Vec<WitnessEnvelope>,
     pub gaps: Vec<ForensicGap>,
@@ -172,7 +217,7 @@ impl Mold for VolleyAmalgam {
         info!(id=%acc.volley_id, "VolleyAmalgam: Assembly SUCCESS");
         
         Some(Volley {
-            id: acc.volley_id,
+            id: VolleyId(acc.volley_id),
             owner_did: acc.owner_did.to_string(),
             artifacts: sorted_artifacts,
             gaps,
