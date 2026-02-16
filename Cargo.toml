@@ -1,9 +1,16 @@
 [workspace]
 resolver = "2"
 members = [
-    "phalanx-core",
-    "phalanx-ffi",
+    "crates/phalanx-core",
+    "crates/phalanx-ffi",
+    "crates/phalanx-dashboard"
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Phalanx Core Team"]
+rust-version = "1.93.1"
 
 [workspace.dependencies]
 tokio = { version = "1.49", features = ["full"] }

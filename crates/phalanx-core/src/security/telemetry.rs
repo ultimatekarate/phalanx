@@ -2,6 +2,49 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use tracing_appender::rolling;
 use std::sync::Once;
 
+use serde::{Serialize, Deserialize};
+
+use tokio::sync::broadcast;
+use crate::{base::types::{ByteCapacity, UnitInterval}, primitives::{identity::NetworkId, shards::{ShardChunk, VolleyId}}};
+
+
+/// Discovery source attribution.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum DiscoverySource {
+    Kademlia,
+    Mdns,
+    Identify,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum SimEvent {
+    // Hardware/Network Layer Events
+    Chunk(NetworkId, ShardChunk),
+    Heartbeat(NetworkId, Vec<u8>),
+    
+    // Orchestration Layer Events
+    PeerDiscovered {
+        peer: NetworkId,
+        source: DiscoverySource,
+    },
+
+    ShardProcessed { 
+        peer_id: NetworkId, 
+        byte_size: ByteCapacity
+    },
+    CrucibleFinalized { 
+        volley_id: VolleyId 
+    },
+    
+    // System Layer Events
+    SystemStressUpdate(UnitInterval),
+    Shutdown,
+}
+/// Global telemetry bus for the Phalanx node.
+pub struct TelemetryHub {
+    tx: broadcast::Sender<SimEvent>,
+}
+
 static INIT: Once = Once::new();
 
 /// Initializes the telemetry system (Console + File).

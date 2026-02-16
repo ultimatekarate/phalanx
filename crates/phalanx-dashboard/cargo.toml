@@ -1,0 +1,10 @@
+[package]
+name = "phalanx-dashboard"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+phalanx-core = { path = "../phalanx-core" }
+ratatui = "0.30.0"
+crossterm = "0.29.0"
+tokio = { version = "1.49.x", features = ["full"] }

@@ -37,6 +37,8 @@ pub mod security {
     pub mod trust;
 }
 
+pub mod simulation;
+
 // --- 6. DRIVERS (Conditional) ---
 #[cfg(feature = "edge")]
 pub mod drivers {

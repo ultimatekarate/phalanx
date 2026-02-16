@@ -3,19 +3,12 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn, debug, span, Level};
 use std::sync::Arc;
 
-use phalanx_core::primitives::identity::{PhalanxIdentity, Did, NetworkId};
-use phalanx_core::security::sentinel::{Sentinel, ControlMessage};
-use phalanx_core::base::types::{UnitInterval, VitalityRate, PowerState};
-use phalanx_core::storage::vault::Guardian;
-use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
-use phalanx_core::primitives::shards::ShardChunk;
-
-#[derive(Clone)]
-pub enum SimEvent {
-    Chunk(NetworkId, ShardChunk),
-    Heartbeat(NetworkId, Vec<u8>), 
-    Shutdown,
-}
+use crate::primitives::identity::{PhalanxIdentity, Did, NetworkId};
+use crate::security::sentinel::{Sentinel, ControlMessage};
+use crate::base::types::{UnitInterval, VitalityRate, PowerState};
+use crate::storage::vault::Guardian;
+use crate::base::config::{PhalanxConfig, PhalanxPhysics};
+use crate::security::telemetry::SimEvent;
 
 pub struct SimulationHarness {
     pub nodes: Arc<RwLock<HashMap<Did, mpsc::Sender<SimEvent>>>>,
@@ -170,6 +163,14 @@ impl SimulationHarness {
             }
         }
     }
+
+    pub async fn record_ingestion(&self, peer: NetworkId, bytes: usize) {
+        let event = SimEvent::ShardProcessed {
+            origin: peer,
+            size: ByteCapacity::from_bytes(bytes as u64), // Deterministic conversion
+        };
+        self.publish_to_dashboard(event).await;
+    }
 }
 
 #[tokio::main]
@@ -203,8 +204,8 @@ async fn main() {
 async fn test_salvage_on_node_death() {
     use tokio::time::Duration;
     use tracing::{info};
-    use phalanx_core::primitives::shards::{create_video_shard, Evidence, WitnessEnvelope, ChunkType};
-    use phalanx_core::primitives as protocol;
+    use crate::primitives::shards::{create_video_shard, Evidence, WitnessEnvelope, ChunkType};
+    use crate::primitives as protocol;
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter("phalanx=debug,info")
@@ -226,7 +227,7 @@ async fn test_salvage_on_node_death() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let victim_device_network_id = harness.resolve_did(&victim_device_did).await.unwrap();
-    let (victim_identity, _) = phalanx_core::primitives::identity::PhalanxIdentity::generate(); 
+    let (victim_identity, _) = crate::primitives::identity::PhalanxIdentity::generate(); 
     let victim_did = victim_identity.did.clone();
 
     let frames = vec![vec![1]];

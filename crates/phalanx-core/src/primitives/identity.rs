@@ -14,7 +14,7 @@ pub const IDENTITY_VERSION: u32 = 1;
 // id types because I kept I was a moron man that kept using strings. 
 
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 /// A strong type for Decentralized Identifiers (DIDs).
 ///
