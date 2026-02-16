@@ -51,14 +51,8 @@ This plan synthesizes all specialized roadmaps (Network, Security, Stronghold, H
 *Goal: Verify the system works at scale without physical deployment.*
 **Dependencies:** `monitoring-roadmap.md` `justiciar-roadmap.md`
 
-- [ ] **Justiciar Playback and Recovery**
-  - [ ] Phase 1
-  - [ ] Phase 2
-  - [ ] Phase 3
-  - [ ] Phase 4
-  - [ ] Phase 5
-
 - [ ] **Simulation Dashboard**
+  
   - [ ] Implement `SimMetrics` struct and telemetry channel in `sim.rs`.
   - [ ] Build the **TUI Dashboard** using `ratatui` to visualize node states, TPS, and storage.
   - [ ] Add **Chaos Controls** (kill node, sever stronghold) to interactive simulation.

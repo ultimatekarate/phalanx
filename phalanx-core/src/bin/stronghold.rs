@@ -112,6 +112,31 @@ impl StrongholdEngine {
     /// 2. **Maintenance Time:** Fixed interval pruning of stale data.
     /// 3. **Vitality Time:** Dynamic heartbeat pulsing based on system load.
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
+        info!(id = %self.identity.did, "Stronghold Engine active.");
+
+        // 1. ANNOUNCE ROLE (The New Method)
+        // This ensures find_strongholds() callers can see us.
+        match self.swarm.behaviour_mut().announce_stronghold() {
+            Ok(query_id) => {
+                info!(?query_id, "Stronghold role successfully announced to DHT.");
+            },
+            Err(e) => {
+                // A DiscoveryError::StorageError often means the local Kademlia 
+                // store is under heavy pressure or hasn't bootstrapped peers yet.
+                tracing::error!(
+                    error = %e, 
+                    "Critical: Failed to announce Stronghold role. Discovery may be limited."
+                );
+            }
+        }
+
+        // 2. ANNOUNCE SERVICE (The Generic Method)
+        // Keep this for backward compatibility or generic storage queries.
+        let storage_key = get_storage_key();
+        if let Err(e) = self.swarm.behaviour_mut().kademlia.start_providing(storage_key) {
+            warn!(error = %e, "Generic storage service advertisement failed.");
+        }
+        
         let local_id = NetworkId(*self.swarm.local_peer_id());
         info!(peer_id = %local_id, "Stronghold Engine Online.");
 
