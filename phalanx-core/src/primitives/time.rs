@@ -4,6 +4,9 @@ use tracing::{info, warn};
 use sntpc;
 use std::net::UdpSocket;
 
+use serde::{Serialize, Deserialize};
+use thiserror::Error;
+
 // --- MOCKABLE CLOCK INTERFACE ---
 
 /// Represents the source of truth for Network Time.
@@ -94,6 +97,58 @@ impl TrustedClock {
                 Err(format!("{:?}", e))
             }
         }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum TimeError {
+    #[error("Timestamp is too far in the past (Replay Attack): {0}s difference")]
+    Stale(u64),
+    #[error("Timestamp is in the future (Time Traveler): {0}s difference")]
+    Future(u64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PhalanxTimestamp(u64);
+
+impl PhalanxTimestamp {
+    /// Captures current network time.
+    pub fn now(clock: &TrustedClock) -> Self {
+        Self(clock.now())
+    }
+
+    /// Wraps a raw value. 
+    /// 
+    /// ARCHITECTURAL NOTE: This does NOT validate against the clock.
+    /// This allows us to deserialize historical data (which is by definition "stale")
+    /// without the constructor failing.
+    pub fn from_u64(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+
+    /// Strict validation for LIVE traffic.
+    /// 
+    /// Call this immediately after receiving a packet from the network
+    /// to ensure it isn't a replay attack.
+    pub fn verify_freshness(&self, clock: &TrustedClock, tolerance_secs: u64) -> Result<(), TimeError> {
+        let now = clock.now();
+        
+        // Check for Future (Time Travelers)
+        if self.0 > now + tolerance_secs {
+            return Err(TimeError::Future(self.0 - now));
+        }
+
+        // Check for Past (Replays)
+        if self.0 < now.saturating_sub(tolerance_secs) {
+            return Err(TimeError::Stale(now - self.0));
+        }
+
+        Ok(())
     }
 }
 
