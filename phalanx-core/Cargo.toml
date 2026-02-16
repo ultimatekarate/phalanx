@@ -53,6 +53,7 @@ base64 = "0.22.1"
 sha2 = "0.10.9"
 curve25519-dalek = "4.1.3"
 x25519-dalek = {version = "2.0.1", features = ["static_secrets"]}
+tempfile = "3.25.0"
 
 # --- Networking (Consolidated) ---
 [dependencies.libp2p]

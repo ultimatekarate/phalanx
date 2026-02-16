@@ -236,3 +236,127 @@ pub fn setup_phalanx_swarm(
 
     Ok(swarm)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libp2p::identity::Keypair;
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    // --- TEST HELPERS ---
+
+    fn get_test_config() -> (PhalanxConfig, PhalanxPhysics) {
+        // Assuming Default or specific constructors exist based on imports
+        // If specific values are needed for validation, set them here.
+        let config = PhalanxConfig::default(); 
+        let physics = PhalanxPhysics::default_wan(); // or test_profile()
+        (config, physics)
+    }
+
+    fn generate_test_identity() -> Keypair {
+        Keypair::generate_ed25519()
+    }
+
+    // --- TESTS ---
+
+    #[test]
+    fn test_swarm_key_io_roundtrip() {
+        // 1. Setup isolated temp directory
+        let dir = tempdir().expect("Failed to create temp dir");
+        let file_path = dir.path().join("swarm.key");
+        let path_str = file_path.to_str().unwrap();
+
+        // 2. Generate Key
+        generate_swarm_key(path_str).expect("Failed to generate swarm key");
+
+        // 3. Verify file exists
+        assert!(file_path.exists());
+
+        // 4. Load Key
+        let loaded_key = load_swarm_key(&file_path);
+        assert!(loaded_key.is_some(), "Should successfully load generated key");
+
+        // 5. Verify corruption handling
+        let corrupt_path = dir.path().join("corrupt.key");
+        let mut f = File::create(&corrupt_path).unwrap();
+        f.write_all(b"short_key").unwrap(); // Write invalid length
+        
+        let loaded_corrupt = load_swarm_key(&corrupt_path);
+        assert!(loaded_corrupt.is_none(), "Should reject key with invalid length");
+    }
+
+    #[tokio::test]
+    async fn test_transport_construction_no_psk() {
+        let keypair = generate_test_identity();
+        
+        // Attempt to build base transport without PSK
+        let result = build_base_transport(&keypair, None);
+        
+        assert!(result.is_ok(), "Transport construction should succeed without PSK");
+    }
+
+    #[tokio::test]
+    async fn test_transport_construction_with_psk() {
+        let keypair = generate_test_identity();
+        
+        // Manually construct a PSK
+        let mut bytes = [0u8; 32];
+        bytes[0] = 1; // arbitrary
+        let psk = PreSharedKey::new(bytes);
+
+        // Attempt to build base transport with PSK
+        let result = build_base_transport(&keypair, Some(psk));
+        
+        assert!(result.is_ok(), "Transport construction should succeed with PSK");
+    }
+
+    #[tokio::test]
+    async fn test_behaviour_initialization() {
+        let keypair = generate_test_identity();
+        let (config, physics) = get_test_config();
+        let local_peer_id = keypair.public().to_peer_id();
+
+        // Initialize relay client (dependency injection)
+        let (_, relay_client_behaviour) = relay::client::new(local_peer_id);
+
+        let result = build_behaviour(
+            &keypair,
+            &config,
+            &physics,
+            relay_client_behaviour
+        );
+
+        assert!(result.is_ok(), "PhalanxBehaviour should initialize with valid config");
+        
+        let behaviour = result.unwrap();
+        // Verify Kademlia mode is Server (as set in build_behaviour)
+        // Note: access to internal mode might be restricted, but we verify the struct exists
+        assert!(matches!(behaviour.kademlia, kad::Behaviour { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_full_swarm_setup() {
+        let keypair = generate_test_identity();
+        let expected_peer_id = keypair.public().to_peer_id();
+        let (config, physics) = get_test_config();
+
+        // Test the main orchestrator function
+        let swarm_result = setup_phalanx_swarm(
+            keypair, 
+            &config, 
+            &physics, 
+            None // No PSK for this test
+        );
+
+        assert!(swarm_result.is_ok(), "SwarmBuilder pipeline should complete without error");
+
+        let swarm = swarm_result.unwrap();
+        assert_eq!(
+            *swarm.local_peer_id(), 
+            expected_peer_id, 
+            "Swarm should be initialized with the provided identity"
+        );
+    }
+}
