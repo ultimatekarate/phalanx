@@ -1,6 +1,7 @@
 use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Signature};
 use serde::{Serialize, Deserialize};
 use std::{fs, fmt};
+use std::str::FromStr;
 use std::path::Path;
 use libp2p::PeerId;
 use rand::RngCore;
@@ -105,6 +106,22 @@ impl From<PeerId> for NetworkId {
 impl From<&PeerId> for NetworkId {
     fn from(peer_id: &PeerId) -> Self {
         Self(*peer_id)
+    }
+}
+
+impl FromStr for NetworkId {
+    type Err = libp2p::identity::ParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let peer_id = PeerId::from_str(s)?;
+        Ok(Self(peer_id))
+    }
+}
+
+// Ensure the inner PeerId is accessible if needed
+impl AsRef<PeerId> for NetworkId {
+    fn as_ref(&self) -> &PeerId {
+        &self.0
     }
 }
 

@@ -1,7 +1,6 @@
 # --- CONFIGURATION ---
 $srcPath = "phalanx-core\src"
 $rootPath = "." 
-$roadmapRootDir = "roadmaps" # Your local root for the roadmap hierarchy
 $outputFile = "C:\Users\joevo\GoogleDrive\PROJECT_CONTEXT.md"
 $noiseTraits = "Debug|Clone|PartialEq|PartialOrd|Serialize|Deserialize|Default|Copy"
 
@@ -11,35 +10,14 @@ $results = @("# Project API, Documentation & Roadmap Summary`nGenerated: $(Get-D
 $cargoPath = Join-Path $rootPath "Cargo.toml"
 if (Test-Path $cargoPath) {
     $results += "## Project Configuration (Cargo.toml)"
-    $results += "````toml"
+    $results += "``````toml"
     $results += Get-Content $cargoPath
-    $results += "````"
+    $results += "``````"
     $results += "---`n"
     Write-Host "Manifest Loaded." -ForegroundColor Green
 }
 
-# --- 2. INGEST ROADMAP HIERARCHY (Recursive) ---
-if (Test-Path $roadmapRootDir) {
-    $results += "## PROJECT ROADMAP HIERARCHY"
-    $results += "The following sections represent the project's strategic hierarchy. Nested paths indicate domain-specific sub-plans."
-    
-    $roadmapFiles = Get-ChildItem -Path $roadmapRootDir -Filter "*.md" -Recurse
-    foreach ($file in $roadmapFiles) {
-        # Create a breadcrumb label (e.g., roadmaps > ui > mobile-ui-roadmap.md)
-        $relativePath = $file.FullName.Replace((Get-Item $roadmapRootDir).Parent.FullName, "").TrimStart("\").Replace("\", " > ")
-        
-        $results += "### ROADMAP LOCATION: $relativePath"
-        $results += "````markdown"
-        $results += Get-Content $file.FullName
-        $results += "````"
-        $results += "---"
-    }
-    Write-Host "Roadmaps Ingested: $($roadmapFiles.Count) files mapped." -ForegroundColor Green
-} else {
-    Write-Host "Warning: Roadmap directory not found at $roadmapRootDir" -ForegroundColor Yellow
-}
-
-# --- 3. INGEST RUST SOURCE FILES ---
+# --- 2. INGEST RUST SOURCE FILES ---
 $files = Get-ChildItem -Path $srcPath -Filter "*.rs" -Recurse | Where-Object { $_.FullName -notmatch "target" }
 
 foreach ($file in $files) {
@@ -95,9 +73,9 @@ foreach ($file in $files) {
 
     if ($fileSignatures.Count -gt 0) {
         $results += "### Source: $relativePath"
-        $results += "````rust"
+        $results += "``````rust"
         $results += $fileSignatures
-        $results += "````"
+        $results += "``````"
         $results += "---"
     }
 }
