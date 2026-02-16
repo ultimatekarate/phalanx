@@ -12,17 +12,6 @@ use bip39::{Mnemonic, Language};
 pub const IDENTITY_VERSION: u32 = 1;
 
 // --- DIDs & Network IDs ---
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Identity(pub String);
-
-impl fmt::Display for Identity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct Did(pub String);
