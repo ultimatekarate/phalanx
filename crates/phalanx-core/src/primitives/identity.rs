@@ -172,55 +172,41 @@ impl fmt::Debug for PhalanxIdentity {
 }
 
 impl PhalanxIdentity {
-    /// Generates a pristine PhalanxIdentity using system entropy.
+    /// Generates a new identity and its corresponding BIP39 mnemonic.
     ///
-    /// This process involves:
-    /// 1. Sampling 16 bytes of entropy from the OS RNG.
-    /// 2. Generating a BIP39 mnemonic phrase (English) for human-readable backup.
-    /// 3. Deriving an Ed25519 private key from the mnemonic seed.
-    /// 4. wrapping the key in the versioned `PhalanxIdentity` struct.
-    ///
-    /// # Returns
-    /// * `(PhalanxIdentity, String)` - The identity struct and the BIP39 mnemonic phrase.
-    pub fn generate() -> (Self, String) {
+    /// # Functional Specification
+    /// - Input: None (uses system entropy).
+    /// - Output: `Result<(Self, String), IdentityError>`
+    /// - Behavior: Propagates RNG or derivation failures to the caller.
+    pub fn generate() -> Result<(Self, String), IdentityError> {
         let mut rng = rand::rng();
         let mut entropy = [0u8; 16];
+        
+        // rng.fill_bytes is infallible in current rand crate versions for OsRng, 
+        // but if we ever switch RNGs, we maintain the pattern.
         rng.fill_bytes(&mut entropy);
 
-        let mnemonic = match Mnemonic::from_entropy(&entropy) {
-            Ok(m) => m,
-            Err(_) => {
-                unreachable!("Fatal: BIP39 rejected valid 16-byte entropy")
-            }
-        };
-
+        let mnemonic = Mnemonic::from_entropy(&entropy)
+            .map_err(|e| IdentityError::EntropyError(e.to_string()))?;
+        
         let phrase = mnemonic.to_string();
         let seed = mnemonic.to_seed("");
 
-        let secret_slice = match seed.get(0..32) {
-            Some(s) => s,
-            None => {
-                unreachable!("Fatal: BIP39 seed length insufficient")
-            }
-        };
+        // Safe slice access
+        let secret_slice = seed.get(0..32)
+            .ok_or_else(|| IdentityError::CryptoError("Seed generation produced insufficient length".into()))?;
 
-        let secret_bytes: [u8; 32] = match secret_slice.try_into() {
-            Ok(b) => b,
-            Err(_) => {
-                unreachable!("Fatal: Slice conversion failed despite length check")
-            }
-        };
+        let secret_bytes: [u8; 32] = secret_slice.try_into()
+            .map_err(|_| IdentityError::CryptoError("Seed conversion failed".into()))?;
 
         let signing_key = SigningKey::from_bytes(&secret_bytes);
         
-        // Internal helper generates the peer_id
+        // Validate Libp2p compatibility immediately
         let mut keypair_bytes = signing_key.to_bytes();
-        let peer_id = match libp2p::identity::Keypair::ed25519_from_bytes(&mut keypair_bytes) {
-            Ok(kp) => kp.public().to_peer_id(),
-            Err(_) => {
-                unreachable!("Fatal: Generated keypair rejected by Libp2p")
-            }
-        };
+        let peer_id = libp2p::identity::Keypair::ed25519_from_bytes(&mut keypair_bytes)
+            .map_err(|e| IdentityError::CryptoError(format!("Libp2p key rejection: {}", e)))?
+            .public()
+            .to_peer_id();
 
         let identity = PhalanxIdentity {
             version: IDENTITY_VERSION,
@@ -228,57 +214,42 @@ impl PhalanxIdentity {
             keypair: signing_key,
         };
         
-        (identity, phrase)
+        Ok((identity, phrase))
     }
 
-    /// Recovers a PhalanxIdentity from a BIP39 mnemonic phrase.
-    ///
-    /// This method is deterministic; the same phrase will always yield the same
-    /// private key and resulting PeerID.
-    ///
-    /// # Arguments
-    /// * `phrase` - A string containing the space-separated BIP39 mnemonic words.
-    ///
-    /// # Returns
-    /// * `Ok(Self)` - The recovered identity.
-    /// * `Err(String)` - If the mnemonic is invalid or the checksum fails.
-    pub fn restore(phrase: &str) -> Result<Self, String> {
+    /// Restores an identity from an existing BIP39 mnemonic phrase.
+    pub fn restore(phrase: &str) -> Result<Self, IdentityError> {
         let mnemonic = Mnemonic::parse_in(Language::English, phrase)
-            .map_err(|e| format!("Invalid mnemonic: {}", e))?;
+            .map_err(|e| IdentityError::MnemonicError(e.to_string()))?;
+        
         let seed = mnemonic.to_seed("");
-        let secret_bytes: [u8; 32] = seed[0..32].try_into().expect("Seed invalid");
-        let signing_key = SigningKey::from_bytes(&secret_bytes);
-        Ok(Self::from_key(signing_key))
-    }
+        
+        let secret_slice = seed.get(0..32)
+            .ok_or_else(|| IdentityError::CryptoError("Seed generation produced insufficient length".into()))?;
+        
+        let secret_bytes: [u8; 32] = secret_slice.try_into()
+            .map_err(|_| IdentityError::CryptoError("Seed conversion failed".into()))?;
 
-    fn from_key(keypair: SigningKey) -> Self {
-        let peer_id = libp2p::identity::Keypair::ed25519_from_bytes(keypair.to_bytes())
-            .expect("Key conv failed")
+        let signing_key = SigningKey::from_bytes(&secret_bytes);
+        
+        let mut keypair_bytes = signing_key.to_bytes();
+        let peer_id = libp2p::identity::Keypair::ed25519_from_bytes(&mut keypair_bytes)
+            .map_err(|e| IdentityError::CryptoError(format!("Key derivation failed: {}", e)))?
             .public()
             .to_peer_id();
 
-        let did_str = peer_id.to_base58();
-
-        PhalanxIdentity {
-            version: IDENTITY_VERSION, // Set Version
-            did: Did(did_str),
-            keypair,
-        }
-    }
-
-    /// Cryptographically signs a byte slice using the internal Ed25519 private key.
-    ///
-    /// Used for attaching forensic proof to data shards or network messages.
-    pub fn sign(&self, msg: &[u8]) -> Signature {
-        self.keypair.sign(msg)
+        Ok(PhalanxIdentity {
+            version: IDENTITY_VERSION,
+            did: Did(peer_id.to_base58()),
+            keypair: signing_key,
+        })
     }
 
     /// Validates a signature using either raw Ed25519 keys or Libp2p protobuf-encoded keys.
-    /// 
+    ///
     /// # Functional Specification
-    /// - Handles raw 32-byte public keys.
-    /// - Handles 38-byte Libp2p Protobuf public keys (with prefix).
-    /// - Returns `false` for any invalid length or malformed key/signature (no panics).
+    /// - Returns `false` on any error (encoding, length, or signature mismatch).
+    /// - No panics.
     pub fn verify(pubkey: &[u8], msg: &[u8], sig: &[u8]) -> bool {
         let key_bytes_opt: Option<&[u8]> = if pubkey.len() == 32 {
             Some(pubkey)
@@ -300,81 +271,64 @@ impl PhalanxIdentity {
         false
     }
 
-    /// Converts the internal forensic key into a Libp2p Keypair.
-    ///
-    /// This transformation allows the networking stack to use the same cryptographic
-    /// root for TLS handshakes and peer routing.
-    pub fn to_libp2p_keypair(&self) -> libp2p::identity::Keypair {
+    pub fn sign(&self, msg: &[u8]) -> Signature {
+        self.keypair.sign(msg)
+    }
+
+    /// Converts the internal Ed25519 key to a Libp2p Keypair.
+    pub fn to_libp2p_keypair(&self) -> Result<libp2p::identity::Keypair, IdentityError> {
         let mut bytes = self.keypair.to_bytes();
-        match libp2p::identity::Keypair::ed25519_from_bytes(&mut bytes) {
-            Ok(kp) => kp,
-            Err(_) => {
-                // This implies the SigningKey held in memory is invalid, 
-                // which violates the Type state of PhalanxIdentity.
-                eprintln!("CRITICAL: In-memory identity corruption detected.");
-                std::process::abort(); 
-            }
-        }
+        libp2p::identity::Keypair::ed25519_from_bytes(&mut bytes)
+            .map_err(|e| IdentityError::CryptoError(e.to_string()))
     }
 
-    /// Serializes the identity to disk using Postcard binary encoding.
-    ///
-    /// # Arguments
-    /// * `path` - The file path for the output.
-    pub fn save_to_disk<P: AsRef<Path>>(&self, path: P) -> std::io::Result<()> {
-        let bytes = postcard::to_stdvec(self).map_err(std::io::Error::other)?;
-        fs::write(path, bytes)
+    pub fn save_to_disk<P: AsRef<Path>>(&self, path: P) -> Result<(), IdentityError> {
+        let bytes = postcard::to_stdvec(self)
+            .map_err(|e| IdentityError::SerializationError(e.to_string()))?;
+        fs::write(path, bytes).map_err(IdentityError::IoError)
     }
 
-    /// Loads an identity from disk with automatic version handling.
-    ///
-    /// # Migration Logic
-    /// 1. **Primary**: Attempts to deserialize as a versioned `PhalanxIdentity` struct.
-    ///    - Checks `identity.version` against `IDENTITY_VERSION` (currently 1).
-    /// 2. **Fallback**: If deserialization fails, checks if the file is exactly 32 bytes.
-    ///    - If yes, treats it as a legacy raw key, upgrades it to v1, and **overwrites the file** with the new format.
-    ///
-    /// # Returns
-    /// * `Ok(Self)` - The loaded (and potentially migrated) identity.
-    /// * `Err(io::Error)` - If the file is missing, corrupt, or has a version mismatch.
-    pub fn load_from_disk<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
-        let bytes = fs::read(&path)?;
+    pub fn load_from_disk<P: AsRef<Path>>(path: P) -> Result<Self, IdentityError> {
+        let bytes = fs::read(&path).map_err(IdentityError::IoError)?;
 
-        // 1. Try to load as Versioned Struct (New Format)
+        // Modern format
         if let Ok(identity) = postcard::from_bytes::<PhalanxIdentity>(&bytes) {
             if identity.version != IDENTITY_VERSION {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "Identity version mismatch. Expected {}, got {}",
-                        IDENTITY_VERSION, identity.version
-                    ),
-                ));
+                return Err(IdentityError::Corruption(format!(
+                    "Version mismatch: Expected {}, found {}", 
+                    IDENTITY_VERSION, identity.version
+                )));
             }
             return Ok(identity);
         }
 
-        // 2. Fallback: Legacy 32-byte Key Check
-        // If "Strictly Enforce" means "No Legacy", comment this block out.
-        // But for development continuity, we auto-migrate.
+        // Legacy format (raw 32 bytes)
         if bytes.len() == 32 {
-            println!(
-                "WARNING: Legacy Identity Format Detected. Upgrading to v{}...",
-                IDENTITY_VERSION
-            );
-            let arr: [u8; 32] = bytes.try_into().unwrap();
+            let arr: [u8; 32] = bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| IdentityError::Corruption("Invalid key length for legacy upgrade".into()))?;
+            
             let key = SigningKey::from_bytes(&arr);
-            let identity = Self::from_key(key);
+            
+            let mut keypair_bytes = key.to_bytes();
+            let peer_id = libp2p::identity::Keypair::ed25519_from_bytes(&mut keypair_bytes)
+                .map_err(|e| IdentityError::CryptoError(e.to_string()))?
+                .public()
+                .to_peer_id();
 
-            // Auto-save the upgraded format back to disk
-            identity.save_to_disk(path)?;
+            let identity = PhalanxIdentity {
+                version: IDENTITY_VERSION,
+                did: Did(peer_id.to_base58()),
+                keypair: key,
+            };
+
+            // Attempt upgrade save, but do not fail load if write fails
+            let _ = identity.save_to_disk(&path);
             return Ok(identity);
         }
 
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Unknown identity format",
-        ))
+        Err(IdentityError::Corruption("Unknown identity format".into()))
     }
 }
 
@@ -384,7 +338,7 @@ mod tests {
 
     #[test]
     fn test_identity_generation_and_did() {
-        let (identity, _) = PhalanxIdentity::generate();
+        let (identity, _) = PhalanxIdentity::generate().unwrap();
         assert!(!identity.did.0.starts_with("did:key:"));
         assert!(identity.did.0.len() > 40);
         assert_eq!(identity.version, IDENTITY_VERSION);
@@ -392,7 +346,7 @@ mod tests {
 
     #[test]
     fn test_signing_and_verification() {
-        let (identity, _) = PhalanxIdentity::generate();
+        let (identity, _) = PhalanxIdentity::generate().unwrap();
         let message = b"evidence_shard_001";
         let signature = identity.sign(message);
         let pubkey = identity.keypair.verifying_key().to_bytes();
@@ -406,7 +360,7 @@ mod tests {
 
     #[test]
     fn test_mnemonic_recovery() {
-        let (original, phrase) = PhalanxIdentity::generate();
+        let (original, phrase) = PhalanxIdentity::generate().unwrap();
         let original_did = original.did.clone();
 
         let recovered = PhalanxIdentity::restore(&phrase).expect("Failed to restore");
@@ -418,7 +372,7 @@ mod tests {
 
     #[test]
     fn test_libp2p_key_format_handling() {
-        let (identity, _) = PhalanxIdentity::generate();
+        let (identity, _) = PhalanxIdentity::generate().unwrap();
         let message = b"compatibility_check";
         let signature = identity.sign(message);
         let raw_key = identity.keypair.verifying_key().to_bytes();
@@ -436,7 +390,7 @@ mod tests {
     #[test]
     fn test_persistence_upgrade() {
         // Test that we can save and load the new format
-        let (identity, _) = PhalanxIdentity::generate();
+        let (identity, _) = PhalanxIdentity::generate().unwrap();
         let path = "test_identity_v1.bin";
 
         identity.save_to_disk(path).unwrap();
@@ -451,7 +405,7 @@ mod tests {
     #[test]
     fn test_legacy_upgrade() {
         // Manually create a legacy file (raw 32 bytes)
-        let (identity, _) = PhalanxIdentity::generate();
+        let (identity, _) = PhalanxIdentity::generate().unwrap();
         let path = "test_identity_legacy.bin";
         fs::write(path, identity.keypair.to_bytes()).unwrap();
 
