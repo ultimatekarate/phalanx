@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 use std::env;
 use crate::base::types::{ByteCapacity, MeshTopic}; 
+use crate::base::types::UnitInterval;
 
 /// The Physical Laws of the Simulation.
 /// 
@@ -21,7 +22,9 @@ pub struct PhalanxPhysics {
     /// The Chaos Factor (Safety Margin).
     /// timeouts = jitter_factor * (tau + cpu).
     /// A higher jitter factor makes the network more tolerant of "Vampire" nodes.
-    pub jitter_factor: u64 
+    pub jitter_factor: u64,
+
+    pub artificial_load: f32,
 }
 
 impl PhalanxPhysics {
@@ -32,6 +35,7 @@ impl PhalanxPhysics {
             tau_rtt: 300,
             delta_cpu: 20,
             jitter_factor: 3,
+            artificial_load: 0.0
         }
     }
 
@@ -42,6 +46,7 @@ impl PhalanxPhysics {
             tau_rtt: 300,
             delta_cpu: 20,
             jitter_factor: 3,
+            artificial_load: 0.0
         }
     }
 
@@ -51,6 +56,7 @@ impl PhalanxPhysics {
             tau_rtt: 50,
             delta_cpu: 100,
             jitter_factor: 5,
+            artificial_load: 0.0
         }
     }
 
@@ -59,6 +65,10 @@ impl PhalanxPhysics {
     pub fn shard_timeout(&self) -> std::time::Duration {
         let ms = self.jitter_factor * (self.tau_rtt + self.delta_cpu);
         std::time::Duration::from_millis(ms)
+    }
+
+    pub fn apply_system_load(&mut self, load: UnitInterval) {
+        self.artificial_load = load.as_f32();
     }
 }
 

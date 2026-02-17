@@ -19,8 +19,14 @@ pub enum DiscoverySource {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SimEvent {
     // Hardware/Network Layer Events
-    Chunk(NetworkId, ShardChunk),
-    Heartbeat(NetworkId, Vec<u8>),
+    ChunkIngested{
+        origin: NetworkId, 
+        chunk: ShardChunk
+    },
+    Heartbeat {
+        origin: NetworkId, 
+        payload: Vec<u8>
+    },
     
     // Orchestration Layer Events
     PeerDiscovered {
@@ -42,7 +48,7 @@ pub enum SimEvent {
 }
 /// Global telemetry bus for the Phalanx node.
 pub struct TelemetryHub {
-    tx: broadcast::Sender<SimEvent>,
+    _tx: broadcast::Sender<SimEvent>,
 }
 
 static INIT: Once = Once::new();

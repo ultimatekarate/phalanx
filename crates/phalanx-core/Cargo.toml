@@ -78,10 +78,6 @@ features = [
     "autonat"
 ]
 
-[[example]]
-name = "simulation"
-path = "examples/simulation.rs"
-
 [features]
 default = []
 edge = []
