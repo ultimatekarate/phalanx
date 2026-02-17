@@ -99,6 +99,12 @@ impl TrustedClock {
     }
 }
 
+impl Default for TrustedClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum TimeError {
     #[error("Timestamp is too far in the past (Replay Attack): {0}s difference")]
