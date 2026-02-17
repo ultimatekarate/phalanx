@@ -10,20 +10,21 @@ use std::{fmt, fs};
 // --- CONSTANTS ---
 pub const IDENTITY_VERSION: u32 = 1;
 
+// --- ERROR TYPES ---
 #[derive(Debug, thiserror::Error)]
 pub enum IdentityError {
-    #[error("Mnemonic generation or parsing failed: {0}")]
+    #[error("Entropy generation failed: {0}")]
+    EntropyError(String),
+    #[error("Mnemonic parsing failed: {0}")]
     MnemonicError(String),
-    #[error("Cryptographic conversion failed: {0}")]
+    #[error("Cryptographic derivation failed: {0}")]
     CryptoError(String),
-    #[error("I/O error during identity persistence: {0}")]
+    #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
-    #[error("Version mismatch: expected {expected}, found {found}")]
-    VersionMismatch { expected: u32, found: u32 },
-    #[error("Invalid data format or length: {0}")]
-    InvalidFormat(String),
     #[error("Serialization error: {0}")]
     SerializationError(String),
+    #[error("Identity data corruption: {0}")]
+    Corruption(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -186,13 +187,48 @@ impl PhalanxIdentity {
         let mut entropy = [0u8; 16];
         rng.fill_bytes(&mut entropy);
 
-        let mnemonic = Mnemonic::from_entropy(&entropy).expect("Failed to create mnemonic");
+        let mnemonic = match Mnemonic::from_entropy(&entropy) {
+            Ok(m) => m,
+            Err(_) => {
+                unreachable!("Fatal: BIP39 rejected valid 16-byte entropy")
+            }
+        };
+
         let phrase = mnemonic.to_string();
         let seed = mnemonic.to_seed("");
 
-        let secret_bytes: [u8; 32] = seed[0..32].try_into().expect("Seed invalid");
+        let secret_slice = match seed.get(0..32) {
+            Some(s) => s,
+            None => {
+                unreachable!("Fatal: BIP39 seed length insufficient")
+            }
+        };
+
+        let secret_bytes: [u8; 32] = match secret_slice.try_into() {
+            Ok(b) => b,
+            Err(_) => {
+                unreachable!("Fatal: Slice conversion failed despite length check")
+            }
+        };
+
         let signing_key = SigningKey::from_bytes(&secret_bytes);
-        (Self::from_key(signing_key), phrase)
+        
+        // Internal helper generates the peer_id
+        let mut keypair_bytes = signing_key.to_bytes();
+        let peer_id = match libp2p::identity::Keypair::ed25519_from_bytes(&mut keypair_bytes) {
+            Ok(kp) => kp.public().to_peer_id(),
+            Err(_) => {
+                unreachable!("Fatal: Generated keypair rejected by Libp2p")
+            }
+        };
+
+        let identity = PhalanxIdentity {
+            version: IDENTITY_VERSION,
+            did: Did(peer_id.to_base58()),
+            keypair: signing_key,
+        };
+        
+        (identity, phrase)
     }
 
     /// Recovers a PhalanxIdentity from a BIP39 mnemonic phrase.
@@ -237,20 +273,17 @@ impl PhalanxIdentity {
         self.keypair.sign(msg)
     }
 
-    /// Verifies a signature against a public key.
-    ///
-    /// This method supports two public key formats for interoperability:
-    /// 1. **Raw Ed25519**: 32 bytes.
-    /// 2. **Libp2p Protobuf**: 38 bytes (includes the `0x00240801...` multicodec prefix).
-    ///
-    /// # Returns
-    /// * `true` if the signature is valid for the given message and key.
-    /// * `false` if the key format is unrecognized or the signature is invalid.
+    /// Validates a signature using either raw Ed25519 keys or Libp2p protobuf-encoded keys.
+    /// 
+    /// # Functional Specification
+    /// - Handles raw 32-byte public keys.
+    /// - Handles 38-byte Libp2p Protobuf public keys (with prefix).
+    /// - Returns `false` for any invalid length or malformed key/signature (no panics).
     pub fn verify(pubkey: &[u8], msg: &[u8], sig: &[u8]) -> bool {
         let key_bytes_opt: Option<&[u8]> = if pubkey.len() == 32 {
             Some(pubkey)
         } else if pubkey.len() == 38 && pubkey.starts_with(&[0x00, 0x24, 0x08, 0x01, 0x12, 0x20]) {
-            Some(&pubkey[6..])
+            pubkey.get(6..)
         } else {
             None
         };
@@ -273,7 +306,15 @@ impl PhalanxIdentity {
     /// root for TLS handshakes and peer routing.
     pub fn to_libp2p_keypair(&self) -> libp2p::identity::Keypair {
         let mut bytes = self.keypair.to_bytes();
-        libp2p::identity::Keypair::ed25519_from_bytes(&mut bytes).unwrap()
+        match libp2p::identity::Keypair::ed25519_from_bytes(&mut bytes) {
+            Ok(kp) => kp,
+            Err(_) => {
+                // This implies the SigningKey held in memory is invalid, 
+                // which violates the Type state of PhalanxIdentity.
+                eprintln!("CRITICAL: In-memory identity corruption detected.");
+                std::process::abort(); 
+            }
+        }
     }
 
     /// Serializes the identity to disk using Postcard binary encoding.
