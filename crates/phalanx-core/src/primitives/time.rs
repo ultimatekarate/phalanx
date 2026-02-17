@@ -69,7 +69,7 @@ impl TrustedClock {
         *w = new_offset;
         Ok(())
     }
-    
+
     pub async fn synchronize(&self) -> Result<(), String> {
         // 1. Bind a local UDP socket to an available port (0)
         let socket = match UdpSocket::bind("0.0.0.0:0") {
@@ -218,13 +218,13 @@ mod tests {
     }
 
     #[test]
-    fn test_clock_skew_correction() {
+    fn test_clock_skew_correction() -> TimeResult<()> {
         let clock = TrustedClock::new();
 
         // SCENARIO: Local machine is 10 seconds BEHIND reality.
         // Real time is 100. Local thinks it is 90.
         // We set offset to +10,000ms.
-        clock.set_offset(10_000);
+        clock.set_offset(10_000)?;
 
         // Local system time (simulated)
         let local_sys_time = SystemTime::now()
@@ -239,5 +239,7 @@ mod tests {
             adjusted_time >= local_sys_time + 9,
             "Clock did not apply positive offset"
         );
+
+        Ok(())
     }
 }
