@@ -171,9 +171,9 @@ impl PhalanxEngine {
         event: SwarmEvent<PhalanxEvent>,
     ) -> Result<(), Box<dyn Error>> {
         if let SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(_gossip_event)) = event {
-                // TODO: Route foreign shards to Guardian::ingest_chunk() for Salvage.
-            }
-        
+            // TODO: Route foreign shards to Guardian::ingest_chunk() for Salvage.
+        }
+
         Ok(())
     }
 }

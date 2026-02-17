@@ -233,7 +233,7 @@ fn build_behaviour(
             .validation_mode(gossipsub::ValidationMode::Strict)
             .max_transmit_size(config.network.max_chunk_size_bytes * 2)
             .build()
-            .map_err(std::io::Error::other)?, 
+            .map_err(std::io::Error::other)?,
     )?;
 
     // B. Kademlia

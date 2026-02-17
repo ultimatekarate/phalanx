@@ -1,9 +1,9 @@
 use crate::base::config::PhalanxPhysics;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::fmt;
 use std::ops::{AddAssign, SubAssign};
 use std::time::Duration;
-use std::cmp::Ordering;
 
 /// A type-safe wrapper for values that MUST be between 0.0 and 1.0.
 /// Replaces raw f32 for Battery and Load metrics.
@@ -13,6 +13,13 @@ pub struct UnitInterval(f32);
 impl UnitInterval {
     /// Creates a new UnitInterval, clamping the value between 0.0 and 1.0.
     pub fn new(val: f32) -> Self {
+        if val.is_nan() {
+            // FORENSIC PROTOCOL: Panic or default to max load on NaN?
+            // Panicking is safer for debugging; defaulting to 1.0 is safer for runtime stability.
+            // We choose 1.0 (Max Load) to trigger traffic shedding if math fails.
+            return Self(1.0);
+        }
+
         Self(val.clamp(0.0, 1.0))
     }
 

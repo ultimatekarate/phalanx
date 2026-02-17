@@ -1,5 +1,5 @@
-use std::fmt;
 use std::convert::TryFrom;
+use std::fmt;
 use std::io::Cursor;
 use std::ops::{Add, Deref, Sub};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -354,7 +354,7 @@ pub fn chunkify(
     data.chunks(chunk_size)
         .enumerate()
         .map(|(i, chunk_slice)| ShardChunk {
-            shard_id: shard_id, 
+            shard_id: shard_id,
             chunk_index: i as u32, // Safe: We proved 'count' fits in u32 above
             total_chunks,
             owner_did: owner_did.clone(),

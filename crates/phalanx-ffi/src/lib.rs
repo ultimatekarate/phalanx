@@ -46,7 +46,7 @@ pub unsafe extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut
 #[no_mangle]
 pub unsafe extern "C" fn phalanx_engine_free(ptr: *mut PhalanxEngine) {
     if !ptr.is_null() {
-        // SAFETY: We explicitly trust the caller to pass a valid pointer 
+        // SAFETY: We explicitly trust the caller to pass a valid pointer
         // derived from phalanx_init or similar constructors.
         let _ = Box::from_raw(ptr);
     }

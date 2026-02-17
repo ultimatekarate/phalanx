@@ -415,14 +415,22 @@ impl Guardian {
         // Numerical precision matters. Let's not be lazy.
         let micro_len = self.micro_layer.len() as f64;
         let macro_len = self.macro_layer.len() as f64;
-        
+
         // Use f64 constants for calculation precision
         let micro_cap = (self.max_buffers_per_peer as f64) * 5.0;
         let macro_cap = self.max_buffers_per_peer as f64;
 
         // Prevent division by zero
-        let micro_load = if micro_cap > 0.0 { micro_len / micro_cap } else { 1.0 };
-        let macro_load = if macro_cap > 0.0 { macro_len / macro_cap } else { 1.0 };
+        let micro_load = if micro_cap > 0.0 {
+            micro_len / micro_cap
+        } else {
+            1.0
+        };
+        let macro_load = if macro_cap > 0.0 {
+            macro_len / macro_cap
+        } else {
+            1.0
+        };
 
         // Combine logic (Simple Sum for now)
         let total_raw = micro_load + macro_load;
@@ -588,8 +596,7 @@ impl Guardian {
         let safe_did = envelope.did.to_safe_name();
         let file_name = format!("{}_{}.wal", safe_did, envelope.evidence.sequence_id().0);
         let wal_path = self.wal_directory.join(file_name);
-        let bytes = postcard::to_stdvec(envelope)
-            .map_err(std::io::Error::other)?;
+        let bytes = postcard::to_stdvec(envelope).map_err(std::io::Error::other)?;
 
         let mut file = File::create(wal_path)?;
         file.write_all(&bytes)?;
