@@ -1,0 +1,11 @@
+# clippy.toml
+# Configuration values for Phalanx Forensic Analysis
+
+# Reduce complexity threshold to enforce simpler functions (default is 25)
+cognitive-complexity-threshold = 20
+
+# Warn on functions with more than 7 arguments (default is 7)
+too-many-arguments-threshold = 7
+
+# Warn on lines longer than 120 chars (if enabling too_many_lines)
+too-many-lines-threshold = 100
