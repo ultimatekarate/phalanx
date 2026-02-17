@@ -206,6 +206,13 @@ impl<S: Mold> Crucible<S> {
     }
 }
 
+impl<S: Mold> Default for Crucible<S> {
+    /// Initializes a default Crucible workbench with a standard 1-second cleanup interval.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
