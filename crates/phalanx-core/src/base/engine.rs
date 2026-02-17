@@ -79,7 +79,7 @@ impl PhalanxEngine {
             identity,
             swarm,
             crucible: crate::storage::crucible::Crucible::new(),
-            guardian: guardian,
+            guardian,
             video_rx,
             audio_rx,
         })

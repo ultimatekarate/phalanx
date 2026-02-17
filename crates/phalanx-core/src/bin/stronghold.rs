@@ -196,16 +196,14 @@ impl StrongholdEngine {
                 }
             }
 
-            SwarmEvent::Behaviour(PhalanxEvent::Identify(identify::Event::Received {
-                peer_id,
-                info,
-                ..
-            })) => {
-                for addr in info.listen_addrs {
-                    self.swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .add_address(&peer_id, addr);
+            SwarmEvent::Behaviour(PhalanxEvent::Identify(boxed_event)) => {
+                if let identify::Event::Received { peer_id, info, .. } = *boxed_event {
+                    for addr in info.listen_addrs {
+                        self.swarm
+                            .behaviour_mut()
+                            .kademlia
+                            .add_address(&peer_id, addr);
+                    }
                 }
             }
 

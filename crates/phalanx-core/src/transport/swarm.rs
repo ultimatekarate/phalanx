@@ -97,7 +97,7 @@ pub enum PhalanxEvent {
     Gossipsub(gossipsub::Event),
     Mdns(mdns::Event),
     Kademlia(kad::Event),
-    Identify(identify::Event),
+    Identify(Box<identify::Event>),
     RelayServer(relay::Event),
     RelayClient(relay::client::Event),
     Dcutr(dcutr::Event),
@@ -121,7 +121,7 @@ impl From<kad::Event> for PhalanxEvent {
 }
 impl From<identify::Event> for PhalanxEvent {
     fn from(v: identify::Event) -> Self {
-        Self::Identify(v)
+        Self::Identify(Box::new(v))
     }
 }
 impl From<relay::Event> for PhalanxEvent {
