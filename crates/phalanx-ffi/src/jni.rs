@@ -34,11 +34,18 @@ pub extern "system" fn Java_com_phalanx_bridge_PhalanxBridge_destroyEngine(
     _env: JNIEnv,
     _class: JClass,
     ptr: jlong,
-) {
-    if ptr != 0 {
-        // Take the pointer back and drop it to free memory
-        unsafe {
-            let _ = Box::from_raw(ptr as *mut PhalanxEngine);
+) -> jlong {
+    let Ok(path) = env.get_string(&storage_path).map(String::from) else {
+        return 0;
+    };
+
+    match PhalanxEngine::new_at_path(&path) {
+        Ok(engine) => {
+            Box::into_raw(Box::new(engine)) as jlong
+        }
+        Err(e) => {
+            eprintln!("JNI Error: Failed to init engine: {e}");
+            0
         }
     }
 }

@@ -18,9 +18,9 @@ pub unsafe extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut
     }
 
     let c_str = CStr::from_ptr(storage_path);
-    let path_str = match c_str.to_str() {
-        Ok(s) => s,
-        Err(_) => return ptr::null_mut(), // Invalid UTF-8
+
+    let Ok(path_str) = c_str.to_str() else {
+        return ptr::null_mut(); // Invalid UTF-8
     };
 
     // Initialize the engine (Synchronously)
@@ -31,7 +31,7 @@ pub unsafe extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut
         }
         Err(e) => {
             // Failure: Log error and return Null
-            eprintln!("Failed to init Phalanx Engine: {}", e);
+            eprintln!("Failed to init Phalanx Engine: {e}");
             ptr::null_mut()
         }
     }

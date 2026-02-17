@@ -358,7 +358,7 @@ pub fn chunkify(
             total_chunks,
             owner_did: owner_did.clone(),
             data: chunk_slice.to_vec(),
-            chunk_type: chunk_type,
+            chunk_type,
         })
         .collect()
 }
