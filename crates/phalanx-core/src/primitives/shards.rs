@@ -315,8 +315,10 @@ impl DataPayload {
         }
     }
 }
-/// HELPER FUNCTIONS
 
+// HELPER FUNCTIONS
+
+/// Splits a shard into chunks to send over the network
 pub fn chunkify(
     shard_id: ShardId,
     data: Vec<u8>,

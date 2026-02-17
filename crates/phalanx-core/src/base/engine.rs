@@ -134,7 +134,7 @@ impl PhalanxEngine {
                 // Priority 3: Local Audio Witnessing
                 Some(shard) = self.audio_rx.recv() => {
                     let evidence = Evidence::Audio(shard);
-                    let envelope = WitnessEnvelope::new(evidence, &self.identity, local_network_id.clone());
+                    let envelope = WitnessEnvelope::new(evidence, &self.identity, local_network_id);
                     self.finalize_reassembly(envelope).await?;
                 }
             }

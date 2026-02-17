@@ -28,17 +28,6 @@ pub struct PhalanxPhysics {
 }
 
 impl PhalanxPhysics {
-    /// Default profile.
-    pub fn default() -> Self {
-        // This is intentionally the same as default_wan.
-        Self {
-            tau_rtt: 300,
-            delta_cpu: 20,
-            jitter_factor: 3,
-            artificial_load: 0.0,
-        }
-    }
-
     /// Optimized for high-latency mobile WANs.
     pub fn default_wan() -> Self {
         Self {
@@ -68,6 +57,18 @@ impl PhalanxPhysics {
 
     pub fn apply_system_load(&mut self, load: UnitInterval) {
         self.artificial_load = load.as_f32();
+    }
+}
+
+/// Establishes the baseline laws of physics for the simulation.
+impl Default for PhalanxPhysics {
+    fn default() -> Self {
+        Self {
+            tau_rtt: 300,
+            delta_cpu: 20,
+            jitter_factor: 3,
+            artificial_load: 0.0,
+        }
     }
 }
 

@@ -68,9 +68,6 @@ impl AsRef<str> for Did {
 /// Wraps `libp2p::PeerId`.
 /// Implements `serde` serialization to/from Base58 strings, ensuring
 /// that JSON/Postcard representations remain human-readable or standard-compliant.
-
-// I won't pretend to understand why it's needed, I'm just
-// trusting the nerds that came before me that decided it was.
 pub struct NetworkId(pub libp2p::PeerId);
 
 impl NetworkId {
