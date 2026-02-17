@@ -6,14 +6,18 @@ use std::ptr;
 #[cfg(target_os = "android")]
 pub mod jni;
 
+/// Initializes the Phalanx storage engine.
+///
+/// # Safety
+/// The caller must ensure `storage_path` is a valid, null-terminated C-string
+/// pointer. Passing a null or dangling pointer will cause Undefined Behavior.
 #[no_mangle]
-pub extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut PhalanxEngine {
+pub unsafe extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut PhalanxEngine {
     if storage_path.is_null() {
         return ptr::null_mut();
     }
 
-    // Safely convert C string to Rust string
-    let c_str = unsafe { CStr::from_ptr(storage_path) };
+    let c_str = CStr::from_ptr(storage_path);
     let path_str = match c_str.to_str() {
         Ok(s) => s,
         Err(_) => return ptr::null_mut(), // Invalid UTF-8
@@ -34,12 +38,10 @@ pub extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut Phalan
 }
 
 #[no_mangle]
-pub extern "C" fn phalanx_engine_free(ptr: *mut PhalanxEngine) {
-    if ptr.is_null() {
-        return;
-    }
-    // Take ownership back to Rust to drop it safely
-    unsafe {
+pub unsafe extern "C" fn phalanx_engine_free(ptr: *mut PhalanxEngine) {
+    if !ptr.is_null() {
+        // SAFETY: We explicitly trust the caller to pass a valid pointer 
+        // derived from phalanx_init or similar constructors.
         let _ = Box::from_raw(ptr);
     }
 }
