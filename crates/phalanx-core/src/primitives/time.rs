@@ -63,11 +63,13 @@ impl TrustedClock {
     }
 
     /// Updates the offset manually (for testing or NTP sync)
-    pub fn set_offset(&self, ms: i64) {
-        let mut w = self.offset_ms.write().unwrap();
-        *w = ms;
+    pub fn set_offset(&self, new_offset: i64) -> TimeResult<()> {
+        let mut w = self.offset_ms.write()
+            .map_err(|_| TimeError::LockPoisoned("offset_ms RwLock is poisoned".to_string()))?;
+        *w = new_offset;
+        Ok(())
     }
-
+    
     pub async fn synchronize(&self) -> Result<(), String> {
         // 1. Bind a local UDP socket to an available port (0)
         let socket = match UdpSocket::bind("0.0.0.0:0") {
