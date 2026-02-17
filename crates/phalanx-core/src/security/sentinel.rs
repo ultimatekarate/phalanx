@@ -258,8 +258,8 @@ mod leaf_mode_tests {
 
     #[test]
     fn test_sentinel_leaf_mode_filtering() {
-        let (identity, _) = PhalanxIdentity::generate();
-        let (stranger, _) = PhalanxIdentity::generate();
+        let (identity, _) = PhalanxIdentity::generate().unwrap();
+        let (stranger, _) = PhalanxIdentity::generate().unwrap();
         let config = PhalanxConfig::default();
         let local_peer = NetworkId::random();
 
