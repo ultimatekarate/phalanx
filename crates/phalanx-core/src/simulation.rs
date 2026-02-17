@@ -101,14 +101,19 @@ impl SimulationHarness {
             ))
             .await;
 
-        // Instantiate the Actor
-        let actor = SimNode::new(
-            name,
+        // [REFACTOR] Configuration Object Construction
+        let sim_config = SimConfig {
+            name: name.to_string(),
             identity,
             network_id,
             role,
-            self.config.clone(),
-            self.physics,
+            config: self.config.clone(),
+            physics: self.physics, // Copy trait assumed for PhalanxPhysics
+        };
+
+        // Instantiate the Actor
+        let actor = SimNode::new(
+            sim_config,
             self.broadcast_channel.clone(),
             self.telemetry_tx.clone(),
         );
@@ -160,6 +165,17 @@ impl SimulationHarness {
 //  LOGIC: The Node Actor
 // =========================================================================================
 
+/// Configuration container for initializing a `SimNode`.
+/// Encapsulates static properties to satisfy `clippy::too_many_arguments`.
+pub struct SimConfig {
+    pub name: String,
+    pub identity: PhalanxIdentity,
+    pub network_id: NetworkId,
+    pub role: NodeRole,
+    pub config: PhalanxConfig,
+    pub physics: PhalanxPhysics,
+}
+
 struct SimNode {
     // Identity
     name: String,
@@ -185,32 +201,28 @@ struct SimNode {
 }
 
 impl SimNode {
+    /// Spawns a new actor representing a single node in the network simulation.
     fn new(
-        name: &str,
-        identity: PhalanxIdentity,
-        network_id: NetworkId,
-        role: NodeRole,
-        config: PhalanxConfig,
-        physics: PhalanxPhysics,
+        sim_config: SimConfig,
         broadcast_tx: mpsc::Sender<(Did, NetworkId, SimEvent)>,
         telemetry_tx: mpsc::Sender<SimEvent>,
     ) -> Self {
-        let sentinel = Sentinel::new(&config);
+        let sentinel = Sentinel::new(&sim_config.config);
         let storage = Guardian::new(
-            &format!("sim_vault/{}", name),
-            &config,
-            identity.did.clone(),
+            &format!("sim_vault/{}", sim_config.name),
+            &sim_config.config,
+            sim_config.identity.did.clone(),
         );
 
         Self {
-            name: name.to_string(),
-            identity,
-            network_id,
-            role,
+            name: sim_config.name,
+            identity: sim_config.identity,
+            network_id: sim_config.network_id,
+            role: sim_config.role,
+            config: sim_config.config,
+            physics: sim_config.physics,
             sentinel,
             storage,
-            config,
-            physics,
             chaos_mode: ChaosMode::Stable,
             known_strongholds: Vec::new(),
             seq_counter: 0,
@@ -415,7 +427,7 @@ impl SimNode {
             .storage
             .peer_registry
             .get(&chunk.owner_did)
-            .map_or(false, |r| r.is_blacklisted);
+            .is_some_and(|r| r.is_blacklisted);
         let pre_sigs = self
             .storage
             .peer_registry

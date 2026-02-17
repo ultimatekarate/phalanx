@@ -34,7 +34,7 @@ impl ReassemblyBuffer {
 
     /// Concatenates chunks into a single byte vector. Assumes is_complete() is true.
     pub fn assemble(&self) -> Vec<u8> {
-        self.chunks.iter().flatten().cloned().flatten().collect()
+        self.chunks.iter().flatten().flatten().cloned().collect()
     }
 }
 
