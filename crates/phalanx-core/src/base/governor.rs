@@ -21,7 +21,7 @@ pub struct SystemGovernor {
 
 impl SystemGovernor {
     pub fn check_permission(&self, task_cost: TaskCost) -> bool {
-        let state = *self.current_state.read().unwrap();
+        let state = *self.current_state.read().unwrap_or_else(|poison| poison.into_inner());
         match (state, task_cost) {
             (SystemStress::Nominal, _) => true,             // Do anything
             (SystemStress::Fair, TaskCost::Heavy) => false, // No FFTs
@@ -37,7 +37,9 @@ impl SystemGovernor {
         let battery = self.get_battery_status();
 
         let new_state = std::cmp::max(thermal, battery);
-        *self.current_state.write().unwrap() = new_state;
+        
+        let mut guard = self.current_state.write().unwrap_or_else(|poison| poison.into_inner());
+        *guard = new_state;
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
