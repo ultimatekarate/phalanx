@@ -1,11 +1,28 @@
 use sntpc;
 use std::net::UdpSocket;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 use tracing::{info, warn};
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
+
+#[derive(Debug, thiserror::Error)]
+pub enum TimeError {
+    #[error("System clock drift detected (time went backwards): {0}")]
+    ClockSkew(#[from] SystemTimeError),
+
+    #[error("Time synchronization lock poisoned: {0}")]
+    LockPoisoned(String),
+
+    #[error("Invalid timestamp computation: {0}")]
+    CalculationError(String),
+    #[error("Timestamp is too far in the past (Replay Attack): {0}s difference")]
+    Stale(u64),
+    #[error("Timestamp is in the future (Time Traveler): {0}s difference")]
+    Future(u64),
+}
+
+pub type TimeResult<T> = Result<T, TimeError>;
 
 // --- MOCKABLE CLOCK INTERFACE ---
 
@@ -103,14 +120,6 @@ impl Default for TrustedClock {
     fn default() -> Self {
         Self::new()
     }
-}
-
-#[derive(Debug, Error)]
-pub enum TimeError {
-    #[error("Timestamp is too far in the past (Replay Attack): {0}s difference")]
-    Stale(u64),
-    #[error("Timestamp is in the future (Time Traveler): {0}s difference")]
-    Future(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

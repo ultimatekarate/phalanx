@@ -40,9 +40,7 @@ pub extern "system" fn Java_com_phalanx_bridge_PhalanxBridge_destroyEngine(
     };
 
     match PhalanxEngine::new_at_path(&path) {
-        Ok(engine) => {
-            Box::into_raw(Box::new(engine)) as jlong
-        }
+        Ok(engine) => Box::into_raw(Box::new(engine)) as jlong,
         Err(e) => {
             eprintln!("JNI Error: Failed to init engine: {e}");
             0

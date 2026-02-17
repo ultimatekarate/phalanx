@@ -181,26 +181,28 @@ impl PhalanxIdentity {
     pub fn generate() -> Result<(Self, String), IdentityError> {
         let mut rng = rand::rng();
         let mut entropy = [0u8; 16];
-        
-        // rng.fill_bytes is infallible in current rand crate versions for OsRng, 
+
+        // rng.fill_bytes is infallible in current rand crate versions for OsRng,
         // but if we ever switch RNGs, we maintain the pattern.
         rng.fill_bytes(&mut entropy);
 
         let mnemonic = Mnemonic::from_entropy(&entropy)
             .map_err(|e| IdentityError::EntropyError(e.to_string()))?;
-        
+
         let phrase = mnemonic.to_string();
         let seed = mnemonic.to_seed("");
 
         // Safe slice access
-        let secret_slice = seed.get(0..32)
-            .ok_or_else(|| IdentityError::CryptoError("Seed generation produced insufficient length".into()))?;
+        let secret_slice = seed.get(0..32).ok_or_else(|| {
+            IdentityError::CryptoError("Seed generation produced insufficient length".into())
+        })?;
 
-        let secret_bytes: [u8; 32] = secret_slice.try_into()
+        let secret_bytes: [u8; 32] = secret_slice
+            .try_into()
             .map_err(|_| IdentityError::CryptoError("Seed conversion failed".into()))?;
 
         let signing_key = SigningKey::from_bytes(&secret_bytes);
-        
+
         // Validate Libp2p compatibility immediately
         let mut keypair_bytes = signing_key.to_bytes();
         let peer_id = libp2p::identity::Keypair::ed25519_from_bytes(&mut keypair_bytes)
@@ -213,7 +215,7 @@ impl PhalanxIdentity {
             did: Did(peer_id.to_base58()),
             keypair: signing_key,
         };
-        
+
         Ok((identity, phrase))
     }
 
@@ -221,17 +223,19 @@ impl PhalanxIdentity {
     pub fn restore(phrase: &str) -> Result<Self, IdentityError> {
         let mnemonic = Mnemonic::parse_in(Language::English, phrase)
             .map_err(|e| IdentityError::MnemonicError(e.to_string()))?;
-        
+
         let seed = mnemonic.to_seed("");
-        
-        let secret_slice = seed.get(0..32)
-            .ok_or_else(|| IdentityError::CryptoError("Seed generation produced insufficient length".into()))?;
-        
-        let secret_bytes: [u8; 32] = secret_slice.try_into()
+
+        let secret_slice = seed.get(0..32).ok_or_else(|| {
+            IdentityError::CryptoError("Seed generation produced insufficient length".into())
+        })?;
+
+        let secret_bytes: [u8; 32] = secret_slice
+            .try_into()
             .map_err(|_| IdentityError::CryptoError("Seed conversion failed".into()))?;
 
         let signing_key = SigningKey::from_bytes(&secret_bytes);
-        
+
         let mut keypair_bytes = signing_key.to_bytes();
         let peer_id = libp2p::identity::Keypair::ed25519_from_bytes(&mut keypair_bytes)
             .map_err(|e| IdentityError::CryptoError(format!("Key derivation failed: {}", e)))?
@@ -295,7 +299,7 @@ impl PhalanxIdentity {
         if let Ok(identity) = postcard::from_bytes::<PhalanxIdentity>(&bytes) {
             if identity.version != IDENTITY_VERSION {
                 return Err(IdentityError::Corruption(format!(
-                    "Version mismatch: Expected {}, found {}", 
+                    "Version mismatch: Expected {}, found {}",
                     IDENTITY_VERSION, identity.version
                 )));
             }
@@ -304,13 +308,12 @@ impl PhalanxIdentity {
 
         // Legacy format (raw 32 bytes)
         if bytes.len() == 32 {
-            let arr: [u8; 32] = bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| IdentityError::Corruption("Invalid key length for legacy upgrade".into()))?;
-            
+            let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+                IdentityError::Corruption("Invalid key length for legacy upgrade".into())
+            })?;
+
             let key = SigningKey::from_bytes(&arr);
-            
+
             let mut keypair_bytes = key.to_bytes();
             let peer_id = libp2p::identity::Keypair::ed25519_from_bytes(&mut keypair_bytes)
                 .map_err(|e| IdentityError::CryptoError(e.to_string()))?

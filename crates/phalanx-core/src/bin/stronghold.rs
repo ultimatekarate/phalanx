@@ -72,7 +72,12 @@ impl StrongholdEngine {
         }
 
         // 3. Swarm Construction
-        let mut swarm = setup_phalanx_swarm(identity.to_libp2p_keypair().unwrap(), &config, &physics, psk)?;
+        let mut swarm = setup_phalanx_swarm(
+            identity.to_libp2p_keypair().unwrap(),
+            &config,
+            &physics,
+            psk,
+        )?;
 
         // 4. Service Advertisement (DHT)
         let storage_key = get_storage_key();

@@ -4,12 +4,40 @@ use std::error::Error;
 use tokio::sync::mpsc;
 
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
+use crate::primitives::identity::IdentityError;
 use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
 use crate::primitives::shards::{AudioShard, Evidence, VideoShard, WitnessEnvelope};
+use crate::primitives::time::TimeError;
 use crate::storage::strategies::ShardAmalgam;
 use crate::storage::vault::Guardian;
 use crate::{PhalanxBehaviour, PhalanxEvent};
+use std::io;
+
 pub use libp2p::pnet::PreSharedKey;
+
+#[derive(Debug, thiserror::Error)]
+pub enum EngineError {
+    #[error("Critical startup failure: {0}")]
+    StartupFailure(String),
+
+    #[error("Identity subsystem failure: {0}")]
+    Identity(#[from] IdentityError),
+
+    #[error("Forensic persistence error: {0}")]
+    Io(#[from] io::Error),
+
+    #[error("Time synchronization error: {0}")]
+    Time(#[from] TimeError),
+
+    #[error("Network transport initialization failed: {0}")]
+    NetworkInit(String),
+
+    #[error("Configuration invalid: {0}")]
+    ConfigError(String),
+
+    #[error("Fatal simulator state: {0}")]
+    Simulation(String),
+}
 
 /// The Central Nervous System of a Phalanx Node.
 ///
@@ -58,7 +86,9 @@ impl PhalanxEngine {
         physics: PhalanxPhysics,
         psk: Option<PreSharedKey>,
     ) -> Result<Self, Box<dyn Error>> {
-        let network_keypair = identity.to_libp2p_keypair().unwrap();
+        let network_keypair = identity
+            .to_libp2p_keypair()
+            .map_err(|e| EngineError::StartupFailure(format!("Identity invalid: {}", e)))?;
 
         let local_peer_id = network_keypair.public().to_peer_id();
         let local_did = Did::from(local_peer_id.to_string());

@@ -2,9 +2,9 @@ use crate::base::types::UnitInterval;
 use crate::base::types::{ByteCapacity, MeshTopic};
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::fmt;
 use std::fs;
 use std::path::Path;
-use std::fmt;
 
 #[derive(Debug)]
 pub enum ConfigError {
@@ -158,7 +158,7 @@ impl PhalanxConfig {
         Ok(config)
     }
 
-    /// Loads the configuration. 
+    /// Loads the configuration.
     /// REFACTOR: Removed .expect() to satisfy Forensic Integrity standards.
     pub fn load_default() -> Result<Self, ConfigError> {
         // 1. Attempt to load the file
