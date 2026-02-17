@@ -170,12 +170,10 @@ impl PhalanxEngine {
         &mut self,
         event: SwarmEvent<PhalanxEvent>,
     ) -> Result<(), Box<dyn Error>> {
-        match event {
-            SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(_gossip_event)) => {
+        if let SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(_gossip_event)) = event {
                 // TODO: Route foreign shards to Guardian::ingest_chunk() for Salvage.
             }
-            _ => {}
-        }
+        
         Ok(())
     }
 }
