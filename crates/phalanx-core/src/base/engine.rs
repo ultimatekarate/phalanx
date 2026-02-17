@@ -126,7 +126,7 @@ impl PhalanxEngine {
                     // 1. Wrap raw shard in Evidence Enum
                     let evidence = Evidence::Video(shard);
                     // 2. Sign and Seal into WitnessEnvelope using our Ghost Key
-                    let envelope = WitnessEnvelope::new(evidence, &self.identity, local_network_id.clone());
+                    let envelope = WitnessEnvelope::new(evidence, &self.identity, local_network_id);
                     // 3. Persist to Disk (WAL) and prepare for distribution
                     self.finalize_reassembly(envelope).await?;
                 }

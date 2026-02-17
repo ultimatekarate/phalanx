@@ -108,7 +108,7 @@ impl SimulationHarness {
             network_id,
             role,
             self.config.clone(),
-            self.physics.clone(),
+            self.physics,
             self.broadcast_channel.clone(),
             self.telemetry_tx.clone(),
         );
