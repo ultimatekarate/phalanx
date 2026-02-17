@@ -62,16 +62,8 @@ pub use transport::swarm::{setup_phalanx_swarm, PhalanxBehaviour, PhalanxEvent};
 pub fn init_identity() -> PhalanxIdentity {
     let id_path = "identity.bin";
     PhalanxIdentity::load_from_disk(id_path).unwrap_or_else(|_| {
-        // ... (Keep your existing init_identity logic here)
-        let (id, _) = PhalanxIdentity::generate();
+        let (id, _) = PhalanxIdentity::generate().unwrap();
         id.save_to_disk(id_path).unwrap();
         id
     })
-}
-
-// --- 9. INTEGRATION TESTS ---
-#[cfg(test)]
-mod integration_tests {
-    // Note the path change: storage::vault instead of storage::guardian
-    // use crate::storage::vault::Guardian;
 }
