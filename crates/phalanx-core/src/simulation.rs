@@ -70,7 +70,7 @@ impl SimulationHarness {
     }
 
     pub async fn spawn_node(&mut self, name: &str, role: NodeRole) -> Did {
-        let (identity, _) = PhalanxIdentity::generate();
+        let (identity, _) = PhalanxIdentity::generate().unwrap();
         let node_did = identity.did.clone();
         let network_id = NetworkId::random();
 
