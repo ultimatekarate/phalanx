@@ -1,10 +1,13 @@
 [package]
 name = "phalanx-dashboard"
-version.workspace = true
-edition.workspace = true
+version = "0.1.0"
+edition = "2021"
 
 [dependencies]
-phalanx-core = { path = "../phalanx-core" }
-ratatui = "0.30.0"
-crossterm = "0.29.0"
-tokio = { version = "1.49.x", features = ["full"] }
+tokio = { version = "1.49", features = ["full"] }
+crossterm = "0.29"
+ratatui = "0.30"
+anyhow = "1.0"
+
+# Local Core Dependency (with Simulation features enabled)
+phalanx-core = { path = "../phalanx-core", features = ["sim"] }

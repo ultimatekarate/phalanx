@@ -46,7 +46,7 @@ ndarray = "0.17.2"
 image = { version = "0.25.9", features = ["jpeg"] }
 tracing-appender = "0.2.4"
 chacha20poly1305 = "0.10.1"
-sntpc = { version = "0.3", features = ["std"] }
+sntpc = { version = "0.3", features = ["std", "utils"] }
 io = "0.0.2"
 futures = "0.3.31"
 thiserror = "2.0.18"
@@ -81,3 +81,4 @@ features = [
 [features]
 default = []
 edge = []
+sim = ["tokio/full"]

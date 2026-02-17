@@ -3878,6 +3878,7 @@ dependencies = [
 name = "phalanx-dashboard"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "crossterm",
  "phalanx-core",
  "ratatui",
@@ -5021,6 +5022,7 @@ version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de6292f240a2bf33ae7156cb354802bca8ecfacf96b820a6ec2f2e9f5c01f260"
 dependencies = [
+ "chrono",
  "no-std-net",
 ]
 
