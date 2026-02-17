@@ -12,14 +12,15 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     widgets::{Block, Borders, Paragraph, List, ListItem},
-    style::{Style, Modifier},
-    text::Line,
+    style::{Style, Modifier, Color},
+    text::{Line, Span},
     Terminal,
 };
 
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
 use phalanx_core::simulation::SimulationHarness;
-use phalanx_core::security::telemetry::SimEvent;
+// Import ChaosMode
+use phalanx_core::security::telemetry::{SimEvent, ChaosMode}; 
 use phalanx_core::primitives::identity::NetworkId;
 
 use widgets::NetworkRadar;
@@ -28,6 +29,8 @@ struct AppState {
     active_peers: HashMap<NetworkId, Instant>,
     logs: Vec<String>,
     total_bytes_processed: u64,
+    // Track current disaster state for display
+    current_scenario: String, 
 }
 
 impl AppState {
@@ -36,6 +39,7 @@ impl AppState {
             active_peers: HashMap::new(),
             logs: Vec::new(),
             total_bytes_processed: 0,
+            current_scenario: "Stable".to_string(),
         }
     }
 
@@ -58,13 +62,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = PhalanxConfig::test_defaults();
     let physics = PhalanxPhysics::test_profile();
 
-    // UPDATED: Now returns just (harness, telemetry_rx)
-    // The relay is already running in the background!
     let (mut harness, mut telemetry_rx) = SimulationHarness::init_mesh(config, physics);
 
-    harness.spawn_node("Alpha").await;
-    harness.spawn_node("Beta").await;
-    harness.spawn_node("Gamma").await;
+    // 1. CAPTURE THE DIDs
+    // We need these handles to target specific nodes for chaos
+    let did_alpha = harness.spawn_node("Alpha").await;
+    let did_beta = harness.spawn_node("Beta").await;
+    let did_gamma = harness.spawn_node("Gamma").await;
 
     let mut app = AppState::new();
     let mut running = true;
@@ -72,15 +76,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while running {
         if crossterm::event::poll(Duration::from_millis(16))? {
             if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Char('q') {
-                    running = false;
+                match key.code {
+                    KeyCode::Char('q') => running = false,
+                    
+                    // --- CHAOS CONTROLS ---
+                    
+                    // Scenario 1: Alpha gets spotty Wi-Fi
+                    KeyCode::Char('1') => {
+                        app.current_scenario = "Alpha: Packet Loss (50%)".to_string();
+                        app.add_log("!!! INJECTING FAULT: Alpha Packet Loss".into());
+                        harness.inject_chaos(&did_alpha, ChaosMode::PacketLoss(0.5)).await;
+                    }
+
+                    // Scenario 2: Beta turns Vampire (High Traffic)
+                    KeyCode::Char('2') => {
+                        app.current_scenario = "Beta: Vampire Attack".to_string();
+                        app.add_log("!!! INJECTING FAULT: Beta Hyperactivity".into());
+                        harness.inject_chaos(&did_beta, ChaosMode::Hyperactive).await;
+                    }
+
+                    // Scenario 3: Gamma goes Byzantine (Corrupt Data)
+                    KeyCode::Char('3') => {
+                        app.current_scenario = "Gamma: Byzantine Fault".to_string();
+                        app.add_log("!!! INJECTING FAULT: Gamma Corruption".into());
+                        harness.inject_chaos(&did_gamma, ChaosMode::Byzantine).await;
+                    }
+
+                    // Scenario 0: Peace
+                    KeyCode::Char('0') => {
+                        app.current_scenario = "Stable".to_string();
+                        app.add_log("--- SYSTEM STABILIZED ---".into());
+                        // Reset everyone
+                        harness.inject_chaos(&did_alpha, ChaosMode::Stable).await;
+                        harness.inject_chaos(&did_beta, ChaosMode::Stable).await;
+                        harness.inject_chaos(&did_gamma, ChaosMode::Stable).await;
+                    }
+                    _ => {}
                 }
             }
         }
 
         while let Ok(event) = telemetry_rx.try_recv() {
             match event {
-                // Matched to simulation.rs uploaded code
                 SimEvent::Heartbeat { origin, .. } => {
                     app.active_peers.insert(origin, Instant::now());
                 }
@@ -94,6 +131,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 SimEvent::ChunkIngested { origin, .. } => {
                     app.add_log(format!("[CHUNK] Ingested from {}", origin));
+                }
+                SimEvent::ChaosUpdate(mode) => {
+                    app.add_log(format!("[ALERT] Chaos Mode Update: {:?}", mode));
+                }
+                SimEvent::AttackAttemptBlocked { attacker, reason } => {
+                    app.add_log(format!("[DEFENSE] Blocked {}: {}", attacker, reason));
                 }
                 _ => {}
             }
@@ -123,26 +166,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 left_chunks[0],
             );
 
-            let stats_text = format!(
-                "Active Nodes: {}\nTotal Throughput: {} bytes\nFPS: 60",
-                app.active_peers.len(),
-                app.total_bytes_processed
-            );
+            // Updated Status Block
+            let stats_text = vec![
+                Line::from(format!("Active Nodes: {}", app.active_peers.len())),
+                Line::from(format!("Throughput:   {} bytes", app.total_bytes_processed)),
+                Line::from(""),
+                Line::from(Span::styled(
+                    format!("STATUS: {}", app.current_scenario),
+                    Style::default().fg(if app.current_scenario == "Stable" { Color::Green } else { Color::Red }).add_modifier(Modifier::BOLD)
+                )),
+                Line::from(""),
+                Line::from("Controls: [1] Pkt Loss [2] Vampire [3] Byzantine [0] Stabilize"),
+            ];
+
             f.render_widget(
                 Paragraph::new(stats_text)
-                    .block(Block::default().title("Telemetry").borders(Borders::ALL)),
+                    .block(Block::default().title("Telemetry & Control").borders(Borders::ALL)),
                 left_chunks[1]
             );
 
             let items: Vec<ListItem> = app.logs
                 .iter()
-                .map(|msg| ListItem::new(Line::from(msg.as_str())))
+                .map(|msg| {
+                    let style = if msg.contains("!!!") {
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    } else if msg.contains("DATA") {
+                        Style::default().fg(Color::Green)
+                    } else if msg.contains("DEFENSE") { 
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    ListItem::new(Line::from(msg.as_str())).style(style)
+                })
                 .collect();
                 
             f.render_widget(
                 List::new(items)
-                    .block(Block::default().title("Event Stream").borders(Borders::ALL))
-                    .highlight_style(Style::default().add_modifier(Modifier::BOLD)),
+                    .block(Block::default().title("Event Stream").borders(Borders::ALL)),
                 chunks[1]
             );
         })?;

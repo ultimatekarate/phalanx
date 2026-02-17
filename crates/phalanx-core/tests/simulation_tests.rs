@@ -220,40 +220,63 @@ async fn test_leaf_mode_isolation() {
 
 #[tokio::test]
 async fn test_vampire_attack_defense() {
+    init_tracing();
     let config = PhalanxConfig::test_defaults();
     let physics = PhalanxPhysics::test_profile();
     
-    // FIX 1: Updated to 2-tuple return.
-    let (mut harness, _telemetry_rx) = SimulationHarness::init_mesh(config.clone(), physics);
-
-    // FIX 2: Removed manual relay spawn.
+    // 1. Init Mesh
+    let (mut harness, mut telemetry_rx) = SimulationHarness::init_mesh(config.clone(), physics);
 
     let _victim_did = harness.spawn_node("Victim").await;
-    let attacker_did = harness.spawn_node("Attacker").await;
     
+    // 2. Setup Attacker (Use ONE identity for both Transport and Application layers)
     let (attacker_identity, _) = PhalanxIdentity::generate();
+    let attacker_did = attacker_identity.did.clone(); // DID B
     let attacker_net_id = NetworkId::random();
 
-    for i in 0..7 {
-        let shard = create_video_shard(vec![vec![1]], StorageSequence(i), 30, "vampire_volley".into());
+    // 3. Launch Attack
+    for i in 0..10 {
+        let shard = create_video_shard(vec![vec![1]], StorageSequence(i), 30, "vampire".into());
         let mut envelope = WitnessEnvelope::new(Evidence::Video(shard), &attacker_identity, attacker_net_id);
         
+        // POISON: Set FPS to 145 (Illegal)
         if let Evidence::Video(ref mut v) = envelope.evidence { v.fps = 145; }
 
         let chunk = shards::chunkify(
             shards::ShardId(i as u32), 
             postcard::to_stdvec(&envelope).unwrap(), 
-            100, 
-            attacker_did.clone(),
+            4096, // Large size to force immediate reassembly
+            attacker_did.clone(), // FIX: Chunk Owner == Envelope Signer
             ChunkType::Witnessed
         );
 
+        // Broadcast from the Attacker DID
         harness.broadcast(&attacker_did, SimEvent::ChunkIngested { 
             origin: attacker_net_id, 
             chunk: chunk[0].clone() 
         }).await;
     }
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    info!("Vampire test completed: Attacker signatures penalized by Victim Guardian.");
+    // 4. Verify Defense
+    let mut detected = false;
+    let timeout = tokio::time::sleep(Duration::from_millis(2000));
+    tokio::pin!(timeout);
+
+    loop {
+        tokio::select! {
+            Some(event) = telemetry_rx.recv() => {
+                if let SimEvent::AttackAttemptBlocked { attacker, reason } = event {
+                    // The event uses 'origin' (NetworkId) which matches attacker_net_id
+                    if attacker == attacker_net_id {
+                        info!("Defense Success: Blocked {} due to '{}'", attacker, reason);
+                        detected = true;
+                        break;
+                    }
+                }
+            }
+            _ = &mut timeout => break,
+        }
+    }
+
+    assert!(detected, "Vampire defense failed: No block event detected (Identity Mismatch?)");
 }

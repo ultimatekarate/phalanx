@@ -7,6 +7,24 @@ use serde::{Serialize, Deserialize};
 use tokio::sync::broadcast;
 use crate::{base::types::{ByteCapacity, UnitInterval}, primitives::{identity::NetworkId, shards::{ShardChunk, VolleyId}}};
 
+/// The Menu of Disasters for the Chaos Engine.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+pub enum ChaosMode {
+    /// Normal operation. Ideal network conditions.
+    Stable,
+    /// Simulates a flaky connection (e.g., weak Wi-Fi).
+    /// Parameter: Probability (0.0 - 1.0) of dropping an outgoing packet.
+    PacketLoss(f32), 
+    /// Simulates network congestion or distance.
+    /// Parameter: Milliseconds of delay added to message processing.
+    HighLatency(u64), 
+    /// Simulates a compromised or malfunctioning node.
+    /// The node will send corrupted/garbage data.
+    Byzantine, 
+    /// Simulates a "Vampire Attack" or resource exhaustion.
+    /// The node generates traffic 50x faster than normal.
+    Hyperactive, 
+}
 
 /// Discovery source attribution.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -42,9 +60,16 @@ pub enum SimEvent {
         volley_id: VolleyId 
     },
     
+    AttackAttemptBlocked {
+        attacker: NetworkId,
+        reason: String,
+    },
     // System Layer Events
     SystemStressUpdate(UnitInterval),
     Shutdown,
+
+    /// A command to alter a node's operating mode.
+    ChaosUpdate(ChaosMode),
 }
 /// Global telemetry bus for the Phalanx node.
 pub struct TelemetryHub {
