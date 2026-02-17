@@ -22,6 +22,10 @@ tracing = "0.1.44"
 gear-dlmalloc = { path = "./patches/gear-dlmalloc" }
 
 [workspace.lints.clippy]
+# Disable style warnings
+pedantic = "allow"
+style = "allow"
+
 # Forensic Zero-Trust: Reliability
 unwrap_used = "deny"
 expect_used = "deny"
@@ -31,6 +35,9 @@ indexing_slicing = "deny"
 # Forensic Zero-Trust: Data Integrity
 cast_possible_truncation = "warn"
 arithmetic_side_effects = "warn"
+cast_sign_loss = "deny"            
+cast_possible_wrap = "deny"        
+float_cmp = "deny"                
 
 # Concurrency Hygiene
 await_holding_lock = "deny"
