@@ -4,6 +4,26 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::Path;
+use std::fmt;
+
+#[derive(Debug)]
+pub enum ConfigError {
+    NotFound(String),
+    ParseError(String),
+    PermissionDenied(String),
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound(msg) => write!(f, "Configuration not found: {msg}"),
+            Self::ParseError(msg) => write!(f, "Failed to parse configuration: {msg}"),
+            Self::PermissionDenied(msg) => write!(f, "Permission denied reading config: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
 
 /// The Physical Laws of the Simulation.
 ///
@@ -138,8 +158,13 @@ impl PhalanxConfig {
         Ok(config)
     }
 
-    pub fn load_default() -> Self {
-        Self::load("phalanx.toml").expect("Critical Error: Missing phalanx.toml")
+    /// Loads the configuration. 
+    /// REFACTOR: Removed .expect() to satisfy Forensic Integrity standards.
+    pub fn load_default() -> Result<Self, ConfigError> {
+        // 1. Attempt to load the file
+        // 2. Return the Result directly instead of unwrapping/expecting
+        Self::load("phalanx.toml")
+            .map_err(|e| ConfigError::NotFound(format!("Critical: Missing phalanx.toml - {e}")))
     }
 
     pub fn load_from_env() -> Self {
