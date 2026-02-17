@@ -271,7 +271,7 @@ impl PhalanxIdentity {
     /// * `path` - The file path for the output.
     pub fn save_to_disk<P: AsRef<Path>>(&self, path: P) -> std::io::Result<()> {
         let bytes = postcard::to_stdvec(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         fs::write(path, bytes)
     }
 
