@@ -1,5 +1,5 @@
 use crate::base::config::PhalanxConfig;
-use crate::base::types::{ByteCapacity, TrafficGovernor};
+use crate::base::types::{ByteCapacity, TrafficGovernor, UnitInterval};
 use crate::primitives::identity::Did;
 use crate::primitives::shards::{Evidence, ShardChunk, StorageSequence, Volley, WitnessEnvelope};
 use crate::primitives::time::TrustedClock;
@@ -296,9 +296,7 @@ impl Guardian {
             "Micro-Layer receiving chunk"
         );
 
-        let micro_load = self.micro_layer.len() as f32 / (self.max_buffers_per_peer * 5) as f32;
-        let macro_load = self.macro_layer.len() as f32 / self.max_buffers_per_peer as f32;
-        let load_factor = (micro_load + macro_load).clamp(0.0, 1.0);
+        let load_factor = self.calculate_load();
 
         // 2. CIRCUIT BREAKER
         // If load is > 80%, stop accepting new foreign reassemblies to save local resources.
@@ -409,6 +407,28 @@ impl Guardian {
         }
 
         Ok(())
+    }
+
+    /// Calculates the current storage pressure.
+    /// Returns a strictly bounded `UnitInterval` (0.0 to 1.0).
+    fn calculate_load(&self) -> UnitInterval {
+        // Numerical precision matters. Let's not be lazy.
+        let micro_len = self.micro_layer.len() as f64;
+        let macro_len = self.macro_layer.len() as f64;
+        
+        // Use f64 constants for calculation precision
+        let micro_cap = (self.max_buffers_per_peer as f64) * 5.0;
+        let macro_cap = self.max_buffers_per_peer as f64;
+
+        // Prevent division by zero
+        let micro_load = if micro_cap > 0.0 { micro_len / micro_cap } else { 1.0 };
+        let macro_load = if macro_cap > 0.0 { macro_len / macro_cap } else { 1.0 };
+
+        // Combine logic (Simple Sum for now)
+        let total_raw = micro_load + macro_load;
+
+        // Combine and clamp to 1.0
+        UnitInterval::new(total_raw.min(1.0) as f32)
     }
 
     /// Increments the violation count for a specific Peer DID.

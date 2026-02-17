@@ -3,10 +3,11 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::{AddAssign, SubAssign};
 use std::time::Duration;
+use std::cmp::Ordering;
 
 /// A type-safe wrapper for values that MUST be between 0.0 and 1.0.
 /// Replaces raw f32 for Battery and Load metrics.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct UnitInterval(f32);
 
 impl UnitInterval {
@@ -43,6 +44,57 @@ impl fmt::Display for UnitInterval {
     }
 }
 
+// 2. Strict Equality (Eq)
+// Valid because we filter NaNs in new().
+impl PartialEq for UnitInterval {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for UnitInterval {}
+
+// 3. Strict Ordering (Ord)
+// Essential for sorting vectors of loads or using in BTreeMaps.
+impl Ord for UnitInterval {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // total_cmp defines a total ordering for floats (handling -0.0 vs +0.0)
+        self.0.total_cmp(&other.0)
+    }
+}
+
+impl PartialOrd for UnitInterval {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+// 4. Ergonomics: Compare directly with f32 / f64
+// Allows: if load > 0.8 { ... }
+
+impl PartialEq<f32> for UnitInterval {
+    fn eq(&self, other: &f32) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialOrd<f32> for UnitInterval {
+    fn partial_cmp(&self, other: &f32) -> Option<Ordering> {
+        self.0.partial_cmp(other)
+    }
+}
+
+impl PartialEq<f64> for UnitInterval {
+    fn eq(&self, other: &f64) -> bool {
+        (self.0 as f64) == *other
+    }
+}
+
+impl PartialOrd<f64> for UnitInterval {
+    fn partial_cmp(&self, other: &f64) -> Option<Ordering> {
+        (self.0 as f64).partial_cmp(other)
+    }
+}
 /// A type-safe wrapper for storage measurements.
 /// Prevents primitive obsession with u64 and provides safe arithmetic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]

@@ -1,4 +1,5 @@
 use std::fmt;
+use std::convert::TryFrom;
 use std::io::Cursor;
 use std::ops::{Add, Deref, Sub};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -318,7 +319,15 @@ impl DataPayload {
 
 // HELPER FUNCTIONS
 
-/// Splits a shard into chunks to send over the network
+/// Splits a raw data vector into smaller, manageable ShardChunks.
+///
+/// # Arguments
+/// * `seq_id`: The global sequence number for this data stream.
+/// * `data`: The raw bytes to split.
+/// * `chunk_size`: The maximum size of each chunk (e.g., 8192 bytes).
+///
+/// # Safety
+/// This function now enforces u64 precision to prevent truncation on large datasets.
 pub fn chunkify(
     shard_id: ShardId,
     data: Vec<u8>,
@@ -326,16 +335,31 @@ pub fn chunkify(
     owner_did: Did,
     chunk_type: ChunkType,
 ) -> Vec<ShardChunk> {
-    let total_chunks = (data.len() as f64 / chunk_size as f64).ceil() as u32;
+    if data.is_empty() || chunk_size == 0 {
+        return Vec::new();
+    }
+
+    // 1. SAFETY CHECK: Pre-calculate total count using u64 to prevent overflow.
+    let total_len = data.len() as u64;
+    let size_u64 = chunk_size as u64;
+    // Ceiling division: (num + denom - 1) / denom
+    let count_u64 = (total_len + size_u64 - 1) / size_u64;
+
+    // 2. BOUNDS CHECK: Ensure the count fits in u32 (ShardId limit).
+    // This guarantees that 'i as u32' in the loop below will NEVER wrap/truncate.
+    let total_chunks = u32::try_from(count_u64)
+        .expect("Forensic Error: Dataset exceeds 4 billion chunks (u32 limit).");
+
+    // 3. The Collect Chain - functional and beautiful
     data.chunks(chunk_size)
         .enumerate()
-        .map(|(i, chunk)| ShardChunk {
-            shard_id,
-            chunk_type,
-            chunk_index: i as u32,
+        .map(|(i, chunk_slice)| ShardChunk {
+            shard_id: shard_id, 
+            chunk_index: i as u32, // Safe: We proved 'count' fits in u32 above
             total_chunks,
-            data: chunk.to_vec(),
             owner_did: owner_did.clone(),
+            data: chunk_slice.to_vec(),
+            chunk_type: chunk_type.clone(),
         })
         .collect()
 }
