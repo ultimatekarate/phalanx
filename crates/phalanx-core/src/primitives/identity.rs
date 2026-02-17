@@ -10,7 +10,21 @@ use std::{fmt, fs};
 // --- CONSTANTS ---
 pub const IDENTITY_VERSION: u32 = 1;
 
-// id types because I kept I was a moron man that kept using strings.
+#[derive(Debug, thiserror::Error)]
+pub enum IdentityError {
+    #[error("Mnemonic generation or parsing failed: {0}")]
+    MnemonicError(String),
+    #[error("Cryptographic conversion failed: {0}")]
+    CryptoError(String),
+    #[error("I/O error during identity persistence: {0}")]
+    IoError(#[from] std::io::Error),
+    #[error("Version mismatch: expected {expected}, found {found}")]
+    VersionMismatch { expected: u32, found: u32 },
+    #[error("Invalid data format or length: {0}")]
+    InvalidFormat(String),
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
