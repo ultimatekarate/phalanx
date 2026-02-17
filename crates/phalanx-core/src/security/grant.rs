@@ -257,7 +257,7 @@ mod tests {
     // Logic matches 'resolve_did_public_key' expectations: did:key:z + base58(0xed01 + pubkey)
     fn generate_identity() -> (Did, [u8; 32]) {
         // 1. Generate core identity using the system standard
-        let (identity, _) = PhalanxIdentity::generate();
+        let (identity, _) = PhalanxIdentity::generate().unwrap();
         let secret_bytes = identity.keypair.to_bytes();
         let pub_bytes = identity.keypair.verifying_key().to_bytes();
 
