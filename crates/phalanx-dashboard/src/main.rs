@@ -1,7 +1,6 @@
 mod widgets;
 
 use std::{io, time::{Duration, Instant}};
-use std::sync::Arc;
 use std::collections::HashMap;
 
 use crossterm::{
@@ -18,7 +17,6 @@ use ratatui::{
     Terminal,
 };
 
-// Core Imports
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
 use phalanx_core::simulation::SimulationHarness;
 use phalanx_core::security::telemetry::SimEvent;
@@ -27,11 +25,8 @@ use phalanx_core::primitives::identity::NetworkId;
 use widgets::NetworkRadar;
 
 struct AppState {
-    // Map of active nodes and their last heartbeat time
     active_peers: HashMap<NetworkId, Instant>,
-    // Scrolling log of recent events
     logs: Vec<String>,
-    // Stats
     total_bytes_processed: u64,
 }
 
@@ -54,35 +49,27 @@ impl AppState {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Terminal Setup
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // 2. Initialize Simulation
     let config = PhalanxConfig::test_defaults();
     let physics = PhalanxPhysics::test_profile();
-    let (mut harness, relay_rx, mut telemetry_rx) = SimulationHarness::init_mesh(config, physics);
 
-    // 3. Spawn Reactor
-    let nodes_ref = Arc::clone(&harness.nodes);
-    tokio::spawn(async move {
-        SimulationHarness::run_mesh_relay(nodes_ref, relay_rx).await;
-    });
+    // UPDATED: Now returns just (harness, telemetry_rx)
+    // The relay is already running in the background!
+    let (mut harness, mut telemetry_rx) = SimulationHarness::init_mesh(config, physics);
 
-    // 4. Seed Data
     harness.spawn_node("Alpha").await;
     harness.spawn_node("Beta").await;
     harness.spawn_node("Gamma").await;
 
-    // 5. Run Loop
     let mut app = AppState::new();
     let mut running = true;
 
     while running {
-        // --- Input Handling ---
         if crossterm::event::poll(Duration::from_millis(16))? {
             if let Event::Key(key) = event::read()? {
                 if key.code == KeyCode::Char('q') {
@@ -91,9 +78,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // --- Data Ingestion ---
         while let Ok(event) = telemetry_rx.try_recv() {
             match event {
+                // Matched to simulation.rs uploaded code
                 SimEvent::Heartbeat { origin, .. } => {
                     app.active_peers.insert(origin, Instant::now());
                 }
@@ -112,7 +99,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // --- Rendering ---
         terminal.draw(|f| {
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
@@ -124,7 +110,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
                 .split(chunks[0]);
 
-            // Widget 1: Network Radar
             let peer_list: Vec<(NetworkId, Instant)> = app.active_peers
                 .iter()
                 .map(|(k, v)| (*k, *v))
@@ -138,7 +123,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 left_chunks[0],
             );
 
-            // Widget 2: Stats
             let stats_text = format!(
                 "Active Nodes: {}\nTotal Throughput: {} bytes\nFPS: 60",
                 app.active_peers.len(),
@@ -150,7 +134,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 left_chunks[1]
             );
 
-            // Widget 3: Event Logs
             let items: Vec<ListItem> = app.logs
                 .iter()
                 .map(|msg| ListItem::new(Line::from(msg.as_str())))
@@ -165,7 +148,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
     }
 
-    // 6. Shutdown
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;

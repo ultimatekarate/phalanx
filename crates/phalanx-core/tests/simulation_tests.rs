@@ -1,6 +1,5 @@
 use tokio::time::Duration;
 use tracing::info;
-use std::sync::Arc;
 
 // Import from the public API
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
@@ -27,12 +26,11 @@ async fn test_salvage_on_node_death() {
     let config = PhalanxConfig::test_salvage_on_node_death();
     let physics = PhalanxPhysics::test_profile();
     
-    let (mut harness, relay_rx, _telemetry_rx) = SimulationHarness::init_mesh(config.clone(), physics);
+    // FIX 1: Updated to 2-tuple return. We ignore the telemetry channel for this test.
+    let (mut harness, _telemetry_rx) = SimulationHarness::init_mesh(config.clone(), physics);
     
-    let nodes_ref = Arc::clone(&harness.nodes);
-    tokio::spawn(async move { 
-        SimulationHarness::run_mesh_relay(nodes_ref, relay_rx).await 
-    });
+    // FIX 2: Removed manual 'tokio::spawn(run_mesh_relay)' block. 
+    // The relay is now running automatically inside init_mesh.
 
     let victim_device_did = harness.spawn_node("VictimDevice").await;
     let _guardian_device_did = harness.spawn_node("GuardianDevice").await;
@@ -200,6 +198,7 @@ async fn test_stronghold_crash_recovery() {
 
 #[tokio::test]
 async fn test_leaf_mode_isolation() {
+    // Unaffected by Harness changes.
     let (me, _) = PhalanxIdentity::generate();
     let (stranger, _) = PhalanxIdentity::generate();
     let config = PhalanxConfig::default();
@@ -223,7 +222,11 @@ async fn test_leaf_mode_isolation() {
 async fn test_vampire_attack_defense() {
     let config = PhalanxConfig::test_defaults();
     let physics = PhalanxPhysics::test_profile();
-    let (mut harness, _relay_rx, _telemetry_rx) = SimulationHarness::init_mesh(config.clone(), physics);
+    
+    // FIX 1: Updated to 2-tuple return.
+    let (mut harness, _telemetry_rx) = SimulationHarness::init_mesh(config.clone(), physics);
+
+    // FIX 2: Removed manual relay spawn.
 
     let _victim_did = harness.spawn_node("Victim").await;
     let attacker_did = harness.spawn_node("Attacker").await;

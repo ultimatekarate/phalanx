@@ -1,8 +1,3 @@
-/// src/base/telemetry.rs (within phalanx-core)
-pub trait MeshObserver: Send + Sync {
-    fn observe_event(&self, event: &SimEvent);
-}
-
 /// crates/phalanx-dashboard/src/bridge.rs
 pub struct TuiObserver {
     tx: mpsc::Sender<DashboardAction>,

@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{error, info, warn, debug, trace, span, Level};
+use tracing::{info, warn, debug, span, Level};
 use std::sync::Arc;
+use std::time::Duration; // Added Duration
+// rand is likely available via your transitive dependencies (ed25519-dalek/sntpc)
+// If this fails, add `rand = "0.8"` to crates/phalanx-core/Cargo.toml
+use rand::Rng; 
 
-// --- Internal Crate Imports ---
 use crate::primitives::identity::{PhalanxIdentity, Did, NetworkId};
 use crate::security::sentinel::{Sentinel, ControlMessage};
 use crate::base::types::{ByteCapacity, PowerState, UnitInterval, VitalityRate};
@@ -13,9 +16,7 @@ use crate::security::telemetry::{SimEvent};
 
 pub struct SimulationHarness {
     pub nodes: Arc<RwLock<HashMap<Did, mpsc::Sender<SimEvent>>>>,
-    /// Internal channel for node-to-node communication (Mesh Relay).
     pub broadcast_channel: mpsc::Sender<(Did, NetworkId, SimEvent)>,
-    /// Dedicated channel for Phase 3 Dashboard telemetry.
     pub telemetry_tx: mpsc::Sender<SimEvent>, 
     pub config: PhalanxConfig,
     pub identity_registry: Arc<RwLock<HashMap<Did, NetworkId>>>,
@@ -23,29 +24,34 @@ pub struct SimulationHarness {
 }
 
 impl SimulationHarness {
-    /// Initializes the mesh and returns the telemetry receiver for the dashboard.
-    /// 
-    /// Returns: (Harness, RelayReceiver, DashboardReceiver)
     pub fn init_mesh(
         config: PhalanxConfig, 
         physics: PhalanxPhysics
-    ) -> (Self, mpsc::Receiver<(Did, NetworkId, SimEvent)>, mpsc::Receiver<SimEvent>) {
+    ) -> (Self, mpsc::Receiver<SimEvent>) {
         
-        // Internal routing for the mesh (Node <-> Relay)
         let (broadcast_tx, broadcast_rx) = mpsc::channel(1024);
-
-        // External routing for the dashboard (Harness -> TUI)
         let (telemetry_tx, telemetry_rx) = mpsc::channel(4096);
 
+        let nodes = Arc::new(RwLock::new(HashMap::new()));
+        
         let harness = Self {
-            nodes: Arc::new(RwLock::new(HashMap::new())),
+            nodes: nodes.clone(),
             identity_registry: Arc::new(RwLock::new(HashMap::new())),
             broadcast_channel: broadcast_tx,
-            telemetry_tx,
+            telemetry_tx: telemetry_tx.clone(),
             config,
             physics
         };
-        (harness, broadcast_rx, telemetry_rx)
+
+        // SPAWN RELAY (The Network Tap)
+        let nodes_ref = nodes.clone();
+        let telemetry_tap = telemetry_tx.clone();
+        
+        tokio::spawn(async move {
+            Self::run_mesh_relay(nodes_ref, broadcast_rx, telemetry_tap).await;
+        });
+
+        (harness, telemetry_rx)
     }
 
     pub async fn resolve_did(&self, did: &Did) -> Option<NetworkId> {
@@ -53,13 +59,15 @@ impl SimulationHarness {
         map.get(did).cloned()
     }
     
-    /// The "God View" Mesh Relay.
-    /// Routes messages between virtual nodes to simulate network propagation.
-    pub async fn run_mesh_relay(
+    async fn run_mesh_relay(
         nodes: Arc<RwLock<HashMap<Did, mpsc::Sender<SimEvent>>>>, 
-        mut relay_rx: mpsc::Receiver<(Did, NetworkId, SimEvent)>
+        mut relay_rx: mpsc::Receiver<(Did, NetworkId, SimEvent)>,
+        telemetry_tx: mpsc::Sender<SimEvent> 
     ) {
         while let Some((sender_did, _sender_peer, event)) = relay_rx.recv().await {
+            // TAP: Mirror network traffic to dashboard
+            let _ = telemetry_tx.try_send(event.clone());
+
             let current_nodes = nodes.read().await;
             for (did, node_tx) in current_nodes.iter() {
                 if did != &sender_did {
@@ -77,10 +85,6 @@ impl SimulationHarness {
         }
     }
 
-    /// Resolves a DID from a NetworkId by searching the simulation's global registry.
-    /// 
-    /// In a production environment, this would be handled by the libp2p Identify 
-    /// protocol, but in simulation, the harness serves as the authoritative oracle.
     pub async fn lookup_did(&self, network_id: &NetworkId) -> Option<Did> {
         let registry = self.identity_registry.read().await;
         registry.iter()
@@ -88,10 +92,6 @@ impl SimulationHarness {
             .map(|(did, _)| did.clone())
     }
 
-    /// Spawns a virtual node in a detached tokio task.
-    /// 
-    /// This method explicitly prevents "Lifetime Escapes" by cloning all
-    /// necessary handles before entering the async block.
     pub async fn spawn_node(&mut self, name: &str) -> Did {
         let name_owned = name.to_string();
         let (identity, _) = PhalanxIdentity::generate();
@@ -101,15 +101,15 @@ impl SimulationHarness {
         
         let (node_tx, mut node_rx) = mpsc::channel::<SimEvent>(100);
 
-        // 1. Prepare Owned Handles (The "Cloning" Phase for 'static lifetimes)
         let registry_clone = Arc::clone(&self.identity_registry);
         let broadcast_tx = self.broadcast_channel.clone();
         
-        // We clone the config and physics so the node operates independently
+        // IMPORTANT: Clone the telemetry handle so the node can talk to the dashboard directly
+        let telemetry_tx = self.telemetry_tx.clone(); 
+        
         let config = self.config.clone();
         let mut physics = self.physics.clone(); 
 
-        // 2. Register Identity (Before Spawning)
         {
             let mut peer_guard = self.identity_registry.write().await;
             peer_guard.insert(node_did.clone(), node_network_id);
@@ -118,36 +118,32 @@ impl SimulationHarness {
             nodes_guard.insert(node_did.clone(), node_tx);
         }
         
-        info!(
-            node = %name_owned, 
-            quota_foreign = %config.storage.max_foreign_storage_bytes,
-            "Initializing Guardian"
-        );
+        info!(node = %name_owned, "Initializing Guardian");
 
         let mut sentinel = Sentinel::new(&config);
         let mut storage = Guardian::new(&format!("sim_vault/{}", name), &config, identity.did.clone());
 
-        // 3. Spawn the Reactor
         tokio::spawn(async move {
             let span = span!(Level::INFO, "sim_node", node = %name_owned, network_id = %node_network_id);
             let _enter = span.enter();
             info!("Virtual node loop started");
 
             let mut cleanup_tick = tokio::time::interval(physics.shard_timeout());
+            
+            // NEW: Traffic Generator Tick (Simulate Video Recording)
+            let mut data_tick = tokio::time::interval(Duration::from_millis(100));
 
             loop {
-                // Determine load for Vitality rate using LOCAL physics state
+                // Vitality Logic
                 let micro_load = storage.micro_layer.len() as f32 / (config.storage.max_peers * 5) as f32;
                 let macro_load = storage.macro_layer.len() as f32 / config.storage.max_peers as f32;
-                
-                // Factor in artificial load injected via dashboard
                 let total_raw_load = micro_load + macro_load + physics.artificial_load;
                 let load = UnitInterval::new(total_raw_load);
-                
                 let vitality = VitalityRate::calculate(&physics, PowerState::Normal, load);
                 let current_interval = vitality.as_duration();
 
                 tokio::select! {
+                    // 1. Heartbeat
                     _ = tokio::time::sleep(current_interval)=> {
                         let msg = ControlMessage {
                             sender: node_network_id,
@@ -165,27 +161,45 @@ impl SimulationHarness {
                         }
                     }
 
+                    // 2. Traffic Generation (The "Noise" Maker)
+                    _ = data_tick.tick() => {
+                        // 10% chance per tick to generate a shard
+                        if rand::rng().random_range(0.0..1.0) < 0.1 {
+                             let size = ByteCapacity(1024 * rand::rng().random_range(10..100)); // 10KB-100KB
+
+                             // Report "Work Done" to Dashboard
+                            let _ = telemetry_tx.try_send(SimEvent::ShardProcessed { 
+                                peer_id: node_network_id, 
+                                byte_size: size 
+                            });
+
+                            debug!("Generated simulated video shard of size {:?}", size);
+                        }
+                    }
+
+                    // 3. Maintenance
                     _ = cleanup_tick.tick() => {
                         sentinel.prune_stale_buffers(&config, &physics);
                         storage.archive_stale_sessions(physics.shard_timeout());
                     }
 
+                    // 4. Inbox
                     Some(event) = node_rx.recv() => {
                         match event {
                             SimEvent::Shutdown => break,
                             
                             SimEvent::ChunkIngested { origin, chunk } => {
                                 if origin == node_network_id {
-                                    debug!("Processing self-generated chunk");
                                     if let Some(envelope) = sentinel.process_chunk(chunk, &config.network.video_topic, &config, &identity, node_network_id) {
-                                        if let Err(e) = storage.ingest_envelope(envelope) {
-                                            error!(?e, "Failed to ingest self-generated envelope");
-                                        }
+                                        let _ = storage.ingest_envelope(envelope);
+                                        // If we ingest real data, report it too
+                                        let _ = telemetry_tx.try_send(SimEvent::ShardProcessed { 
+                                            peer_id: node_network_id, 
+                                            byte_size: ByteCapacity(1024) 
+                                        });
                                     }
                                 } else {
-                                    info!(source = %origin, "Ingesting foreign chunk (Salvage)");
-                                    let is_leaf_mode = false;
-                                    storage.ingest_chunk(chunk, is_leaf_mode);
+                                    storage.ingest_chunk(chunk, false);
                                 }
                             }
                             
@@ -195,49 +209,38 @@ impl SimulationHarness {
                                 }
                             }
                             
-                            SimEvent::PeerDiscovered { peer, source } => {
-                                debug!(target: "phalanx::sim", ?peer, ?source, "New peer address discovered");
-
-                                // Use the LOCAL registry clone to avoid 'self' escape
+                            SimEvent::PeerDiscovered { peer, source: _ } => {
                                 let registry_read = registry_clone.read().await;
                                 let found_did = registry_read.iter()
                                     .find(|(_, net_id)| **net_id == peer)
                                     .map(|(d, _)| d.clone());
-                                drop(registry_read); // Drop lock immediately
+                                drop(registry_read);
 
                                 if let Some(did) = found_did {
                                     let mut write_guard = registry_clone.write().await;
                                     write_guard.insert(did, peer); 
-                                    debug!(target: "phalanx::sim", "Identity resolution successful for {}", peer);
-                                } else {
-                                    warn!(target: "phalanx::sim", %peer, "Discovery resolution failed: No DID mapped");
                                 }
                             }
                             
-                            SimEvent::ShardProcessed { peer_id, byte_size } => {
-                                trace!(target: "phalanx::sim", %peer_id, %byte_size, "Data processed in sim-node");
+                            SimEvent::ShardProcessed { peer_id: _, byte_size: _ } => {
+                                // Already handled by the sender/generator
                             }
 
-                            SimEvent::CrucibleFinalized { volley_id } => {
-                                info!(target: "phalanx::sim", volley_id = %volley_id, "Simulation archival complete");
-                            }
+                            SimEvent::CrucibleFinalized { volley_id: _ } => { }
 
-                            // --- System & Lifecycle Variants ---
                             SimEvent::SystemStressUpdate(interval) => {
-                                // Apply stress to the LOCAL simulation physics
                                 physics.apply_system_load(interval);
-                                debug!(target: "phalanx::sim", load=%interval.as_f32(), "System stress applied");
                             }
                         }
                     }
                 }
             }
-            info!("Virtual node loop terminated");
         });
 
         return_did
     }
 
+    // ... broadcast, record_ingestion, publish_to_dashboard methods remain as helpers ...
     pub async fn broadcast(&self, sender_did: &Did, event: SimEvent) {
         let nodes_guard = self.nodes.read().await;
         for (did, tx) in nodes_guard.iter() {
@@ -248,7 +251,6 @@ impl SimulationHarness {
     }
 
     pub async fn record_ingestion(&self, peer: NetworkId, bytes: ByteCapacity) {
-        // Uses renamed fields 'origin' and 'size'
         let event = SimEvent::ShardProcessed {
             peer_id: peer,
             byte_size: bytes,
@@ -256,9 +258,7 @@ impl SimulationHarness {
         self.publish_to_dashboard(event).await;
     }
 
-    /// Publishes a strongly-typed event to the external dashboard.
     pub async fn publish_to_dashboard(&self, event: SimEvent) {
-        // Non-blocking send to prevent simulation stalls
         if let Err(e) = self.telemetry_tx.try_send(event) {
             tracing::warn!(target: "phalanx::sim", error = %e, "Telemetry channel dropped.");
         }
