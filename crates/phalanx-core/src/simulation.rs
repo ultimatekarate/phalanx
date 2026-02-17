@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{info, warn, debug, span, Level};
+use tracing::{info, warn, span, Level};
 use std::sync::Arc;
 use std::time::Duration;
 use rand::Rng; 
@@ -11,6 +11,9 @@ use crate::base::types::{ByteCapacity, PowerState, UnitInterval, VitalityRate};
 use crate::storage::vault::Guardian;
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
 use crate::security::telemetry::{SimEvent, ChaosMode}; 
+
+// --- NEW IMPORTS REQUIRED FOR ATTACK GENERATION ---
+use crate::primitives::shards::{create_video_shard, WitnessEnvelope, Evidence, chunkify, StorageSequence, ShardId, ChunkType};
 
 pub struct SimulationHarness {
     pub nodes: Arc<RwLock<HashMap<Did, mpsc::Sender<SimEvent>>>>,
@@ -62,7 +65,6 @@ impl SimulationHarness {
         telemetry_tx: mpsc::Sender<SimEvent> 
     ) {
         while let Some((sender_did, _sender_peer, event)) = relay_rx.recv().await {
-            // TAP
             let _ = telemetry_tx.try_send(event.clone());
 
             let current_nodes = nodes.read().await;
@@ -81,8 +83,7 @@ impl SimulationHarness {
             warn!(node_did = %did, "Node stopped manually via harness");
         }
     }
-    
-    // NEW: Inject Chaos into a running node
+
     pub async fn inject_chaos(&self, target_did: &Did, mode: ChaosMode) {
         let nodes = self.nodes.read().await;
         if let Some(tx) = nodes.get(target_did) {
@@ -117,7 +118,6 @@ impl SimulationHarness {
         {
             let mut peer_guard = self.identity_registry.write().await;
             peer_guard.insert(node_did.clone(), node_network_id);
-            
             let mut nodes_guard = self.nodes.write().await;
             nodes_guard.insert(node_did.clone(), node_tx);
         }
@@ -132,14 +132,13 @@ impl SimulationHarness {
             let _enter = span.enter();
             info!("Virtual node loop started");
 
-            // CHAOS STATE
             let mut chaos_mode = ChaosMode::Stable;
-
             let mut cleanup_tick = tokio::time::interval(physics.shard_timeout());
             let mut data_tick = tokio::time::interval(Duration::from_millis(100));
+            // Track sequences for our generated data
+            let mut seq_counter = 0; 
 
             loop {
-                // Apply Hyperactive Physics
                 if matches!(chaos_mode, ChaosMode::Hyperactive) {
                     physics.artificial_load = 0.95; 
                 }
@@ -153,7 +152,6 @@ impl SimulationHarness {
 
                 tokio::select! {
                     _ = tokio::time::sleep(current_interval)=> {
-                        // FAULT INJECTION: Packet Loss
                         let drop_packet = if let ChaosMode::PacketLoss(prob) = chaos_mode {
                             rand::rng().random_range(0.0..1.0) < prob
                         } else { false };
@@ -167,7 +165,6 @@ impl SimulationHarness {
                                 is_leaf: false
                             };
                             
-                            // FAULT INJECTION: Byzantine Corruption
                             if matches!(chaos_mode, ChaosMode::Byzantine) {
                                 msg.storage_remaining_mb = 99999999; 
                             }
@@ -179,26 +176,57 @@ impl SimulationHarness {
                                 };
                                 let _ = broadcast_tx.send((node_did.clone(), node_network_id, event)).await;
                             }
-                        } else {
-                            debug!("Chaos Engine: Dropped outgoing heartbeat");
                         }
                     }
 
+                    // --- UPDATED TRAFFIC GENERATOR ---
                     _ = data_tick.tick() => {
-                        // FAULT INJECTION: Hyperactive Spam
                         let spawn_chance = if matches!(chaos_mode, ChaosMode::Hyperactive) { 
-                            0.9 
+                            0.5 // High chance for Vampire Mode
                         } else { 
-                            0.1 
+                            0.1 // Low chance for Normal Mode
                         };
 
                         if rand::rng().random_range(0.0..1.0) < spawn_chance {
-                             let size = ByteCapacity(1024 * rand::rng().random_range(10..100));
+                            seq_counter += 1;
+                            let frames = vec![vec![1; 512]]; 
+                            
+                            // 1. Create the shard
+                            let shard = create_video_shard(
+                                frames, 
+                                StorageSequence(seq_counter), 
+                                30, 
+                                "sim_volley".into()
+                            );
+                            
+                             // Wrap in Envelope (Signed by THIS node)
+                            let mut envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, node_network_id);
+                            
+                            // 2. Poison the data AFTER it has been signed.
+                            if matches!(chaos_mode, ChaosMode::Hyperactive) {
+                                if let Evidence::Video(ref mut v) = envelope.evidence { 
+                                     v.fps = 145; // The signature expects 30, finds 145 -> REJECT!
+                                }
+                            }
+                             // 3. Chunkify & BROADCAST
+                             // Use large chunk size (4096) to force immediate reassembly at receiver
+                            if let Ok(data) = postcard::to_stdvec(&envelope) {
+                                let chunks = chunkify(
+                                    ShardId(seq_counter), 
+                                    data, 
+                                    4096, 
+                                    node_did.clone(), 
+                                    ChunkType::Witnessed
+                                );
 
-                            let _ = telemetry_tx.try_send(SimEvent::ShardProcessed { 
-                                peer_id: node_network_id, 
-                                byte_size: size 
-                            });
+                                 // Broadcast triggers 'ChunkIngested' on other nodes
+                                let event = SimEvent::ChunkIngested { 
+                                    origin: node_network_id, 
+                                    chunk: chunks[0].clone() 
+                                };
+                                
+                                let _ = broadcast_tx.send((node_did.clone(), node_network_id, event)).await;
+                            }
                         }
                     }
 
@@ -208,7 +236,6 @@ impl SimulationHarness {
                     }
 
                     Some(event) = node_rx.recv() => {
-                        // FAULT INJECTION: High Latency
                         if let ChaosMode::HighLatency(ms) = chaos_mode {
                             tokio::time::sleep(Duration::from_millis(ms)).await;
                         }
@@ -216,11 +243,8 @@ impl SimulationHarness {
                         match event {
                             SimEvent::Shutdown => break,
                             
-                            // HANDLE CHAOS UPDATES
                             SimEvent::ChaosUpdate(new_mode) => {
-                                warn!(?new_mode, "Chaos Mode Changed!");
                                 chaos_mode = new_mode;
-                                
                                 if matches!(chaos_mode, ChaosMode::Hyperactive) {
                                     data_tick = tokio::time::interval(Duration::from_millis(10)); 
                                 } else {
@@ -230,29 +254,39 @@ impl SimulationHarness {
 
                             SimEvent::ChunkIngested { origin, chunk } => {
                                 if origin == node_network_id {
-                                    // ... (Self-generated logic)
+                                    // Keep this empty to handle log spam.
                                 } else {
-                                    let pre_usage = storage.micro_layer.len();
+                                    // Inbound (Foreign) - DEFENSE LOGIC
                                     
-                                    // 1. Process the chunk in the Micro-Layer (vault.rs:188)
+                                    // 1. Snapshot Reputation
+                                    let was_blacklisted = storage.peer_registry.get(&chunk.owner_did)
+                                        .map_or(false, |r| r.is_blacklisted);
+                                    let pre_sigs = storage.peer_registry.get(&chunk.owner_did)
+                                        .map_or(0, |r| r.invalid_sigs);
+
+                                    // 2. Ingest (Triggering Guardian Logic in vault.rs)
                                     storage.ingest_chunk(chunk.clone(), false);
 
-                                    // 2. CHECK: If the Guardian promoted this chunk to an envelope, 
-                                    // it calls ingest_envelope internally. If that fails (e.g., bad signature/FPS),
-                                    // we won't see it here unless we check the peer reputation.
-                                    let is_blacklisted = storage.peer_registry.get(&chunk.owner_did)
-                                        .map_or(false, |r| r.is_blacklisted);
+                                    // 3. Inspect Result
+                                    let current_rep = storage.peer_registry.get(&chunk.owner_did);
+                                    let is_blacklisted = current_rep.map_or(false, |r| r.is_blacklisted);
+                                    let post_sigs = current_rep.map_or(0, |r| r.invalid_sigs);
 
+                                    // 4. Report Defense
                                     if is_blacklisted {
-                                        let _ = telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
+                                         let _ = telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
                                             attacker: origin,
-                                            reason: "Vampire Signature Detected (Blacklisted)".into(),
+                                            reason: if !was_blacklisted { 
+                                                "Vampire Attack: Signature Threshold Exceeded (BANNED)".into() 
+                                            } else { 
+                                                "Traffic Shedding: Blacklisted Peer".into() 
+                                            },
                                         });
-                                    } else if storage.micro_layer.len() == pre_usage && pre_usage != 0 {
-                                        // Check for Resource Quota / Circuit Breaker drops
+                                    } else if post_sigs > pre_sigs {
+                                        // Penalty applied, but not yet banned
                                         let _ = telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
                                             attacker: origin,
-                                            reason: "Traffic Shedding: Quota Exceeded".into(),
+                                            reason: format!("Vampire Signature Detected (Penalty {}/5)", post_sigs),
                                         });
                                     } else {
                                         // Success
@@ -269,7 +303,6 @@ impl SimulationHarness {
                                     sentinel.health_tracker.register_activity(msg);
                                 }
                             }
-                            
                             SimEvent::PeerDiscovered { peer, source: _ } => {
                                 let registry_read = registry_clone.read().await;
                                 let found_did = registry_read.iter()
@@ -282,7 +315,6 @@ impl SimulationHarness {
                                     write_guard.insert(did, peer); 
                                 }
                             }
-                            
                             SimEvent::ShardProcessed { .. } => {}
                             SimEvent::CrucibleFinalized { .. } => { }
                             SimEvent::AttackAttemptBlocked { .. } => {}

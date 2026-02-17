@@ -19,17 +19,17 @@ use ratatui::{
 
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
 use phalanx_core::simulation::SimulationHarness;
-// Import ChaosMode
-use phalanx_core::security::telemetry::{SimEvent, ChaosMode}; 
+use phalanx_core::security::telemetry::{SimEvent, ChaosMode};
 use phalanx_core::primitives::identity::NetworkId;
 
 use widgets::NetworkRadar;
 
 struct AppState {
     active_peers: HashMap<NetworkId, Instant>,
+    // NEW: Track the visual state of nodes
+    node_modes: HashMap<NetworkId, ChaosMode>,
     logs: Vec<String>,
     total_bytes_processed: u64,
-    // Track current disaster state for display
     current_scenario: String, 
 }
 
@@ -37,6 +37,7 @@ impl AppState {
     fn new() -> Self {
         Self {
             active_peers: HashMap::new(),
+            node_modes: HashMap::new(),
             logs: Vec::new(),
             total_bytes_processed: 0,
             current_scenario: "Stable".to_string(),
@@ -64,11 +65,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mut harness, mut telemetry_rx) = SimulationHarness::init_mesh(config, physics);
 
-    // 1. CAPTURE THE DIDs
-    // We need these handles to target specific nodes for chaos
+    // 1. SPAWN & RESOLVE IDs
+    // We need both the DID (for Control) and NetworkId (for Visualization)
     let did_alpha = harness.spawn_node("Alpha").await;
+    let net_alpha = harness.resolve_did(&did_alpha).await.expect("Failed to resolve Alpha");
+
     let did_beta = harness.spawn_node("Beta").await;
+    let net_beta = harness.resolve_did(&did_beta).await.expect("Failed to resolve Beta");
+
     let did_gamma = harness.spawn_node("Gamma").await;
+    let net_gamma = harness.resolve_did(&did_gamma).await.expect("Failed to resolve Gamma");
 
     let mut app = AppState::new();
     let mut running = true;
@@ -80,33 +86,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Char('q') => running = false,
                     
                     // --- CHAOS CONTROLS ---
-                    
-                    // Scenario 1: Alpha gets spotty Wi-Fi
+                    // Now updating BOTH the simulation and the UI state
                     KeyCode::Char('1') => {
-                        app.current_scenario = "Alpha: Packet Loss (50%)".to_string();
+                        app.current_scenario = "Alpha: Packet Loss".to_string();
                         app.add_log("!!! INJECTING FAULT: Alpha Packet Loss".into());
+                        app.node_modes.insert(net_alpha, ChaosMode::PacketLoss(0.5));
                         harness.inject_chaos(&did_alpha, ChaosMode::PacketLoss(0.5)).await;
                     }
-
-                    // Scenario 2: Beta turns Vampire (High Traffic)
                     KeyCode::Char('2') => {
                         app.current_scenario = "Beta: Vampire Attack".to_string();
                         app.add_log("!!! INJECTING FAULT: Beta Hyperactivity".into());
+                        app.node_modes.insert(net_beta, ChaosMode::Hyperactive);
                         harness.inject_chaos(&did_beta, ChaosMode::Hyperactive).await;
                     }
-
-                    // Scenario 3: Gamma goes Byzantine (Corrupt Data)
                     KeyCode::Char('3') => {
                         app.current_scenario = "Gamma: Byzantine Fault".to_string();
                         app.add_log("!!! INJECTING FAULT: Gamma Corruption".into());
+                        app.node_modes.insert(net_gamma, ChaosMode::Byzantine);
                         harness.inject_chaos(&did_gamma, ChaosMode::Byzantine).await;
                     }
-
-                    // Scenario 0: Peace
                     KeyCode::Char('0') => {
                         app.current_scenario = "Stable".to_string();
                         app.add_log("--- SYSTEM STABILIZED ---".into());
-                        // Reset everyone
+                        app.node_modes.clear(); // Reset visuals
                         harness.inject_chaos(&did_alpha, ChaosMode::Stable).await;
                         harness.inject_chaos(&did_beta, ChaosMode::Stable).await;
                         harness.inject_chaos(&did_gamma, ChaosMode::Stable).await;
@@ -128,12 +130,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 SimEvent::ShardProcessed { peer_id, byte_size } => {
                     app.total_bytes_processed += byte_size.as_u64();
                     app.add_log(format!("[DATA] {} processed {} bytes", peer_id, byte_size.as_u64()));
-                }
-                SimEvent::ChunkIngested { origin, .. } => {
-                    app.add_log(format!("[CHUNK] Ingested from {}", origin));
-                }
-                SimEvent::ChaosUpdate(mode) => {
-                    app.add_log(format!("[ALERT] Chaos Mode Update: {:?}", mode));
                 }
                 SimEvent::AttackAttemptBlocked { attacker, reason } => {
                     app.add_log(format!("[DEFENSE] Blocked {}: {}", attacker, reason));
@@ -162,11 +158,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 NetworkRadar {
                     title: "Phalanx Mesh Radar",
                     nodes: &peer_list,
+                    node_states: &app.node_modes, // Pass the chaos state
                 },
                 left_chunks[0],
             );
 
-            // Updated Status Block
+            // ... (Rest of rendering logic remains the same) ...
             let stats_text = vec![
                 Line::from(format!("Active Nodes: {}", app.active_peers.len())),
                 Line::from(format!("Throughput:   {} bytes", app.total_bytes_processed)),
