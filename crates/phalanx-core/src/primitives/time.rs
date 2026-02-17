@@ -40,11 +40,7 @@ impl TrustedClock {
         let now = self.now();
 
         // We use saturating logic to avoid underflow
-        let diff = if claimed_time > now {
-            claimed_time - now
-        } else {
-            now - claimed_time
-        };
+        let diff = claimed_time.abs_diff(now);
 
         diff <= tolerance_secs
     }
