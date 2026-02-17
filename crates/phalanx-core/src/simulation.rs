@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, info, span, Level};
+use tracing::{debug, info, error, span, Level};
 
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
 use crate::base::types::{ByteCapacity, PowerState, UnitInterval, VitalityRate};
@@ -70,7 +70,17 @@ impl SimulationHarness {
     }
 
     pub async fn spawn_node(&mut self, name: &str, role: NodeRole) -> Did {
-        let (identity, _) = PhalanxIdentity::generate().unwrap();
+        let (identity, _) = match PhalanxIdentity::generate() {
+            Ok(res) => res,
+            Err(e) => {
+                error!(
+                    node = %name,
+                    error = %e,
+                    "CRITICAL: Failed to generate node identity. Aborting spawn."
+                );
+                return Did::default(); // Returns did:key:anonymous
+            }
+        };
         let node_did = identity.did.clone();
         let network_id = NetworkId::random();
 
@@ -360,10 +370,21 @@ impl SimNode {
                     self.identity.did.clone(),
                     ChunkType::Witnessed,
                 );
+
+                let Some(first_chunk) = chunks.get(0) else {
+                    tracing::error!(
+                        event = "simulation_logic_error",
+                        node = %self.network_id,
+                        "Attempted to ingest chunk from empty set"
+                    );
+                    return; 
+                };
+
                 let event = SimEvent::ChunkIngested {
                     origin: self.network_id,
-                    chunk: chunks[0].clone(),
+                    chunk: first_chunk.clone(),
                 };
+
                 let _ = self
                     .broadcast_tx
                     .send((self.identity.did.clone(), self.network_id, event))
