@@ -23,8 +23,8 @@ gear-dlmalloc = { path = "./patches/gear-dlmalloc" }
 
 [workspace.lints.clippy]
 # Disable style warnings
-pedantic = "allow"
-style = "allow"
+pedantic = { level = "allow", priority = -1 }
+style = { level = "allow", priority = -1 }
 
 # Forensic Zero-Trust: Reliability
 unwrap_used = "deny"

@@ -342,8 +342,7 @@ pub fn chunkify(
     // 1. SAFETY CHECK: Pre-calculate total count using u64 to prevent overflow.
     let total_len = data.len() as u64;
     let size_u64 = chunk_size as u64;
-    // Ceiling division: (num + denom - 1) / denom
-    let count_u64 = (total_len + size_u64 - 1) / size_u64;
+    let count_u64 = total_len.div_ceil(size_u64);
 
     // 2. BOUNDS CHECK: Ensure the count fits in u32 (ShardId limit).
     // This guarantees that 'i as u32' in the loop below will NEVER wrap/truncate.
@@ -354,12 +353,12 @@ pub fn chunkify(
     data.chunks(chunk_size)
         .enumerate()
         .map(|(i, chunk_slice)| ShardChunk {
-            shard_id: shard_id,
+            shard_id,
             chunk_index: i as u32, // Safe: We proved 'count' fits in u32 above
             total_chunks,
             owner_did: owner_did.clone(),
             data: chunk_slice.to_vec(),
-            chunk_type: chunk_type.clone(),
+            chunk_type: chunk_type,
         })
         .collect()
 }
