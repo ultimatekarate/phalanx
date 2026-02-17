@@ -111,7 +111,7 @@ impl PhalanxEngine {
     /// This loop is the heartbeat of the node. It drives the `Witness` logic
     /// by pulling raw shards, signing them, and pushing them to the Guardian.
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
-        let local_peer_id = self.swarm.local_peer_id().clone();
+        let local_peer_id = *self.swarm.local_peer_id();
         let local_network_id = NetworkId::from(local_peer_id);
 
         loop {
