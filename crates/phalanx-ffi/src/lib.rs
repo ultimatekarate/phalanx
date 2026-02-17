@@ -1,7 +1,7 @@
-use std::os::raw::{c_char};
-use std::ffi::CStr;
-use std::ptr;
 use phalanx_core::base::engine::PhalanxEngine;
+use std::ffi::CStr;
+use std::os::raw::c_char;
+use std::ptr;
 
 #[cfg(target_os = "android")]
 pub mod jni;
@@ -24,7 +24,7 @@ pub extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut Phalan
         Ok(engine) => {
             // Success: Move engine to heap and return raw pointer
             Box::into_raw(Box::new(engine))
-        },
+        }
         Err(e) => {
             // Failure: Log error and return Null
             eprintln!("Failed to init Phalanx Engine: {}", e);

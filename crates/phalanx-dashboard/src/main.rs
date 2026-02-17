@@ -1,7 +1,10 @@
 mod widgets;
 
-use std::{io, time::{Duration, Instant}};
 use std::collections::HashMap;
+use std::{
+    io,
+    time::{Duration, Instant},
+};
 
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -11,26 +14,27 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    widgets::{Block, Borders, Paragraph, List, ListItem},
-    style::{Style, Modifier, Color},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
     Terminal,
 };
 
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
-use phalanx_core::simulation::SimulationHarness;
-use phalanx_core::security::telemetry::{SimEvent, ChaosMode};
 use phalanx_core::primitives::identity::NetworkId;
+use phalanx_core::security::telemetry::{ChaosMode, NodeRole, SimEvent};
+use phalanx_core::simulation::SimulationHarness;
 
 use widgets::NetworkRadar;
 
 struct AppState {
     active_peers: HashMap<NetworkId, Instant>,
-    // NEW: Track the visual state of nodes
     node_modes: HashMap<NetworkId, ChaosMode>,
+    // Store roles to determine shape (Circle vs Square)
+    node_roles: HashMap<NetworkId, NodeRole>,
     logs: Vec<String>,
     total_bytes_processed: u64,
-    current_scenario: String, 
+    current_scenario: String,
 }
 
 impl AppState {
@@ -38,6 +42,7 @@ impl AppState {
         Self {
             active_peers: HashMap::new(),
             node_modes: HashMap::new(),
+            node_roles: HashMap::new(),
             logs: Vec::new(),
             total_bytes_processed: 0,
             current_scenario: "Stable".to_string(),
@@ -65,18 +70,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mut harness, mut telemetry_rx) = SimulationHarness::init_mesh(config, physics);
 
-    // 1. SPAWN & RESOLVE IDs
-    // We need both the DID (for Control) and NetworkId (for Visualization)
-    let did_alpha = harness.spawn_node("Alpha").await;
-    let net_alpha = harness.resolve_did(&did_alpha).await.expect("Failed to resolve Alpha");
-
-    let did_beta = harness.spawn_node("Beta").await;
-    let net_beta = harness.resolve_did(&did_beta).await.expect("Failed to resolve Beta");
-
-    let did_gamma = harness.spawn_node("Gamma").await;
-    let net_gamma = harness.resolve_did(&did_gamma).await.expect("Failed to resolve Gamma");
-
+    // Initialize AppState early so we can register initial nodes
     let mut app = AppState::new();
+
+    // 1. SPAWN GUARDIANS (Standard Nodes)
+    let did_alpha = harness.spawn_node("Alpha", NodeRole::Guardian).await;
+    let net_alpha = harness
+        .resolve_did(&did_alpha)
+        .await
+        .expect("Failed to resolve Alpha");
+    app.node_roles.insert(net_alpha, NodeRole::Guardian);
+
+    let did_beta = harness.spawn_node("Beta", NodeRole::Guardian).await;
+    let net_beta = harness
+        .resolve_did(&did_beta)
+        .await
+        .expect("Failed to resolve Beta");
+    app.node_roles.insert(net_beta, NodeRole::Guardian);
+
+    let did_gamma = harness.spawn_node("Gamma", NodeRole::Guardian).await;
+    let net_gamma = harness
+        .resolve_did(&did_gamma)
+        .await
+        .expect("Failed to resolve Gamma");
+    app.node_roles.insert(net_gamma, NodeRole::Guardian);
+
+    // 2. SPAWN STRONGHOLD (Bastion)
+    let did_bastion = harness.spawn_node("Bastion", NodeRole::Stronghold).await;
+    let net_bastion = harness
+        .resolve_did(&did_bastion)
+        .await
+        .expect("Failed to resolve Bastion");
+    app.node_roles.insert(net_bastion, NodeRole::Stronghold);
+
     let mut running = true;
 
     while running {
@@ -84,20 +110,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => running = false,
-                    
+
                     // --- CHAOS CONTROLS ---
-                    // Now updating BOTH the simulation and the UI state
                     KeyCode::Char('1') => {
                         app.current_scenario = "Alpha: Packet Loss".to_string();
                         app.add_log("!!! INJECTING FAULT: Alpha Packet Loss".into());
                         app.node_modes.insert(net_alpha, ChaosMode::PacketLoss(0.5));
-                        harness.inject_chaos(&did_alpha, ChaosMode::PacketLoss(0.5)).await;
+                        harness
+                            .inject_chaos(&did_alpha, ChaosMode::PacketLoss(0.5))
+                            .await;
                     }
                     KeyCode::Char('2') => {
                         app.current_scenario = "Beta: Vampire Attack".to_string();
                         app.add_log("!!! INJECTING FAULT: Beta Hyperactivity".into());
                         app.node_modes.insert(net_beta, ChaosMode::Hyperactive);
-                        harness.inject_chaos(&did_beta, ChaosMode::Hyperactive).await;
+                        harness
+                            .inject_chaos(&did_beta, ChaosMode::Hyperactive)
+                            .await;
                     }
                     KeyCode::Char('3') => {
                         app.current_scenario = "Gamma: Byzantine Fault".to_string();
@@ -108,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Char('0') => {
                         app.current_scenario = "Stable".to_string();
                         app.add_log("--- SYSTEM STABILIZED ---".into());
-                        app.node_modes.clear(); // Reset visuals
+                        app.node_modes.clear();
                         harness.inject_chaos(&did_alpha, ChaosMode::Stable).await;
                         harness.inject_chaos(&did_beta, ChaosMode::Stable).await;
                         harness.inject_chaos(&did_gamma, ChaosMode::Stable).await;
@@ -123,16 +152,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 SimEvent::Heartbeat { origin, .. } => {
                     app.active_peers.insert(origin, Instant::now());
                 }
-                SimEvent::PeerDiscovered { peer, source, .. } => {
-                    app.add_log(format!("[DISCOVERY] {} via {:?}", peer, source));
+                SimEvent::PeerDiscovered { peer, role, source } => {
+                    // Important: Update our local role map when peers discover each other
+                    app.node_roles.insert(peer, role);
                     app.active_peers.insert(peer, Instant::now());
+                    app.add_log(format!("[DISCOVERY] {:?} {} via {:?}", role, peer, source));
                 }
                 SimEvent::ShardProcessed { peer_id, byte_size } => {
                     app.total_bytes_processed += byte_size.as_u64();
-                    app.add_log(format!("[DATA] {} processed {} bytes", peer_id, byte_size.as_u64()));
+                    app.add_log(format!(
+                        "[DATA] {} processed {} bytes",
+                        peer_id,
+                        byte_size.as_u64()
+                    ));
                 }
                 SimEvent::AttackAttemptBlocked { attacker, reason } => {
                     app.add_log(format!("[DEFENSE] Blocked {}: {}", attacker, reason));
+                }
+                // NEW: Visualizing Offload Events
+                SimEvent::OffloadComplete {
+                    origin,
+                    target,
+                    size,
+                } => {
+                    app.add_log(format!(
+                        "[OFFLOAD] {} -> {}: {} bytes archived",
+                        origin,
+                        target,
+                        size.as_u64()
+                    ));
                 }
                 _ => {}
             }
@@ -149,59 +197,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
                 .split(chunks[0]);
 
-            let peer_list: Vec<(NetworkId, Instant)> = app.active_peers
-                .iter()
-                .map(|(k, v)| (*k, *v))
-                .collect();
-            
+            let peer_list: Vec<(NetworkId, Instant)> =
+                app.active_peers.iter().map(|(k, v)| (*k, *v)).collect();
+
             f.render_widget(
                 NetworkRadar {
                     title: "Phalanx Mesh Radar",
                     nodes: &peer_list,
-                    node_states: &app.node_modes, // Pass the chaos state
+                    node_states: &app.node_modes,
+                    node_roles: &app.node_roles, // Pass the Roles map to widgets.rs
                 },
                 left_chunks[0],
             );
 
-            // ... (Rest of rendering logic remains the same) ...
             let stats_text = vec![
                 Line::from(format!("Active Nodes: {}", app.active_peers.len())),
                 Line::from(format!("Throughput:   {} bytes", app.total_bytes_processed)),
                 Line::from(""),
                 Line::from(Span::styled(
                     format!("STATUS: {}", app.current_scenario),
-                    Style::default().fg(if app.current_scenario == "Stable" { Color::Green } else { Color::Red }).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(if app.current_scenario == "Stable" {
+                            Color::Green
+                        } else {
+                            Color::Red
+                        })
+                        .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(""),
                 Line::from("Controls: [1] Pkt Loss [2] Vampire [3] Byzantine [0] Stabilize"),
             ];
 
             f.render_widget(
-                Paragraph::new(stats_text)
-                    .block(Block::default().title("Telemetry & Control").borders(Borders::ALL)),
-                left_chunks[1]
+                Paragraph::new(stats_text).block(
+                    Block::default()
+                        .title("Telemetry & Control")
+                        .borders(Borders::ALL),
+                ),
+                left_chunks[1],
             );
 
-            let items: Vec<ListItem> = app.logs
+            let items: Vec<ListItem> = app
+                .logs
                 .iter()
                 .map(|msg| {
                     let style = if msg.contains("!!!") {
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                     } else if msg.contains("DATA") {
                         Style::default().fg(Color::Green)
-                    } else if msg.contains("DEFENSE") { 
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                    } else if msg.contains("DEFENSE") {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else if msg.contains("OFFLOAD") {
+                        // CYAN for Offload Events
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     };
                     ListItem::new(Line::from(msg.as_str())).style(style)
                 })
                 .collect();
-                
+
             f.render_widget(
                 List::new(items)
                     .block(Block::default().title("Event Stream").borders(Borders::ALL)),
-                chunks[1]
+                chunks[1],
             );
         })?;
     }

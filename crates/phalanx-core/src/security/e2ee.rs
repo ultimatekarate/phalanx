@@ -2,7 +2,7 @@
 /// It should probably go in a dedicated file.
 use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
-    XChaCha20Poly1305, XNonce
+    XChaCha20Poly1305, XNonce,
 };
 use std::fmt;
 
@@ -29,19 +29,23 @@ pub fn generate_session_key() -> [u8; 32] {
 pub fn encrypt_bytes(key: &[u8; 32], plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
     let cipher = XChaCha20Poly1305::new(key.into());
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng); // 24-bytes (random is safe for XChaCha)
-    
-    let ciphertext = cipher.encrypt(&nonce, plaintext)
+
+    let ciphertext = cipher
+        .encrypt(&nonce, plaintext)
         .map_err(|_| CryptoError::EncryptionFailure)?;
-        
+
     Ok((nonce.to_vec(), ciphertext))
 }
 
-pub fn decrypt_bytes(key: &[u8; 32], nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+pub fn decrypt_bytes(
+    key: &[u8; 32],
+    nonce: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
     let cipher = XChaCha20Poly1305::new(key.into());
     let xnonce = XNonce::from_slice(nonce);
-    
-    cipher.decrypt(xnonce, ciphertext)
+
+    cipher
+        .decrypt(xnonce, ciphertext)
         .map_err(|_| CryptoError::DecryptionFailure)
 }
-
-

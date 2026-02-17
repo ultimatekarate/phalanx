@@ -1,10 +1,10 @@
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
-use std::sync::{Arc, RwLock};
-use tracing::{info, warn};
 use sntpc;
 use std::net::UdpSocket;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::{info, warn};
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 // --- MOCKABLE CLOCK INTERFACE ---
@@ -26,7 +26,10 @@ impl TrustedClock {
 
     /// Returns the current "True Time" (Local + Offset) in seconds.
     pub fn now(&self) -> u64 {
-        let local = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let local = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         let offset_sec = *self.offset_ms.read().unwrap() / 1000;
         (local + offset_sec).max(0) as u64
     }
@@ -35,7 +38,7 @@ impl TrustedClock {
     /// Used to reject Replay Attacks (too old) or Time Travelers (too new).
     pub fn is_valid(&self, claimed_time: u64, tolerance_secs: u64) -> bool {
         let now = self.now();
-        
+
         // We use saturating logic to avoid underflow
         let diff = if claimed_time > now {
             claimed_time - now
@@ -51,7 +54,7 @@ impl TrustedClock {
         let mut w = self.offset_ms.write().unwrap();
         *w = ms;
     }
-    
+
     pub async fn synchronize(&self) -> Result<(), String> {
         // 1. Bind a local UDP socket to an available port (0)
         let socket = match UdpSocket::bind("0.0.0.0:0") {
@@ -71,10 +74,10 @@ impl TrustedClock {
                 // sntpc returns seconds + fraction. We just care about seconds roughly for this proof of concept,
                 // but strictly we should use the precise offset provided by the library if available,
                 // or compare sec/nsec.
-                
+
                 let ntp_sec = time.sec();
                 // let ntp_frac = time.nsec();
-                
+
                 let system_now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
                 let system_sec = system_now.as_secs();
 
@@ -118,8 +121,8 @@ impl PhalanxTimestamp {
         Self(clock.now())
     }
 
-    /// Wraps a raw value. 
-    /// 
+    /// Wraps a raw value.
+    ///
     /// ARCHITECTURAL NOTE: This does NOT validate against the clock.
     /// This allows us to deserialize historical data (which is by definition "stale")
     /// without the constructor failing.
@@ -135,9 +138,13 @@ impl PhalanxTimestamp {
     ///  
     /// Call this immediately after receiving a packet from the network
     /// to ensure it isn't a replay attack.
-    pub fn verify_freshness(&self, clock: &TrustedClock, tolerance_secs: u64) -> Result<(), TimeError> {
+    pub fn verify_freshness(
+        &self,
+        clock: &TrustedClock,
+        tolerance_secs: u64,
+    ) -> Result<(), TimeError> {
         let now = clock.now();
-        
+
         // Check for Future (Time Travelers)
         if self.0 > now + tolerance_secs {
             return Err(TimeError::Future(self.0 - now));
@@ -146,7 +153,7 @@ impl PhalanxTimestamp {
         // Check for Past (Replays)
         if self.0 < now.saturating_sub(tolerance_secs) {
             return Err(TimeError::Stale(now - self.0));
-        } 
+        }
 
         Ok(())
     }
@@ -160,13 +167,13 @@ mod tests {
     fn test_valid_timestamp_acceptance() {
         let clock = TrustedClock::new();
         let now = clock.now();
-        
+
         // Timestamp is "now", tolerance is 5s
         assert!(clock.is_valid(now, 5), "Current time should be valid");
-        
+
         // Timestamp is 2s ago, tolerance 5s
         assert!(clock.is_valid(now - 2, 5), "Recent past should be valid");
-        
+
         // Timestamp is 2s future, tolerance 5s
         assert!(clock.is_valid(now + 2, 5), "Near future should be valid");
     }
@@ -175,37 +182,49 @@ mod tests {
     fn test_replay_attack_rejection() {
         let clock = TrustedClock::new();
         let now = clock.now();
-        
+
         // Attack: Replaying a message from 1 minute ago
         let stale_timestamp = now - 60;
-        assert!(!clock.is_valid(stale_timestamp, 5), "Old timestamp should be rejected");
+        assert!(
+            !clock.is_valid(stale_timestamp, 5),
+            "Old timestamp should be rejected"
+        );
     }
 
     #[test]
     fn test_future_attack_rejection() {
         let clock = TrustedClock::new();
         let now = clock.now();
-        
+
         // Attack: Message claiming to be from next year
         let future_timestamp = now + 3600;
-        assert!(!clock.is_valid(future_timestamp, 5), "Far future timestamp should be rejected"); 
+        assert!(
+            !clock.is_valid(future_timestamp, 5),
+            "Far future timestamp should be rejected"
+        );
     }
 
     #[test]
     fn test_clock_skew_correction() {
         let clock = TrustedClock::new();
-        
-        // SCENARIO: Local machine is 10 seconds BEHIND reality. 
+
+        // SCENARIO: Local machine is 10 seconds BEHIND reality.
         // Real time is 100. Local thinks it is 90.
         // We set offset to +10,000ms.
-        clock.set_offset(10_000); 
+        clock.set_offset(10_000);
 
         // Local system time (simulated)
-        let local_sys_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-        
+        let local_sys_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
         // The clock.now() should return local + 10
         let adjusted_time = clock.now();
-        
-        assert!(adjusted_time >= local_sys_time + 9, "Clock did not apply positive offset");
+
+        assert!(
+            adjusted_time >= local_sys_time + 9,
+            "Clock did not apply positive offset"
+        );
     }
 }

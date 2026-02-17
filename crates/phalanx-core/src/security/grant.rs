@@ -1,15 +1,15 @@
 use crate::primitives::identity::Did;
-use crate::primitives::shards::VolleyId; 
+use crate::primitives::shards::VolleyId;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 // --- Crypto Imports ---
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
-    XChaCha20Poly1305, XNonce
+    XChaCha20Poly1305, XNonce,
 };
 
 // Low-level curve math for key conversion
@@ -25,13 +25,14 @@ fn ed_to_x25519_pk(ed_bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
     // 1. Decompress the Ed25519 point (Y-coordinate + sign bit)
     let ed_point = CompressedEdwardsY::from_slice(ed_bytes)
         .map_err(|_| CryptoError::IdentityResolutionError)?;
-    
+
     // 2. Convert to Montgomery form (Birational equivalence)
     // This allows us to use the same key for Diffie-Hellman
-    let mont_point = ed_point.decompress()
+    let mont_point = ed_point
+        .decompress()
         .ok_or(CryptoError::IdentityResolutionError)?
         .to_montgomery();
-    
+
     Ok(mont_point.to_bytes())
 }
 
@@ -40,11 +41,11 @@ fn ed_to_x25519_pk(ed_bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
 fn ed_to_x25519_sk(ed_bytes: &[u8]) -> x25519_dalek::StaticSecret {
     // We must hash the Ed25519 key to get a valid X25519 scalar (clamped)
     // Standard Ed25519 logic uses SHA-512
-    use sha2::{Sha512, Digest};
+    use sha2::{Digest, Sha512};
     let mut hasher = Sha512::new();
     hasher.update(ed_bytes);
     let h = hasher.finalize();
-    
+
     let mut x25519_bytes = [0u8; 32];
     x25519_bytes.copy_from_slice(&h[0..32]);
     x25519_dalek::StaticSecret::from(x25519_bytes)
@@ -77,7 +78,7 @@ pub struct SealedLocator {
 
 impl SealedLocator {
     /// Creates a new access grant.
-    /// 
+    ///
     /// # Arguments
     /// * `volley_id` - The ID of the evidence being shared.
     /// * `volley_key` - The symmetric key (32 bytes) unlocking the video evidence.
@@ -91,7 +92,6 @@ impl SealedLocator {
         sender_sk_bytes: &[u8; 32],
         recipient_did: Did,
     ) -> Result<Self, CryptoError> {
-        
         // 1. Resolve Recipient's Public Key from DID
         let recipient_ed_pk = resolve_did_public_key(&recipient_did)?;
         let recipient_x25519 = x25519_dalek::PublicKey::from(ed_to_x25519_pk(&recipient_ed_pk)?);
@@ -108,10 +108,15 @@ impl SealedLocator {
         let nonce_bytes = rand::random::<[u8; 24]>(); // 24-byte nonce for XChaCha
         let nonce = XNonce::from_slice(&nonce_bytes);
 
-        let ciphertext = cipher.encrypt(nonce, Payload {
-            msg: volley_key,
-            aad: sender_did.as_ref().as_bytes(), // Authenticate sender DID
-        }).map_err(|_| CryptoError::EncryptionFailure)?;
+        let ciphertext = cipher
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: volley_key,
+                    aad: sender_did.as_ref().as_bytes(), // Authenticate sender DID
+                },
+            )
+            .map_err(|_| CryptoError::EncryptionFailure)?;
 
         Ok(Self {
             target: volley_id,
@@ -141,12 +146,19 @@ impl SealedLocator {
         let cipher = XChaCha20Poly1305::new(shared_secret.as_bytes().into());
         let nonce = XNonce::from_slice(&self.nonce);
 
-        let plaintext = cipher.decrypt(nonce, Payload {
-            msg: &self.sealed_key,
-            aad: self.sender.as_ref().as_bytes(),
-        }).map_err(|_| CryptoError::DecryptionFailure)?;
+        let plaintext = cipher
+            .decrypt(
+                nonce,
+                Payload {
+                    msg: &self.sealed_key,
+                    aad: self.sender.as_ref().as_bytes(),
+                },
+            )
+            .map_err(|_| CryptoError::DecryptionFailure)?;
 
-        plaintext.try_into().map_err(|_| CryptoError::InvalidKeyLength)
+        plaintext
+            .try_into()
+            .map_err(|_| CryptoError::InvalidKeyLength)
     }
 }
 
@@ -157,13 +169,13 @@ impl SealedLocator {
 fn resolve_did_public_key(did: &Did) -> Result<[u8; 32], CryptoError> {
     // Assumes Did implements AsRef<str> or Deref<Target=str> via the newtype
     // Format: did:key:z6MkhaXgBZD...
-    let s = did.0.as_str(); 
+    let s = did.0.as_str();
     if !s.starts_with("did:key:") {
         return Err(CryptoError::IdentityResolutionError);
     }
-    
+
     let multibase_str = &s["did:key:".len()..];
-    
+
     // Assume z-base58 (standard for did:key)
     if !multibase_str.starts_with('z') {
         return Err(CryptoError::IdentityResolutionError);
@@ -205,15 +217,11 @@ impl fmt::Display for SealedLocator {
         // Format: phx-grant://<ID>#<RECIPIENT>@<SENDER>:<NONCE>:<CIPHERTEXT>
         let b64_cipher = URL_SAFE_NO_PAD.encode(&self.sealed_key);
         let b64_nonce = URL_SAFE_NO_PAD.encode(&self.nonce);
-        
+
         write!(
-            f, 
-            "phx-grant://{}#{}@{}?n={}&p={}", 
-            self.target, 
-            self.recipient, 
-            self.sender,
-            b64_nonce,
-            b64_cipher
+            f,
+            "phx-grant://{}#{}@{}?n={}&p={}",
+            self.target, self.recipient, self.sender, b64_nonce, b64_cipher
         )
     }
 }
@@ -222,14 +230,18 @@ impl fmt::Display for SealedLocator {
 mod base64_serde {
     use super::*;
     use serde::{Deserializer, Serializer};
-    
+
     pub fn serialize<S>(bytes: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
-    where S: Serializer {
+    where
+        S: Serializer,
+    {
         serializer.serialize_str(&URL_SAFE_NO_PAD.encode(bytes))
     }
-    
+
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         let s = String::deserialize(deserializer)?;
         URL_SAFE_NO_PAD.decode(s).map_err(serde::de::Error::custom)
     }
@@ -250,9 +262,9 @@ mod tests {
         let pub_bytes = identity.keypair.verifying_key().to_bytes();
 
         // 2. Format as did:key (z-base58 multibase with 0xed01 prefix)
-        // This bridges the gap between PhalanxIdentity's internal PeerID format 
+        // This bridges the gap between PhalanxIdentity's internal PeerID format
         // and the did:key format required by resolve_did_public_key.
-        let mut prefix = vec![0xed, 0x01]; 
+        let mut prefix = vec![0xed, 0x01];
         prefix.extend_from_slice(&pub_bytes);
         let multibase = bs58::encode(prefix).into_string();
         let did_string = format!("did:key:z{}", multibase);
@@ -265,7 +277,7 @@ mod tests {
         // 1. Setup Identities
         let (sender_did, sender_sk) = generate_identity();
         let (recipient_did, recipient_sk) = generate_identity();
-        
+
         // 2. The Secret Evidence Key
         let volley_key = [0x42u8; 32];
         let volley_id = VolleyId::new("volley-test-001");
@@ -276,8 +288,9 @@ mod tests {
             &volley_key,
             sender_did.clone(),
             &sender_sk,
-            recipient_did.clone()
-        ).expect("Failed to create sealed locator");
+            recipient_did.clone(),
+        )
+        .expect("Failed to create sealed locator");
 
         // 4. Verify Structure
         assert_eq!(locator.sender, sender_did);
@@ -286,10 +299,14 @@ mod tests {
         assert_eq!(locator.nonce.len(), 24); // XChaCha20 uses 24-byte nonce
 
         // 5. Recipient Unlocks Grant
-        let decrypted_key = locator.unlock(&recipient_sk)
+        let decrypted_key = locator
+            .unlock(&recipient_sk)
             .expect("Recipient failed to decrypt grant");
 
-        assert_eq!(decrypted_key, volley_key, "Decrypted key must match original secret");
+        assert_eq!(
+            decrypted_key, volley_key,
+            "Decrypted key must match original secret"
+        );
     }
 
     #[test]
@@ -307,15 +324,18 @@ mod tests {
             &volley_key,
             sender_did,
             &sender_sk,
-            recipient_did
-        ).unwrap();
+            recipient_did,
+        )
+        .unwrap();
 
         // Attacker (Wrong Private Key) tries to unlock
         let result = locator.unlock(&attacker_sk);
 
         // Should fail because Shared Secret (ECDH) will be different
-        assert!(matches!(result, Err(CryptoError::DecryptionFailure)), 
-            "Attacker should not be able to decrypt payload");
+        assert!(
+            matches!(result, Err(CryptoError::DecryptionFailure)),
+            "Attacker should not be able to decrypt payload"
+        );
     }
 
     #[test]
@@ -323,14 +343,15 @@ mod tests {
         let (sender_did, sender_sk) = generate_identity();
         let (recipient_did, recipient_sk) = generate_identity();
         let volley_key = [0xBBu8; 32];
-        
+
         let mut locator = SealedLocator::new(
             VolleyId::new("v1"),
             &volley_key,
             sender_did,
             &sender_sk,
-            recipient_did
-        ).unwrap();
+            recipient_did,
+        )
+        .unwrap();
 
         // TAMPER: Flip a bit in the ciphertext
         if let Some(byte) = locator.sealed_key.get_mut(0) {
@@ -338,7 +359,7 @@ mod tests {
         }
 
         let result = locator.unlock(&recipient_sk);
-        
+
         // Poly1305 MAC check should fail
         assert!(matches!(result, Err(CryptoError::DecryptionFailure)));
     }
@@ -356,8 +377,9 @@ mod tests {
             &volley_key,
             real_sender_did,
             &real_sender_sk,
-            recipient_did
-        ).unwrap();
+            recipient_did,
+        )
+        .unwrap();
 
         // ATTACK: Man-in-the-Middle changes the 'sender' field to someone else
         // (Trying to frame 'fake_sender' or trick recipient)
@@ -366,7 +388,7 @@ mod tests {
         // Recipient tries to unlock using the Fake Sender's Public Key (derived from DID)
         // This causes the ECDH shared secret derivation to mismatch the one used for encryption
         let result = locator.unlock(&recipient_sk);
-        
+
         assert!(matches!(result, Err(CryptoError::DecryptionFailure)));
     }
 
@@ -381,11 +403,12 @@ mod tests {
             &volley_key,
             sender_did,
             &sender_sk,
-            recipient_did
-        ).unwrap();
+            recipient_did,
+        )
+        .unwrap();
 
         let uri = locator.to_string();
-        
+
         assert!(uri.starts_with("phx-grant://"));
         assert!(uri.contains("test-id"));
         assert!(uri.contains("?n=")); // Nonce param

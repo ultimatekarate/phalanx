@@ -1,14 +1,13 @@
-
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::io::{Cursor}; 
-use std::ops::{Add, Sub, Deref};
 use std::fmt;
+use std::io::Cursor;
+use std::ops::{Add, Deref, Sub};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // external crates
-use serde::{Serialize, Deserialize};
-use image::{DynamicImage, ImageFormat}; 
+use image::{DynamicImage, ImageFormat};
+use serde::{Deserialize, Serialize};
 
-use crate::primitives::identity::{PhalanxIdentity, Did, NetworkId};
+use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
 use crate::security::e2ee;
 
 // =====================
@@ -35,11 +34,7 @@ impl ReassemblyBuffer {
 
     /// Concatenates chunks into a single byte vector. Assumes is_complete() is true.
     pub fn assemble(&self) -> Vec<u8> {
-        self.chunks.iter()
-            .flatten()
-            .cloned()
-            .flatten()
-            .collect()
+        self.chunks.iter().flatten().cloned().flatten().collect()
     }
 }
 
@@ -77,7 +72,9 @@ impl Evidence {
 }
 /// The order of a data unit within a long-term storage session.
 /// We use PartialOrd and Ord so the Stronghold can sort sessions for archival.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 #[serde(transparent)]
 pub struct StorageSequence(pub u32);
 
@@ -127,7 +124,9 @@ impl std::ops::AddAssign<u32> for StorageSequence {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize, Default,
+)]
 pub struct ShardId(pub u32);
 
 impl fmt::Display for ShardId {
@@ -143,7 +142,7 @@ pub struct VideoShard {
     pub sequence_id: StorageSequence,
     pub fps: u8,
     pub volley_id: VolleyId,
-    pub payload: DataPayload
+    pub payload: DataPayload,
 }
 
 impl VideoShard {
@@ -169,21 +168,20 @@ impl AudioShard {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum ChunkType {
-    /// Raw forensic data (VideoShard/AudioShard). 
-    /// Reassembled into a local evidence unit 
+    /// Raw forensic data (VideoShard/AudioShard).
+    /// Reassembled into a local evidence unit
     /// Assume this is the default state.
     #[default]
-    ForensicUnit, 
-    /// Data wrapped in a WitnessEnvelope. 
+    ForensicUnit,
+    /// Data wrapped in a WitnessEnvelope.
     /// Reassembled into a signed, verifiable envelope.
-    Witnessed,  
-    
+    Witnessed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ShardChunk {
     pub shard_id: ShardId,
-    pub chunk_index: u32,   // 0, 1, 2...
+    pub chunk_index: u32, // 0, 1, 2...
     pub chunk_type: ChunkType,
     pub total_chunks: u32,
     pub data: Vec<u8>,
@@ -247,31 +245,34 @@ pub struct Volley {
     pub owner_did: String,
     pub artifacts: Vec<WitnessEnvelope>,
     pub gaps: Vec<ForensicGap>,
-    pub is_complete: bool
+    pub is_complete: bool,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WitnessEnvelope {
-    pub evidence: Evidence, 
-    pub witness_peer_id: NetworkId,     
-    pub witness_signature: Vec<u8>, 
+    pub evidence: Evidence,
+    pub witness_peer_id: NetworkId,
+    pub witness_signature: Vec<u8>,
     pub did: Did,
 }
 
 impl WitnessEnvelope {
     pub fn verify(&self) -> bool {
         let clean_did = self.did.0.replace("did:key:", "");
-        let Ok(pubkey_bytes) = bs58::decode(clean_did).into_vec() else { return false; };
-        let Ok(data_bytes) = postcard::to_stdvec(&self.evidence) else { return false; };
+        let Ok(pubkey_bytes) = bs58::decode(clean_did).into_vec() else {
+            return false;
+        };
+        let Ok(data_bytes) = postcard::to_stdvec(&self.evidence) else {
+            return false;
+        };
 
         PhalanxIdentity::verify(&pubkey_bytes, &data_bytes, &self.witness_signature)
     }
 
     pub fn new(evidence: Evidence, identity: &PhalanxIdentity, peer_id: NetworkId) -> Self {
-        let data_to_sign = postcard::to_stdvec(&evidence)
-            .expect("Failed to serialize evidence for signing");
-        
+        let data_to_sign =
+            postcard::to_stdvec(&evidence).expect("Failed to serialize evidence for signing");
+
         let signature = identity.sign(&data_to_sign);
 
         Self {
@@ -286,10 +287,7 @@ impl WitnessEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DataPayload {
     Clear(Vec<u8>),
-    Encrypted {
-        nonce: Vec<u8>,
-        ciphertext: Vec<u8>,
-    }
+    Encrypted { nonce: Vec<u8>, ciphertext: Vec<u8> },
 }
 
 // Default to empty Clear payload
@@ -308,7 +306,6 @@ impl DataPayload {
         Ok(())
     }
 
-
     pub fn decrypt(&self, key: &[u8; 32]) -> Result<Vec<u8>, e2ee::CryptoError> {
         match self {
             DataPayload::Clear(data) => Ok(data.clone()),
@@ -320,7 +317,13 @@ impl DataPayload {
 }
 /// HELPER FUNCTIONS
 
-pub fn chunkify(shard_id: ShardId, data: Vec<u8>, chunk_size: usize, owner_did: Did, chunk_type: ChunkType) -> Vec<ShardChunk> {
+pub fn chunkify(
+    shard_id: ShardId,
+    data: Vec<u8>,
+    chunk_size: usize,
+    owner_did: Did,
+    chunk_type: ChunkType,
+) -> Vec<ShardChunk> {
     let total_chunks = (data.len() as f64 / chunk_size as f64).ceil() as u32;
     data.chunks(chunk_size)
         .enumerate()
@@ -338,12 +341,12 @@ pub fn chunkify(shard_id: ShardId, data: Vec<u8>, chunk_size: usize, owner_did: 
 pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, String> {
     let img = DynamicImage::ImageRgb8(
         image::ImageBuffer::from_raw(width, height, raw_data)
-            .ok_or("Failed to create image buffer")?
+            .ok_or("Failed to create image buffer")?,
     );
 
     let mut jpeg_bytes = Vec::new();
     let mut cursor = Cursor::new(&mut jpeg_bytes);
-    
+
     // Pure Rust JPEG compression
     img.write_to(&mut cursor, ImageFormat::Jpeg)
         .map_err(|e| format!("Compression error: {}", e))?;
@@ -351,7 +354,12 @@ pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<
     Ok(jpeg_bytes)
 }
 
-pub fn create_video_shard(frames: Vec<Vec<u8>>, sequence_id: StorageSequence, fps: u8, volley_id: VolleyId) -> VideoShard {
+pub fn create_video_shard(
+    frames: Vec<Vec<u8>>,
+    sequence_id: StorageSequence,
+    fps: u8,
+    volley_id: VolleyId,
+) -> VideoShard {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -373,7 +381,7 @@ pub fn create_audio_shard(
     sequence_id: StorageSequence,
     sample_rate: u32,
     channels: u8,
-    volley_id: VolleyId
+    volley_id: VolleyId,
 ) -> AudioShard {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -396,7 +404,7 @@ mod tests {
 
     // Helper: A deterministic key for testing
     fn get_test_key() -> [u8; 32] {
-        [0x42; 32] 
+        [0x42; 32]
     }
 
     #[test]
@@ -425,14 +433,14 @@ mod tests {
                 assert_eq!(nonce.len(), 24, "XChaCha20Poly1305 requires 24-byte nonce");
                 assert!(!ciphertext.is_empty(), "Ciphertext should not be empty");
                 // Ensure ciphertext is NOT the same as the original cleartext (sanity check)
-                assert_ne!(ciphertext, &vec![1, 2, 3, 4, 5, 6]); 
-            },
+                assert_ne!(ciphertext, &vec![1, 2, 3, 4, 5, 6]);
+            }
             _ => panic!("Shard payload should be DataPayload::Encrypted after .encrypt()"),
         }
 
         // 3. Decrypt
         let decrypted_bytes = shard.payload.decrypt(&key).expect("Decryption failed");
-        
+
         // 4. Verify Content
         let recovered_frames: Vec<Vec<u8>> = postcard::from_bytes(&decrypted_bytes).unwrap();
         assert_eq!(recovered_frames, frames);
@@ -451,7 +459,7 @@ mod tests {
 
         // 3. Decrypt
         let decrypted_bytes = shard.payload.decrypt(&key).expect("Decryption failed");
-        
+
         // 4. Verify Content
         assert_eq!(decrypted_bytes, audio_data);
     }
@@ -460,7 +468,7 @@ mod tests {
     fn test_wrong_key_decryption_fails() {
         let audio_data = vec![1, 2, 3, 4];
         let mut shard = create_audio_shard(audio_data, StorageSequence(1), 44100, 2, "v1".into());
-        
+
         let correct_key = [1u8; 32];
         let wrong_key = [2u8; 32];
 
@@ -480,7 +488,7 @@ mod tests {
 
         // First encryption
         shard.payload.encrypt(&key).unwrap();
-        
+
         // Capture the state
         let (nonce1, cipher1) = match &shard.payload {
             DataPayload::Encrypted { nonce, ciphertext } => (nonce.clone(), ciphertext.clone()),
@@ -494,8 +502,11 @@ mod tests {
         match &shard.payload {
             DataPayload::Encrypted { nonce, ciphertext } => {
                 assert_eq!(nonce, &nonce1, "Nonce changed on second encrypt call");
-                assert_eq!(ciphertext, &cipher1, "Ciphertext changed on second encrypt call");
-            },
+                assert_eq!(
+                    ciphertext, &cipher1,
+                    "Ciphertext changed on second encrypt call"
+                );
+            }
             _ => panic!("Should remain encrypted"),
         }
     }
@@ -506,7 +517,7 @@ mod tests {
         let frames = vec![vec![255, 0, 255]];
         let mut shard = create_video_shard(frames, StorageSequence(50), 60, "v_net".into());
         let key = get_test_key();
-        
+
         // Encrypt locally
         shard.payload.encrypt(&key).unwrap();
 

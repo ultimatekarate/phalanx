@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 
 use tokio::time::Instant;
-use tracing::{info, warn, debug, instrument};
+use tracing::{debug, info, instrument, warn};
 
 use crate::primitives::shards::{
-    Evidence, VideoShard, AudioShard, ReassemblyBuffer, ShardChunk, 
-    ShardId, WitnessEnvelope, ChunkType
+    AudioShard, ChunkType, Evidence, ReassemblyBuffer, ShardChunk, ShardId, VideoShard,
+    WitnessEnvelope,
 };
 
 use crate::base::types::{MeshTopic, PowerState, TrafficGovernor, UnitInterval, VitalityRate};
 
-use crate::base::config::{PhalanxPhysics, PhalanxConfig};
+use crate::base::config::{PhalanxConfig, PhalanxPhysics};
 use crate::primitives::identity::{NetworkId, PhalanxIdentity};
 
 // =====================
@@ -35,7 +35,8 @@ impl HealthTracker {
     pub fn register_activity(&mut self, msg: ControlMessage) {
         let peer_id = msg.sender;
         self.heartbeats.insert(peer_id, Instant::now());
-        self.peer_contracts.insert(peer_id, VitalityRate::new(msg.heartbeat_ms));
+        self.peer_contracts
+            .insert(peer_id, VitalityRate::new(msg.heartbeat_ms));
         self.capacities.insert(peer_id, msg);
     }
 
@@ -47,17 +48,23 @@ impl HealthTracker {
 
         // Use the peer's reported interval, or fall back to physics default if unknown
         let default_load_factor = 0.0;
-        let contract = self.peer_contracts.get(peer_id)
+        let contract = self
+            .peer_contracts
+            .get(peer_id)
             .cloned()
             .unwrap_or_else(|| {
-                VitalityRate::calculate(physics, PowerState::Normal, UnitInterval::new(default_load_factor))
+                VitalityRate::calculate(
+                    physics,
+                    PowerState::Normal,
+                    UnitInterval::new(default_load_factor),
+                )
             });
 
         // Apply physics jitter_factor to allow for network variance
         let grace_period = contract.as_duration() * physics.jitter_factor as u32;
-        
+
         last_time.elapsed() > grace_period
-    }   
+    }
 }
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ControlMessage {
@@ -65,7 +72,7 @@ pub struct ControlMessage {
     pub load_factor: f32,
     pub storage_remaining_mb: u64,
     pub heartbeat_ms: u64,
-    pub is_leaf: bool
+    pub is_leaf: bool,
 }
 
 /// Tracks the behavior and resource usage of remote peers
@@ -131,7 +138,7 @@ impl Sentinel {
     fn get_system_battery(&self) -> UnitInterval {
         // Current Simulation: 80% (Normal Mode)
         // Change to < 0.15 to test Leaf Mode logic.
-        UnitInterval::new(0.80) 
+        UnitInterval::new(0.80)
     }
 
     pub fn set_power_state(&mut self, state: PowerState) {
@@ -192,9 +199,13 @@ impl Sentinel {
                 ChunkType::ForensicUnit => {
                     // This was local raw data; we must wrap it in an envelope now
                     let evidence = if is_video {
-                        postcard::from_bytes::<VideoShard>(&raw_data).ok().map(Evidence::Video)
+                        postcard::from_bytes::<VideoShard>(&raw_data)
+                            .ok()
+                            .map(Evidence::Video)
                     } else {
-                        postcard::from_bytes::<AudioShard>(&raw_data).ok().map(Evidence::Audio)
+                        postcard::from_bytes::<AudioShard>(&raw_data)
+                            .ok()
+                            .map(Evidence::Audio)
                     };
 
                     if let Some(ev) = evidence {
@@ -206,7 +217,7 @@ impl Sentinel {
                     }
                 }
             }
-        } else { 
+        } else {
             None
         }
     }
@@ -217,13 +228,17 @@ impl Sentinel {
 
         self.video_buffers.retain(|id, buffer| {
             let active = buffer.last_activity.elapsed() < timeout;
-            if !active { debug!(shard_id = %id, "Pruning stale video buffer"); }
+            if !active {
+                debug!(shard_id = %id, "Pruning stale video buffer");
+            }
             active
         });
 
         self.audio_buffers.retain(|id, buffer| {
             let active = buffer.last_activity.elapsed() < timeout;
-            if !active { debug!(shard_id = %id, "Pruning stale audio buffer"); }
+            if !active {
+                debug!(shard_id = %id, "Pruning stale audio buffer");
+            }
             active
         });
     }
@@ -239,7 +254,7 @@ mod leaf_mode_tests {
         let (stranger, _) = PhalanxIdentity::generate();
         let config = PhalanxConfig::default();
         let local_peer = NetworkId::random();
-        
+
         let mut sentinel = Sentinel::new(&config);
         sentinel.set_power_state(PowerState::Leaf);
 
@@ -264,11 +279,31 @@ mod leaf_mode_tests {
         };
 
         // 3. Process Foreign
-        sentinel.process_chunk(foreign_chunk, &config.network.video_topic, &config, &identity, local_peer);
-        assert_eq!(sentinel.video_buffers.len(), 0, "Sentinel leaked foreign data in Leaf Mode");
+        sentinel.process_chunk(
+            foreign_chunk,
+            &config.network.video_topic,
+            &config,
+            &identity,
+            local_peer,
+        );
+        assert_eq!(
+            sentinel.video_buffers.len(),
+            0,
+            "Sentinel leaked foreign data in Leaf Mode"
+        );
 
         // 4. Process Local
-        sentinel.process_chunk(local_chunk, &config.network.video_topic, &config, &identity, local_peer);
-        assert_eq!(sentinel.video_buffers.len(), 1, "Sentinel failed to process local data in Leaf Mode");
+        sentinel.process_chunk(
+            local_chunk,
+            &config.network.video_topic,
+            &config,
+            &identity,
+            local_peer,
+        );
+        assert_eq!(
+            sentinel.video_buffers.len(),
+            1,
+            "Sentinel failed to process local data in Leaf Mode"
+        );
     }
 }

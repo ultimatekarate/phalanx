@@ -1,12 +1,12 @@
-use serde::{Serialize, Deserialize};
+use crate::base::types::UnitInterval;
+use crate::base::types::{ByteCapacity, MeshTopic};
+use serde::{Deserialize, Serialize};
+use std::env;
 use std::fs;
 use std::path::Path;
-use std::env;
-use crate::base::types::{ByteCapacity, MeshTopic}; 
-use crate::base::types::UnitInterval;
 
 /// The Physical Laws of the Simulation.
-/// 
+///
 /// These constraints dictate how the network perceives time.
 /// In the Sandbox, we use these to accelerate or decelerate "Network Time"
 /// to test how the system behaves under high latency or rapid churn.
@@ -14,11 +14,11 @@ use crate::base::types::UnitInterval;
 pub struct PhalanxPhysics {
     /// The fundamental unit of time: Round Trip Time (ms).
     /// Used as the base multiplier for all timeouts.
-    pub tau_rtt: u64,      
-    
+    pub tau_rtt: u64,
+
     /// The compute tax: How long we expect a CPU to take to sign/verify a shard.
-    pub delta_cpu: u64,    
-    
+    pub delta_cpu: u64,
+
     /// The Chaos Factor (Safety Margin).
     /// timeouts = jitter_factor * (tau + cpu).
     /// A higher jitter factor makes the network more tolerant of "Vampire" nodes.
@@ -35,10 +35,9 @@ impl PhalanxPhysics {
             tau_rtt: 300,
             delta_cpu: 20,
             jitter_factor: 3,
-            artificial_load: 0.0
+            artificial_load: 0.0,
         }
     }
-
 
     /// Optimized for high-latency mobile WANs.
     pub fn default_wan() -> Self {
@@ -46,7 +45,7 @@ impl PhalanxPhysics {
             tau_rtt: 300,
             delta_cpu: 20,
             jitter_factor: 3,
-            artificial_load: 0.0
+            artificial_load: 0.0,
         }
     }
 
@@ -56,7 +55,7 @@ impl PhalanxPhysics {
             tau_rtt: 50,
             delta_cpu: 100,
             jitter_factor: 5,
-            artificial_load: 0.0
+            artificial_load: 0.0,
         }
     }
 
@@ -83,13 +82,13 @@ pub struct PhalanxConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct NetworkConfig {
     #[serde(default = "default_protocol_version")]
-    pub protocol_version: String, 
-    pub max_chunk_size_bytes: usize, 
+    pub protocol_version: String,
+    pub max_chunk_size_bytes: usize,
     pub video_topic: MeshTopic,
     pub audio_topic: MeshTopic,
     pub control_topic: MeshTopic,
     pub cleanup_interval_secs: u64,
-    #[serde(default)] 
+    #[serde(default)]
     pub bootstrap_peers: Vec<String>,
     #[serde(default = "default_service_key")]
     pub guardian_service_key: String,
@@ -104,9 +103,9 @@ pub struct StorageConfig {
     pub stale_session_threshold: u64,
     pub shards_needed_to_archive: usize,
     #[serde(default = "default_max_storage")]
-    pub max_storage_bytes: ByteCapacity,          
+    pub max_storage_bytes: ByteCapacity,
     #[serde(default = "default_max_foreign")]
-    pub max_foreign_storage_bytes: ByteCapacity,  
+    pub max_foreign_storage_bytes: ByteCapacity,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -118,10 +117,18 @@ pub struct HardwareConfig {
 
 // --- Helper Functions and Initializers ---
 
-fn default_service_key() -> String { "phalanx/service/storage/v1".to_string() }
-fn default_protocol_version() -> String { "/phalanx/1.0.0".to_string() }
-fn default_max_storage() -> ByteCapacity { ByteCapacity(1_000_000_000) } 
-fn default_max_foreign() -> ByteCapacity { ByteCapacity(500_000_000) }   
+fn default_service_key() -> String {
+    "phalanx/service/storage/v1".to_string()
+}
+fn default_protocol_version() -> String {
+    "/phalanx/1.0.0".to_string()
+}
+fn default_max_storage() -> ByteCapacity {
+    ByteCapacity(1_000_000_000)
+}
+fn default_max_foreign() -> ByteCapacity {
+    ByteCapacity(500_000_000)
+}
 
 impl PhalanxConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
@@ -150,15 +157,15 @@ impl PhalanxConfig {
         let mut cfg = Self::default();
         cfg.storage.vault_path = "sim_vault".to_string();
         // Aggressive cleanup to trigger salvage within the test's sleep window
-        cfg.network.cleanup_interval_secs = 1; 
+        cfg.network.cleanup_interval_secs = 1;
         cfg
     }
 }
 
 impl Default for PhalanxConfig {
     /// Provides the standard clinical default configuration.
-    /// 
-    /// Behavior: This implementation mirrors the structure required for 
+    ///
+    /// Behavior: This implementation mirrors the structure required for
     /// local development, providing safe defaults for topics and buffer sizes.
     fn default() -> Self {
         Self {

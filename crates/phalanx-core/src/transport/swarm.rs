@@ -1,24 +1,20 @@
-use libp2p::{
-    gossipsub, identify, kad, mdns, noise, 
-    relay, dcutr, autonat, pnet, 
-    swarm::{NetworkBehaviour}, 
-    tcp, yamux, Swarm, Transport, SwarmBuilder, 
-    core::upgrade::Version,
-    PeerId,
-    identity::Keypair,
-};
+use futures::future::Either;
 use libp2p::kad::RecordKey;
 pub use libp2p::pnet::PreSharedKey;
-use futures::future::Either; // Required for Transport unification
+use libp2p::{
+    autonat, core::upgrade::Version, dcutr, gossipsub, identify, identity::Keypair, kad, mdns,
+    noise, pnet, relay, swarm::NetworkBehaviour, tcp, yamux, PeerId, Swarm, SwarmBuilder,
+    Transport,
+}; // Required for Transport unification
 
 use std::error::Error;
-use std::time::Duration;
-use std::path::Path;
 use std::fs;
+use std::path::Path;
+use std::time::Duration;
 
 // Domain Imports
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
-use crate::base::types::{UnitInterval, VitalityRate, PowerState};
+use crate::base::types::{PowerState, UnitInterval, VitalityRate};
 
 // --- CONSTANTS ---
 pub type PhalanxKadStore = kad::store::MemoryStore;
@@ -38,7 +34,7 @@ pub fn get_storage_key() -> RecordKey {
 }
 
 /// The composite network behaviour struct for Phalanx.
-/// 
+///
 /// This macro-derived struct aggregates specific network protocols (Gossipsub, Kademlia, etc.)
 /// into a single behaviour that can be polled by the Swarm.
 #[derive(NetworkBehaviour)]
@@ -49,8 +45,8 @@ pub struct PhalanxBehaviour {
     pub mdns: mdns::tokio::Behaviour,
     pub kademlia: kad::Behaviour<PhalanxKadStore>,
     pub identify: identify::Behaviour,
-    pub relay_server: relay::Behaviour,      
-    pub relay_client: relay::client::Behaviour, 
+    pub relay_server: relay::Behaviour,
+    pub relay_client: relay::client::Behaviour,
     pub dcutr: dcutr::Behaviour,
     pub autonat: autonat::Behaviour,
 }
@@ -60,11 +56,11 @@ impl PhalanxBehaviour {
     ///
     /// This publishes a provider record to the Kademlia DHT using the deterministic
     /// 'phalanx.stronghold.v1' namespace.
-    /// This is NOT redundant. All nodes on the network can provide storage. This 
+    /// This is NOT redundant. All nodes on the network can provide storage. This
     /// allows a the Stronghold binary to announce itself as a high availability node.
     pub fn announce_stronghold(&mut self) -> Result<kad::QueryId, DiscoveryError> {
         let record_key = RecordKey::new(&STRONGHOLD_NAMESPACE);
-        
+
         tracing::info!(
             target: "phalanx::transport",
             "Announcing local node as Stronghold provider"
@@ -77,11 +73,11 @@ impl PhalanxBehaviour {
 
     /// Initiates a DHT query to find active Stronghold nodes.
     ///
-    /// Triggers a `get_providers` query. Results are returned asynchronously via 
+    /// Triggers a `get_providers` query. Results are returned asynchronously via
     /// SwarmEvent::Behaviour(PhalanxBehaviourEvent::Kademlia(...)).
     pub fn find_strongholds(&mut self) -> kad::QueryId {
         let record_key = RecordKey::new(&STRONGHOLD_NAMESPACE);
-        
+
         tracing::info!(
             target: "phalanx::transport",
             "Initiating discovery for Stronghold providers"
@@ -97,7 +93,7 @@ impl PhalanxBehaviour {
 /// allowing the main event loop to match on a single type.
 #[derive(Debug)]
 pub enum PhalanxEvent {
-    // Types on types! This was my "welcome to Rust" moment. 
+    // Types on types! This was my "welcome to Rust" moment.
     Gossipsub(gossipsub::Event),
     Mdns(mdns::Event),
     Kademlia(kad::Event),
@@ -108,15 +104,46 @@ pub enum PhalanxEvent {
     Autonat(autonat::Event),
 }
 
-impl From<gossipsub::Event> for PhalanxEvent { fn from(v: gossipsub::Event) -> Self { Self::Gossipsub(v) } }
-impl From<mdns::Event> for PhalanxEvent { fn from(v: mdns::Event) -> Self { Self::Mdns(v) } }
-impl From<kad::Event> for PhalanxEvent { fn from(v: kad::Event) -> Self { Self::Kademlia(v) } }
-impl From<identify::Event> for PhalanxEvent { fn from(v: identify::Event) -> Self { Self::Identify(v) } }
-impl From<relay::Event> for PhalanxEvent { fn from(v: relay::Event) -> Self { Self::RelayServer(v) } }
-impl From<relay::client::Event> for PhalanxEvent { fn from(v: relay::client::Event) -> Self { Self::RelayClient(v) } }
-impl From<dcutr::Event> for PhalanxEvent { fn from(v: dcutr::Event) -> Self { Self::Dcutr(v) } }
-impl From<autonat::Event> for PhalanxEvent { fn from(v: autonat::Event) -> Self { Self::Autonat(v) } }
-
+impl From<gossipsub::Event> for PhalanxEvent {
+    fn from(v: gossipsub::Event) -> Self {
+        Self::Gossipsub(v)
+    }
+}
+impl From<mdns::Event> for PhalanxEvent {
+    fn from(v: mdns::Event) -> Self {
+        Self::Mdns(v)
+    }
+}
+impl From<kad::Event> for PhalanxEvent {
+    fn from(v: kad::Event) -> Self {
+        Self::Kademlia(v)
+    }
+}
+impl From<identify::Event> for PhalanxEvent {
+    fn from(v: identify::Event) -> Self {
+        Self::Identify(v)
+    }
+}
+impl From<relay::Event> for PhalanxEvent {
+    fn from(v: relay::Event) -> Self {
+        Self::RelayServer(v)
+    }
+}
+impl From<relay::client::Event> for PhalanxEvent {
+    fn from(v: relay::client::Event) -> Self {
+        Self::RelayClient(v)
+    }
+}
+impl From<dcutr::Event> for PhalanxEvent {
+    fn from(v: dcutr::Event) -> Self {
+        Self::Dcutr(v)
+    }
+}
+impl From<autonat::Event> for PhalanxEvent {
+    fn from(v: autonat::Event) -> Self {
+        Self::Autonat(v)
+    }
+}
 
 /// Constructs the foundational transport stack for the node.
 ///
@@ -131,10 +158,12 @@ impl From<autonat::Event> for PhalanxEvent { fn from(v: autonat::Event) -> Self 
 /// Returns a boxed transport that unifies the types of Encrypted (PNet) and Raw streams
 /// into a single `Either` type, ensuring type consistency for the SwarmBuilder.
 fn build_base_transport(
-    local_key: &Keypair, 
-    psk: Option<PreSharedKey>
-) -> Result<libp2p::core::transport::Boxed<(PeerId, libp2p::core::muxing::StreamMuxerBox)>, Box<dyn Error>> {
-    
+    local_key: &Keypair,
+    psk: Option<PreSharedKey>,
+) -> Result<
+    libp2p::core::transport::Boxed<(PeerId, libp2p::core::muxing::StreamMuxerBox)>,
+    Box<dyn Error>,
+> {
     let noise_config = noise::Config::new(local_key)?;
     let yamux_config = yamux::Config::default();
 
@@ -149,7 +178,8 @@ fn build_base_transport(
 
     let transport = if let Some(key) = psk {
         let pnet_config = pnet::PnetConfig::new(key);
-        dns_transport.and_then(move |socket, _| pnet_config.handshake(socket))
+        dns_transport
+            .and_then(move |socket, _| pnet_config.handshake(socket))
             // Explicitly tell compiler the Right side is RawStream
             .map(|stream, _| Either::<EncryptedStream, RawStream>::Left(stream))
             .upgrade(Version::V1)
@@ -185,24 +215,21 @@ fn build_base_transport(
 /// * `physics` - Physics simulation state for timing calculations.
 /// * `relay_client` - The pre-initialized relay client behaviour to inject.
 fn build_behaviour(
-    local_key: &Keypair, 
+    local_key: &Keypair,
     config: &PhalanxConfig,
     physics: &PhalanxPhysics,
-    relay_client: relay::client::Behaviour 
+    relay_client: relay::client::Behaviour,
 ) -> Result<PhalanxBehaviour, Box<dyn Error>> {
     let local_peer_id = local_key.public().to_peer_id();
 
     // A. Gossipsub
-    let gossip_heartbeat = VitalityRate::calculate(
-        physics, 
-        PowerState::Normal, 
-        UnitInterval::new(0.0) 
-    ).as_duration();
+    let gossip_heartbeat =
+        VitalityRate::calculate(physics, PowerState::Normal, UnitInterval::new(0.0)).as_duration();
 
     let gossipsub = gossipsub::Behaviour::new(
-        gossipsub::MessageAuthenticity::Signed(local_key.clone()), 
+        gossipsub::MessageAuthenticity::Signed(local_key.clone()),
         gossipsub::ConfigBuilder::default()
-            .heartbeat_interval(gossip_heartbeat) 
+            .heartbeat_interval(gossip_heartbeat)
             .validation_mode(gossipsub::ValidationMode::Strict)
             .max_transmit_size(config.network.max_chunk_size_bytes as usize * 2)
             .build()
@@ -210,10 +237,8 @@ fn build_behaviour(
     )?;
 
     // B. Kademlia
-    let mut kademlia = kad::Behaviour::new(
-        local_peer_id, 
-        kad::store::MemoryStore::new(local_peer_id)
-    );
+    let mut kademlia =
+        kad::Behaviour::new(local_peer_id, kad::store::MemoryStore::new(local_peer_id));
     kademlia.set_mode(Some(kad::Mode::Server));
 
     // C. Identify
@@ -224,10 +249,10 @@ fn build_behaviour(
 
     // D. Others
     let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
-    
+
     // Relay Server (For hosting)
     let relay_server = relay::Behaviour::new(local_peer_id, relay::Config::default());
-    
+
     let dcutr = dcutr::Behaviour::new(local_peer_id);
     let autonat = autonat::Behaviour::new(local_peer_id, autonat::Config::default());
 
@@ -255,11 +280,14 @@ pub fn load_swarm_key(path: &Path) -> Option<PreSharedKey> {
                 arr.copy_from_slice(&bytes);
                 Some(PreSharedKey::new(arr))
             } else {
-                tracing::error!("Swarm key at {:?} is corrupt (wrong length). Ignoring.", path);
+                tracing::error!(
+                    "Swarm key at {:?} is corrupt (wrong length). Ignoring.",
+                    path
+                );
                 None
             }
-        },
-        Err(_) => None 
+        }
+        Err(_) => None,
     }
 }
 
@@ -296,9 +324,8 @@ pub fn setup_phalanx_swarm(
     local_key: Keypair,
     config: &PhalanxConfig,
     physics: &PhalanxPhysics,
-    psk: Option<PreSharedKey> 
+    psk: Option<PreSharedKey>,
 ) -> Result<Swarm<PhalanxBehaviour>, Box<dyn Error>> {
-    
     let local_peer_id = local_key.public().to_peer_id();
     tracing::info!(peer_id=%local_peer_id, "Initializing Network Stack...");
 
@@ -314,22 +341,19 @@ pub fn setup_phalanx_swarm(
     // 4. Build Swarm (NEW API v0.56+)
     let swarm = SwarmBuilder::with_existing_identity(local_key.clone())
         .with_tokio() // Set the executor first
-        
         // Primary Transport (TCP/DNS/PNet)
         // We wrap the pre-built transport in a closure to satisfy the API
-        .with_other_transport(|_key| transport)? 
-        
+        .with_other_transport(|_key| transport)?
         // Secondary Transport (Relay)
         .with_other_transport(|key| {
             let noise_config = noise::Config::new(key).unwrap();
             let yamux_config = yamux::Config::default();
-            
+
             relay_transport
                 .upgrade(Version::V1)
                 .authenticate(noise_config)
                 .multiplex(yamux_config)
         })?
-        
         // Behaviour & Configuration
         .with_behaviour(|_| behaviour)?
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
@@ -351,7 +375,7 @@ mod tests {
     fn get_test_config() -> (PhalanxConfig, PhalanxPhysics) {
         // Assuming Default or specific constructors exist based on imports
         // If specific values are needed for validation, set them here.
-        let config = PhalanxConfig::default(); 
+        let config = PhalanxConfig::default();
         let physics = PhalanxPhysics::default_wan(); // or test_profile()
         (config, physics)
     }
@@ -377,31 +401,40 @@ mod tests {
 
         // 4. Load Key
         let loaded_key = load_swarm_key(&file_path);
-        assert!(loaded_key.is_some(), "Should successfully load generated key");
+        assert!(
+            loaded_key.is_some(),
+            "Should successfully load generated key"
+        );
 
         // 5. Verify corruption handling
         let corrupt_path = dir.path().join("corrupt.key");
         let mut f = File::create(&corrupt_path).unwrap();
         f.write_all(b"short_key").unwrap(); // Write invalid length
-        
+
         let loaded_corrupt = load_swarm_key(&corrupt_path);
-        assert!(loaded_corrupt.is_none(), "Should reject key with invalid length");
+        assert!(
+            loaded_corrupt.is_none(),
+            "Should reject key with invalid length"
+        );
     }
 
     #[tokio::test]
     async fn test_transport_construction_no_psk() {
         let keypair = generate_test_identity();
-        
+
         // Attempt to build base transport without PSK
         let result = build_base_transport(&keypair, None);
-        
-        assert!(result.is_ok(), "Transport construction should succeed without PSK");
+
+        assert!(
+            result.is_ok(),
+            "Transport construction should succeed without PSK"
+        );
     }
 
     #[tokio::test]
     async fn test_transport_construction_with_psk() {
         let keypair = generate_test_identity();
-        
+
         // Manually construct a PSK
         let mut bytes = [0u8; 32];
         bytes[0] = 1; // arbitrary
@@ -409,8 +442,11 @@ mod tests {
 
         // Attempt to build base transport with PSK
         let result = build_base_transport(&keypair, Some(psk));
-        
-        assert!(result.is_ok(), "Transport construction should succeed with PSK");
+
+        assert!(
+            result.is_ok(),
+            "Transport construction should succeed with PSK"
+        );
     }
 
     #[tokio::test]
@@ -422,15 +458,13 @@ mod tests {
         // Initialize relay client (dependency injection)
         let (_, relay_client_behaviour) = relay::client::new(local_peer_id);
 
-        let result = build_behaviour(
-            &keypair,
-            &config,
-            &physics,
-            relay_client_behaviour
+        let result = build_behaviour(&keypair, &config, &physics, relay_client_behaviour);
+
+        assert!(
+            result.is_ok(),
+            "PhalanxBehaviour should initialize with valid config"
         );
 
-        assert!(result.is_ok(), "PhalanxBehaviour should initialize with valid config");
-        
         let behaviour = result.unwrap();
         // Verify Kademlia mode is Server (as set in build_behaviour)
         // Note: access to internal mode might be restricted, but we verify the struct exists
@@ -445,18 +479,18 @@ mod tests {
 
         // Test the main orchestrator function
         let swarm_result = setup_phalanx_swarm(
-            keypair, 
-            &config, 
-            &physics, 
-            None // No PSK for this test
+            keypair, &config, &physics, None, // No PSK for this test
         );
 
-        assert!(swarm_result.is_ok(), "SwarmBuilder pipeline should complete without error");
+        assert!(
+            swarm_result.is_ok(),
+            "SwarmBuilder pipeline should complete without error"
+        );
 
         let swarm = swarm_result.unwrap();
         assert_eq!(
-            *swarm.local_peer_id(), 
-            expected_peer_id, 
+            *swarm.local_peer_id(),
+            expected_peer_id,
             "Swarm should be initialized with the provided identity"
         );
     }
@@ -465,14 +499,14 @@ mod tests {
 #[cfg(test)]
 mod discovery_logic_tests {
     use super::*;
-    use libp2p::identity::Keypair;
     use crate::base::config::{PhalanxConfig, PhalanxPhysics};
+    use libp2p::identity::Keypair;
 
     fn setup_test_behaviour() -> PhalanxBehaviour {
         let id_keys = Keypair::generate_ed25519();
         let config = PhalanxConfig::default();
         let physics = PhalanxPhysics::default();
-        
+
         // Mocking the relay client for behaviour initialization
         let local_peer_id = id_keys.public().to_peer_id();
         let (_, relay_client) = libp2p::relay::client::new(local_peer_id);
@@ -484,23 +518,26 @@ mod discovery_logic_tests {
     #[test]
     fn test_stronghold_announcement_query_generation() {
         let mut behaviour = setup_test_behaviour();
-        
+
         // Verify that the announcement returns a valid QueryId and does not panic
         let result = behaviour.announce_stronghold();
-        assert!(result.is_ok(), "Announce stronghold should succeed in a clean memory store");
+        assert!(
+            result.is_ok(),
+            "Announce stronghold should succeed in a clean memory store"
+        );
     }
 
     #[test]
     fn test_find_strongholds_namespace_alignment() {
         let mut behaviour = setup_test_behaviour();
-        
+
         // Initiate discovery
         let query_id = behaviour.find_strongholds();
-        
+
         // In libp2p v0.56.x, we verify that the query is tracked in the Kademlia state
         // This confirms the namespace was correctly transformed into a RecordKey
         assert!(
-            behaviour.kademlia.query(&query_id).is_some(), 
+            behaviour.kademlia.query(&query_id).is_some(),
             "The find_strongholds query must be active in the Kademlia engine"
         );
     }
@@ -509,10 +546,9 @@ mod discovery_logic_tests {
     fn test_namespace_consistency() {
         let storage_key = get_storage_key();
         let stronghold_key = RecordKey::new(&STRONGHOLD_NAMESPACE);
-        
+
         assert_ne!(
-            storage_key, 
-            stronghold_key, 
+            storage_key, stronghold_key,
             "Storage and Stronghold namespaces must remain distinct to prevent query pollution"
         );
     }

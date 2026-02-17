@@ -1,11 +1,23 @@
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-use tracing_appender::rolling;
 use std::sync::Once;
+use tracing_appender::rolling;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
+use crate::{
+    base::types::{ByteCapacity, UnitInterval},
+    primitives::{
+        identity::NetworkId,
+        shards::{ShardChunk, VolleyId},
+    },
+};
 use tokio::sync::broadcast;
-use crate::{base::types::{ByteCapacity, UnitInterval}, primitives::{identity::NetworkId, shards::{ShardChunk, VolleyId}}};
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+pub enum NodeRole {
+    Guardian,
+    Stronghold,
+}
 
 /// The Menu of Disasters for the Chaos Engine.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
@@ -14,16 +26,16 @@ pub enum ChaosMode {
     Stable,
     /// Simulates a flaky connection (e.g., weak Wi-Fi).
     /// Parameter: Probability (0.0 - 1.0) of dropping an outgoing packet.
-    PacketLoss(f32), 
+    PacketLoss(f32),
     /// Simulates network congestion or distance.
     /// Parameter: Milliseconds of delay added to message processing.
-    HighLatency(u64), 
+    HighLatency(u64),
     /// Simulates a compromised or malfunctioning node.
     /// The node will send corrupted/garbage data.
-    Byzantine, 
+    Byzantine,
     /// Simulates a "Vampire Attack" or resource exhaustion.
     /// The node generates traffic 50x faster than normal.
-    Hyperactive, 
+    Hyperactive,
 }
 
 /// Discovery source attribution.
@@ -37,29 +49,34 @@ pub enum DiscoverySource {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SimEvent {
     // Hardware/Network Layer Events
-    ChunkIngested{
-        origin: NetworkId, 
-        chunk: ShardChunk
+    ChunkIngested {
+        origin: NetworkId,
+        chunk: ShardChunk,
     },
     Heartbeat {
-        origin: NetworkId, 
-        payload: Vec<u8>
+        origin: NetworkId,
+        payload: Vec<u8>,
     },
-    
+    OffloadComplete {
+        origin: NetworkId,
+        target: NetworkId,
+        size: ByteCapacity,
+    },
     // Orchestration Layer Events
     PeerDiscovered {
         peer: NetworkId,
+        role: NodeRole,
         source: DiscoverySource,
     },
 
-    ShardProcessed { 
-        peer_id: NetworkId, 
-        byte_size: ByteCapacity
+    ShardProcessed {
+        peer_id: NetworkId,
+        byte_size: ByteCapacity,
     },
-    CrucibleFinalized { 
-        volley_id: VolleyId 
+    CrucibleFinalized {
+        volley_id: VolleyId,
     },
-    
+
     AttackAttemptBlocked {
         attacker: NetworkId,
         reason: String,
@@ -88,7 +105,7 @@ pub fn init_observability() -> Option<tracing_appender::non_blocking::WorkerGuar
         // Rotates daily. Stores in "logs/guardian.log.YYYY-MM-DD"
         let file_appender = rolling::daily("logs", "guardian.log");
         let (non_blocking_file, file_guard) = tracing_appender::non_blocking(file_appender);
-        
+
         // Save the guard so we can return it (crucial for flushing buffers on crash)
         guard = Some(file_guard);
 
@@ -102,14 +119,14 @@ pub fn init_observability() -> Option<tracing_appender::non_blocking::WorkerGuar
         tracing_subscriber::registry()
             .with(env_filter)
             // Layer A: Console (Stdout) - For you watching the terminal
-            .with(fmt::layer()
-                .with_target(false)
-                .with_thread_ids(true))
+            .with(fmt::layer().with_target(false).with_thread_ids(true))
             // Layer B: File (JSON) - Machine readable for later analysis
-            .with(fmt::layer()
-                .with_writer(non_blocking_file)
-                .json() // structured JSON logs are better for parsing later
-                .with_target(true))
+            .with(
+                fmt::layer()
+                    .with_writer(non_blocking_file)
+                    .json() // structured JSON logs are better for parsing later
+                    .with_target(true),
+            )
             .init();
     });
 

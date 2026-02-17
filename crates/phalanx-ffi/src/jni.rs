@@ -1,6 +1,6 @@
-use jni::JNIEnv;
 use jni::objects::{JClass, JString};
 use jni::sys::jlong;
+use jni::JNIEnv;
 use phalanx_core::engine::PhalanxEngine;
 use std::ptr;
 
@@ -21,7 +21,7 @@ pub extern "system" fn Java_com_phalanx_bridge_PhalanxBridge_createEngine(
         Ok(engine) => {
             // 3. Move engine to heap and return the memory address as a 'long'
             Box::into_raw(Box::new(engine)) as jlong
-        },
+        }
         Err(e) => {
             eprintln!("JNI Error: Failed to init engine: {}", e);
             0

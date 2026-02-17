@@ -1,24 +1,29 @@
+use rand::Rng;
 use std::collections::HashMap;
-use tokio::sync::{mpsc, RwLock};
-use tracing::{info, warn, span, Level};
 use std::sync::Arc;
 use std::time::Duration;
-use rand::Rng; 
+use tokio::sync::{mpsc, RwLock};
+use tracing::{debug, info, span, Level};
 
-use crate::primitives::identity::{PhalanxIdentity, Did, NetworkId};
-use crate::security::sentinel::{Sentinel, ControlMessage};
-use crate::base::types::{ByteCapacity, PowerState, UnitInterval, VitalityRate};
-use crate::storage::vault::Guardian;
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
-use crate::security::telemetry::{SimEvent, ChaosMode}; 
+use crate::base::types::{ByteCapacity, PowerState, UnitInterval, VitalityRate};
+use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
+use crate::security::sentinel::{ControlMessage, Sentinel};
+use crate::security::telemetry::{ChaosMode, DiscoverySource, NodeRole, SimEvent};
+use crate::storage::vault::Guardian;
 
-// --- NEW IMPORTS REQUIRED FOR ATTACK GENERATION ---
-use crate::primitives::shards::{create_video_shard, WitnessEnvelope, Evidence, chunkify, StorageSequence, ShardId, ChunkType};
+use crate::primitives::shards::{
+    chunkify, create_video_shard, ChunkType, Evidence, ShardId, StorageSequence, WitnessEnvelope,
+};
+
+// =========================================================================================
+//  INFRASTRUCTURE: The Harness
+// =========================================================================================
 
 pub struct SimulationHarness {
     pub nodes: Arc<RwLock<HashMap<Did, mpsc::Sender<SimEvent>>>>,
     pub broadcast_channel: mpsc::Sender<(Did, NetworkId, SimEvent)>,
-    pub telemetry_tx: mpsc::Sender<SimEvent>, 
+    pub telemetry_tx: mpsc::Sender<SimEvent>,
     pub config: PhalanxConfig,
     pub identity_registry: Arc<RwLock<HashMap<Did, NetworkId>>>,
     pub physics: PhalanxPhysics,
@@ -26,27 +31,26 @@ pub struct SimulationHarness {
 
 impl SimulationHarness {
     pub fn init_mesh(
-        config: PhalanxConfig, 
-        physics: PhalanxPhysics
+        config: PhalanxConfig,
+        physics: PhalanxPhysics,
     ) -> (Self, mpsc::Receiver<SimEvent>) {
-        
         let (broadcast_tx, broadcast_rx) = mpsc::channel(1024);
         let (telemetry_tx, telemetry_rx) = mpsc::channel(4096);
-
         let nodes = Arc::new(RwLock::new(HashMap::new()));
-        
+
         let harness = Self {
             nodes: nodes.clone(),
             identity_registry: Arc::new(RwLock::new(HashMap::new())),
             broadcast_channel: broadcast_tx,
             telemetry_tx: telemetry_tx.clone(),
             config,
-            physics
+            physics,
         };
 
         let nodes_ref = nodes.clone();
         let telemetry_tap = telemetry_tx.clone();
-        
+
+        // Spawn the "Ether" (Network Relay)
         tokio::spawn(async move {
             Self::run_mesh_relay(nodes_ref, broadcast_rx, telemetry_tap).await;
         });
@@ -55,18 +59,78 @@ impl SimulationHarness {
     }
 
     pub async fn resolve_did(&self, did: &Did) -> Option<NetworkId> {
-        let map = self.identity_registry.read().await;
-        map.get(did).cloned()
+        self.identity_registry.read().await.get(did).cloned()
     }
-    
+
+    pub async fn inject_chaos(&self, target_did: &Did, mode: ChaosMode) {
+        if let Some(tx) = self.nodes.read().await.get(target_did) {
+            info!(target: "phalanx::chaos", node=%target_did, ?mode, "Injecting Chaos Event");
+            let _ = tx.send(SimEvent::ChaosUpdate(mode)).await;
+        }
+    }
+
+    pub async fn spawn_node(&mut self, name: &str, role: NodeRole) -> Did {
+        let (identity, _) = PhalanxIdentity::generate();
+        let node_did = identity.did.clone();
+        let network_id = NetworkId::random();
+
+        let (node_tx, node_rx) = mpsc::channel::<SimEvent>(100);
+
+        // Register Node in the "Ether"
+        {
+            self.identity_registry
+                .write()
+                .await
+                .insert(node_did.clone(), network_id);
+            self.nodes.write().await.insert(node_did.clone(), node_tx);
+        }
+
+        info!(node = %name, ?role, "Initializing Node Actor");
+
+        // Broadcast Presence
+        let _ = self
+            .broadcast_channel
+            .send((
+                node_did.clone(),
+                network_id,
+                SimEvent::PeerDiscovered {
+                    peer: network_id,
+                    role,
+                    source: DiscoverySource::Identify,
+                },
+            ))
+            .await;
+
+        // Instantiate the Actor
+        let actor = SimNode::new(
+            name,
+            identity,
+            network_id,
+            role,
+            self.config.clone(),
+            self.physics.clone(),
+            self.broadcast_channel.clone(),
+            self.telemetry_tx.clone(),
+        );
+
+        // Run the Actor
+        tokio::spawn(async move {
+            actor.run(node_rx).await;
+        });
+
+        node_did
+    }
+
     async fn run_mesh_relay(
-        nodes: Arc<RwLock<HashMap<Did, mpsc::Sender<SimEvent>>>>, 
+        nodes: Arc<RwLock<HashMap<Did, mpsc::Sender<SimEvent>>>>,
         mut relay_rx: mpsc::Receiver<(Did, NetworkId, SimEvent)>,
-        telemetry_tx: mpsc::Sender<SimEvent> 
+        telemetry_tx: mpsc::Sender<SimEvent>,
     ) {
         while let Some((sender_did, _sender_peer, event)) = relay_rx.recv().await {
+            // Tap into the stream for the Dashboard
             let _ = telemetry_tx.try_send(event.clone());
 
+            // Forward to all other nodes
             let current_nodes = nodes.read().await;
             for (did, node_tx) in current_nodes.iter() {
                 if did != &sender_did {
@@ -76,280 +140,337 @@ impl SimulationHarness {
         }
     }
 
-    pub async fn stop_node(&mut self, did: &Did) {
-        let mut nodes_guard = self.nodes.write().await;
-        if let Some(tx) = nodes_guard.remove(did) {
-            let _ = tx.send(SimEvent::Shutdown).await;
-            warn!(node_did = %did, "Node stopped manually via harness");
-        }
-    }
-
-    pub async fn inject_chaos(&self, target_did: &Did, mode: ChaosMode) {
-        let nodes = self.nodes.read().await;
-        if let Some(tx) = nodes.get(target_did) {
-            info!(target: "phalanx::chaos", node=%target_did, ?mode, "Injecting Chaos Event");
-            let _ = tx.send(SimEvent::ChaosUpdate(mode)).await;
-        }
-    }
-
-    pub async fn lookup_did(&self, network_id: &NetworkId) -> Option<Did> {
-        let registry = self.identity_registry.read().await;
-        registry.iter()
-            .find(|(_, net_id)| *net_id == network_id)
-            .map(|(did, _)| did.clone())
-    }
-
-    pub async fn spawn_node(&mut self, name: &str) -> Did {
-        let name_owned = name.to_string();
-        let (identity, _) = PhalanxIdentity::generate();
-        let node_did = identity.did.clone();
-        let return_did = node_did.clone();
-        let node_network_id = NetworkId::random();
-        
-        let (node_tx, mut node_rx) = mpsc::channel::<SimEvent>(100);
-
-        let registry_clone = Arc::clone(&self.identity_registry);
-        let broadcast_tx = self.broadcast_channel.clone();
-        let telemetry_tx = self.telemetry_tx.clone(); 
-        
-        let config = self.config.clone();
-        let mut physics = self.physics.clone(); 
-
-        {
-            let mut peer_guard = self.identity_registry.write().await;
-            peer_guard.insert(node_did.clone(), node_network_id);
-            let mut nodes_guard = self.nodes.write().await;
-            nodes_guard.insert(node_did.clone(), node_tx);
-        }
-        
-        info!(node = %name_owned, "Initializing Guardian");
-
-        let mut sentinel = Sentinel::new(&config);
-        let mut storage = Guardian::new(&format!("sim_vault/{}", name), &config, identity.did.clone());
-
-        tokio::spawn(async move {
-            let span = span!(Level::INFO, "sim_node", node = %name_owned, network_id = %node_network_id);
-            let _enter = span.enter();
-            info!("Virtual node loop started");
-
-            let mut chaos_mode = ChaosMode::Stable;
-            let mut cleanup_tick = tokio::time::interval(physics.shard_timeout());
-            let mut data_tick = tokio::time::interval(Duration::from_millis(100));
-            // Track sequences for our generated data
-            let mut seq_counter = 0; 
-
-            loop {
-                if matches!(chaos_mode, ChaosMode::Hyperactive) {
-                    physics.artificial_load = 0.95; 
-                }
-
-                let micro_load = storage.micro_layer.len() as f32 / (config.storage.max_peers * 5) as f32;
-                let macro_load = storage.macro_layer.len() as f32 / config.storage.max_peers as f32;
-                let total_raw_load = micro_load + macro_load + physics.artificial_load;
-                let load = UnitInterval::new(total_raw_load);
-                let vitality = VitalityRate::calculate(&physics, PowerState::Normal, load);
-                let current_interval = vitality.as_duration();
-
-                tokio::select! {
-                    _ = tokio::time::sleep(current_interval)=> {
-                        let drop_packet = if let ChaosMode::PacketLoss(prob) = chaos_mode {
-                            rand::rng().random_range(0.0..1.0) < prob
-                        } else { false };
-
-                        if !drop_packet {
-                            let mut msg = ControlMessage {
-                                sender: node_network_id,
-                                load_factor: load.as_f32(),
-                                storage_remaining_mb: 1024,
-                                heartbeat_ms: current_interval.as_millis() as u64,
-                                is_leaf: false
-                            };
-                            
-                            if matches!(chaos_mode, ChaosMode::Byzantine) {
-                                msg.storage_remaining_mb = 99999999; 
-                            }
-
-                            if let Ok(data) = postcard::to_stdvec(&msg) {
-                                let event = SimEvent::Heartbeat { 
-                                    origin: node_network_id, 
-                                    payload: data 
-                                };
-                                let _ = broadcast_tx.send((node_did.clone(), node_network_id, event)).await;
-                            }
-                        }
-                    }
-
-                    // --- UPDATED TRAFFIC GENERATOR ---
-                    _ = data_tick.tick() => {
-                        let spawn_chance = if matches!(chaos_mode, ChaosMode::Hyperactive) { 
-                            0.5 // High chance for Vampire Mode
-                        } else { 
-                            0.1 // Low chance for Normal Mode
-                        };
-
-                        if rand::rng().random_range(0.0..1.0) < spawn_chance {
-                            seq_counter += 1;
-                            let frames = vec![vec![1; 512]]; 
-                            
-                            // 1. Create the shard
-                            let shard = create_video_shard(
-                                frames, 
-                                StorageSequence(seq_counter), 
-                                30, 
-                                "sim_volley".into()
-                            );
-                            
-                             // Wrap in Envelope (Signed by THIS node)
-                            let mut envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, node_network_id);
-                            
-                            // 2. Poison the data AFTER it has been signed.
-                            if matches!(chaos_mode, ChaosMode::Hyperactive) {
-                                if let Evidence::Video(ref mut v) = envelope.evidence { 
-                                     v.fps = 145; // The signature expects 30, finds 145 -> REJECT!
-                                }
-                            }
-                             // 3. Chunkify & BROADCAST
-                             // Use large chunk size (4096) to force immediate reassembly at receiver
-                            if let Ok(data) = postcard::to_stdvec(&envelope) {
-                                let chunks = chunkify(
-                                    ShardId(seq_counter), 
-                                    data, 
-                                    4096, 
-                                    node_did.clone(), 
-                                    ChunkType::Witnessed
-                                );
-
-                                 // Broadcast triggers 'ChunkIngested' on other nodes
-                                let event = SimEvent::ChunkIngested { 
-                                    origin: node_network_id, 
-                                    chunk: chunks[0].clone() 
-                                };
-                                
-                                let _ = broadcast_tx.send((node_did.clone(), node_network_id, event)).await;
-                            }
-                        }
-                    }
-
-                    _ = cleanup_tick.tick() => {
-                        sentinel.prune_stale_buffers(&config, &physics);
-                        storage.archive_stale_sessions(physics.shard_timeout());
-                    }
-
-                    Some(event) = node_rx.recv() => {
-                        if let ChaosMode::HighLatency(ms) = chaos_mode {
-                            tokio::time::sleep(Duration::from_millis(ms)).await;
-                        }
-
-                        match event {
-                            SimEvent::Shutdown => break,
-                            
-                            SimEvent::ChaosUpdate(new_mode) => {
-                                chaos_mode = new_mode;
-                                if matches!(chaos_mode, ChaosMode::Hyperactive) {
-                                    data_tick = tokio::time::interval(Duration::from_millis(10)); 
-                                } else {
-                                    data_tick = tokio::time::interval(Duration::from_millis(100));
-                                }
-                            }
-
-                            SimEvent::ChunkIngested { origin, chunk } => {
-                                if origin == node_network_id {
-                                    // Keep this empty to handle log spam.
-                                } else {
-                                    // Inbound (Foreign) - DEFENSE LOGIC
-                                    
-                                    // 1. Snapshot Reputation
-                                    let was_blacklisted = storage.peer_registry.get(&chunk.owner_did)
-                                        .map_or(false, |r| r.is_blacklisted);
-                                    let pre_sigs = storage.peer_registry.get(&chunk.owner_did)
-                                        .map_or(0, |r| r.invalid_sigs);
-
-                                    // 2. Ingest (Triggering Guardian Logic in vault.rs)
-                                    storage.ingest_chunk(chunk.clone(), false);
-
-                                    // 3. Inspect Result
-                                    let current_rep = storage.peer_registry.get(&chunk.owner_did);
-                                    let is_blacklisted = current_rep.map_or(false, |r| r.is_blacklisted);
-                                    let post_sigs = current_rep.map_or(0, |r| r.invalid_sigs);
-
-                                    // 4. Report Defense
-                                    if is_blacklisted {
-                                         let _ = telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
-                                            attacker: origin,
-                                            reason: if !was_blacklisted { 
-                                                "Vampire Attack: Signature Threshold Exceeded (BANNED)".into() 
-                                            } else { 
-                                                "Traffic Shedding: Blacklisted Peer".into() 
-                                            },
-                                        });
-                                    } else if post_sigs > pre_sigs {
-                                        // Penalty applied, but not yet banned
-                                        let _ = telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
-                                            attacker: origin,
-                                            reason: format!("Vampire Signature Detected (Penalty {}/5)", post_sigs),
-                                        });
-                                    } else {
-                                        // Success
-                                        let _ = telemetry_tx.try_send(SimEvent::ShardProcessed { 
-                                            peer_id: origin, 
-                                            byte_size: ByteCapacity(chunk.data.len() as u64) 
-                                        });
-                                    }
-                                }
-                            }
-                            
-                            SimEvent::Heartbeat { origin: _source_peer, payload: data } => {
-                                if let Ok(msg) = postcard::from_bytes::<ControlMessage>(&data) {
-                                    sentinel.health_tracker.register_activity(msg);
-                                }
-                            }
-                            SimEvent::PeerDiscovered { peer, source: _ } => {
-                                let registry_read = registry_clone.read().await;
-                                let found_did = registry_read.iter()
-                                    .find(|(_, net_id)| **net_id == peer)
-                                    .map(|(d, _)| d.clone());
-                                drop(registry_read);
-
-                                if let Some(did) = found_did {
-                                    let mut write_guard = registry_clone.write().await;
-                                    write_guard.insert(did, peer); 
-                                }
-                            }
-                            SimEvent::ShardProcessed { .. } => {}
-                            SimEvent::CrucibleFinalized { .. } => { }
-                            SimEvent::AttackAttemptBlocked { .. } => {}
-                            SimEvent::SystemStressUpdate(interval) => {
-                                physics.apply_system_load(interval);
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        return_did
-    }
-
     pub async fn broadcast(&self, sender_did: &Did, event: SimEvent) {
-        let nodes_guard = self.nodes.read().await;
-        for (did, tx) in nodes_guard.iter() {
-            if did != sender_did {
-                let _ = tx.send(event.clone()).await;
+        // Try to resolve the NetworkId, or use a random one if this is an
+        // external/unregistered actor (like a test attacker).
+        let network_id = self
+            .resolve_did(sender_did)
+            .await
+            .unwrap_or_else(NetworkId::random);
+
+        // Send to the relay channel, which distributes to all active actors.
+        let _ = self
+            .broadcast_channel
+            .send((sender_did.clone(), network_id, event))
+            .await;
+    }
+}
+
+// =========================================================================================
+//  LOGIC: The Node Actor
+// =========================================================================================
+
+struct SimNode {
+    // Identity
+    name: String,
+    identity: PhalanxIdentity,
+    network_id: NetworkId,
+    role: NodeRole,
+
+    // Subsystems
+    sentinel: Sentinel,
+    storage: Guardian,
+    config: PhalanxConfig,
+    physics: PhalanxPhysics,
+
+    // Internal State
+    chaos_mode: ChaosMode,
+    known_strongholds: Vec<NetworkId>,
+    seq_counter: u64,
+    staged_bytes: u64,
+
+    // Communications
+    broadcast_tx: mpsc::Sender<(Did, NetworkId, SimEvent)>,
+    telemetry_tx: mpsc::Sender<SimEvent>,
+}
+
+impl SimNode {
+    fn new(
+        name: &str,
+        identity: PhalanxIdentity,
+        network_id: NetworkId,
+        role: NodeRole,
+        config: PhalanxConfig,
+        physics: PhalanxPhysics,
+        broadcast_tx: mpsc::Sender<(Did, NetworkId, SimEvent)>,
+        telemetry_tx: mpsc::Sender<SimEvent>,
+    ) -> Self {
+        let sentinel = Sentinel::new(&config);
+        let storage = Guardian::new(
+            &format!("sim_vault/{}", name),
+            &config,
+            identity.did.clone(),
+        );
+
+        Self {
+            name: name.to_string(),
+            identity,
+            network_id,
+            role,
+            sentinel,
+            storage,
+            config,
+            physics,
+            chaos_mode: ChaosMode::Stable,
+            known_strongholds: Vec::new(),
+            seq_counter: 0,
+            staged_bytes: 0,
+            broadcast_tx,
+            telemetry_tx,
+        }
+    }
+
+    async fn run(mut self, mut rx: mpsc::Receiver<SimEvent>) {
+        let span = span!(Level::INFO, "sim_node", node = %self.name, network_id = %self.network_id);
+        let _enter = span.enter();
+        info!("Actor Loop Started");
+
+        let mut cleanup_tick = tokio::time::interval(self.physics.shard_timeout());
+        let mut data_tick = tokio::time::interval(Duration::from_millis(100));
+        let mut physics_tick = tokio::time::interval(Duration::from_millis(500)); // Slower heartbeat
+
+        loop {
+            // Apply Chaos Load
+            if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
+                self.physics.artificial_load = 0.95;
+            }
+
+            tokio::select! {
+                // 1. Vitality & Heartbeats
+                _ = physics_tick.tick() => {
+                    self.step_physics().await;
+                }
+
+                // 2. Traffic Generation (Normal & Chaos)
+                _ = data_tick.tick() => {
+                    if self.role != NodeRole::Stronghold {
+                        self.step_traffic().await;
+                    }
+                }
+
+                // 3. Maintenance
+                _ = cleanup_tick.tick() => {
+                    self.sentinel.prune_stale_buffers(&self.config, &self.physics);
+                    self.storage.archive_stale_sessions(self.physics.shard_timeout());
+                }
+
+                // 4. Message Handling
+                Some(event) = rx.recv() => {
+                    self.handle_event(event).await;
+                }
             }
         }
     }
 
-    pub async fn record_ingestion(&self, peer: NetworkId, bytes: ByteCapacity) {
-        let event = SimEvent::ShardProcessed {
-            peer_id: peer,
-            byte_size: bytes,
+    // --- BEHAVIORS ---
+
+    async fn step_physics(&mut self) {
+        // Calculate Load
+        let micro_load =
+            self.storage.micro_layer.len() as f32 / (self.config.storage.max_peers * 5) as f32;
+        let macro_load =
+            self.storage.macro_layer.len() as f32 / self.config.storage.max_peers as f32;
+        let total_raw_load = micro_load + macro_load + self.physics.artificial_load;
+        let load = UnitInterval::new(total_raw_load);
+
+        let vitality = VitalityRate::calculate(&self.physics, PowerState::Normal, load);
+        let interval = vitality.as_duration();
+
+        // Chaos: Packet Loss
+        if let ChaosMode::PacketLoss(prob) = self.chaos_mode {
+            if rand::rng().random_range(0.0..1.0) < prob {
+                return; // Simulate dropped heartbeat
+            }
+        }
+
+        // Broadcast Heartbeat
+        let mut msg = ControlMessage {
+            sender: self.network_id,
+            load_factor: load.as_f32(),
+            storage_remaining_mb: 1024,
+            heartbeat_ms: interval.as_millis() as u64,
+            is_leaf: false,
         };
-        self.publish_to_dashboard(event).await;
+
+        if matches!(self.chaos_mode, ChaosMode::Byzantine) {
+            msg.storage_remaining_mb = 99999999;
+        }
+
+        if let Ok(data) = postcard::to_stdvec(&msg) {
+            let event = SimEvent::Heartbeat {
+                origin: self.network_id,
+                payload: data,
+            };
+            let _ = self
+                .broadcast_tx
+                .send((self.identity.did.clone(), self.network_id, event))
+                .await;
+        }
     }
 
-    pub async fn publish_to_dashboard(&self, event: SimEvent) {
-        if let Err(e) = self.telemetry_tx.try_send(event) {
-            tracing::warn!(target: "phalanx::sim", error = %e, "Telemetry channel dropped.");
+    async fn step_traffic(&mut self) {
+        let spawn_chance = if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
+            0.5
+        } else {
+            0.1
+        };
+
+        if rand::rng().random_range(0.0..1.0) < spawn_chance {
+            self.seq_counter += 1;
+            let frames = vec![vec![1; 512]];
+
+            // 1. Create Valid Data (FPS 30)
+            let shard = create_video_shard(
+                frames,
+                StorageSequence(self.seq_counter as u32),
+                30,
+                "sim_volley".into(),
+            );
+
+            // 2. Sign it (Locks signature to 30 FPS)
+            let mut envelope =
+                WitnessEnvelope::new(Evidence::Video(shard), &self.identity, self.network_id);
+
+            // 3. TAMPER (Chaos Logic)
+            // Modify data AFTER signing to trigger invalid signature detection at the receiver
+            if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
+                if let Evidence::Video(ref mut v) = envelope.evidence {
+                    v.fps = 145;
+                }
+            }
+
+            // 4. Chunkify & Broadcast
+            if let Ok(data) = postcard::to_stdvec(&envelope) {
+                let chunks = chunkify(
+                    ShardId(self.seq_counter as u32),
+                    data,
+                    4096,
+                    self.identity.did.clone(),
+                    ChunkType::Witnessed,
+                );
+                let event = SimEvent::ChunkIngested {
+                    origin: self.network_id,
+                    chunk: chunks[0].clone(),
+                };
+                let _ = self
+                    .broadcast_tx
+                    .send((self.identity.did.clone(), self.network_id, event))
+                    .await;
+            }
+        }
+    }
+
+    async fn handle_event(&mut self, event: SimEvent) {
+        // Chaos: High Latency
+        if let ChaosMode::HighLatency(ms) = self.chaos_mode {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+        }
+
+        match event {
+            SimEvent::Shutdown => std::process::exit(0),
+
+            SimEvent::ChaosUpdate(mode) => {
+                self.chaos_mode = mode;
+                // Note: We don't need to adjust tickers here anymore, logic handles it naturally
+            }
+
+            SimEvent::ChunkIngested { origin, chunk } => {
+                if origin != self.network_id {
+                    self.process_inbound_chunk(origin, chunk).await;
+                }
+            }
+
+            SimEvent::PeerDiscovered { peer, role, .. } => {
+                // Register Strongholds for Offloading
+                if role == NodeRole::Stronghold && !self.known_strongholds.contains(&peer) {
+                    self.known_strongholds.push(peer);
+                    debug!("Registered Stronghold: {}", peer);
+                }
+            }
+
+            SimEvent::Heartbeat { payload, .. } => {
+                if let Ok(msg) = postcard::from_bytes::<ControlMessage>(&payload) {
+                    self.sentinel.health_tracker.register_activity(msg);
+                }
+            }
+
+            // Ignored Events
+            SimEvent::ShardProcessed { .. } => {}
+            SimEvent::CrucibleFinalized { .. } => {}
+            SimEvent::AttackAttemptBlocked { .. } => {}
+            SimEvent::OffloadComplete { .. } => {}
+            SimEvent::SystemStressUpdate(interval) => {
+                self.physics.apply_system_load(interval);
+            }
+        }
+    }
+
+    async fn process_inbound_chunk(
+        &mut self,
+        origin: NetworkId,
+        chunk: crate::primitives::shards::ShardChunk,
+    ) {
+        // 1. Snapshot Reputation
+        let was_blacklisted = self
+            .storage
+            .peer_registry
+            .get(&chunk.owner_did)
+            .map_or(false, |r| r.is_blacklisted);
+        let pre_sigs = self
+            .storage
+            .peer_registry
+            .get(&chunk.owner_did)
+            .map_or(0, |r| r.invalid_sigs);
+
+        // 2. Ingest (Triggering Guardian Logic)
+        self.storage.ingest_chunk(chunk.clone(), false);
+
+        // 3. Inspect Result
+        let current_rep = self.storage.peer_registry.get(&chunk.owner_did);
+        let is_blacklisted = current_rep.map_or(false, |r| r.is_blacklisted);
+        let post_sigs = current_rep.map_or(0, |r| r.invalid_sigs);
+
+        // 4. Report Defense
+        if is_blacklisted {
+            let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
+                attacker: origin,
+                reason: if !was_blacklisted {
+                    "Vampire Attack: BANNED".into()
+                } else {
+                    "Traffic Shedding: Blacklisted Peer".into()
+                },
+            });
+        } else if post_sigs > pre_sigs {
+            let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
+                attacker: origin,
+                reason: format!("Vampire Signature Detected (Penalty {}/5)", post_sigs),
+            });
+        } else {
+            // Valid Data
+            let size = chunk.data.len() as u64;
+            let _ = self.telemetry_tx.try_send(SimEvent::ShardProcessed {
+                peer_id: origin,
+                byte_size: ByteCapacity(size),
+            });
+
+            // 5. OFFLOAD LOGIC (Guardians Only)
+            if self.role == NodeRole::Guardian {
+                self.staged_bytes += size;
+                const OFFLOAD_THRESHOLD: u64 = 4096 * 5;
+
+                if self.staged_bytes > OFFLOAD_THRESHOLD && !self.known_strongholds.is_empty() {
+                    let target_idx = rand::rng().random_range(0..self.known_strongholds.len());
+                    let target = self.known_strongholds[target_idx];
+
+                    let _ = self.telemetry_tx.try_send(SimEvent::OffloadComplete {
+                        origin: self.network_id,
+                        target,
+                        size: ByteCapacity(self.staged_bytes),
+                    });
+
+                    self.staged_bytes = 0;
+                }
+            }
         }
     }
 }

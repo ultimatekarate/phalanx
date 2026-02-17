@@ -6,7 +6,7 @@ use std::str::FromStr;
 use thiserror::Error;
 
 /// A self-contained, shareable locator for a specific forensic event (Volley).
-/// 
+///
 /// This struct encapsulates all information required for a remote peer to:
 /// 1. Locate the data on the DHT (via `id`).
 /// 2. Decrypt the content (via `secret`).
@@ -20,7 +20,7 @@ pub struct PhalanxLocator {
     /// The content-addressable hash of the Volley (Video).
     pub id: VolleyId,
     /// The symmetric key (base64 encoded) to decrypt the WitnessEnvelope.
-    pub secret: String, 
+    pub secret: String,
     /// The Decentralized Identifier of the original witness (Author).
     pub author: Did,
 }
@@ -51,7 +51,9 @@ impl FromStr for PhalanxLocator {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // 1. Check Protocol Scheme
-        let remainder = s.strip_prefix("phx://").ok_or(LocatorError::InvalidScheme)?;
+        let remainder = s
+            .strip_prefix("phx://")
+            .ok_or(LocatorError::InvalidScheme)?;
 
         // 2. Split ID and Rest (Key + Author)
         let parts: Vec<&str> = remainder.split('#').collect();
@@ -87,9 +89,9 @@ mod tests {
         // Hardcoded id for testing purposes
         let valid_peer_id = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
 
-        let original_uri = format!("phx://volley-hash-123#secret-key-456@{}",valid_peer_id);
+        let original_uri = format!("phx://volley-hash-123#secret-key-456@{}", valid_peer_id);
         let locator = PhalanxLocator::from_str(&original_uri).expect("Should parse");
-        
+
         assert_eq!(locator.secret, "secret-key-456");
         assert_eq!(locator.id.to_string(), "volley-hash-123");
         assert_eq!(locator.author.to_string(), valid_peer_id);

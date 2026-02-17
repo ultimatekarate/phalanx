@@ -1,12 +1,15 @@
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, mpsc};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 // Bridge Imports
-use crate::primitives::shards::{self, AudioShard, StorageSequence};
 use crate::base::config::HardwareConfig;
+use crate::primitives::shards::{self, AudioShard, StorageSequence};
 
 /// Represents a raw audio buffer captured from the microphone.
 #[derive(Debug, Clone)]
@@ -30,8 +33,8 @@ impl PhalanxAudioThread {
     /// Creates the handle. Does NOT start the thread yet.
     pub fn new(config: &HardwareConfig) -> Self {
         // Buffer ~1 second of audio chunks
-        let (tx, _) = broadcast::channel(100); 
-        
+        let (tx, _) = broadcast::channel(100);
+
         Self {
             sample_rate: config.audio_sample_rate,
             channels: config.audio_channels,
@@ -65,7 +68,7 @@ impl PhalanxAudioThread {
                 match AudioDriver::connect(rate, channels) {
                     Ok(mut driver) => {
                         info!("Audio Hardware: CONNECTED");
-                        
+
                         // 2. Hot Loop (Capture)
                         while running_flag.load(Ordering::Relaxed) {
                             match driver.capture_chunk() {
@@ -74,7 +77,7 @@ impl PhalanxAudioThread {
                                 }
                                 Err(e) => {
                                     error!(error = %e, "Audio Hardware: CRASHED. Restarting...");
-                                    break; 
+                                    break;
                                 }
                             }
                         }
@@ -95,43 +98,44 @@ impl PhalanxAudioThread {
 
     /// COMPATIBILITY BRIDGE
     pub fn spawn(
-        self, 
-        tx: mpsc::Sender<AudioShard>, 
-        hw_config: HardwareConfig, 
+        self,
+        tx: mpsc::Sender<AudioShard>,
+        hw_config: HardwareConfig,
         volley_id: String,
-        secret_key: Option<[u8; 32]>
+        secret_key: Option<[u8; 32]>,
     ) {
         // 1. Ignite Hardware
         self.start_watchdog();
 
         let mut rx = self.subscribe();
-        
+
         // Calculate bytes needed for 1 second of audio
         // e.g. 44100 * 2 (16-bit) * 2 (stereo) = 176,400 bytes
-        let bytes_per_sec = (hw_config.audio_sample_rate * hw_config.audio_channels as u32 * 2) as usize; 
+        let bytes_per_sec =
+            (hw_config.audio_sample_rate * hw_config.audio_channels as u32 * 2) as usize;
 
         // 2. Spawn Processor (Thread B)
         tokio::spawn(async move {
             info!("Audio Processor: STARTED");
-            
+
             let mut byte_buffer = Vec::new();
             let mut sequence_id = StorageSequence(0);
-            
+
             while let Ok(frame) = rx.recv().await {
                 // A. Buffer Data
                 byte_buffer.extend_from_slice(&frame.data);
 
                 // B. Batching
                 if byte_buffer.len() >= bytes_per_sec {
-                    let chunk = byte_buffer.split_off(0); 
-                    
+                    let chunk = byte_buffer.split_off(0);
+
                     // FIX: Added missing arguments (sample_rate, channels)
                     let mut shard = shards::create_audio_shard(
-                        chunk, 
+                        chunk,
                         sequence_id,
                         hw_config.audio_sample_rate, // Arg 3
                         hw_config.audio_channels,    // Arg 4
-                        volley_id.clone()            // Arg 5
+                        volley_id.clone(),           // Arg 5
                     );
 
                     // C. Encryption
@@ -145,7 +149,7 @@ impl PhalanxAudioThread {
                     // D. Transmission
                     if tx.send(shard).await.is_err() {
                         error!("Main channel closed. Stopping Audio Processor.");
-                        self.stop(); 
+                        self.stop();
                         break;
                     }
 
@@ -169,7 +173,7 @@ struct AudioDriver {
 impl AudioDriver {
     fn connect(rate: u32, channels: u8) -> Result<Self, String> {
         Ok(Self {
-            interval: Duration::from_millis(100), 
+            interval: Duration::from_millis(100),
             start_system_time: SystemTime::now(),
             start_monotonic: Instant::now(),
             sample_counter: 0,
@@ -183,23 +187,23 @@ impl AudioDriver {
 
         let elapsed = self.start_monotonic.elapsed();
         let frame_time = self.start_system_time + elapsed;
-        
+
         let timestamp_ms = frame_time
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
             .as_millis() as u64;
 
         // Mock Data: Sine Wave
-        let samples_to_gen = (self.rate as f32 * 0.1) as usize; 
-        let bytes_needed = samples_to_gen * self.channels as usize * 2; 
-        
+        let samples_to_gen = (self.rate as f32 * 0.1) as usize;
+        let bytes_needed = samples_to_gen * self.channels as usize * 2;
+
         let mut data = Vec::with_capacity(bytes_needed);
-        
+
         for i in 0..samples_to_gen {
             let t = (self.sample_counter + i as u64) as f32 / self.rate as f32;
             let val = (t * 440.0 * 2.0 * std::f32::consts::PI).sin();
-            let sample = (val * 32767.0) as i16; 
-            
+            let sample = (val * 32767.0) as i16;
+
             for _ in 0..self.channels {
                 data.extend_from_slice(&sample.to_le_bytes());
             }
@@ -223,14 +227,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_audio_drift_compensation() {
-        let config = HardwareConfig { 
-            camera_fps: 30, 
-            audio_sample_rate: 44100, 
-            audio_channels: 2 
+        let config = HardwareConfig {
+            camera_fps: 30,
+            audio_sample_rate: 44100,
+            audio_channels: 2,
         };
         let audio = PhalanxAudioThread::new(&config);
         let mut rx = audio.subscribe();
-        
+
         // Manual start for test
         audio.start_watchdog();
 
@@ -249,20 +253,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_audio_data_generation() {
-        let config = HardwareConfig { 
-            camera_fps: 30, 
-            audio_sample_rate: 44100, 
-            audio_channels: 1 
+        let config = HardwareConfig {
+            camera_fps: 30,
+            audio_sample_rate: 44100,
+            audio_channels: 1,
         };
         let audio = PhalanxAudioThread::new(&config);
         let mut rx = audio.subscribe();
-        
+
         audio.start_watchdog();
 
         let frame = rx.recv().await.unwrap();
         assert!(!frame.data.is_empty());
         assert_eq!(frame.data.len(), 8820);
-        
+
         audio.stop();
     }
 }

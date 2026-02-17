@@ -1,18 +1,16 @@
-use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Signature};
-use serde::{Serialize, Deserialize};
-use std::{fs, fmt};
-use std::str::FromStr;
-use std::path::Path;
+use bip39::{Language, Mnemonic};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use libp2p::PeerId;
 use rand::RngCore;
-use bip39::{Mnemonic, Language};
-
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::str::FromStr;
+use std::{fmt, fs};
 
 // --- CONSTANTS ---
 pub const IDENTITY_VERSION: u32 = 1;
 
-// id types because I kept I was a moron man that kept using strings. 
-
+// id types because I kept I was a moron man that kept using strings.
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -72,14 +70,13 @@ impl AsRef<str> for Did {
 /// that JSON/Postcard representations remain human-readable or standard-compliant.
 
 // I won't pretend to understand why it's needed, I'm just
-// trusting the nerds that came before me that decided it was. 
+// trusting the nerds that came before me that decided it was.
 pub struct NetworkId(pub libp2p::PeerId);
 
 impl NetworkId {
-
     /// Generates a random NetworkId (wrapping a random PeerId).
     /// I wrote this purely for testing purposes. This stupid thing
-    /// has saved me so much trouble. 
+    /// has saved me so much trouble.
     pub fn random() -> Self {
         Self(PeerId::random())
     }
@@ -87,14 +84,18 @@ impl NetworkId {
 
 impl Serialize for NetworkId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where S: serde::Serializer {
+    where
+        S: serde::Serializer,
+    {
         serializer.serialize_str(&self.0.to_base58())
     }
 }
 
 impl<'de> Deserialize<'de> for NetworkId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         let s = String::deserialize(deserializer)?;
         let peer_id = s.parse().map_err(serde::de::Error::custom)?;
         Ok(NetworkId(peer_id))
@@ -137,24 +138,24 @@ impl AsRef<PeerId> for NetworkId {
 
 /// The sovereign cryptographic root for a Phalanx Node.
 ///
-/// Constraints: Contains a `SigningKey` used for Ed25519 forensic proofs. 
-/// When transitioning to the networking layer, this must be transcoded 
-/// into a `libp2p::identity::Keypair` to ensure the NodeId matches 
+/// Constraints: Contains a `SigningKey` used for Ed25519 forensic proofs.
+/// When transitioning to the networking layer, this must be transcoded
+/// into a `libp2p::identity::Keypair` to ensure the NodeId matches
 /// the forensic signature authority.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PhalanxIdentity {
-    pub version: u32,         // <--- Strict Versioning
-    pub did: Did,             
+    pub version: u32, // <--- Strict Versioning
+    pub did: Did,
     pub keypair: SigningKey,
 }
 
 impl fmt::Debug for PhalanxIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PhalanxIdentity")
-        .field("version", &self.version)
-        .field("did", &self.did)
-        .field("keypair", &"[REDACTED]")
-        .finish()
+            .field("version", &self.version)
+            .field("did", &self.did)
+            .field("keypair", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -170,15 +171,14 @@ impl PhalanxIdentity {
     /// # Returns
     /// * `(PhalanxIdentity, String)` - The identity struct and the BIP39 mnemonic phrase.
     pub fn generate() -> (Self, String) {
-        let mut rng = rand::rng(); 
-        let mut entropy = [0u8; 16]; 
+        let mut rng = rand::rng();
+        let mut entropy = [0u8; 16];
         rng.fill_bytes(&mut entropy);
 
-        let mnemonic = Mnemonic::from_entropy(&entropy)
-            .expect("Failed to create mnemonic");
+        let mnemonic = Mnemonic::from_entropy(&entropy).expect("Failed to create mnemonic");
         let phrase = mnemonic.to_string();
         let seed = mnemonic.to_seed("");
-        
+
         let secret_bytes: [u8; 32] = seed[0..32].try_into().expect("Seed invalid");
         let signing_key = SigningKey::from_bytes(&secret_bytes);
         (Self::from_key(signing_key), phrase)
@@ -226,7 +226,6 @@ impl PhalanxIdentity {
         self.keypair.sign(msg)
     }
 
-
     /// Verifies a signature against a public key.
     ///
     /// This method supports two public key formats for interoperability:
@@ -260,7 +259,7 @@ impl PhalanxIdentity {
     /// Converts the internal forensic key into a Libp2p Keypair.
     ///
     /// This transformation allows the networking stack to use the same cryptographic
-    /// root for TLS handshakes and peer routing. 
+    /// root for TLS handshakes and peer routing.
     pub fn to_libp2p_keypair(&self) -> libp2p::identity::Keypair {
         let mut bytes = self.keypair.to_bytes();
         libp2p::identity::Keypair::ed25519_from_bytes(&mut bytes).unwrap()
@@ -294,28 +293,37 @@ impl PhalanxIdentity {
         if let Ok(identity) = postcard::from_bytes::<PhalanxIdentity>(&bytes) {
             if identity.version != IDENTITY_VERSION {
                 return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData, 
-                    format!("Identity version mismatch. Expected {}, got {}", IDENTITY_VERSION, identity.version)
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "Identity version mismatch. Expected {}, got {}",
+                        IDENTITY_VERSION, identity.version
+                    ),
                 ));
             }
             return Ok(identity);
         }
 
         // 2. Fallback: Legacy 32-byte Key Check
-        // If "Strictly Enforce" means "No Legacy", comment this block out. 
+        // If "Strictly Enforce" means "No Legacy", comment this block out.
         // But for development continuity, we auto-migrate.
         if bytes.len() == 32 {
-            println!("WARNING: Legacy Identity Format Detected. Upgrading to v{}...", IDENTITY_VERSION);
+            println!(
+                "WARNING: Legacy Identity Format Detected. Upgrading to v{}...",
+                IDENTITY_VERSION
+            );
             let arr: [u8; 32] = bytes.try_into().unwrap();
             let key = SigningKey::from_bytes(&arr);
             let identity = Self::from_key(key);
-            
+
             // Auto-save the upgraded format back to disk
             identity.save_to_disk(path)?;
             return Ok(identity);
         }
 
-        Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Unknown identity format"))
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Unknown identity format",
+        ))
     }
 }
 
@@ -337,8 +345,12 @@ mod tests {
         let message = b"evidence_shard_001";
         let signature = identity.sign(message);
         let pubkey = identity.keypair.verifying_key().to_bytes();
-        
-        assert!(PhalanxIdentity::verify(&pubkey, message, &signature.to_bytes()));
+
+        assert!(PhalanxIdentity::verify(
+            &pubkey,
+            message,
+            &signature.to_bytes()
+        ));
     }
 
     #[test]
@@ -352,7 +364,7 @@ mod tests {
         assert_eq!(original.keypair.to_bytes(), recovered.keypair.to_bytes());
         assert_eq!(recovered.version, IDENTITY_VERSION);
     }
-    
+
     #[test]
     fn test_libp2p_key_format_handling() {
         let (identity, _) = PhalanxIdentity::generate();
@@ -361,9 +373,13 @@ mod tests {
         let raw_key = identity.keypair.verifying_key().to_bytes();
         let mut peer_id_bytes = vec![0x00, 0x24, 0x08, 0x01, 0x12, 0x20];
         peer_id_bytes.extend_from_slice(&raw_key);
-        
+
         assert_eq!(peer_id_bytes.len(), 38);
-        assert!(PhalanxIdentity::verify(&peer_id_bytes, message, &signature.to_bytes()));
+        assert!(PhalanxIdentity::verify(
+            &peer_id_bytes,
+            message,
+            &signature.to_bytes()
+        ));
     }
 
     #[test]
@@ -371,13 +387,13 @@ mod tests {
         // Test that we can save and load the new format
         let (identity, _) = PhalanxIdentity::generate();
         let path = "test_identity_v1.bin";
-        
+
         identity.save_to_disk(path).unwrap();
         let loaded = PhalanxIdentity::load_from_disk(path).unwrap();
-        
+
         assert_eq!(identity.did, loaded.did);
         assert_eq!(loaded.version, IDENTITY_VERSION);
-        
+
         let _ = fs::remove_file(path);
     }
 

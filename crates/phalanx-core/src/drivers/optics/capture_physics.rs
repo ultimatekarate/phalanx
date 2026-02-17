@@ -1,4 +1,3 @@
-
 // What if the device has a high end sensor?
 
 // PSEUDOCODE
@@ -21,14 +20,15 @@ impl PassiveDetector for MotionPhysicsVerifier {
             ShutterType::Rolling(readout_ms) => {
                 let expected_skew = calculate_expected_skew(gyro_motion, readout_ms);
                 let actual_skew = measure_geometry_skew(frame);
-                
+
                 // If geometry is too perfect, it's fake
                 return diff(expected_skew, actual_skew);
             }
 
             // BIG SPENDER High-End Sensor (Global Shutter)
             ShutterType::Global => {
-                let expected_blur_vector = calculate_blur_vector(gyro_motion, context.exposure_time);
+                let expected_blur_vector =
+                    calculate_blur_vector(gyro_motion, context.exposure_time);
                 let actual_blur = measure_motion_blur_direction(frame);
 
                 // If image is too sharp or blur direction is wrong, it's fake

@@ -1,18 +1,18 @@
-use crate::base::types::{ByteCapacity, TrafficGovernor};
-use crate::primitives::shards::{StorageSequence, Evidence, WitnessEnvelope, Volley, ShardChunk};
-use crate::storage::crucible::{Crucible};
-use crate::storage::strategies::{ShardAmalgam, VolleyAmalgam}; 
 use crate::base::config::PhalanxConfig;
+use crate::base::types::{ByteCapacity, TrafficGovernor};
 use crate::primitives::identity::Did;
+use crate::primitives::shards::{Evidence, ShardChunk, StorageSequence, Volley, WitnessEnvelope};
 use crate::primitives::time::TrustedClock;
+use crate::storage::crucible::Crucible;
+use crate::storage::strategies::{ShardAmalgam, VolleyAmalgam};
 
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fs::{self, File};
 use std::io::Write;
-use std::fmt;
 use std::path::PathBuf;
 use tokio::time::Instant;
-use tracing::{info, error, warn, debug, instrument};
+use tracing::{debug, error, info, instrument, warn};
 
 /// Enumerates specific failure modes for storage and security operations.
 ///
@@ -22,18 +22,22 @@ use tracing::{info, error, warn, debug, instrument};
 /// * `WalWriteFailed`: Critical IO failure (disk full or permissions).
 #[derive(Debug)]
 pub enum GuardianError {
-    QuotaExceeded(ByteCapacity), 
-    InvalidSignature(String), 
-    ReplayDetected(u32),      
-    WalWriteFailed(String),   
+    QuotaExceeded(ByteCapacity),
+    InvalidSignature(String),
+    ReplayDetected(u32),
+    WalWriteFailed(String),
     SerializationError(String),
 }
 
 impl fmt::Display for GuardianError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::QuotaExceeded(cap) => write!(f, "Storage quota exceeded. Current usage: {:?}", cap),
-            Self::InvalidSignature(did) => write!(f, "Invalid signature detected from DID: {}", did),
+            Self::QuotaExceeded(cap) => {
+                write!(f, "Storage quota exceeded. Current usage: {:?}", cap)
+            }
+            Self::InvalidSignature(did) => {
+                write!(f, "Invalid signature detected from DID: {}", did)
+            }
             Self::ReplayDetected(seq) => write!(f, "Replay attack prevented. Sequence ID: {}", seq),
             Self::WalWriteFailed(path) => write!(f, "Write Ahead Log failure at path: {}", path),
             Self::SerializationError(msg) => write!(f, "Serialization failure: {}", msg),
@@ -67,11 +71,11 @@ pub struct Guardian {
     // Reassembly layers
     pub micro_layer: Crucible<ShardAmalgam>,
     pub macro_layer: Crucible<VolleyAmalgam>,
-    
+
     // --- THE POLICY STATE ---
     pub processed_sequences: HashMap<Did, HashSet<StorageSequence>>,
     pub session_activity: HashMap<Did, Instant>,
-    
+
     pub stale_threshold: std::time::Duration,
 
     // --- ANTI-VAMPIRE STATE ---
@@ -81,11 +85,11 @@ pub struct Guardian {
     pub max_sig_failures: u32,       // threshold before blacklisting
 
     // --- GOVERNANCE & QUOTAS ---
-    pub local_did: Did,                     // "My" Identity
-    pub max_storage_bytes: ByteCapacity,                   // Total Limit
-    pub max_foreign_storage_bytes: ByteCapacity,           // Foreign Limit
-    pub current_storage_usage: ByteCapacity,         // Current Total Usage
-    pub foreign_storage_usage: ByteCapacity,         // Current Foreign Usage
+    pub local_did: Did,                          // "My" Identity
+    pub max_storage_bytes: ByteCapacity,         // Total Limit
+    pub max_foreign_storage_bytes: ByteCapacity, // Foreign Limit
+    pub current_storage_usage: ByteCapacity,     // Current Total Usage
+    pub foreign_storage_usage: ByteCapacity,     // Current Foreign Usage
 
     pub clock: TrustedClock,
 
@@ -93,7 +97,7 @@ pub struct Guardian {
 }
 
 impl Guardian {
-    /// Initializes the storage vault, recovers state from the Write-Ahead Log (WAL), 
+    /// Initializes the storage vault, recovers state from the Write-Ahead Log (WAL),
     /// and performs an initial filesystem scan to calculate current usage.
     ///
     /// # Side Effects
@@ -113,7 +117,7 @@ impl Guardian {
             processed_sequences: HashMap::new(),
             session_activity: HashMap::new(),
             stale_threshold: std::time::Duration::from_secs(config.storage.stale_session_threshold),
-            
+
             peer_registry: HashMap::new(),
             max_buffers_per_peer: config.storage.max_peers,
             max_sig_failures: 5, // magic constant for now
@@ -126,9 +130,9 @@ impl Guardian {
             foreign_storage_usage: ByteCapacity(0),
             clock: TrustedClock::new(),
 
-            governor: TrafficGovernor::new()
+            governor: TrafficGovernor::new(),
         };
-        
+
         guardian.calculate_initial_usage();
         guardian.recover_from_wal();
         guardian
@@ -166,8 +170,8 @@ impl Guardian {
         self.current_storage_usage = ByteCapacity(total);
         self.foreign_storage_usage = ByteCapacity(foreign);
         info!(
-            total_mb = total / 1_000_000, 
-            foreign_mb = foreign / 1_000_000, 
+            total_mb = total / 1_000_000,
+            foreign_mb = foreign / 1_000_000,
             "Storage governance initialized"
         );
     }
@@ -184,8 +188,8 @@ impl Guardian {
         }
 
         warn!(
-            usage = %self.foreign_storage_usage, 
-            limit = %self.max_foreign_storage_bytes, 
+            usage = %self.foreign_storage_usage,
+            limit = %self.max_foreign_storage_bytes,
             "Foreign storage quota exceeded. Pruning..."
         );
 
@@ -199,7 +203,9 @@ impl Guardian {
                 if path.is_dir() {
                     let folder_name = path.file_name().unwrap_or_default().to_string_lossy();
                     // Skip My Data and WAL
-                    if folder_name == safe_local_did || folder_name == "wal" { continue; }
+                    if folder_name == safe_local_did || folder_name == "wal" {
+                        continue;
+                    }
 
                     if let Ok(sub_entries) = fs::read_dir(&path) {
                         for sub in sub_entries.flatten() {
@@ -245,7 +251,6 @@ impl Guardian {
     /// If a chunk completes a shard, it is promoted to `ingest_envelope`.
     #[instrument(skip(self, chunk), level = "debug")]
     pub fn ingest_chunk(&mut self, chunk: ShardChunk, is_leaf_mode: bool) {
-
         debug!(
             is_leaf = %is_leaf_mode,
             chunk_owner = %chunk.owner_did,
@@ -257,35 +262,40 @@ impl Guardian {
         // 1. SYNC STATE
         // Ensure Governor matches the Sentinel's decision from the main loop
         if is_leaf_mode {
-            self.governor.set_state(crate::base::types::PowerState::Leaf);
+            self.governor
+                .set_state(crate::base::types::PowerState::Leaf);
         } else {
-            self.governor.set_state(crate::base::types::PowerState::Normal);
+            self.governor
+                .set_state(crate::base::types::PowerState::Normal);
         }
 
         // 2. CENTRALIZED SECURITY CHECK
         // "Method Injection": We provide the subject (chunk owner) and context (self)
-        if !self.governor.should_accept(&chunk.owner_did, &self.local_did) {
+        if !self
+            .governor
+            .should_accept(&chunk.owner_did, &self.local_did)
+        {
             warn!(did = %chunk.owner_did, "TrafficGovernor: Shedding foreign storage task");
             return;
         }
         // Leaf-mode circuit breaker
         if is_leaf_mode && chunk.owner_did != self.local_did {
             warn!(
-                did = %chunk.owner_did, 
+                did = %chunk.owner_did,
                 "Leaf Mode Active: Shedding foreign chunk"
             );
-            return; 
+            return;
         }
 
         let owner = chunk.owner_did.clone();
 
         info!(
-            shard_id = %chunk.shard_id, 
-            index = chunk.chunk_index, 
+            shard_id = %chunk.shard_id,
+            index = chunk.chunk_index,
             total = chunk.total_chunks,
             "Micro-Layer receiving chunk"
         );
-        
+
         let micro_load = self.micro_layer.len() as f32 / (self.max_buffers_per_peer * 5) as f32;
         let macro_load = self.macro_layer.len() as f32 / self.max_buffers_per_peer as f32;
         let load_factor = (micro_load + macro_load).clamp(0.0, 1.0);
@@ -296,7 +306,7 @@ impl Guardian {
             warn!(load = %load_factor, did = %chunk.owner_did, "Circuit Breaker: Shedding foreign load");
             return;
         }
-        
+
         if let Some(rep) = self.peer_registry.get(&owner) {
             if rep.is_blacklisted {
                 debug!(did = %owner, "Dropping chunk: Peer is blacklisted.");
@@ -304,7 +314,11 @@ impl Guardian {
             }
         }
 
-        let active_sessions = self.processed_sequences.get(&owner).map(|s| s.len()).unwrap_or(0);
+        let active_sessions = self
+            .processed_sequences
+            .get(&owner)
+            .map(|s| s.len())
+            .unwrap_or(0);
         if active_sessions >= self.max_buffers_per_peer {
             warn!(did = %owner, "Dropping chunk: Peer exceeded concurrent session quota.");
             return;
@@ -312,7 +326,7 @@ impl Guardian {
 
         if let Some(envelope) = self.micro_layer.process(chunk) {
             info!(
-                shard_id = %envelope.evidence.sequence_id(), 
+                shard_id = %envelope.evidence.sequence_id(),
                 "Micro-layer reassembly complete. Promoting to envelope."
             );
 
@@ -330,14 +344,12 @@ impl Guardian {
     /// 3. **Replay Protection**: Checks timestamps and sequence IDs against history.
     /// 4. **WAL Persistence**: Writes the verified envelope to the Write-Ahead Log.
     pub fn ingest_envelope(&mut self, envelope: WitnessEnvelope) -> Result<(), GuardianError> {
-        
         // Verify that the signature is valid before doing anything else
-        if !envelope.verify() { 
+        if !envelope.verify() {
             self.penalize_peer(envelope.did.clone(), "Invalid Signature");
-            error!(did = %envelope.did, "Rejected invalid signature."); 
+            error!(did = %envelope.did, "Rejected invalid signature.");
             return Err(GuardianError::InvalidSignature(envelope.did.to_string()));
         }
-        
 
         // 0. GOVERNANCE CHECK
         // If this is foreign data, ensure we have space.
@@ -345,7 +357,7 @@ impl Guardian {
             // Trigger pruning if we are over limit (or close to it)
             if self.foreign_storage_usage > self.max_foreign_storage_bytes {
                 self.prune_foreign_evidence();
-                
+
                 // Hard Reject if pruning failed to free enough space
                 if self.foreign_storage_usage > self.max_foreign_storage_bytes {
                     warn!(did = %envelope.did, "Rejected foreign evidence: Storage Full");
@@ -355,16 +367,21 @@ impl Guardian {
         }
 
         // Allow +/- 10 seconds drift (generous for WAN, tight enough to stop replay)
-        let tolerance = 10; 
-        if !self.clock.is_valid(envelope.evidence.timestamp(), tolerance) {
+        let tolerance = 10;
+        if !self
+            .clock
+            .is_valid(envelope.evidence.timestamp(), tolerance)
+        {
             warn!(
-                did = %envelope.did, 
-                claim = envelope.evidence.timestamp(), 
+                did = %envelope.did,
+                claim = envelope.evidence.timestamp(),
                 now = self.clock.now(),
                 "Rejected Time-Travel/Replay Attack"
             );
             // We reuse InvalidSignature for now, or add a new variant TimeSyncFailure
-            return Err(GuardianError::ReplayDetected(envelope.evidence.sequence_id().0));
+            return Err(GuardianError::ReplayDetected(
+                envelope.evidence.sequence_id().0,
+            ));
         }
 
         if let Err(e) = self.write_to_wal(&envelope) {
@@ -375,7 +392,11 @@ impl Guardian {
         let did = envelope.did.clone();
         let seq = envelope.evidence.sequence_id();
 
-        if self.processed_sequences.get(&did).is_some_and(|set| set.contains(&seq)) {
+        if self
+            .processed_sequences
+            .get(&did)
+            .is_some_and(|set| set.contains(&seq))
+        {
             debug!(%seq, "Replay protection: Dropping already archived shard.");
             return Ok(());
         }
@@ -397,7 +418,7 @@ impl Guardian {
     pub fn penalize_peer(&mut self, did: Did, reason: &str) {
         let rep = self.peer_registry.entry(did.clone()).or_default();
         rep.invalid_sigs += 1;
-        
+
         warn!(%did, %reason, count = rep.invalid_sigs, "Peer penalized for bad behavior.");
 
         if rep.invalid_sigs >= self.max_sig_failures {
@@ -406,8 +427,12 @@ impl Guardian {
         }
     }
 
-    pub fn get_active_volley_shards(&self, did: &Did) -> Option<&std::collections::BTreeMap<StorageSequence, WitnessEnvelope>> {
-        self.macro_layer.get(&did.to_string())
+    pub fn get_active_volley_shards(
+        &self,
+        did: &Did,
+    ) -> Option<&std::collections::BTreeMap<StorageSequence, WitnessEnvelope>> {
+        self.macro_layer
+            .get(&did.to_string())
             .map(|buffer| &buffer.artifacts)
     }
 
@@ -420,9 +445,9 @@ impl Guardian {
     fn archive_volley(&mut self, volley: Volley) {
         info!(id = %volley.id, artifacts = volley.artifacts.len(), "Guardian: archive_volley called");
 
-        if volley.artifacts.is_empty() { 
+        if volley.artifacts.is_empty() {
             warn!(id = %volley.id, "Guardian: Volley is empty! Aborting archive.");
-            return; 
+            return;
         }
 
         let safe_did = volley.owner_did.replace(":", "_");
@@ -437,7 +462,7 @@ impl Guardian {
 
         let did = Did(volley.owner_did.clone());
         let history = self.processed_sequences.entry(did).or_default();
-        
+
         let mut wal_files_to_delete = Vec::new();
 
         for artifact in &volley.artifacts {
@@ -472,7 +497,7 @@ impl Guardian {
                         error!(%e, "Failed to rename archive file");
                     } else {
                         info!(path = ?final_path, size = file_size, "Volley successfully archived");
-                        
+
                         // 3. Update Governance Counters
                         self.current_storage_usage += file_size;
                         if safe_did != self.local_did.to_safe_name() {
@@ -499,11 +524,17 @@ impl Guardian {
     pub fn archive_stale_sessions(&mut self, ttl: std::time::Duration) {
         // 1. Flush Micro Layer
 
-        info!(ttl_ms = ttl.as_millis(), "Guardian: Running governance cleanup cycle");
+        info!(
+            ttl_ms = ttl.as_millis(),
+            "Guardian: Running governance cleanup cycle"
+        );
 
         let recovered_envelopes = self.micro_layer.flush_stale(ttl);
         if !recovered_envelopes.is_empty() {
-            warn!(count = recovered_envelopes.len(), "Guardian: Recovered stale micro-shards");
+            warn!(
+                count = recovered_envelopes.len(),
+                "Guardian: Recovered stale micro-shards"
+            );
         }
 
         for env in recovered_envelopes {
@@ -517,7 +548,10 @@ impl Guardian {
         let recovered_volleys = self.macro_layer.flush_stale(ttl);
 
         if !recovered_volleys.is_empty() {
-            warn!(count = recovered_volleys.len(), "Guardian: Recovered stale VOLLEYS!");
+            warn!(
+                count = recovered_volleys.len(),
+                "Guardian: Recovered stale VOLLEYS!"
+            );
         }
 
         for volley in recovered_volleys {
@@ -534,9 +568,9 @@ impl Guardian {
         let safe_did = envelope.did.to_safe_name();
         let file_name = format!("{}_{}.wal", safe_did, envelope.evidence.sequence_id().0);
         let wal_path = self.wal_directory.join(file_name);
-        let bytes = postcard::to_stdvec(envelope).map_err(|e| 
-            std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        
+        let bytes = postcard::to_stdvec(envelope)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
         let mut file = File::create(wal_path)?;
         file.write_all(&bytes)?;
         file.sync_all()?; // <--- Critical for test_guardian_crash_recovery
@@ -547,7 +581,9 @@ impl Guardian {
         if let Ok(entries) = fs::read_dir(&self.wal_directory) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if fs::metadata(&path).map(|m| m.len()).unwrap_or(0) == 0 { continue; }
+                if fs::metadata(&path).map(|m| m.len()).unwrap_or(0) == 0 {
+                    continue;
+                }
 
                 if let Ok(bytes) = fs::read(&path) {
                     if let Ok(envelope) = postcard::from_bytes::<WitnessEnvelope>(&bytes) {
@@ -565,32 +601,39 @@ impl Guardian {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base::config::{StorageConfig, NetworkConfig, HardwareConfig};
-    use crate::primitives::identity::{PhalanxIdentity, NetworkId};
+    use crate::base::config::{HardwareConfig, NetworkConfig, StorageConfig};
+    use crate::primitives::identity::{NetworkId, PhalanxIdentity};
     use crate::primitives::shards;
     use std::fs::File;
     use std::io::Write;
 
     fn mock_config(max_foreign_bytes: ByteCapacity) -> PhalanxConfig {
         PhalanxConfig {
-            network: NetworkConfig { 
-                max_chunk_size_bytes: 100, 
-                video_topic: "t".into(), 
-                audio_topic: "t".into(), 
-                control_topic: "t".into(), 
-                cleanup_interval_secs: 1, 
-                bootstrap_peers: vec![], guardian_service_key: "k".into() ,
+            network: NetworkConfig {
+                max_chunk_size_bytes: 100,
+                video_topic: "t".into(),
+                audio_topic: "t".into(),
+                control_topic: "t".into(),
+                cleanup_interval_secs: 1,
+                bootstrap_peers: vec![],
+                guardian_service_key: "k".into(),
                 protocol_version: "v0.1.0".to_string(),
-
             },
             storage: StorageConfig {
                 vault_path: "test_vault_governance".into(),
-                max_video_buffer: 1, max_audio_buffer: 1, max_peers: 1, 
-                stale_session_threshold: 1, shards_needed_to_archive: 1,
+                max_video_buffer: 1,
+                max_audio_buffer: 1,
+                max_peers: 1,
+                stale_session_threshold: 1,
+                shards_needed_to_archive: 1,
                 max_storage_bytes: ByteCapacity(100_000),
-                max_foreign_storage_bytes: max_foreign_bytes, 
+                max_foreign_storage_bytes: max_foreign_bytes,
             },
-            hardware: HardwareConfig { camera_fps: 1, audio_sample_rate: 1, audio_channels: 1 },
+            hardware: HardwareConfig {
+                camera_fps: 1,
+                audio_sample_rate: 1,
+                audio_channels: 1,
+            },
         }
     }
 
@@ -609,8 +652,8 @@ mod tests {
         let s1_dir = vault_root.join(stranger_1.did.to_safe_name());
         fs::create_dir_all(&s1_dir).expect("Failed to create s1 dir");
         let mut f1 = File::create(s1_dir.join("old_evidence.phlx")).expect("Failed to create f1");
-        f1.write_all(&[0u8; 1000]).unwrap(); 
-        f1.sync_all().unwrap(); 
+        f1.write_all(&[0u8; 1000]).unwrap();
+        f1.sync_all().unwrap();
 
         // FIX: Ensure distinct timestamp
         thread::sleep(std::time::Duration::from_millis(100));
@@ -619,23 +662,36 @@ mod tests {
         let s2_dir = vault_root.join(stranger_2.did.to_safe_name());
         fs::create_dir_all(&s2_dir).expect("Failed to create s2 dir");
         let mut f2 = File::create(s2_dir.join("new_evidence.phlx")).expect("Failed to create f2");
-        f2.write_all(&[0u8; 1000]).unwrap(); 
-        f2.sync_all().unwrap(); 
+        f2.write_all(&[0u8; 1000]).unwrap();
+        f2.sync_all().unwrap();
 
         // 3. Init Guardian
-        let config = mock_config(ByteCapacity(1500)); 
+        let config = mock_config(ByteCapacity(1500));
         let mut guardian = Guardian::new("test_vault_governance", &config, me.did.clone());
 
-        assert_eq!(guardian.foreign_storage_usage, ByteCapacity(2000), "Initial usage calculation failed");
+        assert_eq!(
+            guardian.foreign_storage_usage,
+            ByteCapacity(2000),
+            "Initial usage calculation failed"
+        );
 
         // 4. Trigger Pruning
-        guardian.prune_foreign_evidence(); 
+        guardian.prune_foreign_evidence();
 
         // 5. Verification
-        assert!(!s1_dir.join("old_evidence.phlx").exists(), "Old evidence should be evicted");
-        assert!(s2_dir.join("new_evidence.phlx").exists(), "New evidence should be kept");
-        assert!(guardian.foreign_storage_usage <= ByteCapacity(1500), "Usage should be under limit");
-        
+        assert!(
+            !s1_dir.join("old_evidence.phlx").exists(),
+            "Old evidence should be evicted"
+        );
+        assert!(
+            s2_dir.join("new_evidence.phlx").exists(),
+            "New evidence should be kept"
+        );
+        assert!(
+            guardian.foreign_storage_usage <= ByteCapacity(1500),
+            "Usage should be under limit"
+        );
+
         let _ = fs::remove_dir_all(&vault_root);
     }
 
@@ -652,16 +708,11 @@ mod tests {
 
         // 1. Create a Shard using constructor
         let frames = vec![vec![1]];
-        let shard = shards::create_video_shard(
-            frames, 
-            StorageSequence(1), 
-            30, 
-            "v1".into()
-        );
+        let shard = shards::create_video_shard(frames, StorageSequence(1), 30, "v1".into());
 
         // 2. Sign it with the WRONG identity (Attacker signs, claims to be Victim?)
         let mut envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id);
-        
+
         // 3. TAMPER: Modify the payload without updating the signature
         if let Evidence::Video(ref mut v) = envelope.evidence {
             v.fps = 120; // Malicious edit, it used to be 30
@@ -669,7 +720,7 @@ mod tests {
 
         // 4. Ingest & Assert Failure
         let result = guardian.ingest_envelope(envelope);
-        
+
         assert!(result.is_err(), "Guardian accepted a tampered envelope!");
         match result {
             Err(GuardianError::InvalidSignature(_)) => (), // Pass
@@ -682,26 +733,21 @@ mod tests {
         let (identity, _) = PhalanxIdentity::generate();
         let (stranger, _) = PhalanxIdentity::generate();
         let peer_id = NetworkId::random();
-        
+
         // 1. Setup Config with TINY limit (0 bytes)
         let mut config = PhalanxConfig::default();
         config.storage.max_foreign_storage_bytes = ByteCapacity(0); // Strict mode
-        
+
         let vault_path = "sim_vault/test_quota_reject";
         let _ = std::fs::remove_dir_all(vault_path);
-        
+
         let mut guardian = Guardian::new(vault_path, &config, identity.did.clone());
 
         // 2. Artificially inflate usage to simulate a "stuck" state
-        guardian.foreign_storage_usage = ByteCapacity(1000); 
+        guardian.foreign_storage_usage = ByteCapacity(1000);
 
         let frames = vec![vec![1]];
-        let shard = shards::create_video_shard(
-            frames, 
-            StorageSequence(1), 
-            30, 
-            "v1".into()
-        );
+        let shard = shards::create_video_shard(frames, StorageSequence(1), 30, "v1".into());
         let envelope = WitnessEnvelope::new(Evidence::Video(shard), &stranger, peer_id);
 
         // 3. Ingest Foreign Data
@@ -727,16 +773,12 @@ mod tests {
 
         let seq_num = StorageSequence(50);
         let frames = vec![vec![1]];
-        let shard = shards::create_video_shard(
-            frames,
-            seq_num,
-            30,
-            "v1".into()
-        );
+        let shard = shards::create_video_shard(frames, seq_num, 30, "v1".into());
         let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id);
 
         // 1. MANUALLY SEED HISTORY
-        guardian.processed_sequences
+        guardian
+            .processed_sequences
             .entry(identity.did.clone())
             .or_default()
             .insert(seq_num);
@@ -746,7 +788,10 @@ mod tests {
 
         // 3. Verify it was BLOCKED
         let active_session = guardian.get_active_volley_shards(&identity.did);
-        assert!(active_session.is_none(), "Replayed envelope leaked into active buffer!");
+        assert!(
+            active_session.is_none(),
+            "Replayed envelope leaked into active buffer!"
+        );
     }
 
     #[test]
@@ -756,7 +801,7 @@ mod tests {
         let config = PhalanxConfig::default();
         let vault_path = "sim_vault/test_init_scan";
         let _ = std::fs::remove_dir_all(vault_path);
-        
+
         // 1. Pre-seed the disk with data
         let stranger_dir = std::path::PathBuf::from(vault_path).join(stranger.did.to_safe_name());
         std::fs::create_dir_all(&stranger_dir).unwrap();
@@ -780,13 +825,19 @@ mod tests {
         // 1. Send multiple invalid signatures
         for _ in 0..6 {
             let shard = crate::primitives::shards::create_video_shard(
-                vec![vec![1]], StorageSequence(1), 30, "v1".into()
+                vec![vec![1]],
+                StorageSequence(1),
+                30,
+                "v1".into(),
             );
-            let mut envelope = WitnessEnvelope::new(Evidence::Video(shard), &vampire, NetworkId::random());
-            
+            let mut envelope =
+                WitnessEnvelope::new(Evidence::Video(shard), &vampire, NetworkId::random());
+
             // TAMPER
-            if let Evidence::Video(ref mut v) = envelope.evidence { v.fps = 99; }
-            
+            if let Evidence::Video(ref mut v) = envelope.evidence {
+                v.fps = 99;
+            }
+
             _ = guardian.ingest_envelope(envelope);
         }
 
@@ -799,8 +850,10 @@ mod tests {
 #[cfg(test)]
 mod guardian_leaf_tests {
     use super::*;
-    use crate::primitives::identity::{PhalanxIdentity, NetworkId};
-    use crate::primitives::shards::{self, ShardId, StorageSequence, Evidence, WitnessEnvelope, ChunkType};
+    use crate::primitives::identity::{NetworkId, PhalanxIdentity};
+    use crate::primitives::shards::{
+        self, ChunkType, Evidence, ShardId, StorageSequence, WitnessEnvelope,
+    };
 
     #[tokio::test] // Use tokio::test for Instant::now() compatibility
     async fn test_guardian_leaf_mode_ingestion() {
@@ -812,30 +865,21 @@ mod guardian_leaf_tests {
         let (identity, _) = PhalanxIdentity::generate();
         let config = PhalanxConfig::default();
         let vault_path = "sim_vault/leaf_unit_test";
-        
+
         let _ = std::fs::remove_dir_all(vault_path);
         let mut guardian = Guardian::new(vault_path, &config, identity.did.clone());
 
         // 1. Create a REAL forensic unit (Video Shard)
         let frames = vec![vec![1, 2, 3]];
-        let shard = shards::create_video_shard(
-            frames, 
-            StorageSequence(200), 
-            30, 
-            "volley_test".into()
-        );
+        let shard =
+            shards::create_video_shard(frames, StorageSequence(200), 30, "volley_test".into());
 
         // 2. WRAP in an Envelope
         // ShardAmalgam strategy expects to deserialize a WitnessEnvelope, not a Shard
-        let envelope = WitnessEnvelope::new(
-            Evidence::Video(shard), 
-            &identity, 
-            NetworkId::random()
-        );
+        let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, NetworkId::random());
 
         // 3. Serialize the FULL ENVELOPE
-        let envelope_bytes = postcard::to_stdvec(&envelope)
-            .expect("Failed to serialize envelope");
+        let envelope_bytes = postcard::to_stdvec(&envelope).expect("Failed to serialize envelope");
 
         // 4. Create chunks from the ENVELOPE bytes
         let local_chunk = shards::ShardChunk {
@@ -854,8 +898,8 @@ mod guardian_leaf_tests {
         // 6. Verification
         // If successful, the Crucible seals it and the micro_layer length returns to 0
         assert_eq!(
-            guardian.micro_layer.len(), 
-            0, 
+            guardian.micro_layer.len(),
+            0,
             "Micro-layer should be empty after successful sealing and promotion"
         );
 

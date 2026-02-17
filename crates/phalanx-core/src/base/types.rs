@@ -1,7 +1,7 @@
-use std::ops::{AddAssign, SubAssign};
-use serde::{Serialize, Deserialize};
-use std::fmt;
 use crate::base::config::PhalanxPhysics;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::ops::{AddAssign, SubAssign};
 use std::time::Duration;
 
 /// A type-safe wrapper for values that MUST be between 0.0 and 1.0.
@@ -201,7 +201,7 @@ impl VitalityRate {
     /// Derives a heartbeat interval based on current system power and load.
     pub fn calculate(physics: &PhalanxPhysics, state: PowerState, load: UnitInterval) -> Self {
         let base_ms = (physics.tau_rtt / 2) as f32;
-        
+
         // 2. Load Scaling: Scaled by 1.0 + load factor
         let mut dynamic_ms = base_ms * (1.0 + load.as_f32());
 
@@ -227,7 +227,7 @@ pub enum PowerState {
     #[default]
     Normal,
     /// Focus strictly on self-preservation: Only accept local data
-    Leaf, 
+    Leaf,
 }
 
 /// Central authority for deciding which data chunks are accepted.
@@ -245,15 +245,15 @@ impl TrafficGovernor {
 
     /// Primary security gate: Determines if a chunk should be processed.
     pub fn should_accept(
-        &self, 
-        chunk_owner: &crate::primitives::identity::Did, 
-        local_did: &crate::primitives::identity::Did
+        &self,
+        chunk_owner: &crate::primitives::identity::Did,
+        local_did: &crate::primitives::identity::Did,
     ) -> bool {
         match self.power_state {
             PowerState::Normal => true,
             // The Logic is still centralized here, satisfying the audit.
             PowerState::Leaf => chunk_owner == local_did,
-        }        
+        }
     }
 
     pub fn set_state(&mut self, state: PowerState) {

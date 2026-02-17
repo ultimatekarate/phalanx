@@ -1,9 +1,7 @@
+use image::{imageops::FilterType, GrayImage};
 /// DEFINITELY NOT WORKING YET
 /// LOTS OF PSEUDOCODE HERE.
-
-
-use rustfft::{FftPlanner, num_complex::Complex};
-use image::{GrayImage, imageops::FilterType};
+use rustfft::{num_complex::Complex, FftPlanner};
 
 /// Returns a score from 0.0 (Natural) to 1.0 (Screen/Moiré)
 
@@ -18,13 +16,17 @@ pub fn detect_moire(img: &DynamicImage) -> f32 {
     let fft = planner.plan_fft_forward(512);
 
     // Convert pixels to Complex<f32>
-    let mut buffer: Vec<Complex<f32>> = gray.pixels()
-        .map(|p| Complex { re: p[0] as f32, im: 0.0 })
+    let mut buffer: Vec<Complex<f32>> = gray
+        .pixels()
+        .map(|p| Complex {
+            re: p[0] as f32,
+            im: 0.0,
+        })
         .collect();
 
     // 3. Execute FFT (Rows then Columns for 2D)
     // Process Rows
-    fft.process(&mut buffer); 
+    fft.process(&mut buffer);
 
     // Transpose and Process Columns
     // transpose(&mut buffer, 512);
@@ -34,8 +36,6 @@ pub fn detect_moire(img: &DynamicImage) -> f32 {
     // Natural images have energy concentrated at the center (Low Freq).
     // Screens have energy "spikes" in the corners/edges (High Freq Grid).
     let score = calculate_high_freq_ratio(&buffer);
-    
+
     score
 }
-
-

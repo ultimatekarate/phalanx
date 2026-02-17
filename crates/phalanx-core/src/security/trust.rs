@@ -1,15 +1,14 @@
-use crate::primitives::identity::Did;
 use crate::base::config::PhalanxConfig;
+use crate::primitives::identity::Did;
+use crate::primitives::time::TrustedClock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{self, File};
 use std::fmt;
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use tracing::{info, warn};
 use thiserror::Error;
-use crate::primitives::time::TrustedClock;
-
+use tracing::{info, warn};
 
 /// A user-defined local identifier for a DID (Pet name).
 ///
@@ -25,13 +24,19 @@ impl PetName {
     pub fn new(s: impl Into<String>) -> Result<Self, TrustError> {
         let s = s.into();
         if s.trim().is_empty() {
-            return Err(TrustError::InvalidPetName("Pet name cannot be empty".into()));
+            return Err(TrustError::InvalidPetName(
+                "Pet name cannot be empty".into(),
+            ));
         }
         if s.len() > 64 {
-            return Err(TrustError::InvalidPetName("Pet name too long (max 64)".into()));
+            return Err(TrustError::InvalidPetName(
+                "Pet name too long (max 64)".into(),
+            ));
         }
         if s.chars().any(|c| c.is_control()) {
-            return Err(TrustError::InvalidPetName("Pet name contains control characters".into()));
+            return Err(TrustError::InvalidPetName(
+                "Pet name contains control characters".into(),
+            ));
         }
         Ok(Self(s))
     }
@@ -98,23 +103,22 @@ pub struct TrustRegistry {
     /// Lookup index: Alias -> DID (Ephemeral, rebuilt on load)
     #[serde(skip)]
     pet_name_index: HashMap<PetName, Did>,
-    
+
     storage_path: PathBuf,
 }
 
 impl TrustRegistry {
     /// Initialize the registry, loading from disk if available.
     pub fn new(config: &PhalanxConfig) -> Self {
-
         let vault = PathBuf::from(&config.storage.vault_path);
-        
+
         // Ensure the directory exists before trying to access the file
         if !vault.exists() {
             let _ = fs::create_dir_all(&vault);
         }
 
         let storage_path = vault.join("trust_registry.bin");
-        
+
         let mut registry = Self {
             contacts: HashMap::new(),
             pet_name_index: HashMap::new(),
@@ -134,11 +138,11 @@ impl TrustRegistry {
     /// If the alias is already used by *another* DID, this returns an error.
     /// If the alias is used by the *same* DID, it updates the record.
     pub fn set_peer(
-        &mut self, 
-        did: Did, 
-        pet_name: PetName, 
+        &mut self,
+        did: Did,
+        pet_name: PetName,
         level: TrustLevel,
-        clock: &TrustedClock
+        clock: &TrustedClock,
     ) -> Result<(), TrustError> {
         // 1. Check Alias Uniqueness
         if let Some(existing_did) = self.pet_name_index.get(&pet_name) {
@@ -170,7 +174,7 @@ impl TrustRegistry {
         self.pet_name_index.insert(pet_name.clone(), did.clone());
 
         info!(target: "trust", %did, %pet_name, ?level, "Peer record updated");
-        
+
         self.save()?;
         Ok(())
     }
@@ -180,9 +184,9 @@ impl TrustRegistry {
     pub fn touch(&mut self, did: &Did, clock: &TrustedClock) {
         if let Some(record) = self.contacts.get_mut(did) {
             record.last_interaction = clock.now();
-            // We don't error check save() here to avoid spamming logs 
+            // We don't error check save() here to avoid spamming logs
             // on high-frequency touches.
-            let _ = self.save(); 
+            let _ = self.save();
         }
     }
 
@@ -200,7 +204,10 @@ impl TrustRegistry {
 
     /// Gets the trust level. Returns `Ignored` (Neutral) for unknown DIDs.
     pub fn check_trust(&self, did: &Did) -> TrustLevel {
-        self.contacts.get(did).map(|r| r.level).unwrap_or(TrustLevel::Ignored)
+        self.contacts
+            .get(did)
+            .map(|r| r.level)
+            .unwrap_or(TrustLevel::Ignored)
     }
 
     /// Removes a peer from the registry entirely.
@@ -225,7 +232,7 @@ impl TrustRegistry {
         file.write_all(&data)?;
         file.sync_all()?;
         fs::rename(temp_path, &self.storage_path)?;
-        
+
         Ok(())
     }
 
@@ -242,11 +249,12 @@ impl TrustRegistry {
             .map_err(|e| TrustError::SerializationError(e.to_string()))?;
 
         self.contacts = loaded;
-        
+
         // Rebuild the Alias Index
         self.pet_name_index.clear();
         for (did, record) in &self.contacts {
-            self.pet_name_index.insert(record.pet_name.clone(), did.clone());
+            self.pet_name_index
+                .insert(record.pet_name.clone(), did.clone());
         }
 
         Ok(())
@@ -263,16 +271,19 @@ mod tests {
     fn test_aliasing() {
         let config = PhalanxConfig::test_defaults();
         let mut registry = TrustRegistry::new(&config);
-        
+
         let did1 = Did::from("did:phx:user_one");
         let did2 = Did::from("did:phx:user_two");
 
         let pet_name: PetName = PetName::new("Alice").expect("Static string should be valid");
-        let big_pet_name: PetName = PetName::new("BigAlice").expect("Static string should be valid");
+        let big_pet_name: PetName =
+            PetName::new("BigAlice").expect("Static string should be valid");
         let clock = TrustedClock::new();
         // Set Alice
-        registry.set_peer(did1.clone(), pet_name.clone(), TrustLevel::Ally, &clock).unwrap();
-        
+        registry
+            .set_peer(did1.clone(), pet_name.clone(), TrustLevel::Ally, &clock)
+            .unwrap();
+
         // Resolve Alice
         assert_eq!(registry.resolve_pet_name(&pet_name.clone()), Some(&did1));
         assert_eq!(registry.get_alias(&did1), Some("Alice"));
@@ -282,8 +293,13 @@ mod tests {
         assert!(matches!(err, Err(TrustError::PetnameCollision(_))));
 
         // Rename Alice -> BigAlice
-        registry.set_peer(did1.clone(), big_pet_name.clone(), TrustLevel::Ally, &clock).unwrap();
-        assert_eq!(registry.resolve_pet_name(&big_pet_name.clone()), Some(&did1));
+        registry
+            .set_peer(did1.clone(), big_pet_name.clone(), TrustLevel::Ally, &clock)
+            .unwrap();
+        assert_eq!(
+            registry.resolve_pet_name(&big_pet_name.clone()),
+            Some(&did1)
+        );
         assert_eq!(registry.resolve_pet_name(&pet_name.clone()), None); // Old alias freed
     }
 }
