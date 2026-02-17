@@ -64,7 +64,9 @@ impl TrustedClock {
 
     /// Updates the offset manually (for testing or NTP sync)
     pub fn set_offset(&self, new_offset: i64) -> TimeResult<()> {
-        let mut w = self.offset_ms.write()
+        let mut w = self
+            .offset_ms
+            .write()
             .map_err(|_| TimeError::LockPoisoned("offset_ms RwLock is poisoned".to_string()))?;
         *w = new_offset;
         Ok(())

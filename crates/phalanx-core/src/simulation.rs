@@ -472,7 +472,7 @@ impl SimNode {
 
                 if self.staged_bytes > OFFLOAD_THRESHOLD && !self.known_strongholds.is_empty() {
                     let target_idx = rand::rng().random_range(0..self.known_strongholds.len());
-                    
+
                     if let Some(target) = self.known_strongholds.get(target_idx).cloned() {
                         let _ = self.telemetry_tx.try_send(SimEvent::OffloadComplete {
                             origin: self.network_id,
