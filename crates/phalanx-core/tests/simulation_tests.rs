@@ -41,7 +41,7 @@ async fn test_salvage_on_node_death() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let victim_device_network_id = harness.resolve_did(&victim_device_did).await.unwrap();
-    let (victim_identity, _) = PhalanxIdentity::generate();
+    let (victim_identity, _) = PhalanxIdentity::generate().unwrap();
     let victim_did = victim_identity.did.clone();
 
     let frames = vec![vec![1]];
@@ -116,7 +116,7 @@ async fn test_salvage_on_node_death() {
 
 #[tokio::test]
 async fn test_out_of_sequence_salvage_on_node_death() {
-    let (identity, _) = PhalanxIdentity::generate();
+    let (identity, _) = PhalanxIdentity::generate().unwrap();
     let peer_id = NetworkId::random();
     let config = PhalanxConfig::default();
     let mut storage = Guardian::new("sim_vault/salvage_test", &config, identity.did.clone());
@@ -172,7 +172,7 @@ async fn test_stronghold_crash_recovery() {
     let vault_path = "sim_vault/crash_test";
     let _ = std::fs::remove_dir_all(vault_path);
 
-    let (identity, _) = PhalanxIdentity::generate();
+    let (identity, _) = PhalanxIdentity::generate().unwrap();
     let peer_id = NetworkId::random();
     let seq = StorageSequence(101);
 
@@ -209,8 +209,8 @@ async fn test_stronghold_crash_recovery() {
 #[tokio::test]
 async fn test_leaf_mode_isolation() {
     // Unaffected by Harness changes.
-    let (me, _) = PhalanxIdentity::generate();
-    let (stranger, _) = PhalanxIdentity::generate();
+    let (me, _) = PhalanxIdentity::generate().unwrap();
+    let (stranger, _) = PhalanxIdentity::generate().unwrap();
     let config = PhalanxConfig::default();
     let mut storage = Guardian::new("sim_vault/leaf_test", &config, me.did.clone());
 
@@ -245,7 +245,7 @@ async fn test_vampire_attack_defense() {
     let _victim_did = harness.spawn_node("Victim", NodeRole::Guardian).await;
 
     // 2. Setup Attacker (Use ONE identity for both Transport and Application layers)
-    let (attacker_identity, _) = PhalanxIdentity::generate();
+    let (attacker_identity, _) = PhalanxIdentity::generate().unwrap();
     let attacker_did = attacker_identity.did.clone(); // DID B
     let attacker_net_id = NetworkId::random();
 

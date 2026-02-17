@@ -52,7 +52,7 @@ impl StrongholdEngine {
     /// and performs the cryptographic handshake to join the Swarm.
     pub async fn new(config_path: &str) -> Result<Self, Box<dyn Error>> {
         let config = PhalanxConfig::load(config_path)?;
-        let (identity, _) = PhalanxIdentity::generate();
+        let (identity, _) = PhalanxIdentity::generate().unwrap();
 
         // Physics Profile: WAN (High Latency Tolerance)
         // Strongholds are usually servers, but they deal with mobile peers.
@@ -72,7 +72,7 @@ impl StrongholdEngine {
         }
 
         // 3. Swarm Construction
-        let mut swarm = setup_phalanx_swarm(identity.to_libp2p_keypair(), &config, &physics, psk)?;
+        let mut swarm = setup_phalanx_swarm(identity.to_libp2p_keypair().unwrap(), &config, &physics, psk)?;
 
         // 4. Service Advertisement (DHT)
         let storage_key = get_storage_key();

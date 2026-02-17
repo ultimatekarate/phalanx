@@ -58,7 +58,7 @@ impl PhalanxEngine {
         physics: PhalanxPhysics,
         psk: Option<PreSharedKey>,
     ) -> Result<Self, Box<dyn Error>> {
-        let network_keypair = identity.to_libp2p_keypair();
+        let network_keypair = identity.to_libp2p_keypair().unwrap();
 
         let local_peer_id = network_keypair.public().to_peer_id();
         let local_did = Did::from(local_peer_id.to_string());
