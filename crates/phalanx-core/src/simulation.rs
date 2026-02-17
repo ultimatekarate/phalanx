@@ -427,7 +427,7 @@ impl SimNode {
 
         // 3. Inspect Result
         let current_rep = self.storage.peer_registry.get(&chunk.owner_did);
-        let is_blacklisted = current_rep.map_or(false, |r| r.is_blacklisted);
+        let is_blacklisted = current_rep.is_some_and(|r| r.is_blacklisted);
         let post_sigs = current_rep.map_or(0, |r| r.invalid_sigs);
 
         // 4. Report Defense
