@@ -260,3 +260,10 @@ impl TrafficGovernor {
         self.power_state = state;
     }
 }
+
+/// Take that, Clippy!
+impl Default for TrafficGovernor {
+    fn default() -> Self {
+        Self::new()
+    }
+}

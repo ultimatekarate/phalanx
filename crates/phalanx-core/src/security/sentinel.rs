@@ -66,6 +66,14 @@ impl HealthTracker {
         last_time.elapsed() > grace_period
     }
 }
+
+/// Standard default method.
+impl Default for HealthTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ControlMessage {
     pub sender: NetworkId,

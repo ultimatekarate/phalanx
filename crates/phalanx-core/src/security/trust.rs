@@ -53,22 +53,17 @@ impl fmt::Display for PetName {
 }
 
 /// Defines the explicit relationship between the local user and a remote peer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrustLevel {
     /// Explicitly Banned. All traffic from this peer is dropped immediately.
     Blocked,
     /// Default state. We see them, but treat data with maximum scrutiny.
+    #[default]
     Ignored,
     /// Known contact. We accept direct connections and storage requests.
     Verified,
     /// High-trust team member. Prioritized bandwidth and auto-accept grants.
     Ally,
-}
-
-impl Default for TrustLevel {
-    fn default() -> Self {
-        Self::Ignored
-    }
 }
 
 #[derive(Debug, Error)]

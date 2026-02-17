@@ -28,7 +28,7 @@ impl Mold for ShardAmalgam {
     type Accumulator = ShardBuffer;
 
     fn get_key(item: &Self::Input) -> Self::Key {
-        item.shard_id.clone()
+        item.shard_id
     }
 
     fn init_accumulator(item: &Self::Input) -> Self::Accumulator {

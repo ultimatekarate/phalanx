@@ -231,9 +231,9 @@ fn build_behaviour(
         gossipsub::ConfigBuilder::default()
             .heartbeat_interval(gossip_heartbeat)
             .validation_mode(gossipsub::ValidationMode::Strict)
-            .max_transmit_size(config.network.max_chunk_size_bytes as usize * 2)
+            .max_transmit_size(config.network.max_chunk_size_bytes * 2)
             .build()
-            .map_err(|msg| std::io::Error::new(std::io::ErrorKind::Other, msg))?, // FIX: Explicit std::io
+            .map_err(std::io::Error::other)?, 
     )?;
 
     // B. Kademlia

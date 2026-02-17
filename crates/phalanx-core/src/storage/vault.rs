@@ -569,7 +569,7 @@ impl Guardian {
         let file_name = format!("{}_{}.wal", safe_did, envelope.evidence.sequence_id().0);
         let wal_path = self.wal_directory.join(file_name);
         let bytes = postcard::to_stdvec(envelope)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
 
         let mut file = File::create(wal_path)?;
         file.write_all(&bytes)?;
