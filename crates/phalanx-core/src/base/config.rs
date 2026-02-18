@@ -151,6 +151,46 @@ fn default_max_foreign() -> ByteCapacity {
     ByteCapacity(500_000_000)
 }
 
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            protocol_version: default_protocol_version(),
+            max_chunk_size_bytes: 8192,
+            video_topic: "phalanx/video".into(),
+            audio_topic: "phalanx/audio".into(),
+            control_topic: "phalanx/control".into(),
+            cleanup_interval_secs: 60,
+            bootstrap_peers: vec![],
+            guardian_service_key: default_service_key(),
+        }
+    }
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            vault_path: "./sim_vault".to_string(),
+            max_video_buffer: 100,
+            max_audio_buffer: 100,
+            max_peers: 10,
+            stale_session_threshold: 3600,
+            shards_needed_to_archive: 10,
+            max_storage_bytes: default_max_storage(),
+            max_foreign_storage_bytes: default_max_foreign(),
+        }
+    }
+}
+
+impl Default for HardwareConfig {
+    fn default() -> Self {
+        Self {
+            camera_fps: 10,
+            audio_sample_rate: 16000,
+            audio_channels: 1,
+        }
+    }
+}
+
 impl PhalanxConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let content = fs::read_to_string(path)?;
@@ -190,36 +230,11 @@ impl PhalanxConfig {
 
 impl Default for PhalanxConfig {
     /// Provides the standard clinical default configuration.
-    ///
-    /// Behavior: This implementation mirrors the structure required for
-    /// local development, providing safe defaults for topics and buffer sizes.
     fn default() -> Self {
         Self {
-            network: NetworkConfig {
-                protocol_version: default_protocol_version(),
-                max_chunk_size_bytes: 8192,
-                video_topic: "phalanx/video".into(),
-                audio_topic: "phalanx/audio".into(),
-                control_topic: "phalanx/control".into(),
-                cleanup_interval_secs: 60,
-                bootstrap_peers: vec![],
-                guardian_service_key: "phalanx/service/storage/v1".to_string(),
-            },
-            storage: StorageConfig {
-                vault_path: "./sim_vault".to_string(),
-                max_video_buffer: 100,
-                max_audio_buffer: 100,
-                max_peers: 10,
-                stale_session_threshold: 3600,
-                shards_needed_to_archive: 10,
-                max_storage_bytes: default_max_storage(),
-                max_foreign_storage_bytes: default_max_foreign(),
-            },
-            hardware: HardwareConfig {
-                camera_fps: 10,
-                audio_sample_rate: 16000,
-                audio_channels: 1,
-            },
+            network: NetworkConfig::default(),
+            storage: StorageConfig::default(),
+            hardware: HardwareConfig::default(),
         }
     }
 }

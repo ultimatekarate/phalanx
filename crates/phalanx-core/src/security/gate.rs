@@ -152,8 +152,8 @@ impl ChronosGate for TrustedClock {
             Err(e) => {
                 // Critical system failure: Time is broken.
                 error!(
-                    event = "clock_failure", 
-                    error = %e, 
+                    event = "clock_failure",
+                    error = %e,
                     "Chronos Gate: Time source unavailable"
                 );
                 None

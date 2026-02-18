@@ -177,6 +177,21 @@ impl fmt::Debug for PhalanxIdentity {
 }
 
 impl PhalanxIdentity {
+    /// Creates a fresh, ephemeral identity.
+    /// 
+    /// # Sentinel Note
+    /// This calls `generate()` internally and discards the BIP39 mnemonic.
+    /// Use this ONLY for ephemeral nodes (simulations, tests) where 
+    /// key recovery is not required.
+    ///
+    /// # Panics
+    /// Panics if system entropy is unavailable (Fatal OS error).
+    pub fn new() -> Self {
+        let (identity, _mnemonic) = Self::generate()
+            .expect("Critical: System entropy source unavailable for ephemeral identity");
+        identity
+    }
+
     /// Generates a new identity and its corresponding BIP39 mnemonic.
     ///
     /// # Functional Specification

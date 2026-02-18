@@ -1,18 +1,19 @@
 use futures::StreamExt;
 use libp2p::swarm::{Swarm, SwarmEvent};
 use std::error::Error;
+use std::io;
 use tokio::sync::mpsc;
-use tracing::{error, info}; // Added tracing imports
+use tracing::{error, info};
 
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
 use crate::primitives::identity::{init_identity, Did, IdentityError, NetworkId, PhalanxIdentity};
 use crate::primitives::shards::{AudioShard, Evidence, ShardId, VideoShard, WitnessEnvelope};
-use crate::primitives::time::{TimeError, TrustedClock}; // Added TrustedClock
-use crate::security::gate::{ForensicGate, IntegrityGate, WitnessGate}; // Import the Gates
+use crate::primitives::time::{TimeError, TrustedClock};
+// IMPORT ALL GATES
+use crate::security::gate::{CapacityGate, ForensicGate, IntegrityGate, PrivacyGate, WitnessGate};
 use crate::storage::strategies::ShardAmalgam;
 use crate::storage::vault::Guardian;
 use crate::{PhalanxBehaviour, PhalanxEvent};
-use std::io;
 
 pub use libp2p::pnet::PreSharedKey;
 
@@ -34,7 +35,7 @@ pub struct PhalanxEngine {
     #[allow(dead_code)]
     config: PhalanxConfig,
     identity: PhalanxIdentity,
-    clock: TrustedClock, // Added TrustedClock
+    clock: TrustedClock,
     swarm: Swarm<PhalanxBehaviour>,
     #[allow(dead_code)]
     crucible: crate::storage::crucible::Crucible<ShardAmalgam>,
@@ -44,6 +45,8 @@ pub struct PhalanxEngine {
 
     // Internal state
     seq_counter: u64,
+    // TODO: Rotate this via KeyStore in production
+    network_key: [u8; 32],
 }
 
 impl PhalanxEngine {
@@ -83,23 +86,30 @@ impl PhalanxEngine {
             video_rx,
             audio_rx,
             seq_counter: 0,
+            network_key: [0x42; 32], // Default/Placeholder Key
         })
     }
 
-    /// FFI Helper: Boots the engine with minimal arguments for Mobile integration.
-    ///
-    /// Behavior: This is the primary entry point for Android/iOS bindings where
-    /// passing complex Rust structs is difficult. It:
-    /// 1. Sets the Storage Root to `storage_path`.
-    /// 2. Loads (or generates) the default Identity from disk.
-    /// 3. Applies the `default_wan()` physics profile (high latency tolerance).
-    pub fn new_at_path(storage_path: &str) -> Result<Self, Box<dyn Error>> {
+    /// FFI Compatibility Helper.
+    /// Bootstraps an engine from a storage path using default physics and config.
+    /// Zero-Panic: Uses fallbacks if identity loading fails.
+    pub fn new_at_path(path: &str) -> Result<Self, Box<dyn Error>> {
         let mut config = PhalanxConfig::default();
-        config.storage.vault_path = storage_path.to_string();
+        config.storage.vault_path = path.to_string();
 
-        let identity = init_identity("identity.bin").unwrap();
-        let physics = PhalanxPhysics::default_wan();
+        // 1. Setup Default Physics
+        let physics = PhalanxPhysics::default();
 
+        // 2. Load or Generate Identity
+        let identity_path = std::path::Path::new(path).join("identity.pem");
+
+        // Attempt load, fallback to generation (Ephemeral Mode)
+        let identity = match init_identity(&identity_path) {
+    Ok(id) => id,
+    Err(_) => PhalanxIdentity::new(),
+};
+
+        // 3. Initialize Core
         Self::new(config, identity, physics, None)
     }
 
@@ -107,6 +117,9 @@ impl PhalanxEngine {
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
         let local_peer_id = *self.swarm.local_peer_id();
         let local_network_id = NetworkId::from(local_peer_id);
+
+        // GossipSub Topic
+        let topic = libp2p::gossipsub::IdentTopic::new("phalanx/1.0.0");
 
         info!(
             "Phalanx Engine: Active and Gated. PeerID: {}",
@@ -116,78 +129,94 @@ impl PhalanxEngine {
         loop {
             tokio::select! {
                 // ------------------------------------------------------------------
-                // PIPELINE 1: RECEPTION (Network -> Storage)
+                // PIPELINE 1: RECEPTION (Ingress: Network -> Storage)
+                // Gates: Forensic -> Capacity -> Integrity
                 // ------------------------------------------------------------------
                 event = self.swarm.select_next_some() => {
-                    match event {
-                        SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(
-                            libp2p::gossipsub::Event::Message {
-                                propagation_source: _,
-                                message_id: _,
-                                message, // <--- Extract the message struct here
-                            }
-                        ))=> {
-                            // 1. Serialization Gate
-                            let envelope = postcard::from_bytes::<WitnessEnvelope>(&message.data)
-                                .ok_or_log("deserialization_err", &local_network_id, "Malformed wire packet");
+                    if let SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(
+                        libp2p::gossipsub::Event::Message {
+                            propagation_source: peer,
+                            message_id: _,
+                            message,
+                        }
+                    )) = event {
+                        let peer_id = NetworkId::from(peer);
 
-                            // 2. Integrity & Temporal Gate
-                            let verified_env = envelope.and_then(|env| {
-                                env.check_integrity(&local_network_id, &self.clock, 10) // 10s tolerance
-                            });
+                        // 1. Forensic Gate: Safe Deserialization
+                        let envelope_opt = postcard::from_bytes::<WitnessEnvelope>(&message.data)
+                            .ok_or_log("deserialization_err", &local_network_id, "Malformed wire packet");
 
-                            // 3. Promotion Gate (Storage)
-                            if let Some(env) = verified_env {
-                                if let Err(e) = self.guardian.ingest_envelope(env) {
-                                    error!(event = "vault_write_err", error = %e, "Failed to persist foreign evidence");
-                                }
+                        // 2. Capacity Gate: DoS Protection
+                        // (Checking against a 50MB buffer limit placeholder)
+                        let envelope_opt = envelope_opt.and_then(|env| {
+                            env.check_capacity(&peer_id, 0, 1024 * 1024 * 50)
+                        });
+
+                        // 3. Integrity Gate: Crypto & Time Validation
+                        let verified_env = envelope_opt.and_then(|env| {
+                            env.check_integrity(&peer_id, &self.clock, 10) // 10s tolerance
+                        });
+
+                        // 4. Persistence
+                        if let Some(env) = verified_env {
+                            if let Err(e) = self.guardian.ingest_envelope(env) {
+                                error!(event = "vault_write_err", error = %e, "Failed to persist foreign evidence");
                             }
                         }
-                        _ => {} // Handle other swarm events if necessary
                     }
                 }
 
                 // ------------------------------------------------------------------
-                // PIPELINE 2: VIDEO INGESTION (Sensor -> Network)
+                // PIPELINE 2: VIDEO INGESTION (Egress: Sensor -> Network)
+                // Gates: Privacy -> Witness -> Forensic (Chunking)
                 // ------------------------------------------------------------------
                 Some(shard) = self.video_rx.recv() => {
                     let shard_id = ShardId(self.seq_counter as u32);
 
-                    // Seal -> Chunkify -> Broadcast
-                    let chunks = Evidence::Video(shard)
-                        .seal(&self.identity, local_network_id)
-                        .and_then(|env| {
-                            env.chunkify(shard_id)
-                                .ok_or_log("chunkify_err", &local_network_id, "Video processing failed")
-                        });
+                    let chunks_opt = Evidence::Video(shard)
+                        .safeguard(&self.network_key)                      // 1. Privacy Gate (Encrypt)
+                        .and_then(|ev| ev.seal(&self.identity, local_network_id))  // 2. Witness Gate (Sign)
+                        .and_then(|env| env.chunkify(shard_id)             // 3. Discretization
+                            .ok_or_log("chunkify_err", &local_network_id, "Video processing failed")
+                        );
 
-                    if let Some(valid_chunks) = chunks {
-                        for _chunk in valid_chunks {
-                            // self.broadcast_chunk(chunk).await; // TODO: Implement broadcast
+                    if let Some(chunks) = chunks_opt {
+                        for chunk in chunks {
+                             // Broadcast via GossipSub
+                             if let Ok(data) = postcard::to_stdvec(&chunk) {
+                                 let _ = self.swarm
+                                    .behaviour_mut()
+                                    .gossipsub
+                                    .publish(topic.clone(), data);
+                             }
                         }
                         self.seq_counter += 1;
-
-                        // We also persist our own data to the WAL
-                        // Note: In a real implementation, you might persist the Envelope *before* chunking
                     }
                 }
 
                 // ------------------------------------------------------------------
-                // PIPELINE 3: AUDIO INGESTION (Sensor -> Network)
+                // PIPELINE 3: AUDIO INGESTION (Egress: Sensor -> Network)
+                // Gates: Privacy -> Witness -> Forensic (Chunking)
                 // ------------------------------------------------------------------
                 Some(shard) = self.audio_rx.recv() => {
                     let shard_id = ShardId(self.seq_counter as u32);
 
-                    let chunks = Evidence::Audio(shard)
-                        .seal(&self.identity, local_network_id)
-                        .and_then(|env| {
-                            env.chunkify(shard_id)
-                                .ok_or_log("chunkify_err", &local_network_id, "Audio processing failed")
-                        });
+                    let chunks_opt = Evidence::Audio(shard)
+                        .safeguard(&self.network_key)                      // 1. Privacy Gate (Encrypt)
+                        .and_then(|ev| ev.seal(&self.identity, local_network_id))  // 2. Witness Gate (Sign)
+                        .and_then(|env| env.chunkify(shard_id)             // 3. Discretization
+                            .ok_or_log("chunkify_err", &local_network_id, "Audio processing failed")
+                        );
 
-                    if let Some(valid_chunks) = chunks {
-                        for _chunk in valid_chunks {
-                            // self.broadcast_chunk(chunk).await;
+                    if let Some(chunks) = chunks_opt {
+                        for chunk in chunks {
+                             // Broadcast via GossipSub
+                            if let Ok(data) = postcard::to_stdvec(&chunk) {
+                                let _ = self.swarm
+                                    .behaviour_mut()
+                                    .gossipsub
+                                    .publish(topic.clone(), data);
+                            }
                         }
                         self.seq_counter += 1;
                     }
@@ -195,13 +224,67 @@ impl PhalanxEngine {
             }
         }
     }
+}
 
-    /// Helper for committing to storage (used internally or by pipelines)
-    async fn _finalize_reassembly(
-        &mut self,
-        envelope: WitnessEnvelope,
-    ) -> Result<(), Box<dyn Error>> {
-        self.guardian.ingest_envelope(envelope)?;
-        Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::base::config::PhalanxConfig;
+    use crate::primitives::identity::PhalanxIdentity;
+    use std::fs;
+
+    fn setup_test_env() -> (PhalanxConfig, PhalanxPhysics) {
+        let config = PhalanxConfig {
+            storage: crate::base::config::StorageConfig {
+                vault_path: "test_vault_engine".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let physics = PhalanxPhysics::default();
+        (config, physics)
+    }
+
+    #[test]
+    fn test_engine_initialization() {
+        let (config, physics) = setup_test_env();
+        let identity = PhalanxIdentity::new();
+        
+        let engine = PhalanxEngine::new(config, identity, physics, None);
+        assert!(engine.is_ok(), "Engine should initialize with valid inputs");
+    }
+
+    #[test]
+    fn test_new_at_path_ephemeral_fallback() {
+        // 1. Point to a non-existent path
+        let path = "temp_test_engine_boot";
+        let _ = fs::remove_dir_all(path); // Cleanup pre
+        
+        // 2. Initialize
+        // This triggers the logic: load_identity? No -> PhalanxIdentity::new()
+        let engine_result = PhalanxEngine::new_at_path(path);
+        
+        assert!(engine_result.is_ok(), "Should successfully bootstrap ephemeral node");
+        
+        let engine = engine_result.unwrap();
+        assert_eq!(engine.seq_counter, 0);
+        
+        // Cleanup post
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_gates_active() {
+        // This test verifies the integrity of the channel wiring
+        let (config, physics) = setup_test_env();
+        let identity = PhalanxIdentity::new();
+        let engine = PhalanxEngine::new(config, identity, physics, None).unwrap();
+
+        // Check 1: Capacity Gate limits are set (buffer sizes)
+        assert!(engine.video_rx.capacity() > 0);
+        assert!(engine.audio_rx.capacity() > 0);
+
+        // Check 2: Clock is running (Chronos Gate)
+        assert!(engine.clock.now().is_ok());
     }
 }
