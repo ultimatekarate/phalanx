@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
+
 #[derive(Debug, thiserror::Error)]
 pub enum LocatorError {
     #[error("Locator input is malformed or incorrectly delimited")]
@@ -71,27 +72,24 @@ impl FromStr for PhalanxLocator {
         // 1. Check Protocol Scheme
         let remainder = s
             .strip_prefix("phx://")
-            .ok_or_else(||LocatorError::InvalidScheme(s.to_string()))?;
+            .ok_or_else(|| LocatorError::InvalidScheme(s.to_string()))?;
 
         // 2. Split ID and Rest (Key + Author)
         let parts: Vec<&str> = remainder.split('#').collect();
-        if parts.len() != 2 {
-            return Err(LocatorError::MissingKey);
-        }
-        let id_str = parts[0];
-        let rest = parts[1];
+        
+        // REFACTOR: Use .get() to avoid clippy::indexing_slicing
+        let id_str = parts.get(0).ok_or(LocatorError::MalformedInput)?;
+        let rest = parts.get(1).ok_or(LocatorError::MissingKey)?;
 
         // 3. Split Key and Author
         let secret_parts: Vec<&str> = rest.split('@').collect();
-        if secret_parts.len() != 2 {
-            return Err(LocatorError::MissingAuthor);
-        }
-        let secret_str = secret_parts.get(0).ok_or(LocatorError::MalformedInput)?; // Ensure this error variant exists
-
+        
+        let secret_str = secret_parts.get(0).ok_or(LocatorError::MalformedInput)?;
         let author_str = secret_parts.get(1).ok_or(LocatorError::MissingAuthor)?;
 
-        // 4. Construct
+        // 4. Construct with Forensic Validation
         Ok(PhalanxLocator {
+            // map_err ensures we don't leak internal parsing errors, providing a clean forensic boundary
             id: VolleyId::from_str(id_str).map_err(|_| LocatorError::ParseError)?,
             secret: secret_str.to_string(),
             author: Did(author_str.to_string()),
