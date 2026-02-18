@@ -287,7 +287,7 @@ impl Guardian {
             self.foreign_storage_usage.0 as usize
         };
 
-        let peer_id = envelope.witness_peer_id.clone();
+        let peer_id = envelope.witness_peer_id;
 
         // If the gate returns None, we drop and return Error
         let envelope = envelope

@@ -238,9 +238,8 @@ impl StrongholdEngine {
         // BRANCH A: CONTROL PLANE (Heartbeats)
         // ------------------------------------------------------------------
         if topic == self.config.network.control_topic {
-            postcard::from_bytes::<ControlMessage>(&message.data)
-                .ok_or_log("ctrl_parse_fail", &local_peer, "Malformed heartbeat")
-                .map(|msg| self.sentinel.health_tracker.register_activity(msg));
+            if let Some(msg) = postcard::from_bytes::<ControlMessage>(&message.data)
+                .ok_or_log("ctrl_parse_fail", &local_peer, "Malformed heartbeat") { self.sentinel.health_tracker.register_activity(msg) }
                 
             return Ok(());
         }

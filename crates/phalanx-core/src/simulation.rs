@@ -376,7 +376,7 @@ impl SimNode {
                     .safeguard(&self.network_key)
                     // 3. Witness Gate (Signing)
                     .and_then(|ev| ev.seal(&self.identity, self.network_id))
-                    .and_then(|mut envelope| {
+                    .map(|mut envelope| {
                         // CHAOS INTERCEPTOR: Tamper *after* signing, *before* sending.
                         // This tests if the Receiver's Integrity Gate works.
                         if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
@@ -384,7 +384,7 @@ impl SimNode {
                                 v.fps = 145; // Corrupt the data
                             }
                         }
-                        Some(envelope)
+                        envelope
                     })
                     // 4. Forensic Gate (Chunking/Discretization)
                     .and_then(|env| {
@@ -397,7 +397,7 @@ impl SimNode {
 
                 // 5. Broadcast (Simulated Network)
                 if let Some(chunks) = chunks_opt {
-                    if let Some(first_chunk) = chunks.get(0) {
+                    if let Some(first_chunk) = chunks.first() {
                         let event = SimEvent::ChunkIngested {
                             origin: self.network_id,
                             chunk: first_chunk.clone(),

@@ -422,7 +422,7 @@ pub fn create_video_shard(
         sequence_id,
         payload: DataPayload::Clear(raw_bytes),
         fps,
-        volley_id: volley_id,
+        volley_id,
     })
 }
 
