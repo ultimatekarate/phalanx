@@ -1,7 +1,7 @@
 use crate::primitives::identity::{NetworkId, PhalanxIdentity};
 use crate::primitives::shards::{Evidence, WitnessEnvelope};
 use crate::primitives::time::TrustedClock;
-use tracing::error;
+use tracing::{error, warn};
 
 /// Gate 1: The Witnessing Gate
 /// Converts raw Evidence into a signed, verifiable WitnessEnvelope.
@@ -70,6 +70,92 @@ impl IntegrityGate for WitnessEnvelope {
             Ok(_) => Some(self),
             Err(e) => {
                 error!(event = "temporal_failure", node = %node_id, peer = %self.did, error = %e, "TIME_INVALID");
+                None
+            }
+        }
+    }
+}
+
+/// Gate 4: The Privacy Gate (Egress)
+/// Enforces Confidentiality.
+/// Ensures that no evidence leaves this node without XChaCha20Poly1305 encryption.
+pub trait PrivacyGate {
+    fn safeguard(self, key: &[u8; 32]) -> Option<Self>
+    where
+        Self: Sized;
+}
+
+impl PrivacyGate for Evidence {
+    fn safeguard(mut self, key: &[u8; 32]) -> Option<Self> {
+        // We perform the encryption in place.
+        // If it fails (e.g., bad nonce gen), we drop the packet to prevent leakage.
+        let result = match &mut self {
+            Evidence::Video(s) => s.encrypt(key),
+            Evidence::Audio(s) => s.encrypt(key),
+        };
+
+        match result {
+            Ok(_) => Some(self),
+            Err(e) => {
+                error!(event = "privacy_failure", error = %e, "Dropped unencrypted unit to prevent leak");
+                None
+            }
+        }
+    }
+}
+
+/// Gate 5: The Capacity Gate (Ingress)
+/// Enforces Availability.
+/// Prevents Denial of Service (DoS) by checking quotas BEFORE cryptographic verification.
+pub trait CapacityGate {
+    fn check_capacity(self, peer: &NetworkId, pending_bytes: usize, limit: usize) -> Option<Self>
+    where
+        Self: Sized;
+}
+
+impl CapacityGate for WitnessEnvelope {
+    fn check_capacity(self, peer: &NetworkId, pending_bytes: usize, limit: usize) -> Option<Self> {
+        // 1. Basic Size Check
+        // Postcard serialization usually handles this, but a logical check is good.
+        // (Here we assume pending_bytes tracks the accumulation buffer)
+
+        if pending_bytes > limit {
+            warn!(
+                event = "capacity_shedding",
+                peer = %peer,
+                current = pending_bytes,
+                limit = limit,
+                "Dropping packet: Node is saturated"
+            );
+            return None;
+        }
+
+        // 2. (Optional) Check Blocklist/Allowlist here
+        // if blacklist.contains(peer) { return None; }
+
+        Some(self)
+    }
+}
+
+/// Gate 6: The Chronos Gate (System Resource)
+/// Enforces Temporal Availability.
+/// Safely acquires the current forensic time, logging critical system failures
+/// if the clock is poisoned or skewed beyond recovery.
+pub trait ChronosGate {
+    fn forensic_now(&self) -> Option<u64>;
+}
+
+impl ChronosGate for TrustedClock {
+    fn forensic_now(&self) -> Option<u64> {
+        match self.now() {
+            Ok(t) => Some(t),
+            Err(e) => {
+                // Critical system failure: Time is broken.
+                error!(
+                    event = "clock_failure", 
+                    error = %e, 
+                    "Chronos Gate: Time source unavailable"
+                );
                 None
             }
         }

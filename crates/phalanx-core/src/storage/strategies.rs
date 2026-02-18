@@ -8,6 +8,8 @@ use crate::primitives::shards::{
 use crate::storage::crucible::Mold;
 use std::collections::BTreeMap;
 use std::time::Duration;
+use crate::primitives::time::TrustedClock;
+use crate::security::gate::ChronosGate;
 
 use tracing::{error, info, warn}; // <--- ADDED TRACING
 
@@ -133,11 +135,11 @@ impl Mold for VolleyAmalgam {
 
         let mut sorted_artifacts: Vec<WitnessEnvelope> = Vec::with_capacity(acc.artifacts.len());
         let mut gaps = Vec::new();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let clock = TrustedClock::new();
 
+        // 2. Get the time safely (No panic/unwrap)
+        // This returns a Result. Use '?' to propagate errors or 'match' to handle them.
+        let now = clock.forensic_now()?;
         let mut expected_seq: Option<u32> = None;
 
         for (seq, env) in acc.artifacts {
@@ -148,7 +150,7 @@ impl Mold for VolleyAmalgam {
                     gaps.push(ForensicGap {
                         start_seq: expected,
                         end_seq: current_seq - 1,
-                        detected_at: now,
+                        detected_at: now, // Safe u64
                     });
                 }
             }
