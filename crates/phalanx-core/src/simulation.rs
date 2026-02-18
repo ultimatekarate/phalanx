@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, info, error, span, Level};
+use tracing::{debug, error, info, span, Level};
 
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
 use crate::base::types::{ByteCapacity, PowerState, UnitInterval, VitalityRate};
@@ -390,9 +390,9 @@ impl SimNode {
                         node = %self.network_id,
                         "Discretization returned an empty shard set for non-empty data"
                     );
-                    return; 
+                    return;
                 };
-                
+
                 let event = SimEvent::ChunkIngested {
                     origin: self.network_id,
                     chunk: first_chunk.clone(),

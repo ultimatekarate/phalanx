@@ -3,7 +3,39 @@ use crate::primitives::shards::VolleyId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use thiserror::Error;
+
+#[derive(Debug, thiserror::Error)]
+pub enum LocatorError {
+    #[error("Locator input is malformed or incorrectly delimited")]
+    MalformedInput,
+
+    #[error("Locator is missing the required author/signer field")]
+    MissingAuthor,
+
+    #[error("Locator scheme is unsupported or invalid: {0}")]
+    InvalidScheme(String),
+
+    #[error("Locator payload exceeds maximum forensic length: {0}")]
+    PayloadTooLarge(usize),
+
+    #[error("Cryptographic signature in locator failed verification")]
+    SignatureMismatch,
+
+    #[error("I/O error during locator resolution: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Internal encoding error: {0}")]
+    Encoding(String),
+    #[error("Missing fragment (Decryption Key)")]
+    MissingKey,
+    #[error("Malformatted component")]
+    ParseError,
+    #[error("Invalid NetworkId {0}")]
+    InvalidNetworkId(String),
+}
+
+// Result type alias for locator operations
+pub type LocatorResult<T> = Result<T, LocatorError>;
 
 /// A self-contained, shareable locator for a specific forensic event (Volley).
 ///
@@ -25,20 +57,6 @@ pub struct PhalanxLocator {
     pub author: Did,
 }
 
-#[derive(Debug, Error)]
-pub enum LocatorError {
-    #[error("Invalid URI format: missing 'phx://' prefix")]
-    InvalidScheme,
-    #[error("Missing fragment (Decryption Key)")]
-    MissingKey,
-    #[error("Missing author DID")]
-    MissingAuthor,
-    #[error("Malformatted component")]
-    ParseError,
-    #[error("Invalid NetworkId {0}")]
-    InvalidNetworkId(String),
-}
-
 impl fmt::Display for PhalanxLocator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Format: phx://<ID>#<KEY>@<AUTHOR>
@@ -53,7 +71,7 @@ impl FromStr for PhalanxLocator {
         // 1. Check Protocol Scheme
         let remainder = s
             .strip_prefix("phx://")
-            .ok_or(LocatorError::InvalidScheme)?;
+            .ok_or_else(||LocatorError::InvalidScheme(s.to_string()))?;
 
         // 2. Split ID and Rest (Key + Author)
         let parts: Vec<&str> = remainder.split('#').collect();
@@ -68,8 +86,9 @@ impl FromStr for PhalanxLocator {
         if secret_parts.len() != 2 {
             return Err(LocatorError::MissingAuthor);
         }
-        let secret_str = secret_parts[0];
-        let author_str = secret_parts[1];
+        let secret_str = secret_parts.get(0).ok_or(LocatorError::MalformedInput)?; // Ensure this error variant exists
+
+        let author_str = secret_parts.get(1).ok_or(LocatorError::MissingAuthor)?;
 
         // 4. Construct
         Ok(PhalanxLocator {

@@ -55,5 +55,5 @@ pub mod drivers {
 
 // --- 7. RE-EXPORTS ---
 pub use base::config::PhalanxConfig;
-pub use primitives::identity::{PhalanxIdentity, IdentityError, init_identity};
+pub use primitives::identity::{init_identity, IdentityError, PhalanxIdentity};
 pub use transport::swarm::{setup_phalanx_swarm, PhalanxBehaviour, PhalanxEvent};

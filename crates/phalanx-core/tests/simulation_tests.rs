@@ -1,6 +1,5 @@
 use tokio::time::Duration;
-use tracing::{info, error};
-
+use tracing::{error, info};
 
 // Import from the public API
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
@@ -55,7 +54,7 @@ async fn test_salvage_on_node_death() {
     );
 
     let serialized_envelope = postcard::to_stdvec(&envelope).expect("Failed to serialize envelope");
-    
+
     let chunks_result = shards::chunkify(
         shards::ShardId(999),
         serialized_envelope,

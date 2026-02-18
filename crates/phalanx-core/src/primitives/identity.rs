@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::str::FromStr;
 use std::{fmt, fs};
-use tracing::{warn, info, error};
+use tracing::{error, info, warn};
 
 // --- CONSTANTS ---
 pub const IDENTITY_VERSION: u32 = 1;

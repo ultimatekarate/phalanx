@@ -8,9 +8,9 @@ use tracing::info;
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
 use phalanx_core::base::engine::PhalanxEngine;
 // Corrected naming: network.rs likely defines load_swarm_key
+use phalanx_core::primitives::identity::init_identity;
 use phalanx_core::security::telemetry;
 use phalanx_core::transport::swarm::load_swarm_key;
-use phalanx_core::primitives::identity::init_identity;
 
 /// The entry point for the Phalanx Stronghold binary.
 ///

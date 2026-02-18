@@ -355,11 +355,12 @@ pub fn chunkify(
 
     // 2. BOUNDS CHECK: Ensure the count fits in u32 (ShardId limit).
     // This guarantees that 'i as u32' in the loop below will NEVER wrap/truncate.
-    let total_chunks = u32::try_from(count_u64)
-        .map_err(|_| ShardError::CapacityExceeded(count_u64))?;
+    let total_chunks =
+        u32::try_from(count_u64).map_err(|_| ShardError::CapacityExceeded(count_u64))?;
 
     // 3. The Collect Chain - functional and beautiful
-    let chunks = data.chunks(chunk_size)
+    let chunks = data
+        .chunks(chunk_size)
         .enumerate()
         .map(|(index, chunk_slice)| ShardChunk {
             shard_id,
