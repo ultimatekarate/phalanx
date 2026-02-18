@@ -10,6 +10,7 @@ use phalanx_core::base::engine::PhalanxEngine;
 // Corrected naming: network.rs likely defines load_swarm_key
 use phalanx_core::security::telemetry;
 use phalanx_core::transport::swarm::load_swarm_key;
+use phalanx_core::primitives::identity::init_identity;
 
 /// The entry point for the Phalanx Stronghold binary.
 ///
@@ -30,7 +31,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let physics = PhalanxPhysics::default_wan();
 
     // 3. Identity & Security Setup
-    let my_identity = phalanx_core::init_identity();
+    let my_identity = init_identity("identity.bin")?;
     let psk_path = Path::new("swarm.key");
     let psk = load_swarm_key(psk_path);
 

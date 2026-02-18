@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::str::FromStr;
 use std::{fmt, fs};
+use tracing::{warn, info, error};
 
 // --- CONSTANTS ---
 pub const IDENTITY_VERSION: u32 = 1;
@@ -332,6 +333,27 @@ impl PhalanxIdentity {
         }
 
         Err(IdentityError::Corruption("Unknown identity format".into()))
+    }
+}
+
+/// Standalone boot strapper for the identity primitive.
+pub fn init_identity<P: AsRef<Path>>(path: P) -> Result<PhalanxIdentity, IdentityError> {
+    match PhalanxIdentity::load_from_disk(&path) {
+        Ok(identity) => {
+            info!(path = ?path.as_ref(), "Existing identity loaded");
+            Ok(identity)
+        }
+        Err(IdentityError::IoError(ref e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            warn!("Identity not found. Generating new credentials.");
+            let (new_identity, mnemonic) = PhalanxIdentity::generate()?;
+            info!("CRITICAL: New Mnemonic Generated: {}", mnemonic);
+            new_identity.save_to_disk(&path)?;
+            Ok(new_identity)
+        }
+        Err(err) => {
+            error!(error = %err, "Identity load failed (Corruption/IO)");
+            Err(err)
+        }
     }
 }
 

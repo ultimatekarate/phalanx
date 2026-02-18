@@ -126,9 +126,16 @@ impl PhalanxEngine {
         let mut config = PhalanxConfig::default();
         config.storage.vault_path = storage_path.to_string();
 
-        let identity = crate::init_identity();
+        // 1. Safe Identity Initialization
+        // The '?' operator propagates IdentityError, which implements std::error::Error,
+        // into the Box<dyn Error> return type.
+        let identity = crate::init_identity("identity.bin")?;
+
         let physics = PhalanxPhysics::default_wan();
 
+        // 2. Fallible Construction
+        // Assuming Self::new also returns a Result per the function signature.
+        // If Self::new is infallible, use Ok(Self::new(...))
         Self::new(config, identity, physics, None)
     }
 
