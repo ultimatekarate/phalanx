@@ -23,7 +23,13 @@ use curve25519_dalek::edwards::CompressedEdwardsY;
 /// This allows us to send encrypted messages to a DID without needing a separate encryption key.
 fn ed_to_x25519_pk(ed_bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
     // 1. Decompress the Ed25519 point (Y-coordinate + sign bit)
-    let ed_point = CompressedEdwardsY::from_slice(ed_bytes)
+    let bytes: [u8; 32] = ed_bytes
+        .get(0..32)
+        .and_then(|s| s.try_into().ok())
+        .ok_or(CryptoError::IdentityResolutionError)?;
+
+    // 2. Decompress the validated array
+    let ed_point = CompressedEdwardsY::from_slice(&bytes)
         .map_err(|_| CryptoError::IdentityResolutionError)?;
 
     // 2. Convert to Montgomery form (Birational equivalence)
@@ -38,17 +44,24 @@ fn ed_to_x25519_pk(ed_bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
 
 /// Converts an Ed25519 Secret Key to X25519.
 /// Warning: This is a one-way street for the session.
-fn ed_to_x25519_sk(ed_bytes: &[u8]) -> x25519_dalek::StaticSecret {
-    // We must hash the Ed25519 key to get a valid X25519 scalar (clamped)
-    // Standard Ed25519 logic uses SHA-512
-    use sha2::{Digest, Sha512};
+fn ed_to_x25519_sk(ed_bytes: &[u8]) -> Result<x25519_dalek::StaticSecret, CryptoError> {
+use sha2::{Digest, Sha512};
+    
+    // 1. Hash the Ed25519 seed
     let mut hasher = Sha512::new();
     hasher.update(ed_bytes);
-    let h = hasher.finalize();
+    let hash_result = hasher.finalize();
 
-    let mut x25519_bytes = [0u8; 32];
-    x25519_bytes.copy_from_slice(&h[0..32]);
-    x25519_dalek::StaticSecret::from(x25519_bytes)
+    // 2. Safe Buffer Extraction (Sentinel Pattern)
+    // We replace &h[0..32] with a safe slice retrieval and fixed-array conversion.
+    let x25519_bytes: [u8; 32] = hash_result
+        .get(0..32)
+        .and_then(|slice| slice.try_into().ok())
+        .ok_or_else(|| CryptoError::EncodingError("Failed to derive 32-byte scalar from hash".to_string()))?;
+
+    // 3. Construct the Secret
+    // The StaticSecret::from automatically handles clamping (pruning) for X25519.
+    Ok(x25519_dalek::StaticSecret::from(x25519_bytes))
 }
 
 // ==========================================
@@ -97,7 +110,7 @@ impl SealedLocator {
         let recipient_x25519 = x25519_dalek::PublicKey::from(ed_to_x25519_pk(&recipient_ed_pk)?);
 
         // 2. Convert Sender's Private Key to X25519
-        let sender_x25519 = ed_to_x25519_sk(sender_sk_bytes);
+        let sender_x25519 = ed_to_x25519_sk(sender_sk_bytes)?;
 
         // 3. Derive Shared Secret (ECDH)
         let shared_secret = sender_x25519.diffie_hellman(&recipient_x25519);
@@ -137,7 +150,7 @@ impl SealedLocator {
         let sender_x25519_pk = x25519_dalek::PublicKey::from(ed_to_x25519_pk(&sender_ed_pk)?);
 
         // 2. Convert My Private Key to X25519
-        let my_x25519 = ed_to_x25519_sk(my_sk_bytes);
+        let my_x25519 = ed_to_x25519_sk(my_sk_bytes)?;
 
         // 3. Re-derive Shared Secret
         let shared_secret = my_x25519.diffie_hellman(&sender_x25519_pk);
@@ -167,32 +180,31 @@ impl SealedLocator {
 // ==========================================
 
 fn resolve_did_public_key(did: &Did) -> Result<[u8; 32], CryptoError> {
-    // Assumes Did implements AsRef<str> or Deref<Target=str> via the newtype
-    // Format: did:key:z6MkhaXgBZD...
-    let s = did.0.as_str();
-    if !s.starts_with("did:key:") {
-        return Err(CryptoError::IdentityResolutionError);
-    }
+// 1. Safe Prefix Handling (Zero-Panic)
+    // Replaces: let multibase_str = &s["did:key:".len()..];
+    let multibase_str = did.as_str()
+        .strip_prefix("did:key:")
+        .ok_or(CryptoError::IdentityResolutionError)?;
 
-    let multibase_str = &s["did:key:".len()..];
+    // 2. Safe Multibase Detection
+    // Replaces: if !multibase_str.starts_with('z') ... decode(&multibase_str[1..])
+    let encoded_key = multibase_str
+        .strip_prefix('z')
+        .ok_or(CryptoError::IdentityResolutionError)?;
 
-    // Assume z-base58 (standard for did:key)
-    if !multibase_str.starts_with('z') {
-        return Err(CryptoError::IdentityResolutionError);
-    }
-
-    let bytes = bs58::decode(&multibase_str[1..])
+    let bytes = bs58::decode(encoded_key)
         .into_vec()
         .map_err(|_| CryptoError::IdentityResolutionError)?;
 
-    // multicodec prefix for ed25519-pub is 0xed01 (2 bytes)
-    // We strip that to get the raw 32-byte key
-    if bytes.len() == 34 && bytes[0] == 0xed && bytes[1] == 0x01 {
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&bytes[2..]);
-        Ok(key)
-    } else {
-        Err(CryptoError::IdentityResolutionError)
+    // 3. Safe Multicodec Extraction (Zero-Panic)
+    // Replaces: if bytes.len() == 34 && bytes[0] == 0xed ... copy_from_slice(&bytes[2..])
+    match bytes.as_slice() {
+        [0xed, 0x01, key_bytes @ ..] if key_bytes.len() == 32 => {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(key_bytes);
+            Ok(key)
+        }
+        _ => Err(CryptoError::IdentityResolutionError),
     }
 }
 
@@ -210,6 +222,8 @@ pub enum CryptoError {
     InvalidKeyLength,
     #[error("Could not resolve DID to Public Key")]
     IdentityResolutionError,
+    #[error("Encoding error: {0}")]
+    EncodingError(String),
 }
 
 impl fmt::Display for SealedLocator {

@@ -46,6 +46,10 @@ impl Did {
     pub fn to_safe_name(&self) -> String {
         self.0.replace(":", "_")
     }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl Default for Did {
