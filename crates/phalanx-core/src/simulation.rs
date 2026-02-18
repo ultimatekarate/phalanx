@@ -120,7 +120,7 @@ impl SimulationHarness {
             network_id,
             role,
             config: self.config.clone(),
-            physics: self.physics, 
+            physics: self.physics,
         };
 
         // Instantiate the Actor
@@ -254,7 +254,7 @@ impl SimNode {
 
         let mut cleanup_tick = tokio::time::interval(self.physics.shard_timeout());
         let mut data_tick = tokio::time::interval(Duration::from_millis(100));
-        let mut physics_tick = tokio::time::interval(Duration::from_millis(500)); 
+        let mut physics_tick = tokio::time::interval(Duration::from_millis(500));
 
         loop {
             // Apply Chaos Load
@@ -326,8 +326,11 @@ impl SimNode {
         // FORENSIC GATE: Heartbeat Serialization
         // If serialization fails, we log it via ok_or_log and skip sending.
         // This replaces the raw `if let Ok` block with standardized reporting.
-        let payload_opt = postcard::to_stdvec(&msg)
-            .ok_or_log("heartbeat_serialize_error", &self.network_id, "Failed to encode heartbeat");
+        let payload_opt = postcard::to_stdvec(&msg).ok_or_log(
+            "heartbeat_serialize_error",
+            &self.network_id,
+            "Failed to encode heartbeat",
+        );
 
         if let Some(data) = payload_opt {
             let event = SimEvent::Heartbeat {
@@ -356,7 +359,7 @@ impl SimNode {
             // -----------------------------------------------------------
             // THE GATED PIPELINE (Simulation Edition)
             // -----------------------------------------------------------
-            
+
             // 1. Generation Gate (Forensic)
             // Ensures valid data creation or logs failure.
             let shard_opt = create_video_shard(
@@ -384,9 +387,13 @@ impl SimNode {
                         Some(envelope)
                     })
                     // 4. Forensic Gate (Chunking/Discretization)
-                    .and_then(|env| env.chunkify(shard_id)
-                         .ok_or_log("sim_chunk_err", &self.network_id, "Discretization failed")
-                    );
+                    .and_then(|env| {
+                        env.chunkify(shard_id).ok_or_log(
+                            "sim_chunk_err",
+                            &self.network_id,
+                            "Discretization failed",
+                        )
+                    });
 
                 // 5. Broadcast (Simulated Network)
                 if let Some(chunks) = chunks_opt {
@@ -434,8 +441,11 @@ impl SimNode {
 
             SimEvent::Heartbeat { payload, .. } => {
                 // Forensic Gate: Deserialization
-                let msg_opt = postcard::from_bytes::<ControlMessage>(&payload)
-                    .ok_or_log("heartbeat_rx_err", &self.network_id, "Malformed heartbeat");
+                let msg_opt = postcard::from_bytes::<ControlMessage>(&payload).ok_or_log(
+                    "heartbeat_rx_err",
+                    &self.network_id,
+                    "Malformed heartbeat",
+                );
 
                 if let Some(msg) = msg_opt {
                     self.sentinel.health_tracker.register_activity(msg);

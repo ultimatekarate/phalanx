@@ -117,24 +117,21 @@ impl StrongholdEngine {
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
         info!(id = %self.identity.did, "Stronghold Engine active.");
 
-        // 1. ANNOUNCE ROLE (The New Method)
-        // This ensures find_strongholds() callers can see us.
-        match self.swarm.behaviour_mut().announce_stronghold() {
-            Ok(query_id) => {
-                info!(?query_id, "Stronghold role successfully announced to DHT.");
-            }
-            Err(e) => {
-                // A DiscoveryError::StorageError often means the local Kademlia
-                // store is under heavy pressure or hasn't bootstrapped peers yet.
-                tracing::error!(
-                    error = %e,
-                    "Critical: Failed to announce Stronghold role. Discovery may be limited."
-                );
-            }
+        // 1. ANNOUNCE ROLE (Updated for new signature)
+        // We capture the authoritative local ID once to pass into the forensic gates.
+        let local_id = NetworkId(*self.swarm.local_peer_id());
+
+        // The announce_stronghold method now uses the Forensic Gate internally.
+        // It returns Option<QueryId> and handles its own forensic logging.
+        if let Some(query_id) = self.swarm.behaviour_mut().announce_stronghold(&local_id) {
+            info!(?query_id, "Stronghold role successfully announced to DHT.");
+        } else {
+            // If the gate returned None, it already logged the forensic reason (e.g., dht_announce_fail).
+            // We can add high-level context here if needed.
+            warn!("Stronghold role announcement bypassed by Forensic Gate.");
         }
 
         // 2. ANNOUNCE SERVICE (The Generic Method)
-        // Keep this for backward compatibility or generic storage queries.
         let storage_key = get_storage_key();
         if let Err(e) = self
             .swarm
@@ -145,13 +142,9 @@ impl StrongholdEngine {
             warn!(error = %e, "Generic storage service advertisement failed.");
         }
 
-        let local_id = NetworkId(*self.swarm.local_peer_id());
         info!(peer_id = %local_id, "Stronghold Engine Online.");
 
         let mut cleanup_timer = tokio::time::interval(Duration::from_secs(10));
-
-        // [FIX] We pin the sleep future so it isn't reset every time a network packet arrives.
-        // This ensures we pulse even under heavy network load.
         let mut heartbeat_timer: Pin<Box<Sleep>> =
             Box::pin(tokio::time::sleep(Duration::from_millis(100)));
 
@@ -170,7 +163,6 @@ impl StrongholdEngine {
                 // --- DOMAIN C: Vitality (The "Pulse") ---
                 _ = &mut heartbeat_timer => {
                     let next_interval = self.pulse_vitality().await?;
-                    // Reset the timer for the dynamic interval
                     heartbeat_timer.as_mut().reset((Instant::now() + next_interval).into());
                 }
             }
