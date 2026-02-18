@@ -14,6 +14,15 @@ use crate::security::e2ee;
 // =====================
 // DATA STRUCTURES
 // =====================
+
+#[derive(Debug, thiserror::Error)]
+pub enum ShardError {
+    #[error("Dataset capacity exceeded: calculated chunk count {0} exceeds u32 limit")]
+    CapacityExceeded(u64),
+    #[error("Invalid shard configuration: {0}")]
+    InvalidConfiguration(String),
+}
+
 pub struct ReassemblyBuffer {
     pub chunks: Vec<Option<Vec<u8>>>,
     pub total_chunks: usize,
@@ -334,9 +343,9 @@ pub fn chunkify(
     chunk_size: usize,
     owner_did: Did,
     chunk_type: ChunkType,
-) -> Vec<ShardChunk> {
+) -> Result<Vec<ShardChunk>, ShardError> {
     if data.is_empty() || chunk_size == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // 1. SAFETY CHECK: Pre-calculate total count using u64 to prevent overflow.
@@ -347,20 +356,22 @@ pub fn chunkify(
     // 2. BOUNDS CHECK: Ensure the count fits in u32 (ShardId limit).
     // This guarantees that 'i as u32' in the loop below will NEVER wrap/truncate.
     let total_chunks = u32::try_from(count_u64)
-        .expect("Forensic Error: Dataset exceeds 4 billion chunks (u32 limit).");
+        .map_err(|_| ShardError::CapacityExceeded(count_u64))?;
 
     // 3. The Collect Chain - functional and beautiful
-    data.chunks(chunk_size)
+    let chunks = data.chunks(chunk_size)
         .enumerate()
-        .map(|(i, chunk_slice)| ShardChunk {
+        .map(|(index, chunk_slice)| ShardChunk {
             shard_id,
-            chunk_index: i as u32, // Safe: We proved 'count' fits in u32 above
+            chunk_index: index as u32, // Safe: We proved 'count' fits in u32 above
             total_chunks,
             owner_did: owner_did.clone(),
             data: chunk_slice.to_vec(),
             chunk_type,
         })
-        .collect()
+        .collect();
+
+    Ok(chunks)
 }
 
 pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, String> {

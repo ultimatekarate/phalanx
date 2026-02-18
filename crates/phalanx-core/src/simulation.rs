@@ -363,7 +363,7 @@ impl SimNode {
 
             // 4. Chunkify & Broadcast
             if let Ok(data) = postcard::to_stdvec(&envelope) {
-                let chunks = chunkify(
+                let chunks_result = chunkify(
                     ShardId(self.seq_counter as u32),
                     data,
                     4096,
@@ -371,15 +371,28 @@ impl SimNode {
                     ChunkType::Witnessed,
                 );
 
+                let chunks = match chunks_result {
+                    Ok(valid_chunks) => valid_chunks,
+                    Err(error) => {
+                        tracing::error!(
+                            event = "discretization_failure",
+                            node = %self.network_id,
+                            error = %error,
+                            "Failed to transform envelope into verifiable chunks"
+                        );
+                        return; // Terminate this ingestion cycle to prevent inconsistent state
+                    }
+                };
+
                 let Some(first_chunk) = chunks.get(0) else {
                     tracing::error!(
                         event = "simulation_logic_error",
                         node = %self.network_id,
-                        "Attempted to ingest chunk from empty set"
+                        "Discretization returned an empty shard set for non-empty data"
                     );
                     return; 
                 };
-
+                
                 let event = SimEvent::ChunkIngested {
                     origin: self.network_id,
                     chunk: first_chunk.clone(),

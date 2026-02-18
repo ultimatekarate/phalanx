@@ -1,147 +1,118 @@
-# --- FUNCTIONS ---
-function Get-FileTree {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, Position = 0)]
-        [string]$Path,
-        [Parameter()]
-        [string]$Indent = ""
-    )
-    process {
-        $treeOutput = @()
-        try {
-            $resolvedPath = Resolve-Path -Path $Path -ErrorAction Stop
-            $items = Get-ChildItem -Path $resolvedPath -ErrorAction Stop
-            $itemCount = $items.Count
-            for ($i = 0; $i -lt $itemCount; $i++) {
-                $item = $items[$i]
-                $isLast = $i -eq ($itemCount - 1)
-                $junction = if ($isLast) { "\-- " } else { "|-- " }
-                $extension = if ($isLast) { "    " } else { "|   " }
-                $treeOutput += "$Indent$junction$($item.Name)"
-                if ($item.PSIsContainer) {
-                    $treeOutput += Get-FileTree -Path $item.FullName -Indent "$Indent$extension"
-                }
-            }
-        } catch { }
-        return $treeOutput
-    }
-}
+<#
+.SYNOPSIS
+    Generates a pure 'Map' of the project architecture.
+    FIXES:
+    - parser error caused by special characters in comments.
+    - Uses single-quoted format strings for safety.
+#>
 
 # --- CONFIGURATION ---
-$srcPath = "phalanx-core\src"
-$outputFile = "C:\Users\joevo\GoogleDrive\PROJECT_CONTEXT.md"
-$noiseTraits = "Debug|Clone|PartialEq|PartialOrd|Serialize|Deserialize|Default|Copy"
+$RootPath = "crates\phalanx-core\src" # Adjust to your target crate
+$CargoPath = "Cargo.toml"
+$OutputFile = "C:\Users\joevo\GoogleDrive\PROJECT_CONTEXT.md"
 
-$results = @("# Project API, Documentation & Roadmap Summary`nGenerated: $(Get-Date)`n")
-$testResults = @("`n---`n## PROJECT UNIT TESTS`n")
+# --- 1. ARCHITECTURE SUMMARY (Cargo.toml) ---
+function Get-CargoSummary {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return "" }
+    
+    $content = Get-Content $Path -Raw
+    $summary = @()
+    $summary += "## Workspace Architecture"
+    
+    if ($content -match 'rust-version\s*=\s*"([^"]+)"') {
+        $summary += "* **Rust Version:** $($Matches[1])"
+    }
 
-# --- 1. INGEST CARGO.TOML ---
-$cargoPath = "Cargo.toml"
-if (Test-Path $cargoPath) {
-    $results += "## Project Configuration (Cargo.toml)"
-    $results += "``````toml"
-    $results += Get-Content $cargoPath
-    $results += "``````"
-    $results += "---`n"
+    $keyDeps = @("tokio", "libp2p", "tracing", "postcard", "serde", "sqlx")
+    $foundDeps = @()
+    foreach ($dep in $keyDeps) {
+        if ($content -match "$dep\s*=") { $foundDeps += $dep }
+    }
+    if ($foundDeps.Count -gt 0) {
+        $summary += "* **Key Stack:** $($foundDeps -join ", ")"
+    }
+
+    return ($summary -join "`n") + "`n---"
 }
 
-# --- 2. GENERATE FILE TREE ---
-$results += "## Project Structure"
-$results += "``````text"
-$results += Get-FileTree -Path $srcPath
-$results += "``````"
-$results += "---`n"
-
-# --- 3. INGEST RUST SOURCE FILES ---
-$files = Get-ChildItem -Path $srcPath -Filter "*.rs" -Recurse | Where-Object { $_.FullName -notmatch "target" }
-
-foreach ($file in $files) {
-    $relativePath = Resolve-Path -Path $file.FullName -Relative
-    $content = Get-Content $file.FullName
-    $fileOutput = @()
-    $fileTestOutput = @()
+# --- 2. PUBLIC INTERFACE MAPPER (Source Scraper) ---
+function Get-PublicInterface {
+    param([string]$Path)
     
-    $currentSignature = ""
-    $currentDocs = @()
-    $isCollectingSig = $false
-    $currentImplType = "" 
-    $braceDepth = 0
-    $isTestItem = $false # Specific flag for the current function
+    $output = @()
+    $output += "## Public API Surface"
+    
+    $files = Get-ChildItem -Path $Path -Filter "*.rs" -Recurse | 
+             Where-Object { $_.FullName -notmatch "target|tests" }
 
-    $implRegex = "^(?:pub(?:\(.*\))?\s+)?impl\s*(?:<.*?>)?\s+(?:(?<trait>[\w\d:]+)(?:<.*?>)?\s+for\s+)?(?<type>[\w\d:]+)"
+    foreach ($file in $files) {
+        $relPath = Resolve-Path -Path $file.FullName -Relative
+        $lines = Get-Content $file.FullName
+        $fileItems = @()
 
-    foreach ($line in $content) {
-        $trimmed = $line.Trim()
-        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
-
-        # Detect Test Attributes
-        if ($trimmed -match "#\[(?:tokio::)?test\]") {
-            $isTestItem = $true
-        }
-
-        # Context Tracking: impl blocks
-        if ($trimmed -match $implRegex) {
-            $matches = $Matches
-            $typeName = $matches.type
-            $traitName = $matches.trait
-            if ($typeName -match "::") { $typeName = $typeName.Split(":")[-1] }
-            if ($traitName -match "::") { $traitName = $traitName.Split(":")[-1] }
-            $currentImplType = if ($traitName) { "$typeName (as $traitName)" } else { $typeName }
-        }
-
-        # Brace Tracking
-        if ($trimmed.Contains("{")) { $braceDepth++ }
-        if ($trimmed.Contains("}")) { 
-            $braceDepth-- 
-            if ($braceDepth -le 0) { $currentImplType = ""; $braceDepth = 0 }
-        }
-
-        # Collect Docs
-        if ($trimmed.StartsWith("///")) {
-            $currentDocs += $trimmed
-            continue
-        }
-
-        # Signature Detection
-        if ($trimmed -match "^(?:pub(?:\(.*\))?\s+)?(?:async\s+)?(struct|enum|trait|impl|fn)\s+") {
-            $isCollectingSig = $true
-            $currentSignature = $trimmed
-        } elseif ($isCollectingSig) {
-            $currentSignature += " $trimmed"
-        }
-
-        # Finalize and Render
-        if ($isCollectingSig -and ($trimmed.EndsWith("{") -or $trimmed.EndsWith(";"))) {
-            $cleanSig = $currentSignature -replace "\s+", " " -replace "\s*\{\s*$", ""
+        # Regex: Capture Indent (1), Type (2), Rest (3)
+        $regexStart = '^(\s*)pub\s+(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?(struct|enum|trait|fn|type|mod)\s+(.*)'
+        
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            $line = $lines[$i]
             
-            if ($cleanSig -notmatch "(?:derive|impl)\s+\($noiseTraits\)" -and $cleanSig -notmatch "^impl\s") {
-                $block = @("#### $cleanSig")
+            if ($line -match $regexStart) {
+                $rawIndent = $Matches[1]
+                $type = $Matches[2]
+                $rest = $Matches[3]
                 
-                if ($isTestItem) {
-                    $block += "**[UNIT TEST]**"
-                } elseif ($currentImplType) {
-                    $block += "**Context:** Member function of $currentImplType"
-                }
+                # Logic for Indentation Prefix
+                $prefix = if ($rawIndent.Length -ge 4) { "  -" } else { "-" }
 
-                if ($currentDocs.Count -gt 0) { 
-                    $block += "``````rust"
-                    $block += $currentDocs 
-                    $block += "``````"
+                if ($type -eq "fn") {
+                    # --- Multi-Line Accumulator ---
+                    $fullSig = $line.Trim()
+                    
+                    while ($true) {
+                        if ($fullSig -match '\{') { break }     # Stop at body
+                        if ($fullSig -match ';\s*$') { break }  # Stop at end of decl
+                        if (($i + 1) -ge $lines.Count) { break }
+                        
+                        $i++
+                        $nextLine = $lines[$i].Trim()
+                        $fullSig += " " + $nextLine
+                    }
+                    
+                    # Clean up signature
+                    $fullSig = $fullSig -replace '\s+', ' '
+                    $fullSig = $fullSig -replace '\s*\{.*$', '' -replace ';\s*$', ''
+                    $sigOnly = $fullSig -replace '^.*?fn\s+', ''
+                    
+                    # SAFE FORMATTING: Single quotes prevent parser errors
+                    $fileItems += '{0} **[fn]** `{1}`' -f $prefix, $sigOnly
+                } 
+                else {
+                    # Structs/Enums
+                    $name = $rest -split '[{(;=]' | Select-Object -First 1
+                    $name = $name.Trim()
+                    
+                    # SAFE FORMATTING: Single quotes prevent parser errors
+                    $fileItems += '{0} **[{1}]** `{2}`' -f $prefix, $type, $name
                 }
-                $block += ""
-
-                if ($isTestItem) { $fileTestOutput += $block }
-                else { $fileOutput += $block }
             }
-            # Reset item state
-            $currentSignature = ""; $currentDocs = @(); $isCollectingSig = $false; $isTestItem = $false
+        }
+
+        if ($fileItems.Count -gt 0) {
+            $output += "`n### File: $relPath"
+            $output += $fileItems
         }
     }
-    if ($fileOutput.Count -gt 0) { $results += "### Source: $relativePath"; $results += $fileOutput; $results += "---" }
-    if ($fileTestOutput.Count -gt 0) { $testResults += "### Tests in: $relativePath"; $testResults += $fileTestOutput; $testResults += "---" }
+    return $output -join "`n"
 }
 
-# --- 4. SAVE ---
-$results + $testResults | Out-File -FilePath $outputFile -Encoding utf8 -Force
-Write-Host "`n Phalanx Context updated. Tests isolated and descriptors active." -ForegroundColor Cyan
+# --- EXECUTION ---
+Write-Host "Building Context Map..." -ForegroundColor Cyan
+
+$finalContent = @()
+$finalContent += Get-CargoSummary -Path $CargoPath
+$finalContent += Get-PublicInterface -Path $RootPath
+
+$finalContent | Out-File -FilePath $OutputFile -Encoding utf8 -Force
+
+Write-Host "Done. Saved to $OutputFile" -ForegroundColor Green

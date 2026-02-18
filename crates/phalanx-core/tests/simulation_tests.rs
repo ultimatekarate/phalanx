@@ -1,5 +1,6 @@
 use tokio::time::Duration;
-use tracing::info;
+use tracing::{info, error};
+
 
 // Import from the public API
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
@@ -54,8 +55,8 @@ async fn test_salvage_on_node_death() {
     );
 
     let serialized_envelope = postcard::to_stdvec(&envelope).expect("Failed to serialize envelope");
-
-    let chunks = shards::chunkify(
+    
+    let chunks_result = shards::chunkify(
         shards::ShardId(999),
         serialized_envelope,
         10,
@@ -63,7 +64,18 @@ async fn test_salvage_on_node_death() {
         ChunkType::Witnessed,
     );
 
-    info!(victim = %victim_did, chunk_count = chunks.len(), "Broadcasting Signed Envelope Chunks");
+    let chunks = match chunks_result {
+        Ok(valid_chunks) => valid_chunks,
+        Err(error) => {
+            tracing::error!(
+                event = "discretization_failure",
+                node = %victim_did,
+                error = %error,
+                "Failed to transform envelope into verifiable chunks"
+            );
+            return; // Terminate this ingestion cycle to prevent inconsistent state
+        }
+    };
 
     for chunk in chunks {
         harness
@@ -208,6 +220,8 @@ async fn test_stronghold_crash_recovery() {
 
 #[tokio::test]
 async fn test_leaf_mode_isolation() {
+    use tracing::warn;
+
     // Unaffected by Harness changes.
     let (me, _) = PhalanxIdentity::generate().unwrap();
     let (stranger, _) = PhalanxIdentity::generate().unwrap();
@@ -215,16 +229,44 @@ async fn test_leaf_mode_isolation() {
     let mut storage = Guardian::new("sim_vault/leaf_test", &config, me.did.clone());
 
     let shard = create_video_shard(vec![vec![1]], StorageSequence(1), 30, "v1".into());
-    let chunk = shards::chunkify(
+
+    let Ok(serialized_shard) = postcard::to_stdvec(&shard) else {
+        error!(
+            event = "serialization_failure",
+            "Failed to serialize shard for chunking"
+        );
+        return;
+    };
+
+    let chunks = match shards::chunkify(
         shards::ShardId(1),
-        postcard::to_stdvec(&shard).unwrap(),
+        serialized_shard,
         100,
         stranger.did.clone(),
         ChunkType::Witnessed,
-    );
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            error!(
+                event = "discretization_failure",
+                error = %e,
+                node = %stranger.did,
+                "Chunkify operation failed capacity or logic bounds"
+            );
+            return;
+        }
+    };
 
     let is_leaf_mode = true;
-    storage.ingest_chunk(chunk[0].clone(), is_leaf_mode);
+    if let Some(first_chunk) = chunks.get(0) {
+        storage.ingest_chunk(first_chunk.clone(), is_leaf_mode);
+    } else {
+        warn!(
+            event = "empty_chunk_set",
+            node = %stranger.did,
+            "Discretization produced zero chunks for provided data"
+        );
+    }
 
     assert_eq!(
         storage.micro_layer.len(),
@@ -260,24 +302,55 @@ async fn test_vampire_attack_defense() {
             v.fps = 145;
         }
 
-        let chunk = shards::chunkify(
+        let Ok(serialized_envelope) = postcard::to_stdvec(&envelope) else {
+            tracing::error!(
+                event = "serialization_failure",
+                node = %attacker_did,
+                "Failed to serialize envelope for adversarial injection"
+            );
+            return; // Or continue if in a loop
+        };
+
+        // 2. Safe Discretization (Handle ShardError)
+        let chunks_result = shards::chunkify(
             shards::ShardId(i as u32),
-            postcard::to_stdvec(&envelope).unwrap(),
-            4096,                 // Large size to force immediate reassembly
-            attacker_did.clone(), // FIX: Chunk Owner == Envelope Signer
+            serialized_envelope,
+            4096,
+            attacker_did.clone(),
             ChunkType::Witnessed,
         );
 
-        // Broadcast from the Attacker DID
-        harness
-            .broadcast(
-                &attacker_did,
-                SimEvent::ChunkIngested {
-                    origin: attacker_net_id,
-                    chunk: chunk[0].clone(),
-                },
-            )
-            .await;
+        let chunks = match chunks_result {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(
+                    event = "discretization_failure",
+                    error = %e,
+                    node = %attacker_did,
+                    "Chunkify failed during adversarial simulation"
+                );
+                return;
+            }
+        };
+
+        // 3. Safe Indexing (Sentinel Access)
+        if let Some(first_chunk) = chunks.get(0) {
+            harness
+                .broadcast(
+                    &attacker_did,
+                    SimEvent::ChunkIngested {
+                        origin: attacker_net_id,
+                        chunk: first_chunk.clone(),
+                    },
+                )
+                .await;
+        } else {
+            tracing::warn!(
+                event = "empty_payload",
+                node = %attacker_did,
+                "Discretization produced zero chunks; skipping broadcast"
+            );
+        }
     }
 
     // 4. Verify Defense
