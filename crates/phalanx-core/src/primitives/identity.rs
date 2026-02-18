@@ -178,10 +178,10 @@ impl fmt::Debug for PhalanxIdentity {
 
 impl PhalanxIdentity {
     /// Creates a fresh, ephemeral identity.
-    /// 
+    ///
     /// # Sentinel Note
     /// This calls `generate()` internally and discards the BIP39 mnemonic.
-    /// Use this ONLY for ephemeral nodes (simulations, tests) where 
+    /// Use this ONLY for ephemeral nodes (simulations, tests) where
     /// key recovery is not required.
     ///
     /// # Panics

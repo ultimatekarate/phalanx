@@ -105,9 +105,9 @@ impl PhalanxEngine {
 
         // Attempt load, fallback to generation (Ephemeral Mode)
         let identity = match init_identity(&identity_path) {
-    Ok(id) => id,
-    Err(_) => PhalanxIdentity::new(),
-};
+            Ok(id) => id,
+            Err(_) => PhalanxIdentity::new(),
+        };
 
         // 3. Initialize Core
         Self::new(config, identity, physics, None)
@@ -249,7 +249,7 @@ mod tests {
     fn test_engine_initialization() {
         let (config, physics) = setup_test_env();
         let identity = PhalanxIdentity::new();
-        
+
         let engine = PhalanxEngine::new(config, identity, physics, None);
         assert!(engine.is_ok(), "Engine should initialize with valid inputs");
     }
@@ -259,16 +259,19 @@ mod tests {
         // 1. Point to a non-existent path
         let path = "temp_test_engine_boot";
         let _ = fs::remove_dir_all(path); // Cleanup pre
-        
+
         // 2. Initialize
         // This triggers the logic: load_identity? No -> PhalanxIdentity::new()
         let engine_result = PhalanxEngine::new_at_path(path);
-        
-        assert!(engine_result.is_ok(), "Should successfully bootstrap ephemeral node");
-        
+
+        assert!(
+            engine_result.is_ok(),
+            "Should successfully bootstrap ephemeral node"
+        );
+
         let engine = engine_result.unwrap();
         assert_eq!(engine.seq_counter, 0);
-        
+
         // Cleanup post
         let _ = fs::remove_dir_all(path);
     }

@@ -12,7 +12,8 @@ use crate::security::sentinel::{ControlMessage, Sentinel};
 use crate::security::telemetry::{ChaosMode, DiscoverySource, NodeRole, SimEvent};
 use crate::storage::vault::Guardian;
 
-use crate::security::gate::{ForensicGate, WitnessGate};
+// IMPORT ALL GATES
+use crate::security::gate::{ForensicGate, PrivacyGate, WitnessGate};
 
 use crate::primitives::shards::{create_video_shard, Evidence, ShardId, StorageSequence};
 
@@ -70,6 +71,7 @@ impl SimulationHarness {
     }
 
     pub async fn spawn_node(&mut self, name: &str, role: NodeRole) -> Did {
+        // Sentinel: Ensure Identity Generation is safe
         let (identity, _) = match PhalanxIdentity::generate() {
             Ok(res) => res,
             Err(e) => {
@@ -111,14 +113,14 @@ impl SimulationHarness {
             ))
             .await;
 
-        // [REFACTOR] Configuration Object Construction
+        // Configuration Object Construction
         let sim_config = SimConfig {
             name: name.to_string(),
             identity,
             network_id,
             role,
             config: self.config.clone(),
-            physics: self.physics, // Copy trait assumed for PhalanxPhysics
+            physics: self.physics, 
         };
 
         // Instantiate the Actor
@@ -176,7 +178,6 @@ impl SimulationHarness {
 // =========================================================================================
 
 /// Configuration container for initializing a `SimNode`.
-/// Encapsulates static properties to satisfy `clippy::too_many_arguments`.
 pub struct SimConfig {
     pub name: String,
     pub identity: PhalanxIdentity,
@@ -208,6 +209,9 @@ struct SimNode {
     // Communications
     broadcast_tx: mpsc::Sender<(Did, NetworkId, SimEvent)>,
     telemetry_tx: mpsc::Sender<SimEvent>,
+
+    // Simulation-only Encryption Key (Fixed for tests)
+    network_key: [u8; 32],
 }
 
 impl SimNode {
@@ -239,6 +243,7 @@ impl SimNode {
             staged_bytes: 0,
             broadcast_tx,
             telemetry_tx,
+            network_key: [0x42; 32], // Standard Test Key
         }
     }
 
@@ -249,7 +254,7 @@ impl SimNode {
 
         let mut cleanup_tick = tokio::time::interval(self.physics.shard_timeout());
         let mut data_tick = tokio::time::interval(Duration::from_millis(100));
-        let mut physics_tick = tokio::time::interval(Duration::from_millis(500)); // Slower heartbeat
+        let mut physics_tick = tokio::time::interval(Duration::from_millis(500)); 
 
         loop {
             // Apply Chaos Load
@@ -318,7 +323,13 @@ impl SimNode {
             msg.storage_remaining_mb = 99999999;
         }
 
-        if let Ok(data) = postcard::to_stdvec(&msg) {
+        // FORENSIC GATE: Heartbeat Serialization
+        // If serialization fails, we log it via ok_or_log and skip sending.
+        // This replaces the raw `if let Ok` block with standardized reporting.
+        let payload_opt = postcard::to_stdvec(&msg)
+            .ok_or_log("heartbeat_serialize_error", &self.network_id, "Failed to encode heartbeat");
+
+        if let Some(data) = payload_opt {
             let event = SimEvent::Heartbeat {
                 origin: self.network_id,
                 payload: data,
@@ -342,8 +353,12 @@ impl SimNode {
             let frames = vec![vec![1; 512]];
             let shard_id = ShardId(self.seq_counter as u32);
 
-            // 1. Generation Gate
-            // Safely create the shard or log the forensic error "sim_gen_err"
+            // -----------------------------------------------------------
+            // THE GATED PIPELINE (Simulation Edition)
+            // -----------------------------------------------------------
+            
+            // 1. Generation Gate (Forensic)
+            // Ensures valid data creation or logs failure.
             let shard_opt = create_video_shard(
                 frames,
                 StorageSequence(self.seq_counter as u32),
@@ -352,41 +367,39 @@ impl SimNode {
             )
             .ok_or_log("sim_gen_err", &self.network_id, "Video generation failed");
 
-            // 2. Witness Gate
-            // If we have a shard, seal it. If signing fails, WitnessGate logs it.
             if let Some(shard) = shard_opt {
-                let envelope_opt = Evidence::Video(shard).seal(&self.identity, self.network_id);
-
-                if let Some(mut envelope) = envelope_opt {
-                    // 3. Chaos Logic (Tampering)
-                    // We tamper *after* signing to ensure the IntegrityGate catches it downstream.
-                    if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
-                        if let Evidence::Video(ref mut v) = envelope.evidence {
-                            v.fps = 145; // Invalidates signature (content changed post-sign)
+                let chunks_opt = Evidence::Video(shard)
+                    // 2. Privacy Gate (Encryption)
+                    .safeguard(&self.network_key)
+                    // 3. Witness Gate (Signing)
+                    .and_then(|ev| ev.seal(&self.identity, self.network_id))
+                    .and_then(|mut envelope| {
+                        // CHAOS INTERCEPTOR: Tamper *after* signing, *before* sending.
+                        // This tests if the Receiver's Integrity Gate works.
+                        if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
+                            if let Evidence::Video(ref mut v) = envelope.evidence {
+                                v.fps = 145; // Corrupt the data
+                            }
                         }
-                    }
-
-                    // 4. Discretization Gate
-                    // Uses the helper method on WitnessEnvelope to Serialize -> Chunkify
-                    let chunks_opt = envelope.chunkify(shard_id).ok_or_log(
-                        "sim_chunk_err",
-                        &self.network_id,
-                        "Discretization failed",
+                        Some(envelope)
+                    })
+                    // 4. Forensic Gate (Chunking/Discretization)
+                    .and_then(|env| env.chunkify(shard_id)
+                         .ok_or_log("sim_chunk_err", &self.network_id, "Discretization failed")
                     );
 
-                    // 5. Broadcast
-                    if let Some(chunks) = chunks_opt {
-                        if let Some(first_chunk) = chunks.get(0) {
-                            let event = SimEvent::ChunkIngested {
-                                origin: self.network_id,
-                                chunk: first_chunk.clone(),
-                            };
+                // 5. Broadcast (Simulated Network)
+                if let Some(chunks) = chunks_opt {
+                    if let Some(first_chunk) = chunks.get(0) {
+                        let event = SimEvent::ChunkIngested {
+                            origin: self.network_id,
+                            chunk: first_chunk.clone(),
+                        };
 
-                            let _ = self
-                                .broadcast_tx
-                                .send((self.identity.did.clone(), self.network_id, event))
-                                .await;
-                        }
+                        let _ = self
+                            .broadcast_tx
+                            .send((self.identity.did.clone(), self.network_id, event))
+                            .await;
                     }
                 }
             }
@@ -404,7 +417,6 @@ impl SimNode {
 
             SimEvent::ChaosUpdate(mode) => {
                 self.chaos_mode = mode;
-                // Note: We don't need to adjust tickers here anymore, logic handles it naturally
             }
 
             SimEvent::ChunkIngested { origin, chunk } => {
@@ -414,7 +426,6 @@ impl SimNode {
             }
 
             SimEvent::PeerDiscovered { peer, role, .. } => {
-                // Register Strongholds for Offloading
                 if role == NodeRole::Stronghold && !self.known_strongholds.contains(&peer) {
                     self.known_strongholds.push(peer);
                     debug!("Registered Stronghold: {}", peer);
@@ -422,7 +433,11 @@ impl SimNode {
             }
 
             SimEvent::Heartbeat { payload, .. } => {
-                if let Ok(msg) = postcard::from_bytes::<ControlMessage>(&payload) {
+                // Forensic Gate: Deserialization
+                let msg_opt = postcard::from_bytes::<ControlMessage>(&payload)
+                    .ok_or_log("heartbeat_rx_err", &self.network_id, "Malformed heartbeat");
+
+                if let Some(msg) = msg_opt {
                     self.sentinel.health_tracker.register_activity(msg);
                 }
             }
@@ -443,7 +458,7 @@ impl SimNode {
         origin: NetworkId,
         chunk: crate::primitives::shards::ShardChunk,
     ) {
-        // 1. Snapshot Reputation
+        // 1. Snapshot Reputation (Forensic baseline)
         let was_blacklisted = self
             .storage
             .peer_registry
@@ -455,10 +470,10 @@ impl SimNode {
             .get(&chunk.owner_did)
             .map_or(0, |r| r.invalid_sigs);
 
-        // 2. Ingest (Triggering Guardian Logic)
+        // 2. Ingest (Internal Gates applied in Guardian::ingest_chunk)
         self.storage.ingest_chunk(chunk.clone(), false);
 
-        // 3. Inspect Result
+        // 3. Inspect Result (Post-Gating Analysis)
         let current_rep = self.storage.peer_registry.get(&chunk.owner_did);
         let is_blacklisted = current_rep.is_some_and(|r| r.is_blacklisted);
         let post_sigs = current_rep.map_or(0, |r| r.invalid_sigs);
