@@ -163,7 +163,7 @@ impl StrongholdEngine {
 
                 // --- DOMAIN C: Vitality (The "Pulse") ---
                 () = &mut heartbeat_timer => {
-                    let next_interval = self.pulse_vitality().await?;
+                    let next_interval = self.pulse_vitality()?;
                     heartbeat_timer.as_mut().reset((Instant::now() + next_interval).into());
                 }
             }
@@ -182,7 +182,7 @@ impl StrongholdEngine {
     ) -> Result<(), Box<dyn Error>> {
         match event {
             SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(event)) => {
-                self.handle_gossip(event).await?;
+                self.handle_gossip(event)?;
             }
 
             SwarmEvent::Behaviour(PhalanxEvent::Mdns(mdns::Event::Discovered(list))) => {
@@ -224,7 +224,7 @@ impl StrongholdEngine {
     /// Distinction:
     /// * **Control Signals:** Updates the internal "Reputation Table" (Justiciar).
     /// * **Data Shards:** Immediately persisted to the Vault ("Salvage").
-    async fn handle_gossip(&mut self, event: gossipsub::Event) -> Result<(), Box<dyn Error>> {
+    fn handle_gossip(&mut self, event: gossipsub::Event) -> Result<(), Box<dyn Error>> {
         // 1. Extract the message or exit immediately
         let message = match event {
             gossipsub::Event::Message { message, .. } => message,
@@ -275,7 +275,7 @@ impl StrongholdEngine {
     /// A Stronghold under heavy storage load (high I/O) beats slower.
     /// A Stronghold doing nothing beats fast.
     /// This allows the network to route data away from stressed nodes naturally.
-    async fn pulse_vitality(&mut self) -> Result<Duration, Box<dyn Error>> {
+    fn pulse_vitality(&mut self) -> Result<Duration, Box<dyn Error>> {
         // 1. Measure Stress
         let active_storage_tasks = self.storage.micro_layer.len() as f32;
         let max_capacity = self.config.storage.max_peers as f32;
