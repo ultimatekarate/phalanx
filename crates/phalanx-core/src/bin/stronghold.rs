@@ -163,7 +163,7 @@ impl StrongholdEngine {
 
                 // --- DOMAIN C: Vitality (The "Pulse") ---
                 () = &mut heartbeat_timer => {
-                    let next_interval = self.pulse_vitality()?;
+                    let next_interval = self.pulse_vitality();
                     heartbeat_timer.as_mut().reset((Instant::now() + next_interval).into());
                 }
             }
@@ -226,11 +226,9 @@ impl StrongholdEngine {
     /// * **Data Shards:** Immediately persisted to the Vault ("Salvage").
     fn handle_gossip(&mut self, event: gossipsub::Event) -> Result<(), Box<dyn Error>> {
         // 1. Extract the message or exit immediately
-        let message = match event {
-            gossipsub::Event::Message { message, .. } => message,
-            _ => return Ok(()),
-        };
 
+        let gossipsub::Event::Message { message, .. } = event else { return Ok(()) };
+        
         let topic: MeshTopic = message.topic.as_str().into();
         let local_peer = NetworkId(*self.swarm.local_peer_id());
 
@@ -275,7 +273,7 @@ impl StrongholdEngine {
     /// A Stronghold under heavy storage load (high I/O) beats slower.
     /// A Stronghold doing nothing beats fast.
     /// This allows the network to route data away from stressed nodes naturally.
-    fn pulse_vitality(&mut self) -> Result<Duration, Box<dyn Error>> {
+    fn pulse_vitality(&mut self) -> Duration {
         // 1. Measure Stress
         let active_storage_tasks = self.storage.micro_layer.len() as f32;
         let max_capacity = self.config.storage.max_peers as f32;
@@ -284,10 +282,10 @@ impl StrongholdEngine {
         // 2. Calculate Rate
         let vitality = VitalityRate::calculate(&self.physics, PowerState::Normal, load);
         let interval = vitality.as_duration();
-
+        let sender_id = NetworkId(*self.swarm.local_peer_id());
         // 3. Construct Proof
-        let hb = ControlMessage {
-            sender: NetworkId(*self.swarm.local_peer_id()),
+        let heartbeat_msg = ControlMessage {
+            sender: sender_id.clone(),
             load_factor: load.as_f32(),
             storage_remaining_mb: 10240, // TODO: Real disk check
             heartbeat_ms: vitality.as_u64(),
@@ -295,17 +293,18 @@ impl StrongholdEngine {
         };
 
         // 4. Broadcast
-        if let Ok(data) = postcard::to_stdvec(&hb) {
-            let topic = gossipsub::IdentTopic::new(&self.config.network.control_topic);
-            let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, data);
-        }
+        postcard::to_stdvec(&heartbeat_msg)
+        .ok_or_log("heartbeat_enc_fail", &sender_id.clone(), "Failed to encode heartbeat")
+        .map(|data| {
+            let topic = gossipsub::IdentTopic::new(self.config.network.control_topic.to_string());
 
-        // 5. Self-Protection Log
-        if load > UnitInterval::new(0.8) {
-            warn!(load = %load, next = ?interval, "High load detected. Throttling pulse.");
-        }
+            let _ = self.swarm.behaviour_mut().gossipsub.publish(
+                topic,
+                data
+            );
+        });
 
-        Ok(interval)
+        interval
     }
 
     fn perform_maintenance(&mut self) {
