@@ -633,9 +633,11 @@ mod tests {
     use crate::base::config::{HardwareConfig, NetworkConfig, StorageConfig};
     use crate::primitives::identity::{NetworkId, PhalanxIdentity};
     use crate::primitives::shards;
-    use std::fs::File;
+    use std::fs::{self, File};
     use std::io::Write;
+    use std::path::PathBuf;
 
+    // Helper stays infallible as it constructs a struct literal
     fn mock_config(max_foreign_bytes: ByteCapacity) -> PhalanxConfig {
         PhalanxConfig {
             network: NetworkConfig {
@@ -667,32 +669,37 @@ mod tests {
     }
 
     #[test]
-    fn test_governance_pruning() {
+    fn test_governance_pruning() -> Result<(), Box<dyn std::error::Error>> {
         use std::thread;
         let vault_root = PathBuf::from("test_vault_governance");
-        let _ = fs::remove_dir_all(&vault_root);
-        fs::create_dir_all(&vault_root).expect("Failed to create root");
+        
+        if vault_root.exists() {
+            fs::remove_dir_all(&vault_root)?;
+        }
+        fs::create_dir_all(&vault_root)?;
 
-        let (me, _) = PhalanxIdentity::generate().unwrap();
-        let (stranger_1, _) = PhalanxIdentity::generate().unwrap();
-        let (stranger_2, _) = PhalanxIdentity::generate().unwrap();
+        let (me, _) = PhalanxIdentity::generate()?;
+        let (stranger_1, _) = PhalanxIdentity::generate()?;
+        let (stranger_2, _) = PhalanxIdentity::generate()?;
 
         // 1. Create OLD Data (Stranger 1)
         let s1_dir = vault_root.join(stranger_1.did.to_safe_name());
-        fs::create_dir_all(&s1_dir).expect("Failed to create s1 dir");
-        let mut f1 = File::create(s1_dir.join("old_evidence.phlx")).expect("Failed to create f1");
-        f1.write_all(&[0u8; 1000]).unwrap();
-        f1.sync_all().unwrap();
+        fs::create_dir_all(&s1_dir)?;
+        
+        let mut f1 = File::create(s1_dir.join("old_evidence.phlx"))?;
+        f1.write_all(&[0u8; 1000])?;
+        f1.sync_all()?;
 
         // FIX: Ensure distinct timestamp
         thread::sleep(std::time::Duration::from_millis(100));
 
         // 2. Create NEW Data (Stranger 2)
         let s2_dir = vault_root.join(stranger_2.did.to_safe_name());
-        fs::create_dir_all(&s2_dir).expect("Failed to create s2 dir");
-        let mut f2 = File::create(s2_dir.join("new_evidence.phlx")).expect("Failed to create f2");
-        f2.write_all(&[0u8; 1000]).unwrap();
-        f2.sync_all().unwrap();
+        fs::create_dir_all(&s2_dir)?;
+        
+        let mut f2 = File::create(s2_dir.join("new_evidence.phlx"))?;
+        f2.write_all(&[0u8; 1000])?;
+        f2.sync_all()?;
 
         // 3. Init Guardian
         let config = mock_config(ByteCapacity(1500));
@@ -721,26 +728,32 @@ mod tests {
             "Usage should be under limit"
         );
 
-        let _ = fs::remove_dir_all(&vault_root);
+        if vault_root.exists() {
+            fs::remove_dir_all(&vault_root)?;
+        }
+        Ok(())
     }
 
     #[test]
-    fn test_invalid_signature_rejection() {
-        let (identity, _) = PhalanxIdentity::generate().unwrap();
-        let _attacker = PhalanxIdentity::generate(); // Different key!
+    fn test_invalid_signature_rejection() -> Result<(), Box<dyn std::error::Error>> {
+        let (identity, _) = PhalanxIdentity::generate()?;
+        let _attacker = PhalanxIdentity::generate()?; // Different key!
         let peer_id = NetworkId::random();
         let config = PhalanxConfig::default();
         let vault_path = "sim_vault/test_sig_reject";
-        let _ = std::fs::remove_dir_all(vault_path);
+        
+        if std::path::Path::new(vault_path).exists() {
+            std::fs::remove_dir_all(vault_path)?;
+        }
 
         let mut guardian = Guardian::new(vault_path, &config, identity.did.clone());
 
-        // 1. Create a Shard using constructor
+        // 1. Create a Shard using constructor (safe propagation)
         let frames = vec![vec![1]];
-        let shard = shards::create_video_shard(frames, StorageSequence(1), 30, "v1".into());
+        let shard = shards::create_video_shard(frames, StorageSequence(1), 30, "v1".into())?;
 
         // 2. Sign it with the WRONG identity (Attacker signs, claims to be Victim?)
-        let mut envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id);
+        let mut envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id)?;
 
         // 3. TAMPER: Modify the payload without updating the signature
         if let Evidence::Video(ref mut v) = envelope.evidence {
@@ -755,12 +768,14 @@ mod tests {
             Err(GuardianError::InvalidSignature(_)) => (), // Pass
             _ => panic!("Wrong error type returned"),
         }
+        
+        Ok(())
     }
 
     #[test]
-    fn test_governance_rejection() {
-        let (identity, _) = PhalanxIdentity::generate().unwrap();
-        let (stranger, _) = PhalanxIdentity::generate().unwrap();
+    fn test_governance_rejection() -> Result<(), Box<dyn std::error::Error>> {
+        let (identity, _) = PhalanxIdentity::generate()?;
+        let (stranger, _) = PhalanxIdentity::generate()?;
         let peer_id = NetworkId::random();
 
         // 1. Setup Config with TINY limit (0 bytes)
@@ -768,7 +783,9 @@ mod tests {
         config.storage.max_foreign_storage_bytes = ByteCapacity(0); // Strict mode
 
         let vault_path = "sim_vault/test_quota_reject";
-        let _ = std::fs::remove_dir_all(vault_path);
+        if std::path::Path::new(vault_path).exists() {
+            std::fs::remove_dir_all(vault_path)?;
+        }
 
         let mut guardian = Guardian::new(vault_path, &config, identity.did.clone());
 
@@ -776,8 +793,8 @@ mod tests {
         guardian.foreign_storage_usage = ByteCapacity(1000);
 
         let frames = vec![vec![1]];
-        let shard = shards::create_video_shard(frames, StorageSequence(1), 30, "v1".into());
-        let envelope = WitnessEnvelope::new(Evidence::Video(shard), &stranger, peer_id);
+        let shard = shards::create_video_shard(frames, StorageSequence(1), 30, "v1".into())?;
+        let envelope = WitnessEnvelope::new(Evidence::Video(shard), &stranger, peer_id)?;
 
         // 3. Ingest Foreign Data
         let result = guardian.ingest_envelope(envelope);
@@ -788,22 +805,26 @@ mod tests {
             Err(GuardianError::QuotaExceeded(limit)) => assert_eq!(limit, ByteCapacity(0)),
             _ => panic!("Wrong error type"),
         }
+        Ok(())
     }
 
     #[test]
-    fn test_replay_protection() {
-        let (identity, _) = PhalanxIdentity::generate().unwrap();
+    fn test_replay_protection() -> Result<(), Box<dyn std::error::Error>> {
+        let (identity, _) = PhalanxIdentity::generate()?;
         let peer_id = NetworkId::random();
         let config = PhalanxConfig::default();
         let vault_path = "sim_vault/test_replay";
-        let _ = std::fs::remove_dir_all(vault_path);
+        
+        if std::path::Path::new(vault_path).exists() {
+            std::fs::remove_dir_all(vault_path)?;
+        }
 
         let mut guardian = Guardian::new(vault_path, &config, identity.did.clone());
 
         let seq_num = StorageSequence(50);
         let frames = vec![vec![1]];
-        let shard = shards::create_video_shard(frames, seq_num, 30, "v1".into());
-        let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id);
+        let shard = shards::create_video_shard(frames, seq_num, 30, "v1".into())?;
+        let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id)?;
 
         // 1. MANUALLY SEED HISTORY
         guardian
@@ -821,20 +842,24 @@ mod tests {
             active_session.is_none(),
             "Replayed envelope leaked into active buffer!"
         );
+        Ok(())
     }
 
     #[test]
-    fn test_initial_usage_scan() {
-        let (identity, _) = PhalanxIdentity::generate().unwrap();
-        let (stranger, _) = PhalanxIdentity::generate().unwrap();
+    fn test_initial_usage_scan() -> Result<(), Box<dyn std::error::Error>> {
+        let (identity, _) = PhalanxIdentity::generate()?;
+        let (stranger, _) = PhalanxIdentity::generate()?;
         let config = PhalanxConfig::default();
         let vault_path = "sim_vault/test_init_scan";
-        let _ = std::fs::remove_dir_all(vault_path);
+        
+        if std::path::Path::new(vault_path).exists() {
+            std::fs::remove_dir_all(vault_path)?;
+        }
 
         // 1. Pre-seed the disk with data
         let stranger_dir = std::path::PathBuf::from(vault_path).join(stranger.did.to_safe_name());
-        std::fs::create_dir_all(&stranger_dir).unwrap();
-        std::fs::write(stranger_dir.join("test.bin"), vec![0u8; 500]).unwrap(); // 500 bytes
+        std::fs::create_dir_all(&stranger_dir)?;
+        std::fs::write(stranger_dir.join("test.bin"), vec![0u8; 500])?; // 500 bytes
 
         // 2. Boot Guardian
         let guardian = Guardian::new(vault_path, &config, identity.did.clone());
@@ -842,12 +867,13 @@ mod tests {
         // 3. Assert Usage Detected
         assert_eq!(guardian.current_storage_usage, ByteCapacity(500));
         assert_eq!(guardian.foreign_storage_usage, ByteCapacity(500));
+        Ok(())
     }
 
     #[test]
-    fn test_vampire_blacklisting() {
-        let (me, _) = PhalanxIdentity::generate().unwrap();
-        let (vampire, _) = PhalanxIdentity::generate().unwrap();
+    fn test_vampire_blacklisting() -> Result<(), Box<dyn std::error::Error>> {
+        let (me, _) = PhalanxIdentity::generate()?;
+        let (vampire, _) = PhalanxIdentity::generate()?;
         let config = PhalanxConfig::default();
         let mut guardian = Guardian::new("sim_vault/vampire_test", &config, me.did.clone());
 
@@ -858,21 +884,25 @@ mod tests {
                 StorageSequence(1),
                 30,
                 "v1".into(),
-            );
+            )?;
             let mut envelope =
-                WitnessEnvelope::new(Evidence::Video(shard), &vampire, NetworkId::random());
+                WitnessEnvelope::new(Evidence::Video(shard), &vampire, NetworkId::random())?;
 
             // TAMPER
             if let Evidence::Video(ref mut v) = envelope.evidence {
                 v.fps = 99;
             }
 
-            _ = guardian.ingest_envelope(envelope);
+            let _ = guardian.ingest_envelope(envelope);
         }
 
         // 2. Verify blacklisted
-        let rep = guardian.peer_registry.get(&vampire.did).unwrap();
+        // Safe Option unwrap
+        let rep = guardian.peer_registry.get(&vampire.did)
+            .ok_or("Expected vampire DID in registry")?;
+        
         assert!(rep.is_blacklisted);
+        Ok(())
     }
 }
 
@@ -884,38 +914,40 @@ mod guardian_leaf_tests {
         self, ChunkType, Evidence, ShardId, StorageSequence, WitnessEnvelope,
     };
 
-    #[tokio::test] // Use tokio::test for Instant::now() compatibility
-    async fn test_guardian_leaf_mode_ingestion() {
+    #[tokio::test] 
+    async fn test_guardian_leaf_mode_ingestion() -> Result<(), Box<dyn std::error::Error>> {
         let _ = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
             .with_test_writer()
-            .try_init();
+            .try_init(); // Safe to ignore if init fails (already init)
 
-        let (identity, _) = PhalanxIdentity::generate().unwrap();
+        let (identity, _) = PhalanxIdentity::generate()?;
         let config = PhalanxConfig::default();
         let vault_path = "sim_vault/leaf_unit_test";
 
-        let _ = std::fs::remove_dir_all(vault_path);
+        if std::path::Path::new(vault_path).exists() {
+            std::fs::remove_dir_all(vault_path)?;
+        }
+        
         let mut guardian = Guardian::new(vault_path, &config, identity.did.clone());
 
         // 1. Create a REAL forensic unit (Video Shard)
         let frames = vec![vec![1, 2, 3]];
         let shard =
-            shards::create_video_shard(frames, StorageSequence(200), 30, "volley_test".into());
+            shards::create_video_shard(frames, StorageSequence(200), 30, "volley_test".into())?;
 
         // 2. WRAP in an Envelope
-        // ShardAmalgam strategy expects to deserialize a WitnessEnvelope, not a Shard
-        let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, NetworkId::random());
+        let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, NetworkId::random())?;
 
-        // 3. Serialize the FULL ENVELOPE
-        let envelope_bytes = postcard::to_stdvec(&envelope).expect("Failed to serialize envelope");
+        // 3. Serialize the FULL ENVELOPE (Safe Propagation)
+        let envelope_bytes = postcard::to_stdvec(&envelope)?;
 
         // 4. Create chunks from the ENVELOPE bytes
         let local_chunk = shards::ShardChunk {
             shard_id: ShardId(200),
             chunk_index: 0,
             total_chunks: 1,
-            data: envelope_bytes, // This is now the full signed data
+            data: envelope_bytes,
             owner_did: identity.did.clone(),
             chunk_type: ChunkType::Witnessed,
         };
@@ -925,13 +957,15 @@ mod guardian_leaf_tests {
         guardian.ingest_chunk(local_chunk, is_leaf_mode);
 
         // 6. Verification
-        // If successful, the Crucible seals it and the micro_layer length returns to 0
         assert_eq!(
             guardian.micro_layer.len(),
             0,
             "Micro-layer should be empty after successful sealing and promotion"
         );
 
-        let _ = std::fs::remove_dir_all(vault_path);
+        if std::path::Path::new(vault_path).exists() {
+            std::fs::remove_dir_all(vault_path)?;
+        }
+        Ok(())
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use tokio::time::Instant;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, error, instrument, warn};
 
 use crate::primitives::shards::{
     AudioShard, ChunkType, Evidence, ReassemblyBuffer, ShardChunk, ShardId, VideoShard,
@@ -217,8 +217,22 @@ impl Sentinel {
                     };
 
                     if let Some(ev) = evidence {
-                        info!(%shard_id, "Successfully witnessed local forensic unit.");
-                        Some(WitnessEnvelope::new(ev, identity, local_peer_id))
+                        // Sentinel Guard: We attempt to sign the evidence.
+                        // If serialization or signing fails, we log it forensicly and drop the unit.
+                        match WitnessEnvelope::new(ev, identity, local_peer_id) {
+                            Ok(envelope) => {
+                                info!(%shard_id, "Successfully witnessed local forensic unit.");
+                                Some(envelope)
+                            }
+                            Err(e) => {
+                                error!(
+                                    %shard_id, 
+                                    error = %e, 
+                                    "Critical: Failed to sign local forensic unit (dropped)"
+                                );
+                                None
+                            }
+                        }
                     } else {
                         warn!(%shard_id, "Deserialization failed for reassembled raw shard.");
                         None

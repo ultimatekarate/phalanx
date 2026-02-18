@@ -155,24 +155,42 @@ impl PhalanxEngine {
             tokio::select! {
                 // Priority 1: Network I/O
                 event = self.swarm.select_next_some() => {
+                    // Network events usually carry critical state; we propagate these.
                     self.handle_swarm_event(event).await?;
                 }
 
                 // Priority 2: Local Video Witnessing
                 Some(shard) = self.video_rx.recv() => {
-                    // 1. Wrap raw shard in Evidence Enum
                     let evidence = Evidence::Video(shard);
-                    // 2. Sign and Seal into WitnessEnvelope using our Ghost Key
-                    let envelope = WitnessEnvelope::new(evidence, &self.identity, local_network_id);
-                    // 3. Persist to Disk (WAL) and prepare for distribution
-                    self.finalize_reassembly(envelope).await?;
+                    
+                    // Fault-Tolerant Gate: Signing failure does not kill the loop
+                    match WitnessEnvelope::new(evidence, &self.identity, local_network_id) {
+                        Ok(envelope) => {
+                            // Attempt persistence; log failure but keep recording other streams
+                            if let Err(e) = self.finalize_reassembly(envelope).await {
+                                tracing::error!(error = %e, "IO_FAILURE: Could not persist video unit to WAL");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "DATA_CORRUPTION: Dropping video frame - Signing failed");
+                        }
+                    }
                 }
 
                 // Priority 3: Local Audio Witnessing
                 Some(shard) = self.audio_rx.recv() => {
                     let evidence = Evidence::Audio(shard);
-                    let envelope = WitnessEnvelope::new(evidence, &self.identity, local_network_id);
-                    self.finalize_reassembly(envelope).await?;
+
+                    match WitnessEnvelope::new(evidence, &self.identity, local_network_id) {
+                        Ok(envelope) => {
+                            if let Err(e) = self.finalize_reassembly(envelope).await {
+                                tracing::error!(error = %e, "IO_FAILURE: Could not persist audio unit to WAL");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "DATA_CORRUPTION: Dropping audio packet - Signing failed");
+                        }
+                    }
                 }
             }
         }
