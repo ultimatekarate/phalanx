@@ -355,6 +355,13 @@ impl PhalanxIdentity {
     }
 }
 
+impl Default for PhalanxIdentity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+    
+
 /// Standalone boot strapper for the identity primitive.
 pub fn init_identity<P: AsRef<Path>>(path: P) -> Result<PhalanxIdentity, IdentityError> {
     match PhalanxIdentity::load_from_disk(&path) {

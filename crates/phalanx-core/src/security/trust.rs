@@ -142,14 +142,14 @@ impl TrustRegistry {
         clock: &TrustedClock,
     ) -> Result<(), TrustError> {
         // 1. Check Alias Uniqueness
-        if let Some(existing_did) = self.pet_name_index.get(&pet_name) {
+        if let Some(existing_did) = self.pet_name_index.get(pet_name) {
             if *existing_did != *did {
                 return Err(TrustError::PetnameCollision(pet_name.to_string()));
             }
         }
 
         // 2. Remove old pet name if the user is renaming this DID
-        if let Some(old_record) = self.contacts.get(&did) {
+        if let Some(old_record) = self.contacts.get(did) {
             if old_record.pet_name != *pet_name {
                 self.pet_name_index.remove(&old_record.pet_name);
             }
@@ -161,7 +161,7 @@ impl TrustRegistry {
 
         let original_added_at = self
             .contacts
-            .get(&did)
+            .get(did)
             .map_or(timestamp, |record| record.added_at);
 
         let record = PeerRecord {

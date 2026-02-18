@@ -256,11 +256,11 @@ impl StrongholdEngine {
     /// Distinction:
     /// * **Control Signals:** Updates the internal "Reputation Table" (Justiciar).
     /// * **Data Shards:** Immediately persisted to the Vault ("Salvage").
-    fn handle_gossip(&mut self, event: gossipsub::Event) -> () {
+    fn handle_gossip(&mut self, event: gossipsub::Event) {
         // 1. Extract the message or exit immediately
 
         let gossipsub::Event::Message { message, .. } = event else {
-            return ();
+            return ;
         };
 
         let topic: MeshTopic = message.topic.as_str().into();
@@ -278,7 +278,7 @@ impl StrongholdEngine {
                 self.sentinel.health_tracker.register_activity(msg)
             }
 
-            return ();
+            return ;
         }
 
         // ------------------------------------------------------------------
@@ -301,7 +301,7 @@ impl StrongholdEngine {
                 )
             });
 
-        ()
+        
     }
 
     /// Calculates the Node's "Vitality Rate" and broadcasts a heartbeat.
