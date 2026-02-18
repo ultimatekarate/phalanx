@@ -85,7 +85,7 @@ impl StrongholdEngine {
         swarm
             .behaviour_mut()
             .kademlia
-            .start_providing(storage_key.clone())?;
+            .start_providing(storage_key)?;
 
         // 5. Topic Subscription
         let gossip = &mut swarm.behaviour_mut().gossipsub;
@@ -97,7 +97,7 @@ impl StrongholdEngine {
         let port = std::env::args()
             .nth(1)
             .unwrap_or_else(|| "4001".to_string());
-        swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}", port).parse()?)?;
+        swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{port}").parse()?)?;
 
         Ok(Self {
             config,
@@ -162,7 +162,7 @@ impl StrongholdEngine {
                 }
 
                 // --- DOMAIN C: Vitality (The "Pulse") ---
-                _ = &mut heartbeat_timer => {
+                () = &mut heartbeat_timer => {
                     let next_interval = self.pulse_vitality().await?;
                     heartbeat_timer.as_mut().reset((Instant::now() + next_interval).into());
                 }
@@ -219,7 +219,7 @@ impl StrongholdEngine {
         Ok(())
     }
 
-    /// Processes high-velocity GossipSub messages.
+    /// Processes high-velocity `GossipSub` messages.
     ///
     /// Distinction:
     /// * **Control Signals:** Updates the internal "Reputation Table" (Justiciar).
