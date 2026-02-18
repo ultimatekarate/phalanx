@@ -1,8 +1,8 @@
 use std::sync::Once;
-use tracing_appender::rolling;
-use tracing_subscriber::{fmt, prelude::*};
-use tracing_subscriber::filter::Targets;
 use tracing::Level;
+use tracing_appender::rolling;
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::{fmt, prelude::*};
 
 use serde::{Deserialize, Serialize};
 

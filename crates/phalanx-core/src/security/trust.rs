@@ -237,7 +237,7 @@ impl TrustRegistry {
     pub fn check_trust(&self, did: &Did) -> TrustLevel {
         self.contacts
             .get(did)
-            .map_or(TrustLevel::Ignored,|r| r.level)
+            .map_or(TrustLevel::Ignored, |r| r.level)
     }
 
     /// Removes a peer from the registry entirely.
@@ -319,12 +319,22 @@ mod tests {
         assert_eq!(registry.get_alias(&did1), Some("Alice"));
 
         // Attempt Collision
-        let err = registry.set_peer(&did2.clone(), &pet_name.clone(), TrustLevel::Ignored, &clock);
+        let err = registry.set_peer(
+            &did2.clone(),
+            &pet_name.clone(),
+            TrustLevel::Ignored,
+            &clock,
+        );
         assert!(matches!(err, Err(TrustError::PetnameCollision(_))));
 
         // Rename Alice -> BigAlice
         registry
-            .set_peer(&did1.clone(), &big_pet_name.clone(), TrustLevel::Ally, &clock)
+            .set_peer(
+                &did1.clone(),
+                &big_pet_name.clone(),
+                TrustLevel::Ally,
+                &clock,
+            )
             .unwrap();
         assert_eq!(
             registry.resolve_pet_name(&big_pet_name.clone()),

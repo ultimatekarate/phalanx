@@ -14,9 +14,9 @@ use phalanx_core::{
     },
     primitives::identity::{NetworkId, PhalanxIdentity},
     security::{
+        gate::ForensicGate,
         sentinel::{ControlMessage, Sentinel},
         telemetry,
-        gate::ForensicGate,
     },
     storage::vault::Guardian,
     transport::swarm::{get_storage_key, load_swarm_key, setup_phalanx_swarm},
@@ -51,9 +51,22 @@ impl StrongholdEngine {
     ///
     /// Loads configuration, generates/loads identity, establishes the Vault,
     /// and performs the cryptographic handshake to join the Swarm.
+    /// 
+    /// # Errors
+    /// 
     pub async fn new(config_path: &str) -> Result<Self, Box<dyn Error>> {
         let config = PhalanxConfig::load(config_path)?;
-        let (identity, _) = PhalanxIdentity::generate().unwrap();
+        let (identity, _) = PhalanxIdentity::generate()
+            .map_err(|e| {
+                // FORENSIC GATE: Report the entropy failure to telemetry
+                tracing::error!(
+                    target: "phalanx::forensics",
+                    event_code = "config_load_err",
+                    error = %e,
+                    "Engine boot aborted: Configuration missing or corrupt"
+                );
+                e
+            })?;
 
         // Physics Profile: WAN (High Latency Tolerance)
         // Strongholds are usually servers, but they deal with mobile peers.
@@ -73,8 +86,20 @@ impl StrongholdEngine {
         }
 
         // 3. Swarm Construction
+        let libp2p_key = identity.to_libp2p_keypair()
+            .map_err(|e| {
+                // FORENSIC GATE: Log the format mismatch before aborting
+                tracing::error!(
+                    target: "phalanx::forensics",
+                    event_code = "identity_format_err",
+                    error = %e,
+                    "Engine boot aborted: Failed to map PhalanxIdentity to libp2p format"
+                );
+                e
+            })?;
+
         let mut swarm = setup_phalanx_swarm(
-            identity.to_libp2p_keypair().unwrap(),
+            libp2p_key,
             &config,
             &physics,
             psk,
@@ -115,6 +140,13 @@ impl StrongholdEngine {
     /// 1. **Network Time:** Responding to asynchronous Swarm events.
     /// 2. **Maintenance Time:** Fixed interval pruning of stale data.
     /// 3. **Vitality Time:** Dynamic heartbeat pulsing based on system load.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// * The network swarm fails to poll (Critical Transport Failure).
+    /// * Inbound gossip messages contain unrecoverable malformations during the dispatch phase.
+    /// * Vitality calculations encounter a system-level clock error.
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
         info!(id = %self.identity.did, "Stronghold Engine active.");
 
@@ -182,7 +214,7 @@ impl StrongholdEngine {
     ) -> Result<(), Box<dyn Error>> {
         match event {
             SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(event)) => {
-                self.handle_gossip(event)?;
+                self.handle_gossip(event);
             }
 
             SwarmEvent::Behaviour(PhalanxEvent::Mdns(mdns::Event::Discovered(list))) => {
@@ -224,11 +256,13 @@ impl StrongholdEngine {
     /// Distinction:
     /// * **Control Signals:** Updates the internal "Reputation Table" (Justiciar).
     /// * **Data Shards:** Immediately persisted to the Vault ("Salvage").
-    fn handle_gossip(&mut self, event: gossipsub::Event) -> Result<(), Box<dyn Error>> {
+    fn handle_gossip(&mut self, event: gossipsub::Event) -> () {
         // 1. Extract the message or exit immediately
 
-        let gossipsub::Event::Message { message, .. } = event else { return Ok(()) };
-        
+        let gossipsub::Event::Message { message, .. } = event else {
+            return ();
+        };
+
         let topic: MeshTopic = message.topic.as_str().into();
         let local_peer = NetworkId(*self.swarm.local_peer_id());
 
@@ -236,10 +270,15 @@ impl StrongholdEngine {
         // BRANCH A: CONTROL PLANE (Heartbeats)
         // ------------------------------------------------------------------
         if topic == self.config.network.control_topic {
-            if let Some(msg) = postcard::from_bytes::<ControlMessage>(&message.data)
-                .ok_or_log("ctrl_parse_fail", &local_peer, "Malformed heartbeat") { self.sentinel.health_tracker.register_activity(msg) }
-                
-            return Ok(());
+            if let Some(msg) = postcard::from_bytes::<ControlMessage>(&message.data).ok_or_log(
+                "ctrl_parse_fail",
+                &local_peer,
+                "Malformed heartbeat",
+            ) {
+                self.sentinel.health_tracker.register_activity(msg)
+            }
+
+            return ();
         }
 
         // ------------------------------------------------------------------
@@ -250,21 +289,19 @@ impl StrongholdEngine {
             .ok_or_log("data_parse_fail", &local_peer, "Malformed data chunk")
             .and_then(|chunk| {
                 // Sentinel applies: PrivacyGate -> WitnessGate -> IntegrityGate
-                self.sentinel.process_chunk(
-                    chunk,
-                    &topic,
-                    &self.config,
-                    &self.identity,
-                    local_peer,
-                )
+                self.sentinel
+                    .process_chunk(chunk, &topic, &self.config, &self.identity, local_peer)
             })
             .and_then(|envelope| {
                 // Storage applies: CapacityGate -> ForensicGate
-                self.storage.ingest_envelope(envelope)
-                    .ok_or_log("vault_ingest_fail", &local_peer, "Vault rejected envelope")
+                self.storage.ingest_envelope(envelope).ok_or_log(
+                    "vault_ingest_fail",
+                    &local_peer,
+                    "Vault rejected envelope",
+                )
             });
 
-        Ok(())
+        ()
     }
 
     /// Calculates the Node's "Vitality Rate" and broadcasts a heartbeat.
@@ -285,7 +322,7 @@ impl StrongholdEngine {
         let sender_id = NetworkId(*self.swarm.local_peer_id());
         // 3. Construct Proof
         let heartbeat_msg = ControlMessage {
-            sender: sender_id.clone(),
+            sender: sender_id,
             load_factor: load.as_f32(),
             storage_remaining_mb: 10240, // TODO: Real disk check
             heartbeat_ms: vitality.as_u64(),
@@ -293,16 +330,17 @@ impl StrongholdEngine {
         };
 
         // 4. Broadcast
-        postcard::to_stdvec(&heartbeat_msg)
-        .ok_or_log("heartbeat_enc_fail", &sender_id.clone(), "Failed to encode heartbeat")
-        .map(|data| {
-            let topic = gossipsub::IdentTopic::new(self.config.network.control_topic.to_string());
+        if let Some(data) = postcard::to_stdvec(&heartbeat_msg)
+            .ok_or_log(
+                "heartbeat_enc_fail",
+                &sender_id.clone(),
+                "Failed to encode heartbeat",
+            ) {
+                let topic =
+                    gossipsub::IdentTopic::new(self.config.network.control_topic.to_string());
 
-            let _ = self.swarm.behaviour_mut().gossipsub.publish(
-                topic,
-                data
-            );
-        });
+                let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, data);
+            };
 
         interval
     }

@@ -454,10 +454,10 @@ impl SimNode {
             }
 
             // Ignored Events
-            SimEvent::ShardProcessed { .. } | 
-            SimEvent::CrucibleFinalized { .. }| 
-            SimEvent::AttackAttemptBlocked { .. } |
-            SimEvent::OffloadComplete { .. } => {}
+            SimEvent::ShardProcessed { .. }
+            | SimEvent::CrucibleFinalized { .. }
+            | SimEvent::AttackAttemptBlocked { .. }
+            | SimEvent::OffloadComplete { .. } => {}
             SimEvent::SystemStressUpdate(interval) => {
                 self.physics.apply_system_load(interval);
             }
