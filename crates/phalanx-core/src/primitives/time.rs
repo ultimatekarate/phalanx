@@ -16,10 +16,15 @@ pub enum TimeError {
 
     #[error("Invalid timestamp computation: {0}")]
     CalculationError(String),
+    
     #[error("Timestamp is too far in the past (Replay Attack): {0}s difference")]
     Stale(u64),
+    
     #[error("Timestamp is in the future (Time Traveler): {0}s difference")]
     Future(u64),
+
+    #[error("NTP Sync failed: {0}")]
+    NtpError(String),
 }
 
 pub type TimeResult<T> = Result<T, TimeError>;
@@ -42,24 +47,34 @@ impl TrustedClock {
     }
 
     /// Returns the current "True Time" (Local + Offset) in seconds.
-    pub fn now(&self) -> u64 {
+    /// 
+    /// # Forensic Safety
+    /// Returns `TimeError` if the system clock is before UNIX_EPOCH or if 
+    /// the internal lock is poisoned.
+    pub fn now(&self) -> TimeResult<u64> {
         let local = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .map_err(TimeError::ClockSkew)?
             .as_secs() as i64;
-        let offset_sec = *self.offset_ms.read().unwrap() / 1000;
-        (local + offset_sec).max(0) as u64
+        
+        let offset_guard = self.offset_ms.read()
+            .map_err(|_| TimeError::LockPoisoned("offset_ms read lock poisoned".to_string()))?;
+        
+        let offset_sec = *offset_guard / 1000;
+        
+        // Ensure we don't return negative time if offset is massive
+        Ok((local + offset_sec).max(0) as u64)
     }
 
     /// Validates if a timestamp is within the acceptable window of True Time.
     /// Used to reject Replay Attacks (too old) or Time Travelers (too new).
-    pub fn is_valid(&self, claimed_time: u64, tolerance_secs: u64) -> bool {
-        let now = self.now();
+    pub fn is_valid(&self, claimed_time: u64, tolerance_secs: u64) -> TimeResult<bool> {
+        let now = self.now()?;
 
         // We use saturating logic to avoid underflow
         let diff = claimed_time.abs_diff(now);
 
-        diff <= tolerance_secs
+        Ok(diff <= tolerance_secs)
     }
 
     /// Updates the offset manually (for testing or NTP sync)
@@ -67,54 +82,50 @@ impl TrustedClock {
         let mut w = self
             .offset_ms
             .write()
-            .map_err(|_| TimeError::LockPoisoned("offset_ms RwLock is poisoned".to_string()))?;
+            .map_err(|_| TimeError::LockPoisoned("offset_ms write lock poisoned".to_string()))?;
         *w = new_offset;
         Ok(())
     }
 
-    pub async fn synchronize(&self) -> Result<(), String> {
+    /// Performs an NTP synchronization to calculate the time offset.
+    pub fn synchronize(&self) -> TimeResult<()> {
         // 1. Bind a local UDP socket to an available port (0)
-        let socket = match UdpSocket::bind("0.0.0.0:0") {
-            Ok(s) => s,
-            Err(e) => return Err(format!("Failed to bind UDP socket: {}", e)),
-        };
+        let socket = UdpSocket::bind("0.0.0.0:0")
+            .map_err(|e| TimeError::NtpError(format!("UDP Bind failed: {}", e)))?;
 
         // 2. Set a timeout so we don't hang forever if NTP is down
-        if let Err(e) = socket.set_read_timeout(Some(Duration::from_secs(2))) {
-            return Err(format!("Failed to set socket timeout: {}", e));
-        }
+        socket.set_read_timeout(Some(Duration::from_secs(2)))
+            .map_err(|e| TimeError::NtpError(format!("Socket configuration failed: {}", e)))?;
 
         // NTP uses UDP port 123
         match sntpc::simple_get_time("pool.ntp.org", &socket) {
             Ok(time) => {
-                // Calculate offset: NTP Time - System Time
-                // sntpc returns seconds + fraction. We just care about seconds roughly for this proof of concept,
-                // but strictly we should use the precise offset provided by the library if available,
-                // or compare sec/nsec.
-
                 let ntp_sec = time.sec();
-                // let ntp_frac = time.nsec();
-
-                let system_now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+                
+                let system_now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(TimeError::ClockSkew)?;
+                
                 let system_sec = system_now.as_secs();
 
                 // Simple offset calculation (Network - Local)
                 // If Network is 1000 and Local is 990, offset is +10.
-                // We store in milliseconds for better precision than raw seconds.
                 let diff_sec = (ntp_sec as i64) - (system_sec as i64);
                 let offset_ms = diff_sec * 1000;
 
-                {
-                    let mut w = self.offset_ms.write().unwrap();
-                    *w = offset_ms;
-                }
+                // Safe lock acquisition
+                let mut w = self.offset_ms.write()
+                    .map_err(|_| TimeError::LockPoisoned("offset_ms write lock poisoned".to_string()))?;
+                
+                *w = offset_ms;
 
                 info!("NTP Sync Complete. Offset: {}ms", offset_ms);
                 Ok(())
             }
             Err(e) => {
-                warn!("NTP Sync Failed: {:?}. Using local system time.", e);
-                Err(format!("{:?}", e))
+                let err_msg = format!("{:?}", e);
+                warn!("NTP Sync Failed: {}. Using local system time.", err_msg);
+                Err(TimeError::NtpError(err_msg))
             }
         }
     }
@@ -131,9 +142,9 @@ impl Default for TrustedClock {
 pub struct PhalanxTimestamp(u64);
 
 impl PhalanxTimestamp {
-    /// Captures current network time.
-    pub fn now(clock: &TrustedClock) -> Self {
-        Self(clock.now())
+    /// Captures current network time safely.
+    pub fn now(clock: &TrustedClock) -> TimeResult<Self> {
+        Ok(Self(clock.now()?))
     }
 
     /// Wraps a raw value.
@@ -157,8 +168,8 @@ impl PhalanxTimestamp {
         &self,
         clock: &TrustedClock,
         tolerance_secs: u64,
-    ) -> Result<(), TimeError> {
-        let now = clock.now();
+    ) -> TimeResult<()> {
+        let now = clock.now()?;
 
         // Check for Future (Time Travelers)
         if self.0 > now + tolerance_secs {
@@ -179,44 +190,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_valid_timestamp_acceptance() {
+    fn test_valid_timestamp_acceptance() -> TimeResult<()> {
         let clock = TrustedClock::new();
-        let now = clock.now();
+        let now = clock.now()?;
 
         // Timestamp is "now", tolerance is 5s
-        assert!(clock.is_valid(now, 5), "Current time should be valid");
+        assert!(clock.is_valid(now, 5)?, "Current time should be valid");
 
         // Timestamp is 2s ago, tolerance 5s
-        assert!(clock.is_valid(now - 2, 5), "Recent past should be valid");
+        assert!(clock.is_valid(now - 2, 5)?, "Recent past should be valid");
 
         // Timestamp is 2s future, tolerance 5s
-        assert!(clock.is_valid(now + 2, 5), "Near future should be valid");
+        assert!(clock.is_valid(now + 2, 5)?, "Near future should be valid");
+        
+        Ok(())
     }
 
     #[test]
-    fn test_replay_attack_rejection() {
+    fn test_replay_attack_rejection() -> TimeResult<()> {
         let clock = TrustedClock::new();
-        let now = clock.now();
+        let now = clock.now()?;
 
         // Attack: Replaying a message from 1 minute ago
         let stale_timestamp = now - 60;
         assert!(
-            !clock.is_valid(stale_timestamp, 5),
+            !clock.is_valid(stale_timestamp, 5)?,
             "Old timestamp should be rejected"
         );
+        Ok(())
     }
 
     #[test]
-    fn test_future_attack_rejection() {
+    fn test_future_attack_rejection() -> TimeResult<()> {
         let clock = TrustedClock::new();
-        let now = clock.now();
+        let now = clock.now()?;
 
         // Attack: Message claiming to be from next year
         let future_timestamp = now + 3600;
         assert!(
-            !clock.is_valid(future_timestamp, 5),
+            !clock.is_valid(future_timestamp, 5)?,
             "Far future timestamp should be rejected"
         );
+        Ok(())
     }
 
     #[test]
@@ -231,11 +246,11 @@ mod tests {
         // Local system time (simulated)
         let local_sys_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .map_err(TimeError::ClockSkew)?
             .as_secs();
 
         // The clock.now() should return local + 10
-        let adjusted_time = clock.now();
+        let adjusted_time = clock.now()?;
 
         assert!(
             adjusted_time >= local_sys_time + 9,

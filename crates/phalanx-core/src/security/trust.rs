@@ -1,6 +1,6 @@
 use crate::base::config::PhalanxConfig;
 use crate::primitives::identity::Did;
-use crate::primitives::time::TrustedClock;
+use crate::primitives::time::{TrustedClock, TimeError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -76,6 +76,8 @@ pub enum TrustError {
     SerializationError(String),
     #[error("Invalid Pet name format: {0}")]
     InvalidPetName(String),
+    #[error("Trusted clock failure: {0}")]
+    TimeSource(#[from] TimeError),
 }
 
 /// A single entry in the Trust Registry.
@@ -155,14 +157,18 @@ impl TrustRegistry {
 
         // 3. Update Indices - no need to use trusted time here, this is local
         // to the device.
-        let timestamp = clock.now();
+        let timestamp = clock.now()?;
+
+        let original_added_at = self.contacts.get(&did)
+            .map(|record| record.added_at)   // Extract existing timestamp
+            .unwrap_or(timestamp);
 
         let record = PeerRecord {
             did: did.clone(),
             pet_name: pet_name.clone(),
             level,
-            added_at: timestamp,
-            last_interaction: timestamp, // Reset interaction on update? Or preserve?
+            added_at: original_added_at,
+            last_interaction: timestamp, 
         };
 
         self.contacts.insert(did.clone(), record);
@@ -175,13 +181,39 @@ impl TrustRegistry {
     }
 
     /// Updates the last interaction timestamp.
-    /// Call this when we receive valid data from a peer.
+    /// 
+    /// # Forensic Safety
+    /// This method absorbs clock errors rather than propagating them, 
+    /// preventing telemetry glitches from crashing the main loop.
+    /// Failures are logged as warnings.
     pub fn touch(&mut self, did: &Did, clock: &TrustedClock) {
+        // We only proceed if the peer exists
         if let Some(record) = self.contacts.get_mut(did) {
-            record.last_interaction = clock.now();
-            // We don't error check save() here to avoid spamming logs
-            // on high-frequency touches.
-            let _ = self.save();
+            // Sentinel: Attempt to get time, handle failure gracefully
+            match clock.now() {
+                Ok(now) => {
+                    record.last_interaction = now;
+                    
+                    // Best-effort save. We log errors but don't panic.
+                    if let Err(e) = self.save() {
+                        tracing::warn!(
+                            target: "trust",
+                            did = %did,
+                            error = %e,
+                            "Failed to persist interaction timestamp"
+                        );
+                    }
+                }
+                Err(e) => {
+                    // Log the forensic failure (Clock Skew / Poison)
+                    tracing::error!(
+                        target: "trust",
+                        did = %did,
+                        error = %e,
+                        "Touch failed: Trusted Clock is compromised or drifting"
+                    );
+                }
+            }
         }
     }
 

@@ -7,12 +7,12 @@ use crate::storage::crucible::Crucible;
 use crate::storage::strategies::{ShardAmalgam, VolleyAmalgam};
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
+use crate::primitives::time::TimeError;
 
 /// Enumerates specific failure modes for storage and security operations.
 ///
@@ -20,32 +20,27 @@ use tracing::{debug, error, info, instrument, warn};
 /// * `InvalidSignature`: Cryptographic verification failed (potential tampering).
 /// * `ReplayDetected`: The sequence ID or timestamp indicates an attempt to reuse old data.
 /// * `WalWriteFailed`: Critical IO failure (disk full or permissions).
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum GuardianError {
+    #[error("Quota exceeded: {0:?}")]
     QuotaExceeded(ByteCapacity),
+
+    #[error("Invalid signature: {0}")]
     InvalidSignature(String),
-    ReplayDetected(u32),
+
+    #[error("Replay attack detected: Sequence {0} is too old")]
+    ReplayDetected(u64), // Updated to u64 to match standard sequence_id()
+
+    #[error("WAL write failed: {0}")]
     WalWriteFailed(String),
+
+    #[error("Serialization error: {0}")]
     SerializationError(String),
-}
 
-impl fmt::Display for GuardianError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::QuotaExceeded(cap) => {
-                write!(f, "Storage quota exceeded. Current usage: {:?}", cap)
-            }
-            Self::InvalidSignature(did) => {
-                write!(f, "Invalid signature detected from DID: {}", did)
-            }
-            Self::ReplayDetected(seq) => write!(f, "Replay attack prevented. Sequence ID: {}", seq),
-            Self::WalWriteFailed(path) => write!(f, "Write Ahead Log failure at path: {}", path),
-            Self::SerializationError(msg) => write!(f, "Serialization failure: {}", msg),
-        }
-    }
+    // The Sentinel Bridge for Time
+    #[error("Time synchronization failure: {0}")]
+    TimeSource(#[from] TimeError),
 }
-
-impl std::error::Error for GuardianError {}
 
 /// Tracks the behavior of remote peers to prevent "Vampire Attacks" (Resource Exhaustion).
 ///
@@ -366,19 +361,26 @@ impl Guardian {
 
         // Allow +/- 10 seconds drift (generous for WAN, tight enough to stop replay)
         let tolerance = 10;
-        if !self
-            .clock
+        let is_valid_time = self.clock
             .is_valid(envelope.evidence.timestamp(), tolerance)
-        {
+            .map_err(|e| GuardianError::TimeSource(e))?;
+
+        if !is_valid_time {
+            // 2. Safe Time Retrieval for Logging
+            // We attempt to get the current time for the log, but if it fails,
+            // we use a placeholder to avoid crashing inside the error handler.
+            let current_time_log = self.clock.now().unwrap_or(0);
+
             warn!(
                 did = %envelope.did,
                 claim = envelope.evidence.timestamp(),
-                now = self.clock.now(),
+                now = current_time_log,
                 "Rejected Time-Travel/Replay Attack"
             );
-            // We reuse InvalidSignature for now, or add a new variant TimeSyncFailure
+
+            // 3. Specific Error Variant
             return Err(GuardianError::ReplayDetected(
-                envelope.evidence.sequence_id().0,
+                envelope.evidence.sequence_id().0 as u64,
             ));
         }
 
