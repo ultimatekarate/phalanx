@@ -1,6 +1,8 @@
 use std::sync::Once;
 use tracing_appender::rolling;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{fmt, prelude::*};
+use tracing_subscriber::filter::Targets;
+use tracing::Level;
 
 use serde::{Deserialize, Serialize};
 
@@ -96,7 +98,7 @@ pub struct TelemetryHub {
 static INIT: Once = Once::new();
 
 /// Initializes the telemetry system (Console + File).
-/// Returns a WorkerGuard that MUST be held by main() to ensure logs flush on shutdown.
+/// Returns a `WorkerGuard` that MUST be held by main() to ensure logs flush on shutdown.
 pub fn init_observability() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let mut guard = None;
 
@@ -111,13 +113,14 @@ pub fn init_observability() -> Option<tracing_appender::non_blocking::WorkerGuar
 
         // 2. Define the Filters
         // "info" by default, but "debug" for our code (phalanx)
-        let env_filter = EnvFilter::from_default_env()
-            .add_directive(tracing::Level::INFO.into())
-            .add_directive("phalanx=debug".parse().unwrap());
+        let filter = Targets::new()
+            .with_target("phalanx", Level::DEBUG)
+            .with_target("phalanx_core", Level::DEBUG)
+            .with_default(Level::INFO);
 
         // 3. Register Layers
         tracing_subscriber::registry()
-            .with(env_filter)
+            .with(filter)
             // Layer A: Console (Stdout) - For you watching the terminal
             .with(fmt::layer().with_target(false).with_thread_ids(true))
             // Layer B: File (JSON) - Machine readable for later analysis

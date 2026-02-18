@@ -31,6 +31,7 @@ pub struct SimulationHarness {
 }
 
 impl SimulationHarness {
+    #[must_use]
     pub fn init_mesh(
         config: PhalanxConfig,
         physics: PhalanxPhysics,
@@ -48,8 +49,8 @@ impl SimulationHarness {
             physics,
         };
 
-        let nodes_ref = nodes.clone();
-        let telemetry_tap = telemetry_tx.clone();
+        let nodes_ref = nodes;
+        let telemetry_tap = telemetry_tx;
 
         // Spawn the "Ether" (Network Relay)
         tokio::spawn(async move {
@@ -60,7 +61,7 @@ impl SimulationHarness {
     }
 
     pub async fn resolve_did(&self, did: &Did) -> Option<NetworkId> {
-        self.identity_registry.read().await.get(did).cloned()
+        self.identity_registry.read().await.get(did).copied()
     }
 
     pub async fn inject_chaos(&self, target_did: &Did, mode: ChaosMode) {
@@ -453,9 +454,9 @@ impl SimNode {
             }
 
             // Ignored Events
-            SimEvent::ShardProcessed { .. } => {}
-            SimEvent::CrucibleFinalized { .. } => {}
-            SimEvent::AttackAttemptBlocked { .. } => {}
+            SimEvent::ShardProcessed { .. } | 
+            SimEvent::CrucibleFinalized { .. }| 
+            SimEvent::AttackAttemptBlocked { .. } |
             SimEvent::OffloadComplete { .. } => {}
             SimEvent::SystemStressUpdate(interval) => {
                 self.physics.apply_system_load(interval);
@@ -492,10 +493,10 @@ impl SimNode {
         if is_blacklisted {
             let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
                 attacker: origin,
-                reason: if !was_blacklisted {
-                    "Vampire Attack: BANNED".into()
-                } else {
+                reason: if was_blacklisted {
                     "Traffic Shedding: Blacklisted Peer".into()
+                } else {
+                    "Vampire Attack: BANNED".into()
                 },
             });
         } else if post_sigs > pre_sigs {

@@ -136,21 +136,21 @@ impl TrustRegistry {
     /// If the alias is used by the *same* DID, it updates the record.
     pub fn set_peer(
         &mut self,
-        did: Did,
-        pet_name: PetName,
+        did: &Did,
+        pet_name: &PetName,
         level: TrustLevel,
         clock: &TrustedClock,
     ) -> Result<(), TrustError> {
         // 1. Check Alias Uniqueness
         if let Some(existing_did) = self.pet_name_index.get(&pet_name) {
-            if *existing_did != did {
+            if *existing_did != *did {
                 return Err(TrustError::PetnameCollision(pet_name.to_string()));
             }
         }
 
         // 2. Remove old pet name if the user is renaming this DID
         if let Some(old_record) = self.contacts.get(&did) {
-            if old_record.pet_name != pet_name {
+            if old_record.pet_name != *pet_name {
                 self.pet_name_index.remove(&old_record.pet_name);
             }
         }
@@ -162,8 +162,7 @@ impl TrustRegistry {
         let original_added_at = self
             .contacts
             .get(&did)
-            .map(|record| record.added_at) // Extract existing timestamp
-            .unwrap_or(timestamp);
+            .map_or(timestamp, |record| record.added_at);
 
         let record = PeerRecord {
             did: did.clone(),
@@ -221,22 +220,24 @@ impl TrustRegistry {
 
     /// Resolves a local pet name (e.g., "Alice") to a global DID.
     /// Returns None if the alias is unknown.
+    #[must_use]
     pub fn resolve_pet_name(&self, pet_name: &PetName) -> Option<&Did> {
         self.pet_name_index.get(pet_name)
     }
 
     /// Reverse lookup: Get the local alias for a given DID.
     /// Useful for logging: `info!("Message from {}", registry.get_pet_name(did))`
+    #[must_use]
     pub fn get_alias(&self, did: &Did) -> Option<&str> {
         self.contacts.get(did).map(|r| r.pet_name.as_str())
     }
 
     /// Gets the trust level. Returns `Ignored` (Neutral) for unknown DIDs.
+    #[must_use]
     pub fn check_trust(&self, did: &Did) -> TrustLevel {
         self.contacts
             .get(did)
-            .map(|r| r.level)
-            .unwrap_or(TrustLevel::Ignored)
+            .map_or(TrustLevel::Ignored,|r| r.level)
     }
 
     /// Removes a peer from the registry entirely.
@@ -310,7 +311,7 @@ mod tests {
         let clock = TrustedClock::new();
         // Set Alice
         registry
-            .set_peer(did1.clone(), pet_name.clone(), TrustLevel::Ally, &clock)
+            .set_peer(&did1.clone(), &pet_name.clone(), TrustLevel::Ally, &clock)
             .unwrap();
 
         // Resolve Alice
@@ -318,12 +319,12 @@ mod tests {
         assert_eq!(registry.get_alias(&did1), Some("Alice"));
 
         // Attempt Collision
-        let err = registry.set_peer(did2.clone(), pet_name.clone(), TrustLevel::Ignored, &clock);
+        let err = registry.set_peer(&did2.clone(), &pet_name.clone(), TrustLevel::Ignored, &clock);
         assert!(matches!(err, Err(TrustError::PetnameCollision(_))));
 
         // Rename Alice -> BigAlice
         registry
-            .set_peer(did1.clone(), big_pet_name.clone(), TrustLevel::Ally, &clock)
+            .set_peer(&did1.clone(), &big_pet_name.clone(), TrustLevel::Ally, &clock)
             .unwrap();
         assert_eq!(
             registry.resolve_pet_name(&big_pet_name.clone()),
