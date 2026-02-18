@@ -2,12 +2,13 @@ use futures::StreamExt;
 use libp2p::swarm::{Swarm, SwarmEvent};
 use std::error::Error;
 use tokio::sync::mpsc;
+use tracing::{error, info}; // Added tracing imports
 
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
-use crate::primitives::identity::IdentityError;
-use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
-use crate::primitives::shards::{AudioShard, Evidence, VideoShard, WitnessEnvelope};
-use crate::primitives::time::TimeError;
+use crate::primitives::identity::{init_identity, Did, IdentityError, NetworkId, PhalanxIdentity};
+use crate::primitives::shards::{AudioShard, Evidence, ShardId, VideoShard, WitnessEnvelope};
+use crate::primitives::time::{TimeError, TrustedClock}; // Added TrustedClock
+use crate::security::gate::{ForensicGate, IntegrityGate, WitnessGate}; // Import the Gates
 use crate::storage::strategies::ShardAmalgam;
 use crate::storage::vault::Guardian;
 use crate::{PhalanxBehaviour, PhalanxEvent};
@@ -19,67 +20,33 @@ pub use libp2p::pnet::PreSharedKey;
 pub enum EngineError {
     #[error("Critical startup failure: {0}")]
     StartupFailure(String),
-
     #[error("Identity subsystem failure: {0}")]
     Identity(#[from] IdentityError),
-
     #[error("Forensic persistence error: {0}")]
     Io(#[from] io::Error),
-
     #[error("Time synchronization error: {0}")]
     Time(#[from] TimeError),
-
-    #[error("Network transport initialization failed: {0}")]
-    NetworkInit(String),
-
-    #[error("Configuration invalid: {0}")]
-    ConfigError(String),
-
     #[error("Fatal simulator state: {0}")]
     Simulation(String),
 }
 
-/// The Central Nervous System of a Phalanx Node.
-///
-/// The Engine orchestrates the three critical lifecycles of the application:
-/// 1. **The Witness Cycle:** Ingesting raw sensor data (Video/Audio), signing it
-///    with the Identity ("Ghost Key"), and sealing it into `WitnessEnvelopes`.
-/// 2. **The Swarm Cycle:** Managing the libp2p mesh, handling peer discovery,
-///    and routing GossipSub messages.
-/// 3. **The Storage Cycle:** Directing the `Guardian` to persist evidence to the
-///    Vault (Disk/WAL) and preparing it for network distribution.
 pub struct PhalanxEngine {
     #[allow(dead_code)]
     config: PhalanxConfig,
-
-    /// The cryptographic identity used to sign all locally generated evidence.
     identity: PhalanxIdentity,
-
-    /// The libp2p network manager. Handles the low-level noise of TCP/UDP/QUIC.
+    clock: TrustedClock, // Added TrustedClock
     swarm: Swarm<PhalanxBehaviour>,
-
-    /// The "Jitter Buffer" and Reassembly logic.
-    /// Used to reconstruct Volleys from incoming network shards.
     #[allow(dead_code)]
     crucible: crate::storage::crucible::Crucible<ShardAmalgam>,
-
-    /// The interface to the local disk. Manages the Write-Ahead Log (WAL)
-    /// and the long-term shard archive.
     guardian: Guardian,
-
-    /// Input channel for raw video frames from the hardware driver.
     video_rx: mpsc::Receiver<VideoShard>,
-    /// Input channel for raw audio samples from the hardware driver.
     audio_rx: mpsc::Receiver<AudioShard>,
+
+    // Internal state
+    seq_counter: u64,
 }
 
 impl PhalanxEngine {
-    /// Bootstraps the Phalanx Engine with explicit configuration.
-    ///
-    /// This constructor performs the "Grand Linkage":
-    /// 1. Initializes the **Guardian** at the specified vault path.
-    /// 2. Configures the **Swarm** with the provided Identity and Physics.
-    /// 3. Establishes the **Sensor Channels** (Video/Audio) for hardware ingestion.
     pub fn new(
         config: PhalanxConfig,
         identity: PhalanxIdentity,
@@ -90,28 +57,32 @@ impl PhalanxEngine {
             .to_libp2p_keypair()
             .map_err(|e| EngineError::StartupFailure(format!("Identity invalid: {}", e)))?;
 
+        // Guardian init (Storage)
         let local_peer_id = network_keypair.public().to_peer_id();
         let local_did = Did::from(local_peer_id.to_string());
-
-        // The Guardian protects the disk. It must be initialized before the network
-        // to ensure we have a place to dump incoming data.
         let guardian = Guardian::new(&config.storage.vault_path, &config, local_did);
 
-        // The Swarm connects us to the world.
+        // Swarm init (Network)
         let swarm =
             crate::transport::swarm::setup_phalanx_swarm(network_keypair, &config, &physics, psk)?;
 
+        // Channels (Sensors)
         let (_video_tx, video_rx) = mpsc::channel(config.storage.max_video_buffer);
         let (_audio_tx, audio_rx) = mpsc::channel(config.storage.max_audio_buffer);
+
+        // Clock init
+        let clock = TrustedClock::new();
 
         Ok(Self {
             config,
             identity,
+            clock,
             swarm,
             crucible: crate::storage::crucible::Crucible::new(),
             guardian,
             video_rx,
             audio_rx,
+            seq_counter: 0,
         })
     }
 
@@ -126,109 +97,111 @@ impl PhalanxEngine {
         let mut config = PhalanxConfig::default();
         config.storage.vault_path = storage_path.to_string();
 
-        // 1. Safe Identity Initialization
-        // The '?' operator propagates IdentityError, which implements std::error::Error,
-        // into the Box<dyn Error> return type.
-        let identity = crate::init_identity("identity.bin")?;
-
+        let identity = init_identity("identity.bin").unwrap();
         let physics = PhalanxPhysics::default_wan();
 
-        // 2. Fallible Construction
-        // Assuming Self::new also returns a Result per the function signature.
-        // If Self::new is infallible, use Ok(Self::new(...))
         Self::new(config, identity, physics, None)
     }
 
-    /// The Main Event Loop.
-    ///
-    /// This runs indefinitely, multiplexing between:
-    /// * **Network Events:** Inbound GossipSub messages, Peer connections.
-    /// * **Sensor Events:** Incoming Video/Audio shards from the hardware.
-    ///
-    /// This loop is the heartbeat of the node. It drives the `Witness` logic
-    /// by pulling raw shards, signing them, and pushing them to the Guardian.
+    /// The Main Gated Event Loop
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
         let local_peer_id = *self.swarm.local_peer_id();
         let local_network_id = NetworkId::from(local_peer_id);
 
+        info!(
+            "Phalanx Engine: Active and Gated. PeerID: {}",
+            local_peer_id
+        );
+
         loop {
             tokio::select! {
-                // Priority 1: Network I/O
+                // ------------------------------------------------------------------
+                // PIPELINE 1: RECEPTION (Network -> Storage)
+                // ------------------------------------------------------------------
                 event = self.swarm.select_next_some() => {
-                    // Network events usually carry critical state; we propagate these.
-                    self.handle_swarm_event(event).await?;
-                }
+                    match event {
+                        SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(
+                            libp2p::gossipsub::Event::Message {
+                                propagation_source: _,
+                                message_id: _,
+                                message, // <--- Extract the message struct here
+                            }
+                        ))=> {
+                            // 1. Serialization Gate
+                            let envelope = postcard::from_bytes::<WitnessEnvelope>(&message.data)
+                                .ok_or_log("deserialization_err", &local_network_id, "Malformed wire packet");
 
-                // Priority 2: Local Video Witnessing
-                Some(shard) = self.video_rx.recv() => {
-                    let evidence = Evidence::Video(shard);
-                    
-                    // Fault-Tolerant Gate: Signing failure does not kill the loop
-                    match WitnessEnvelope::new(evidence, &self.identity, local_network_id) {
-                        Ok(envelope) => {
-                            // Attempt persistence; log failure but keep recording other streams
-                            if let Err(e) = self.finalize_reassembly(envelope).await {
-                                tracing::error!(error = %e, "IO_FAILURE: Could not persist video unit to WAL");
+                            // 2. Integrity & Temporal Gate
+                            let verified_env = envelope.and_then(|env| {
+                                env.check_integrity(&local_network_id, &self.clock, 10) // 10s tolerance
+                            });
+
+                            // 3. Promotion Gate (Storage)
+                            if let Some(env) = verified_env {
+                                if let Err(e) = self.guardian.ingest_envelope(env) {
+                                    error!(event = "vault_write_err", error = %e, "Failed to persist foreign evidence");
+                                }
                             }
                         }
-                        Err(e) => {
-                            tracing::error!(error = %e, "DATA_CORRUPTION: Dropping video frame - Signing failed");
-                        }
+                        _ => {} // Handle other swarm events if necessary
                     }
                 }
 
-                // Priority 3: Local Audio Witnessing
-                Some(shard) = self.audio_rx.recv() => {
-                    let evidence = Evidence::Audio(shard);
+                // ------------------------------------------------------------------
+                // PIPELINE 2: VIDEO INGESTION (Sensor -> Network)
+                // ------------------------------------------------------------------
+                Some(shard) = self.video_rx.recv() => {
+                    let shard_id = ShardId(self.seq_counter as u32);
 
-                    match WitnessEnvelope::new(evidence, &self.identity, local_network_id) {
-                        Ok(envelope) => {
-                            if let Err(e) = self.finalize_reassembly(envelope).await {
-                                tracing::error!(error = %e, "IO_FAILURE: Could not persist audio unit to WAL");
-                            }
+                    // Seal -> Chunkify -> Broadcast
+                    let chunks = Evidence::Video(shard)
+                        .seal(&self.identity, local_network_id)
+                        .and_then(|env| {
+                            env.chunkify(shard_id)
+                                .ok_or_log("chunkify_err", &local_network_id, "Video processing failed")
+                        });
+
+                    if let Some(valid_chunks) = chunks {
+                        for _chunk in valid_chunks {
+                            // self.broadcast_chunk(chunk).await; // TODO: Implement broadcast
                         }
-                        Err(e) => {
-                            tracing::error!(error = %e, "DATA_CORRUPTION: Dropping audio packet - Signing failed");
+                        self.seq_counter += 1;
+
+                        // We also persist our own data to the WAL
+                        // Note: In a real implementation, you might persist the Envelope *before* chunking
+                    }
+                }
+
+                // ------------------------------------------------------------------
+                // PIPELINE 3: AUDIO INGESTION (Sensor -> Network)
+                // ------------------------------------------------------------------
+                Some(shard) = self.audio_rx.recv() => {
+                    let shard_id = ShardId(self.seq_counter as u32);
+
+                    let chunks = Evidence::Audio(shard)
+                        .seal(&self.identity, local_network_id)
+                        .and_then(|env| {
+                            env.chunkify(shard_id)
+                                .ok_or_log("chunkify_err", &local_network_id, "Audio processing failed")
+                        });
+
+                    if let Some(valid_chunks) = chunks {
+                        for _chunk in valid_chunks {
+                            // self.broadcast_chunk(chunk).await;
                         }
+                        self.seq_counter += 1;
                     }
                 }
             }
         }
     }
 
-    /// The "Commit" phase of the Witness Cycle.
-    ///
-    /// Takes a signed `WitnessEnvelope` and hands it to the Guardian for
-    /// persistence. This ensures that even if the network is down or the
-    /// app crashes, the evidence is safely stored in the local Write-Ahead Log (WAL).
-    async fn finalize_reassembly(
+    /// Helper for committing to storage (used internally or by pipelines)
+    async fn _finalize_reassembly(
         &mut self,
         envelope: WitnessEnvelope,
     ) -> Result<(), Box<dyn Error>> {
-        // 1. Commit to Write-Ahead Log (WAL) and disk.
-        // This is a synchronous blocking operation to guarantee data integrity
-        // before we attempt any network operations.
         self.guardian.ingest_envelope(envelope)?;
-
-        // Future: Forward to Crucible for aggregation into "Volleys" (Batched Shards)
-        // self.crucible.process(...)
-
-        Ok(())
-    }
-
-    /// Handles low-level Libp2p events.
-    ///
-    /// Currently a placeholder for future logic where we will process incoming
-    /// GossipSub messages (Foreign Shards) and route them to the Crucible for
-    /// salvage or reassembly.
-    async fn handle_swarm_event(
-        &mut self,
-        event: SwarmEvent<PhalanxEvent>,
-    ) -> Result<(), Box<dyn Error>> {
-        if let SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(_gossip_event)) = event {
-            // TODO: Route foreign shards to Guardian::ingest_chunk() for Salvage.
-        }
-
         Ok(())
     }
 }

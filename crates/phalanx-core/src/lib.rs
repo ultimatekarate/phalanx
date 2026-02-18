@@ -30,6 +30,7 @@ pub mod transport {
 // --- 5. SECURITY ---
 pub mod security {
     pub mod e2ee;
+    pub mod gate;
     pub mod grant;
     pub mod locator;
     pub mod sentinel;

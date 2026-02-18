@@ -2,20 +2,20 @@ use std::convert::TryFrom;
 use std::fmt;
 use std::io::Cursor;
 use std::ops::{Add, Deref, Sub};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 // external crates
 use image::{DynamicImage, ImageFormat};
 use serde::{Deserialize, Serialize};
 
 use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
+use crate::primitives::time::{PhalanxTimestamp, TrustedClock};
 use crate::security::e2ee;
 
 // =====================
 // DATA STRUCTURES
 // =====================
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Serialize, Deserialize)]
 pub enum ShardError {
     #[error("Dataset capacity exceeded: calculated chunk count {0} exceeds u32 limit")]
     CapacityExceeded(u64),
@@ -31,7 +31,7 @@ pub enum ShardError {
 
     #[error("Cryptographic signing failed: {0}")]
     SigningError(String),
-    
+
     #[error("Encryption error: {0}")]
     Encryption(#[from] e2ee::CryptoError),
 }
@@ -82,7 +82,7 @@ impl Evidence {
         }
     }
 
-    pub fn timestamp(&self) -> u64 {
+    pub fn timestamp(&self) -> PhalanxTimestamp {
         match self {
             Evidence::Video(s) => s.timestamp,
             Evidence::Audio(s) => s.timestamp,
@@ -149,7 +149,7 @@ impl fmt::Display for ShardId {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoShard {
-    pub timestamp: u64,
+    pub timestamp: PhalanxTimestamp,
     pub sequence_id: StorageSequence,
     pub fps: u8,
     pub volley_id: VolleyId,
@@ -164,7 +164,7 @@ impl VideoShard {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioShard {
-    pub timestamp: u64,
+    pub timestamp: PhalanxTimestamp,
     pub sequence_id: StorageSequence,
     pub sample_rate: u32,
     pub channels: u8,
@@ -266,12 +266,12 @@ impl WitnessEnvelope {
     /// Verifies the envelope signature without panicking.
     pub fn verify(&self) -> bool {
         let clean_did = self.did.0.replace("did:key:", "");
-        
+
         // Fail-safe: if decoding fails, signature is invalid
         let Ok(pubkey_bytes) = bs58::decode(clean_did).into_vec() else {
             return false;
         };
-        
+
         let Ok(data_bytes) = postcard::to_stdvec(&self.evidence) else {
             return false;
         };
@@ -280,16 +280,16 @@ impl WitnessEnvelope {
     }
 
     /// Creates a new signed envelope.
-    /// 
+    ///
     /// # Sentinel Safety
     /// Returns `Result` to propagate serialization errors instead of panicking.
     pub fn new(
-        evidence: Evidence, 
-        identity: &PhalanxIdentity, 
-        peer_id: NetworkId
+        evidence: Evidence,
+        identity: &PhalanxIdentity,
+        peer_id: NetworkId,
     ) -> Result<Self, ShardError> {
-        let data_to_sign = postcard::to_stdvec(&evidence)
-            .map_err(|e| ShardError::Serialization(e.to_string()))?;
+        let data_to_sign =
+            postcard::to_stdvec(&evidence).map_err(|e| ShardError::Serialization(e.to_string()))?;
 
         let signature = identity.sign(&data_to_sign);
 
@@ -299,6 +299,24 @@ impl WitnessEnvelope {
             witness_signature: signature.to_vec(),
             did: identity.did.clone(),
         })
+    }
+
+    pub fn chunkify(self, shard_id: ShardId) -> Result<Vec<ShardChunk>, ShardError> {
+        // 1. Capture the owner's DID for the chunks
+        let owner_did = self.did.clone();
+
+        // 2. Serialize the FULL envelope (Header + Signature + Data)
+        let data =
+            postcard::to_stdvec(&self).map_err(|e| ShardError::Serialization(e.to_string()))?;
+
+        // 3. Split into chunks using the standalone helper
+        chunkify(
+            shard_id,
+            data,
+            4096, // Standard Phalanx MTU
+            owner_did,
+            ChunkType::Witnessed,
+        )
     }
 }
 
@@ -348,12 +366,12 @@ pub fn chunkify(
 
     let total_len = data.len() as u64;
     let size_u64 = chunk_size as u64;
-    
+
     // Checked math to prevent panic on zero (already handled) but good for robustness
     let count_u64 = total_len.div_ceil(size_u64);
 
-    let total_chunks = u32::try_from(count_u64)
-        .map_err(|_| ShardError::CapacityExceeded(count_u64))?;
+    let total_chunks =
+        u32::try_from(count_u64).map_err(|_| ShardError::CapacityExceeded(count_u64))?;
 
     let chunks = data
         .chunks(chunk_size)
@@ -393,13 +411,11 @@ pub fn create_video_shard(
     fps: u8,
     volley_id: VolleyId,
 ) -> Result<VideoShard, ShardError> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| ShardError::TimeSource(e.to_string()))?
-        .as_secs();
+    let clock = TrustedClock::new();
+    let now = PhalanxTimestamp::now(&clock).map_err(|e| ShardError::TimeSource(e.to_string()))?;
 
-    let raw_bytes = postcard::to_stdvec(&frames)
-        .map_err(|e| ShardError::Serialization(e.to_string()))?;
+    let raw_bytes =
+        postcard::to_stdvec(&frames).map_err(|e| ShardError::Serialization(e.to_string()))?;
 
     Ok(VideoShard {
         timestamp: now,
@@ -418,10 +434,8 @@ pub fn create_audio_shard(
     channels: u8,
     volley_id: VolleyId,
 ) -> Result<AudioShard, ShardError> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| ShardError::TimeSource(e.to_string()))?
-        .as_secs();
+    let clock = TrustedClock::new();
+    let now = PhalanxTimestamp::now(&clock).map_err(|e| ShardError::TimeSource(e.to_string()))?;
 
     Ok(AudioShard {
         timestamp: now,
@@ -445,7 +459,7 @@ mod tests {
     fn test_video_shard_encryption_cycle() -> Result<(), Box<dyn std::error::Error>> {
         let frames = vec![vec![1, 2, 3], vec![4, 5, 6]];
         let seq = StorageSequence(100);
-        
+
         // Handle result via '?'
         let mut shard = create_video_shard(frames.clone(), seq, 30, "volley_1".into())?;
 
@@ -502,7 +516,7 @@ mod tests {
 
         let result = shard.payload.decrypt(&wrong_key);
         assert!(result.is_err(), "Decryption should fail with wrong key");
-        
+
         Ok(())
     }
 
@@ -524,7 +538,10 @@ mod tests {
         match &shard.payload {
             DataPayload::Encrypted { nonce, ciphertext } => {
                 assert_eq!(nonce, &nonce1, "Nonce changed on second encrypt call");
-                assert_eq!(ciphertext, &cipher1, "Ciphertext changed on second encrypt call");
+                assert_eq!(
+                    ciphertext, &cipher1,
+                    "Ciphertext changed on second encrypt call"
+                );
             }
             _ => panic!("Should remain encrypted"),
         }
@@ -549,7 +566,7 @@ mod tests {
         assert_eq!(recovered_frames[0], vec![255, 0, 255]);
         assert_eq!(received_shard.sequence_id.0, 50);
         assert_eq!(received_shard.volley_id, "v_net".into());
-        
+
         Ok(())
     }
 }

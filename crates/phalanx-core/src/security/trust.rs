@@ -1,6 +1,6 @@
 use crate::base::config::PhalanxConfig;
 use crate::primitives::identity::Did;
-use crate::primitives::time::{TrustedClock, TimeError};
+use crate::primitives::time::{TimeError, TrustedClock};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -159,8 +159,10 @@ impl TrustRegistry {
         // to the device.
         let timestamp = clock.now()?;
 
-        let original_added_at = self.contacts.get(&did)
-            .map(|record| record.added_at)   // Extract existing timestamp
+        let original_added_at = self
+            .contacts
+            .get(&did)
+            .map(|record| record.added_at) // Extract existing timestamp
             .unwrap_or(timestamp);
 
         let record = PeerRecord {
@@ -168,7 +170,7 @@ impl TrustRegistry {
             pet_name: pet_name.clone(),
             level,
             added_at: original_added_at,
-            last_interaction: timestamp, 
+            last_interaction: timestamp,
         };
 
         self.contacts.insert(did.clone(), record);
@@ -181,9 +183,9 @@ impl TrustRegistry {
     }
 
     /// Updates the last interaction timestamp.
-    /// 
+    ///
     /// # Forensic Safety
-    /// This method absorbs clock errors rather than propagating them, 
+    /// This method absorbs clock errors rather than propagating them,
     /// preventing telemetry glitches from crashing the main loop.
     /// Failures are logged as warnings.
     pub fn touch(&mut self, did: &Did, clock: &TrustedClock) {
@@ -193,7 +195,7 @@ impl TrustRegistry {
             match clock.now() {
                 Ok(now) => {
                     record.last_interaction = now;
-                    
+
                     // Best-effort save. We log errors but don't panic.
                     if let Err(e) = self.save() {
                         tracing::warn!(

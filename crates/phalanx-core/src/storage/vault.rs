@@ -6,13 +6,13 @@ use crate::primitives::time::TrustedClock;
 use crate::storage::crucible::Crucible;
 use crate::storage::strategies::{ShardAmalgam, VolleyAmalgam};
 
+use crate::primitives::time::TimeError;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
-use crate::primitives::time::TimeError;
 
 /// Enumerates specific failure modes for storage and security operations.
 ///
@@ -361,9 +361,12 @@ impl Guardian {
 
         // Allow +/- 10 seconds drift (generous for WAN, tight enough to stop replay)
         let tolerance = 10;
-        let is_valid_time = self.clock
-            .is_valid(envelope.evidence.timestamp(), tolerance)
-            .map_err(|e| GuardianError::TimeSource(e))?;
+        let clock = TrustedClock::new();
+        let is_valid_time = envelope
+            .evidence
+            .timestamp()
+            .verify_freshness(&clock, tolerance)
+            .is_ok();
 
         if !is_valid_time {
             // 2. Safe Time Retrieval for Logging
@@ -373,7 +376,7 @@ impl Guardian {
 
             warn!(
                 did = %envelope.did,
-                claim = envelope.evidence.timestamp(),
+                claim = envelope.evidence.timestamp().as_u64(),
                 now = current_time_log,
                 "Rejected Time-Travel/Replay Attack"
             );
@@ -672,7 +675,7 @@ mod tests {
     fn test_governance_pruning() -> Result<(), Box<dyn std::error::Error>> {
         use std::thread;
         let vault_root = PathBuf::from("test_vault_governance");
-        
+
         if vault_root.exists() {
             fs::remove_dir_all(&vault_root)?;
         }
@@ -685,7 +688,7 @@ mod tests {
         // 1. Create OLD Data (Stranger 1)
         let s1_dir = vault_root.join(stranger_1.did.to_safe_name());
         fs::create_dir_all(&s1_dir)?;
-        
+
         let mut f1 = File::create(s1_dir.join("old_evidence.phlx"))?;
         f1.write_all(&[0u8; 1000])?;
         f1.sync_all()?;
@@ -696,7 +699,7 @@ mod tests {
         // 2. Create NEW Data (Stranger 2)
         let s2_dir = vault_root.join(stranger_2.did.to_safe_name());
         fs::create_dir_all(&s2_dir)?;
-        
+
         let mut f2 = File::create(s2_dir.join("new_evidence.phlx"))?;
         f2.write_all(&[0u8; 1000])?;
         f2.sync_all()?;
@@ -741,7 +744,7 @@ mod tests {
         let peer_id = NetworkId::random();
         let config = PhalanxConfig::default();
         let vault_path = "sim_vault/test_sig_reject";
-        
+
         if std::path::Path::new(vault_path).exists() {
             std::fs::remove_dir_all(vault_path)?;
         }
@@ -768,7 +771,7 @@ mod tests {
             Err(GuardianError::InvalidSignature(_)) => (), // Pass
             _ => panic!("Wrong error type returned"),
         }
-        
+
         Ok(())
     }
 
@@ -814,7 +817,7 @@ mod tests {
         let peer_id = NetworkId::random();
         let config = PhalanxConfig::default();
         let vault_path = "sim_vault/test_replay";
-        
+
         if std::path::Path::new(vault_path).exists() {
             std::fs::remove_dir_all(vault_path)?;
         }
@@ -851,7 +854,7 @@ mod tests {
         let (stranger, _) = PhalanxIdentity::generate()?;
         let config = PhalanxConfig::default();
         let vault_path = "sim_vault/test_init_scan";
-        
+
         if std::path::Path::new(vault_path).exists() {
             std::fs::remove_dir_all(vault_path)?;
         }
@@ -898,9 +901,11 @@ mod tests {
 
         // 2. Verify blacklisted
         // Safe Option unwrap
-        let rep = guardian.peer_registry.get(&vampire.did)
+        let rep = guardian
+            .peer_registry
+            .get(&vampire.did)
             .ok_or("Expected vampire DID in registry")?;
-        
+
         assert!(rep.is_blacklisted);
         Ok(())
     }
@@ -914,7 +919,7 @@ mod guardian_leaf_tests {
         self, ChunkType, Evidence, ShardId, StorageSequence, WitnessEnvelope,
     };
 
-    #[tokio::test] 
+    #[tokio::test]
     async fn test_guardian_leaf_mode_ingestion() -> Result<(), Box<dyn std::error::Error>> {
         let _ = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
@@ -928,7 +933,7 @@ mod guardian_leaf_tests {
         if std::path::Path::new(vault_path).exists() {
             std::fs::remove_dir_all(vault_path)?;
         }
-        
+
         let mut guardian = Guardian::new(vault_path, &config, identity.did.clone());
 
         // 1. Create a REAL forensic unit (Video Shard)
@@ -937,7 +942,8 @@ mod guardian_leaf_tests {
             shards::create_video_shard(frames, StorageSequence(200), 30, "volley_test".into())?;
 
         // 2. WRAP in an Envelope
-        let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, NetworkId::random())?;
+        let envelope =
+            WitnessEnvelope::new(Evidence::Video(shard), &identity, NetworkId::random())?;
 
         // 3. Serialize the FULL ENVELOPE (Safe Propagation)
         let envelope_bytes = postcard::to_stdvec(&envelope)?;

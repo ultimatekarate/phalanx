@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use tokio::time::Instant;
-use tracing::{debug, info, error, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::primitives::shards::{
     AudioShard, ChunkType, Evidence, ReassemblyBuffer, ShardChunk, ShardId, VideoShard,
@@ -226,8 +226,8 @@ impl Sentinel {
                             }
                             Err(e) => {
                                 error!(
-                                    %shard_id, 
-                                    error = %e, 
+                                    %shard_id,
+                                    error = %e,
                                     "Critical: Failed to sign local forensic unit (dropped)"
                                 );
                                 None

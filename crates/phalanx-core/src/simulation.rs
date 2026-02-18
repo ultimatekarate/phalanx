@@ -12,9 +12,9 @@ use crate::security::sentinel::{ControlMessage, Sentinel};
 use crate::security::telemetry::{ChaosMode, DiscoverySource, NodeRole, SimEvent};
 use crate::storage::vault::Guardian;
 
-use crate::primitives::shards::{
-    chunkify, create_video_shard, ChunkType, Evidence, ShardId, StorageSequence, WitnessEnvelope,
-};
+use crate::security::gate::{ForensicGate, WitnessGate};
+
+use crate::primitives::shards::{create_video_shard, Evidence, ShardId, StorageSequence};
 
 // =========================================================================================
 //  INFRASTRUCTURE: The Harness
@@ -340,68 +340,55 @@ impl SimNode {
         if rand::rng().random_range(0.0..1.0) < spawn_chance {
             self.seq_counter += 1;
             let frames = vec![vec![1; 512]];
+            let shard_id = ShardId(self.seq_counter as u32);
 
-            // 1. Create Valid Data (FPS 30)
-            let shard = create_video_shard(
+            // 1. Generation Gate
+            // Safely create the shard or log the forensic error "sim_gen_err"
+            let shard_opt = create_video_shard(
                 frames,
                 StorageSequence(self.seq_counter as u32),
                 30,
                 "sim_volley".into(),
-            );
+            )
+            .ok_or_log("sim_gen_err", &self.network_id, "Video generation failed");
 
-            // 2. Sign it (Locks signature to 30 FPS)
-            let mut envelope =
-                WitnessEnvelope::new(Evidence::Video(shard), &self.identity, self.network_id);
+            // 2. Witness Gate
+            // If we have a shard, seal it. If signing fails, WitnessGate logs it.
+            if let Some(shard) = shard_opt {
+                let envelope_opt = Evidence::Video(shard).seal(&self.identity, self.network_id);
 
-            // 3. TAMPER (Chaos Logic)
-            // Modify data AFTER signing to trigger invalid signature detection at the receiver
-            if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
-                if let Evidence::Video(ref mut v) = envelope.evidence {
-                    v.fps = 145;
-                }
-            }
-
-            // 4. Chunkify & Broadcast
-            if let Ok(data) = postcard::to_stdvec(&envelope) {
-                let chunks_result = chunkify(
-                    ShardId(self.seq_counter as u32),
-                    data,
-                    4096,
-                    self.identity.did.clone(),
-                    ChunkType::Witnessed,
-                );
-
-                let chunks = match chunks_result {
-                    Ok(valid_chunks) => valid_chunks,
-                    Err(error) => {
-                        tracing::error!(
-                            event = "discretization_failure",
-                            node = %self.network_id,
-                            error = %error,
-                            "Failed to transform envelope into verifiable chunks"
-                        );
-                        return; // Terminate this ingestion cycle to prevent inconsistent state
+                if let Some(mut envelope) = envelope_opt {
+                    // 3. Chaos Logic (Tampering)
+                    // We tamper *after* signing to ensure the IntegrityGate catches it downstream.
+                    if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
+                        if let Evidence::Video(ref mut v) = envelope.evidence {
+                            v.fps = 145; // Invalidates signature (content changed post-sign)
+                        }
                     }
-                };
 
-                let Some(first_chunk) = chunks.get(0) else {
-                    tracing::error!(
-                        event = "simulation_logic_error",
-                        node = %self.network_id,
-                        "Discretization returned an empty shard set for non-empty data"
+                    // 4. Discretization Gate
+                    // Uses the helper method on WitnessEnvelope to Serialize -> Chunkify
+                    let chunks_opt = envelope.chunkify(shard_id).ok_or_log(
+                        "sim_chunk_err",
+                        &self.network_id,
+                        "Discretization failed",
                     );
-                    return;
-                };
 
-                let event = SimEvent::ChunkIngested {
-                    origin: self.network_id,
-                    chunk: first_chunk.clone(),
-                };
+                    // 5. Broadcast
+                    if let Some(chunks) = chunks_opt {
+                        if let Some(first_chunk) = chunks.get(0) {
+                            let event = SimEvent::ChunkIngested {
+                                origin: self.network_id,
+                                chunk: first_chunk.clone(),
+                            };
 
-                let _ = self
-                    .broadcast_tx
-                    .send((self.identity.did.clone(), self.network_id, event))
-                    .await;
+                            let _ = self
+                                .broadcast_tx
+                                .send((self.identity.did.clone(), self.network_id, event))
+                                .await;
+                        }
+                    }
+                }
             }
         }
     }

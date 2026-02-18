@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-
 #[derive(Debug, thiserror::Error)]
 pub enum LocatorError {
     #[error("Locator input is malformed or incorrectly delimited")]
@@ -76,14 +75,14 @@ impl FromStr for PhalanxLocator {
 
         // 2. Split ID and Rest (Key + Author)
         let parts: Vec<&str> = remainder.split('#').collect();
-        
+
         // REFACTOR: Use .get() to avoid clippy::indexing_slicing
         let id_str = parts.get(0).ok_or(LocatorError::MalformedInput)?;
         let rest = parts.get(1).ok_or(LocatorError::MissingKey)?;
 
         // 3. Split Key and Author
         let secret_parts: Vec<&str> = rest.split('@').collect();
-        
+
         let secret_str = secret_parts.get(0).ok_or(LocatorError::MalformedInput)?;
         let author_str = secret_parts.get(1).ok_or(LocatorError::MissingAuthor)?;
 

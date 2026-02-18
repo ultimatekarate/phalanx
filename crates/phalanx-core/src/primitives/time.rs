@@ -16,10 +16,10 @@ pub enum TimeError {
 
     #[error("Invalid timestamp computation: {0}")]
     CalculationError(String),
-    
+
     #[error("Timestamp is too far in the past (Replay Attack): {0}s difference")]
     Stale(u64),
-    
+
     #[error("Timestamp is in the future (Time Traveler): {0}s difference")]
     Future(u64),
 
@@ -47,28 +47,34 @@ impl TrustedClock {
     }
 
     /// Returns the current "True Time" (Local + Offset) in seconds.
-    /// 
+    ///
     /// # Forensic Safety
-    /// Returns `TimeError` if the system clock is before UNIX_EPOCH or if 
+    /// Returns `TimeError` if the system clock is before UNIX_EPOCH or if
     /// the internal lock is poisoned.
     pub fn now(&self) -> TimeResult<u64> {
         let local = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(TimeError::ClockSkew)?
             .as_secs() as i64;
-        
-        let offset_guard = self.offset_ms.read()
+
+        let offset_guard = self
+            .offset_ms
+            .read()
             .map_err(|_| TimeError::LockPoisoned("offset_ms read lock poisoned".to_string()))?;
-        
+
         let offset_sec = *offset_guard / 1000;
-        
+
         // Ensure we don't return negative time if offset is massive
         Ok((local + offset_sec).max(0) as u64)
     }
 
     /// Validates if a timestamp is within the acceptable window of True Time.
     /// Used to reject Replay Attacks (too old) or Time Travelers (too new).
-    pub fn is_valid(&self, claimed_time: u64, tolerance_secs: u64) -> TimeResult<bool> {
+    pub fn is_valid(
+        &self,
+        claimed_time: PhalanxTimestamp,
+        tolerance_secs: u64,
+    ) -> TimeResult<bool> {
         let now = self.now()?;
 
         // We use saturating logic to avoid underflow
@@ -94,18 +100,19 @@ impl TrustedClock {
             .map_err(|e| TimeError::NtpError(format!("UDP Bind failed: {}", e)))?;
 
         // 2. Set a timeout so we don't hang forever if NTP is down
-        socket.set_read_timeout(Some(Duration::from_secs(2)))
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
             .map_err(|e| TimeError::NtpError(format!("Socket configuration failed: {}", e)))?;
 
         // NTP uses UDP port 123
         match sntpc::simple_get_time("pool.ntp.org", &socket) {
             Ok(time) => {
                 let ntp_sec = time.sec();
-                
+
                 let system_now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_err(TimeError::ClockSkew)?;
-                
+
                 let system_sec = system_now.as_secs();
 
                 // Simple offset calculation (Network - Local)
@@ -114,9 +121,10 @@ impl TrustedClock {
                 let offset_ms = diff_sec * 1000;
 
                 // Safe lock acquisition
-                let mut w = self.offset_ms.write()
-                    .map_err(|_| TimeError::LockPoisoned("offset_ms write lock poisoned".to_string()))?;
-                
+                let mut w = self.offset_ms.write().map_err(|_| {
+                    TimeError::LockPoisoned("offset_ms write lock poisoned".to_string())
+                })?;
+
                 *w = offset_ms;
 
                 info!("NTP Sync Complete. Offset: {}ms", offset_ms);
@@ -164,11 +172,7 @@ impl PhalanxTimestamp {
     ///  
     /// Call this immediately after receiving a packet from the network
     /// to ensure it isn't a replay attack.
-    pub fn verify_freshness(
-        &self,
-        clock: &TrustedClock,
-        tolerance_secs: u64,
-    ) -> TimeResult<()> {
+    pub fn verify_freshness(&self, clock: &TrustedClock, tolerance_secs: u64) -> TimeResult<()> {
         let now = clock.now()?;
 
         // Check for Future (Time Travelers)
@@ -183,6 +187,16 @@ impl PhalanxTimestamp {
 
         Ok(())
     }
+
+    pub fn abs_diff(&self, other: u64) -> u64 {
+        self.0.abs_diff(other)
+    }
+}
+
+impl From<u64> for PhalanxTimestamp {
+    fn from(t: u64) -> Self {
+        Self(t)
+    }
 }
 
 #[cfg(test)]
@@ -195,14 +209,23 @@ mod tests {
         let now = clock.now()?;
 
         // Timestamp is "now", tolerance is 5s
-        assert!(clock.is_valid(now, 5)?, "Current time should be valid");
+        assert!(
+            clock.is_valid(PhalanxTimestamp(now), 5)?,
+            "Current time should be valid"
+        );
 
         // Timestamp is 2s ago, tolerance 5s
-        assert!(clock.is_valid(now - 2, 5)?, "Recent past should be valid");
+        assert!(
+            clock.is_valid(PhalanxTimestamp(now - 2), 5)?,
+            "Recent past should be valid"
+        );
 
         // Timestamp is 2s future, tolerance 5s
-        assert!(clock.is_valid(now + 2, 5)?, "Near future should be valid");
-        
+        assert!(
+            clock.is_valid(PhalanxTimestamp(now + 2), 5)?,
+            "Near future should be valid"
+        );
+
         Ok(())
     }
 
@@ -214,7 +237,7 @@ mod tests {
         // Attack: Replaying a message from 1 minute ago
         let stale_timestamp = now - 60;
         assert!(
-            !clock.is_valid(stale_timestamp, 5)?,
+            !clock.is_valid(PhalanxTimestamp(stale_timestamp), 5)?,
             "Old timestamp should be rejected"
         );
         Ok(())
@@ -228,7 +251,7 @@ mod tests {
         // Attack: Message claiming to be from next year
         let future_timestamp = now + 3600;
         assert!(
-            !clock.is_valid(future_timestamp, 5)?,
+            !clock.is_valid(PhalanxTimestamp(future_timestamp), 5)?,
             "Far future timestamp should be rejected"
         );
         Ok(())

@@ -29,8 +29,8 @@ fn ed_to_x25519_pk(ed_bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
         .ok_or(CryptoError::IdentityResolutionError)?;
 
     // 2. Decompress the validated array
-    let ed_point = CompressedEdwardsY::from_slice(&bytes)
-        .map_err(|_| CryptoError::IdentityResolutionError)?;
+    let ed_point =
+        CompressedEdwardsY::from_slice(&bytes).map_err(|_| CryptoError::IdentityResolutionError)?;
 
     // 2. Convert to Montgomery form (Birational equivalence)
     // This allows us to use the same key for Diffie-Hellman
@@ -45,8 +45,8 @@ fn ed_to_x25519_pk(ed_bytes: &[u8]) -> Result<[u8; 32], CryptoError> {
 /// Converts an Ed25519 Secret Key to X25519.
 /// Warning: This is a one-way street for the session.
 fn ed_to_x25519_sk(ed_bytes: &[u8]) -> Result<x25519_dalek::StaticSecret, CryptoError> {
-use sha2::{Digest, Sha512};
-    
+    use sha2::{Digest, Sha512};
+
     // 1. Hash the Ed25519 seed
     let mut hasher = Sha512::new();
     hasher.update(ed_bytes);
@@ -57,7 +57,9 @@ use sha2::{Digest, Sha512};
     let x25519_bytes: [u8; 32] = hash_result
         .get(0..32)
         .and_then(|slice| slice.try_into().ok())
-        .ok_or_else(|| CryptoError::EncodingError("Failed to derive 32-byte scalar from hash".to_string()))?;
+        .ok_or_else(|| {
+            CryptoError::EncodingError("Failed to derive 32-byte scalar from hash".to_string())
+        })?;
 
     // 3. Construct the Secret
     // The StaticSecret::from automatically handles clamping (pruning) for X25519.
@@ -180,9 +182,10 @@ impl SealedLocator {
 // ==========================================
 
 fn resolve_did_public_key(did: &Did) -> Result<[u8; 32], CryptoError> {
-// 1. Safe Prefix Handling (Zero-Panic)
+    // 1. Safe Prefix Handling (Zero-Panic)
     // Replaces: let multibase_str = &s["did:key:".len()..];
-    let multibase_str = did.as_str()
+    let multibase_str = did
+        .as_str()
         .strip_prefix("did:key:")
         .ok_or(CryptoError::IdentityResolutionError)?;
 

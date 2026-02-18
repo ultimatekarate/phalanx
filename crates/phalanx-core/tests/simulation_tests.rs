@@ -45,13 +45,15 @@ async fn test_salvage_on_node_death() {
     let victim_did = victim_identity.did.clone();
 
     let frames = vec![vec![1]];
-    let real_shard = create_video_shard(frames, StorageSequence(999), 10, "volley_test_999".into());
+    let real_shard = create_video_shard(frames, StorageSequence(999), 10, "volley_test_999".into())
+        .expect("Failed to generate attack shard");
 
     let envelope = WitnessEnvelope::new(
         Evidence::Video(real_shard),
         &victim_identity,
         victim_device_network_id,
-    );
+    )
+    .expect("Failed to sign attack envelope");
 
     let serialized_envelope = postcard::to_stdvec(&envelope).expect("Failed to serialize envelope");
 
@@ -136,9 +138,11 @@ async fn test_out_of_sequence_salvage_on_node_death() {
     for i in 0..5 {
         let seq = StorageSequence(i);
         let frames = vec![vec![i as u8]];
-        let shard = create_video_shard(frames, seq, 30, "volley_test_999".into());
+        let shard = create_video_shard(frames, seq, 30, "volley_test_999".into())
+            .expect("Failed to generate attack shard");
 
-        let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id);
+        let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id)
+            .expect("Failed to sign envelope");
         captured_envelopes.push(envelope);
     }
 
@@ -190,9 +194,11 @@ async fn test_stronghold_crash_recovery() {
     let mut storage = Guardian::new(vault_path, &config, identity.did.clone());
 
     let frames = vec![vec![0xAA]];
-    let shard = create_video_shard(frames, seq, 30, "volley_test_999".into());
+    let shard = create_video_shard(frames, seq, 30, "volley_test_999".into())
+        .expect("Failed to generate attack shard");
 
-    let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id);
+    let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id)
+        .expect("Failed to sign envelope");
     storage
         .ingest_envelope(envelope.clone())
         .expect("Ingest failed");
@@ -292,9 +298,11 @@ async fn test_vampire_attack_defense() {
 
     // 3. Launch Attack
     for i in 0..10 {
-        let shard = create_video_shard(vec![vec![1]], StorageSequence(i), 30, "vampire".into());
+        let shard = create_video_shard(vec![vec![1]], StorageSequence(i), 30, "vampire".into())
+            .expect("Failed to generate attack shard");
         let mut envelope =
-            WitnessEnvelope::new(Evidence::Video(shard), &attacker_identity, attacker_net_id);
+            WitnessEnvelope::new(Evidence::Video(shard), &attacker_identity, attacker_net_id)
+                .expect("Failed to sign envelope");
 
         // POISON: Set FPS to 145 (Illegal)
         if let Evidence::Video(ref mut v) = envelope.evidence {
