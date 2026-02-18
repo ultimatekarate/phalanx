@@ -275,7 +275,7 @@ impl StrongholdEngine {
                 &local_peer,
                 "Malformed heartbeat",
             ) {
-                self.sentinel.health_tracker.register_activity(msg)
+                self.sentinel.health_tracker.register_activity(msg);
             }
 
             return ;
@@ -340,7 +340,7 @@ impl StrongholdEngine {
                     gossipsub::IdentTopic::new(self.config.network.control_topic.to_string());
 
                 let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, data);
-            };
+            }
 
         interval
     }
