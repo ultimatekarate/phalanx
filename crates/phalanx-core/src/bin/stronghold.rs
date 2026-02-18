@@ -16,6 +16,7 @@ use phalanx_core::{
     security::{
         sentinel::{ControlMessage, Sentinel},
         telemetry,
+        gate::ForensicGate,
     },
     storage::vault::Guardian,
     transport::swarm::{get_storage_key, load_swarm_key, setup_phalanx_swarm},
@@ -224,40 +225,48 @@ impl StrongholdEngine {
     /// * **Control Signals:** Updates the internal "Reputation Table" (Justiciar).
     /// * **Data Shards:** Immediately persisted to the Vault ("Salvage").
     async fn handle_gossip(&mut self, event: gossipsub::Event) -> Result<(), Box<dyn Error>> {
-        if let gossipsub::Event::Message { message, .. } = event {
-            let topic: MeshTopic = message.topic.as_str().into();
+        // 1. Extract the message or exit immediately
+        let message = match event {
+            gossipsub::Event::Message { message, .. } => message,
+            _ => return Ok(()),
+        };
 
-            // 1. Check Topic Type
-            if topic == self.config.network.control_topic {
-                // CASE: Vitality Signal
-                if let Ok(msg) = postcard::from_bytes::<ControlMessage>(&message.data) {
-                    self.sentinel.health_tracker.register_activity(msg);
-                }
-            } else {
-                // CASE: Data Volley (Video/Audio)
-                // Attempt to deserialize as a ShardChunk
-                if let Ok(chunk) = postcard::from_bytes::<
-                    phalanx_core::primitives::shards::ShardChunk,
-                >(&message.data)
-                {
-                    let local_peer = NetworkId(*self.swarm.local_peer_id());
+        let topic: MeshTopic = message.topic.as_str().into();
+        let local_peer = NetworkId(*self.swarm.local_peer_id());
 
-                    // The Sentinel checks the signature. If valid, we salvage it.
-                    if let Some(envelope) = self.sentinel.process_chunk(
-                        chunk,
-                        &topic,
-                        &self.config,
-                        &self.identity,
-                        local_peer,
-                    ) {
-                        // "Salvage" means ingesting foreign data we did not create.
-                        if let Err(e) = self.storage.ingest_envelope(envelope) {
-                            warn!(error = ?e, "Failed to salvage incoming shard.");
-                        }
-                    }
-                }
-            }
+        // ------------------------------------------------------------------
+        // BRANCH A: CONTROL PLANE (Heartbeats)
+        // ------------------------------------------------------------------
+        if topic == self.config.network.control_topic {
+            postcard::from_bytes::<ControlMessage>(&message.data)
+                .ok_or_log("ctrl_parse_fail", &local_peer, "Malformed heartbeat")
+                .map(|msg| self.sentinel.health_tracker.register_activity(msg));
+                
+            return Ok(());
         }
+
+        // ------------------------------------------------------------------
+        // BRANCH B: DATA PLANE (Evidence Shards)
+        // ------------------------------------------------------------------
+        // We chain the gates into a single, flat forensic pipeline.
+        let _ = postcard::from_bytes::<phalanx_core::primitives::shards::ShardChunk>(&message.data)
+            .ok_or_log("data_parse_fail", &local_peer, "Malformed data chunk")
+            .and_then(|chunk| {
+                // Sentinel applies: PrivacyGate -> WitnessGate -> IntegrityGate
+                self.sentinel.process_chunk(
+                    chunk,
+                    &topic,
+                    &self.config,
+                    &self.identity,
+                    local_peer,
+                )
+            })
+            .and_then(|envelope| {
+                // Storage applies: CapacityGate -> ForensicGate
+                self.storage.ingest_envelope(envelope)
+                    .ok_or_log("vault_ingest_fail", &local_peer, "Vault rejected envelope")
+            });
+
         Ok(())
     }
 
