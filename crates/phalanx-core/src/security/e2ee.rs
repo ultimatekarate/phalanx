@@ -50,3 +50,22 @@ pub fn decrypt_bytes(
         .decrypt(xnonce, ciphertext)
         .map_err(|_| CryptoError::DecryptionFailure)
 }
+
+/// A strongly typed symmetric key for forensic payload encryption.
+/// Enforces semantic boundaries and prevents cross-contamination with identity keys.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SymmetricKey(pub [u8; 32]);
+
+impl SymmetricKey {
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+// Ensure keys do not leak in debug output
+impl std::fmt::Debug for SymmetricKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SymmetricKey").field(&"[REDACTED]").finish()
+    }
+}
