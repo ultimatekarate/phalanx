@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use tokio::time::Instant;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, instrument, warn};
 
-use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
+use crate::primitives::identity::{NetworkId, PhalanxIdentity};
 use crate::primitives::shards::{
     AudioShard, ChunkType, Evidence, ReassemblyBuffer, ShardChunk, ShardError, ShardId, VideoShard,
     WitnessEnvelope,
@@ -12,16 +12,6 @@ use crate::security::gate::BufferCapacityGate;
 
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
 use crate::base::types::{MeshTopic, PowerState, TrafficGovernor, UnitInterval, VitalityRate};
-
-// =====================
-// SECURITY GATES
-// =====================
-
-/// Dependency Inversion: Allows the Sentinel to query storage-layer
-/// reputation state without coupling to the Guardian implementation.
-pub trait ReputationGate {
-    fn is_blacklisted(&self, did: &Did) -> bool;
-}
 
 // =====================
 // HEALTH & CAPACITY
@@ -95,16 +85,6 @@ pub struct ControlMessage {
     pub is_leaf: bool,
 }
 
-/// Tracks the behavior and resource usage of remote peers
-#[derive(Debug, Default)]
-pub struct PeerReputation {
-    pub active_buffers: usize,
-    pub invalid_sigs: u32,
-    pub total_shards_sent: u64,
-    pub last_seen_load: f32,
-    pub is_blacklisted: bool,
-}
-
 // =====================
 // SENTINEL CORE
 // =====================
@@ -173,31 +153,22 @@ impl Sentinel {
     }
 
     /// Primary entry point for reassembling network chunks into signed Evidence.
-    #[instrument(skip(self, identity, chunk, reputation), level = "debug")]
-    pub fn process_chunk<R: ReputationGate>(
+    #[instrument(skip(self, identity, chunk), level = "debug")]
+    pub fn process_chunk(
         &mut self,
         chunk: ShardChunk,
         topic: &MeshTopic,
         config: &PhalanxConfig,
         identity: &PhalanxIdentity,
         local_peer_id: NetworkId,
-        reputation: &R,
     ) -> Result<Option<WitnessEnvelope>, ShardError> {
-        // 1. Preemptive Reputation Gate (Vampire Defense)
-        if reputation.is_blacklisted(&chunk.owner_did) {
-            debug!(did = %chunk.owner_did, "ReputationGate: Dropping chunk from blacklisted peer");
-            return Err(ShardError::InvalidConfiguration(
-                "Peer is blacklisted".into(),
-            ));
-        }
-
-        // 2. Governance Gate
+        // 1. Governance Gate (Stateless hardware limit enforcement)
         if !self.governor.should_accept(&chunk.owner_did, &identity.did) {
-            debug!(did = %chunk.owner_did, "TrafficGovernor: Rejecting foreign chunk in Leaf Mode");
+            tracing::debug!(did = %chunk.owner_did, "TrafficGovernor: Rejecting foreign chunk in Leaf Mode");
             return Ok(None); // Benign load-shedding, not an error.
         }
 
-        // 3. Route to correct buffer based on network topic
+        // 2. Route to correct buffer based on network topic
         let is_video = topic == &config.network.video_topic;
         let (buffers, capacity_limit) = if is_video {
             (&mut self.video_buffers, config.storage.max_video_buffer)
@@ -207,7 +178,7 @@ impl Sentinel {
 
         let shard_id = chunk.shard_id;
 
-        // 4. Capacity Gate (OOM Defense via LRU Eviction)
+        // 3. Capacity Gate (OOM Defense via LRU Eviction)
         buffers.enforce_capacity_limit(&shard_id, capacity_limit)?;
 
         let buffer = buffers
@@ -222,7 +193,7 @@ impl Sentinel {
 
         // 5. Finalize if reassembly is complete
         if buffer.is_complete() {
-            debug!(%shard_id, "Reassembly complete. Finalizing evidence.");
+            tracing::debug!(%shard_id, "Reassembly complete. Finalizing evidence.");
             let raw_data = buffer.assemble();
 
             // Immediate cleanup of the completed buffer
@@ -249,7 +220,7 @@ impl Sentinel {
 
                     // Witness Gate: Fallible cryptographic seal
                     let envelope = WitnessEnvelope::new(evidence, identity, local_peer_id)?;
-                    info!(%shard_id, "Successfully witnessed local forensic unit.");
+                    tracing::info!(%shard_id, "Successfully witnessed local forensic unit.");
 
                     Ok(Some(envelope))
                 }
@@ -258,7 +229,6 @@ impl Sentinel {
             Ok(None) // Assembly in progress
         }
     }
-
     /// Garbage collection for incomplete reassemblies that have timed out.
     pub fn prune_stale_buffers(&mut self, _config: &PhalanxConfig, physics: &PhalanxPhysics) {
         let timeout = physics.shard_timeout();
@@ -286,15 +256,6 @@ mod leaf_mode_tests {
     use super::*;
     use std::error::Error;
 
-    // 1. Define a lightweight mock for unit testing the boundary
-    struct MockReputationGate;
-
-    impl ReputationGate for MockReputationGate {
-        fn is_blacklisted(&self, _did: &Did) -> bool {
-            false // Default to benign for base Sentinel tests
-        }
-    }
-
     #[test]
     fn test_sentinel_leaf_mode_filtering() -> Result<(), Box<dyn Error>> {
         let (identity, _) = PhalanxIdentity::generate()?;
@@ -304,7 +265,6 @@ mod leaf_mode_tests {
 
         let mut sentinel = Sentinel::new(&config);
         sentinel.set_power_state(PowerState::Leaf);
-        let mock_gate = MockReputationGate;
 
         // 1. Foreign chunk (labeled as Witnessed/Relayed)
         let foreign_chunk = ShardChunk {
@@ -327,14 +287,12 @@ mod leaf_mode_tests {
         };
 
         // 3. Process Foreign
-        // The ? operator unwraps the Ok(None) expected from a blocked chunk
         let _ = sentinel.process_chunk(
             foreign_chunk,
             &config.network.video_topic,
             &config,
             &identity,
             local_peer.clone(),
-            &mock_gate,
         )?;
 
         assert_eq!(
@@ -344,14 +302,12 @@ mod leaf_mode_tests {
         );
 
         // 4. Process Local
-        // The ? operator unwraps the Ok(None) expected from an incomplete chunk assembly
         let _ = sentinel.process_chunk(
             local_chunk,
             &config.network.video_topic,
             &config,
             &identity,
             local_peer,
-            &mock_gate,
         )?;
 
         assert_eq!(

@@ -419,7 +419,6 @@ impl SimNode {
             &self.config,
             &self.identity,
             self.network_id,
-            &self.storage, // The Guardian implements ReputationGate
         );
 
         match chunk_result {

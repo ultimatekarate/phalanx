@@ -283,8 +283,7 @@ impl StrongholdEngine {
                 &topic,
                 &self.config,
                 &self.identity,
-                local_peer,
-                &self.storage, // ReputationGate Injection
+                local_peer, // ReputationGate Injection
             )
             .gate(
                 "reassembly_fail",

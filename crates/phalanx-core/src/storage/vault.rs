@@ -5,7 +5,6 @@ use crate::primitives::shards::{Evidence, ShardChunk, StorageSequence, Volley, W
 use crate::primitives::time::TrustedClock;
 use crate::storage::crucible::Crucible;
 use crate::storage::strategies::{ShardAmalgam, VolleyAmalgam};
-use crate::security::sentinel::ReputationGate;
 
 // IMPORT GATES
 use crate::security::gate::{CapacityGate, ForensicGate, IntegrityGate};
@@ -22,14 +21,6 @@ use tracing::{debug, error, info, instrument, warn};
 pub enum NodeMode {
     Leaf,
     Standard,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Offense {
-    InvalidSignature,
-    ReplayAttack,
-    QuotaExceeded,
-    MalformedPacket,
 }
 
 /// Enumerates specific failure modes for storage and security operations.
@@ -57,13 +48,6 @@ pub enum GuardianError {
     BlacklistedPeer(String),
 }
 
-/// Tracks the behavior of remote peers to prevent "Vampire Attacks" (Resource Exhaustion).
-#[derive(Debug, Default, Clone)]
-pub struct PeerReputation {
-    pub invalid_sigs: u32,
-    pub is_blacklisted: bool,
-}
-
 pub struct Guardian {
     pub vault_storage: PathBuf,
     pub wal_directory: PathBuf,
@@ -77,11 +61,7 @@ pub struct Guardian {
     pub session_activity: HashMap<Did, Instant>,
 
     pub stale_threshold: std::time::Duration,
-
-    // --- ANTI-VAMPIRE STATE ---
-    pub peer_registry: HashMap<Did, PeerReputation>,
     pub max_buffers_per_peer: usize,
-    pub max_sig_failures: u32,
 
     // --- GOVERNANCE & QUOTAS ---
     pub local_did: Did,
@@ -110,10 +90,7 @@ impl Guardian {
             processed_sequences: HashMap::new(),
             session_activity: HashMap::new(),
             stale_threshold: std::time::Duration::from_secs(config.storage.stale_session_threshold),
-
-            peer_registry: HashMap::new(),
             max_buffers_per_peer: config.storage.max_peers,
-            max_sig_failures: 5,
 
             local_did: local_did.clone(),
             max_storage_bytes: config.storage.max_storage_bytes,
@@ -255,15 +232,7 @@ impl Guardian {
             return;
         }
 
-        // 4. Reputation Check
-        if let Some(rep) = self.peer_registry.get(&chunk.owner_did) {
-            if rep.is_blacklisted {
-                debug!(did = %chunk.owner_did, "Dropping chunk: Peer is blacklisted.");
-                return;
-            }
-        }
-
-        // 5. Processing
+        // 4. Processing
         if let Some(envelope) = self.micro_layer.process(chunk) {
             info!(
                 shard_id = %envelope.evidence.sequence_id(),
@@ -285,13 +254,6 @@ impl Guardian {
             .parse::<NetworkId>()
             .unwrap_or_else(|_| NetworkId::random());
 
-        // 0. GATE 0: REPUTATION GATE (Vampire Defense)
-        // Preemptively drop envelopes from known malicious peers to prevent CPU exhaustion.
-        if self.is_blacklisted(&envelope.did) {
-            warn!(did = %envelope.did, "Blocked ingest_envelope attempt from blacklisted peer");
-            return Err(GuardianError::BlacklistedPeer(envelope.did.to_string()));
-        }
-
         // 1. Foreign Data Pruning (Pre-Check)
         if envelope.did != self.local_did
             && self.foreign_storage_usage > self.max_foreign_storage_bytes
@@ -299,9 +261,7 @@ impl Guardian {
             self.prune_foreign_evidence();
         }
 
-        // ------------------------------------------------------------------
-        // GATE 1: CAPACITY GATE (Availability)
-        // ------------------------------------------------------------------
+        // GATE 1: CAPACITY GATE
         let limit = if envelope.did == self.local_did {
             self.max_storage_bytes.0 as usize
         } else {
@@ -320,22 +280,12 @@ impl Guardian {
             .check_capacity(&peer_id, current_usage, limit)
             .map_err(|_| GuardianError::QuotaExceeded(ByteCapacity(limit as u64)))?;
 
-        // ------------------------------------------------------------------
-        // GATE 2: INTEGRITY GATE (Verification)
-        // ------------------------------------------------------------------
-        let peer_did = envelope.did.clone();
-
+        // GATE 2: INTEGRITY GATE
         let envelope = envelope
             .check_integrity(&local_network_id, &self.clock, 10)
-            .map_err(|e| {
-                // Updated to use the strict Offense type state
-                self.penalize_peer(peer_did, Offense::InvalidSignature);
-                GuardianError::InvalidSignature(e.to_string())
-            })?;
+            .map_err(|e| GuardianError::InvalidSignature(e.to_string()))?;
 
-        // ------------------------------------------------------------------
-        // GATE 3: FORENSIC GATE (Persistence)
-        // ------------------------------------------------------------------
+        // GATE 3: FORENSIC GATE
         self.write_to_wal(&envelope)
             .gate(
                 "wal_write_failed",
@@ -345,23 +295,20 @@ impl Guardian {
             .map_err(|e| GuardianError::WalWriteFailed(e.to_string()))?;
 
         // --- Post-Gating Logic (In-Memory Updates) ---
-
         let did = envelope.did.clone();
         let seq = envelope.evidence.sequence_id();
 
-        // Replay Check (Memory)
         if self
             .processed_sequences
             .get(&did)
             .is_some_and(|set| set.contains(&seq))
         {
             debug!(%seq, "Replay protection: Dropping already archived shard.");
-            return Ok(());
+            return Err(GuardianError::ReplayDetected(seq.0 as u64));
         }
 
         self.session_activity.insert(did.clone(), Instant::now());
 
-        // Process Volley
         if let Some(volley) = self.macro_layer.process(envelope) {
             info!(volley = %volley.id, "Volley sealed. Archiving.");
             self.archive_volley(volley);
@@ -389,23 +336,6 @@ impl Guardian {
 
         let total_raw = micro_load + macro_load;
         UnitInterval::new(total_raw.min(1.0) as f32)
-    }
-
-    pub fn penalize_peer(&mut self, did: Did, offense: Offense) {
-        let rep = self.peer_registry.entry(did.clone()).or_default();
-        rep.invalid_sigs += 1;
-
-        warn!(
-            %did,
-            ?offense,
-            count = rep.invalid_sigs,
-            "Peer penalized for bad behavior."
-        );
-
-        if rep.invalid_sigs >= self.max_sig_failures {
-            rep.is_blacklisted = true;
-            warn!(%did, "PEER BLACKLISTED: Vampire attack detected.");
-        }
     }
 
     #[must_use]
@@ -514,6 +444,8 @@ impl Guardian {
             "Guardian: Running governance cleanup cycle"
         );
         let recovered_envelopes = self.micro_layer.flush_stale(ttl);
+
+        // Use a dummy gate for internal cyclic recovery
         for env in recovered_envelopes {
             // Re-ingest (will hit replay protection or archive logic)
             let _ = self.ingest_envelope(env);
@@ -569,14 +501,6 @@ impl Guardian {
                 }
             }
         }
-    }
-}
-
-impl crate::security::sentinel::ReputationGate for Guardian {
-    fn is_blacklisted(&self, did: &Did) -> bool {
-        self.peer_registry
-            .get(did)
-            .is_some_and(|rep| rep.is_blacklisted)
     }
 }
 
@@ -776,7 +700,8 @@ mod tests {
 
         let seq_num = StorageSequence(50);
         let frames = vec![vec![1]];
-        let shard = shards::create_video_shard(frames, seq_num, 30, "v1".into())?;
+        let shard =
+            crate::primitives::shards::create_video_shard(frames, seq_num, 30, "v1".into())?;
         let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id)?;
 
         // 1. MANUALLY SEED HISTORY
@@ -787,14 +712,25 @@ mod tests {
             .insert(seq_num);
 
         // 2. Ingest the "Replay" Envelope
-        assert!(guardian.ingest_envelope(envelope).is_ok());
+        let result = guardian.ingest_envelope(envelope);
 
-        // 3. Verify it was BLOCKED
+        // 3. Verify it was BLOCKED explicitly with an error
+        assert!(
+            result.is_err(),
+            "Guardian failed to reject replayed envelope!"
+        );
+
+        match result.unwrap_err() {
+            GuardianError::ReplayDetected(seq) => assert_eq!(seq, 50),
+            other => panic!("Expected ReplayDetected error, found: {:?}", other),
+        }
+
         let active_session = guardian.get_active_volley_shards(&identity.did);
         assert!(
             active_session.is_none(),
             "Replayed envelope leaked into active buffer!"
         );
+
         Ok(())
     }
 
@@ -823,105 +759,67 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_vampire_blacklisting() -> Result<(), Box<dyn std::error::Error>> {
-        let (me, _) = PhalanxIdentity::generate()?;
-        let (vampire, _) = PhalanxIdentity::generate()?;
-        let config = PhalanxConfig::default();
-        let mut guardian = Guardian::new("sim_vault/vampire_test", &config, me.did.clone());
-
-        // 1. Send multiple invalid signatures
-        for _ in 0..6 {
-            let shard = crate::primitives::shards::create_video_shard(
-                vec![vec![1]],
-                StorageSequence(1),
-                30,
-                "v1".into(),
-            )?;
-            let mut envelope =
-                WitnessEnvelope::new(Evidence::Video(shard), &vampire, NetworkId::random())?;
-
-            // TAMPER
-            if let Evidence::Video(ref mut v) = envelope.evidence {
-                v.fps = 99;
-            }
-
-            let _ = guardian.ingest_envelope(envelope);
-        }
-
-        // 2. Verify blacklisted
-        // Safe Option unwrap
-        let rep = guardian
-            .peer_registry
-            .get(&vampire.did)
-            .ok_or("Expected vampire DID in registry")?;
-
-        assert!(rep.is_blacklisted);
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod guardian_leaf_tests {
-    use super::*;
-    use crate::primitives::identity::{NetworkId, PhalanxIdentity};
-    use crate::primitives::shards::{
-        self, ChunkType, Evidence, ShardId, StorageSequence, WitnessEnvelope,
-    };
+    use crate::base::types::PowerState;
+    use crate::primitives::shards::{ChunkType, ShardId};
+    use crate::security::sentinel::Sentinel;
+    use std::error::Error;
 
     #[tokio::test]
-    async fn test_guardian_leaf_mode_ingestion() -> Result<(), Box<dyn std::error::Error>> {
-        let _ = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_test_writer()
-            .try_init(); // Safe to ignore if init fails (already init)
-
+    async fn test_sentinel_leaf_mode_filtering() -> Result<(), Box<dyn Error>> {
         let (identity, _) = PhalanxIdentity::generate()?;
+        let (stranger, _) = PhalanxIdentity::generate()?;
         let config = PhalanxConfig::default();
-        let vault_path = "sim_vault/leaf_unit_test";
+        let local_peer = NetworkId::random();
 
-        if std::path::Path::new(vault_path).exists() {
-            std::fs::remove_dir_all(vault_path)?;
-        }
+        let mut sentinel = Sentinel::new(&config);
+        sentinel.set_power_state(PowerState::Leaf);
 
-        let mut guardian = Guardian::new(vault_path, &config, identity.did.clone());
-
-        // 1. Create a REAL forensic unit (Video Shard)
-        let frames = vec![vec![1, 2, 3]];
-        let shard =
-            shards::create_video_shard(frames, StorageSequence(200), 30, "volley_test".into())?;
-
-        // 2. WRAP in an Envelope
-        let envelope =
-            WitnessEnvelope::new(Evidence::Video(shard), &identity, NetworkId::random())?;
-
-        // 3. Serialize the FULL ENVELOPE (Safe Propagation)
-        let envelope_bytes = postcard::to_stdvec(&envelope)?;
-
-        // 4. Create chunks from the ENVELOPE bytes
-        let local_chunk = shards::ShardChunk {
-            shard_id: ShardId(200),
+        let foreign_chunk = ShardChunk {
+            shard_id: ShardId(1),
             chunk_index: 0,
-            total_chunks: 1,
-            data: envelope_bytes,
-            owner_did: identity.did.clone(),
+            total_chunks: 2,
+            data: vec![1, 2, 3],
+            owner_did: stranger.did.clone(),
             chunk_type: ChunkType::Witnessed,
         };
 
-        // 5. Ingest while Leaf Mode is ACTIVE
-        let mode = NodeMode::Leaf;
-        guardian.ingest_chunk(local_chunk, mode);
+        let local_chunk = ShardChunk {
+            shard_id: ShardId(2),
+            chunk_index: 0,
+            total_chunks: 2,
+            data: vec![4, 5, 6],
+            owner_did: identity.did.clone(),
+            chunk_type: ChunkType::ForensicUnit,
+        };
 
-        // 6. Verification
+        let _ = sentinel.process_chunk(
+            foreign_chunk,
+            &config.network.video_topic,
+            &config,
+            &identity,
+            local_peer.clone(),
+        )?;
+
         assert_eq!(
-            guardian.micro_layer.len(),
+            sentinel.video_buffers.len(),
             0,
-            "Micro-layer should be empty after successful sealing and promotion"
+            "Sentinel leaked foreign data in Leaf Mode"
         );
 
-        if std::path::Path::new(vault_path).exists() {
-            std::fs::remove_dir_all(vault_path)?;
-        }
+        let _ = sentinel.process_chunk(
+            local_chunk,
+            &config.network.video_topic,
+            &config,
+            &identity,
+            local_peer,
+        )?;
+
+        assert_eq!(
+            sentinel.video_buffers.len(),
+            1,
+            "Sentinel failed to process local data in Leaf Mode"
+        );
+
         Ok(())
     }
 }

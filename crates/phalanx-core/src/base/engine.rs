@@ -3,18 +3,22 @@ use libp2p::swarm::{Swarm, SwarmEvent};
 use std::error::Error;
 use std::io;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::info;
 
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
 use crate::primitives::identity::{init_identity, Did, IdentityError, NetworkId, PhalanxIdentity};
-use crate::primitives::shards::{AudioShard, Evidence, ShardId, VideoShard, WitnessEnvelope};
+use crate::primitives::shards::{
+    AudioShard, Evidence, ShardChunk, ShardId, VideoShard, WitnessEnvelope,
+};
 use crate::primitives::time::{TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
+use crate::security::sentinel::Sentinel;
+use crate::security::trust::ReputationGate;
 
 // IMPORT ALL GATES
 use crate::security::gate::{CapacityGate, ForensicGate, IntegrityGate, PrivacyGate, WitnessGate};
 use crate::storage::strategies::ShardAmalgam;
-use crate::storage::vault::Guardian;
+use crate::storage::vault::{Guardian, GuardianError};
 use crate::{PhalanxBehaviour, PhalanxEvent};
 
 pub use libp2p::pnet::PreSharedKey;
@@ -41,11 +45,12 @@ pub struct PhalanxEngine {
     swarm: Swarm<PhalanxBehaviour>,
     #[allow(dead_code)]
     crucible: crate::storage::crucible::Crucible<ShardAmalgam>,
+    sentinel: Sentinel,
     guardian: Guardian,
+    trust_registry: crate::security::trust::TrustRegistry,
     video_rx: mpsc::Receiver<VideoShard>,
     audio_rx: mpsc::Receiver<AudioShard>,
 
-    // Internal state
     seq_counter: u64,
     // TODO: Rotate this via KeyStore in production
     network_key: SymmetricKey,
@@ -61,21 +66,35 @@ impl PhalanxEngine {
     ) -> Result<Self, Box<dyn Error>> {
         let network_keypair = identity.to_libp2p_keypair();
 
-        // Guardian init (Storage)
         let local_peer_id = network_keypair.public().to_peer_id();
         let local_did = Did::from(local_peer_id.to_string());
+        
+        // Data boundaries
+        let sentinel = Sentinel::new(&config);
         let guardian = Guardian::new(&config.storage.vault_path, &config, local_did);
 
-        // Swarm init (Network)
+        // Network
         let swarm =
             crate::transport::swarm::setup_phalanx_swarm(network_keypair, &config, &physics, psk)?;
 
-        // Channels (Sensors)
+        // Media Channels
         let (_video_tx, video_rx) = mpsc::channel(config.storage.max_video_buffer);
         let (_audio_tx, audio_rx) = mpsc::channel(config.storage.max_audio_buffer);
 
-        // Clock init
         let clock = TrustedClock::new();
+
+        // Isolate async execution context for synchronous builder
+        let config_clone = config.clone();
+        let trust_registry = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to initialize transient async reactor for TrustRegistry");
+
+            rt.block_on(crate::security::trust::TrustRegistry::build(&config_clone))
+        })
+        .join()
+        .expect("TrustRegistry initialization thread panicked");
 
         Ok(Self {
             config,
@@ -83,7 +102,9 @@ impl PhalanxEngine {
             clock,
             swarm,
             crucible: crate::storage::crucible::Crucible::new(),
+            sentinel,
             guardian,
+            trust_registry,
             video_rx,
             audio_rx,
             seq_counter: 0,
@@ -91,156 +112,162 @@ impl PhalanxEngine {
         })
     }
 
-    /// FFI Compatibility Helper.
-    /// Bootstraps an engine from a storage path using default physics and config.
-    /// Zero-Panic: Uses fallbacks if identity loading fails.
-    /// # Errors
-    ///
-    /// Returns an error if the underlying `PhalanxEngine::new` call fails. Note that this
-    /// function is "Zero-Panic" regarding identity; if an identity cannot be loaded
-    /// from the path, it will generate a new ephemeral one rather than returning an `Err`.
     pub fn new_at_path(path: &str) -> Result<Self, Box<dyn Error>> {
         let mut config = PhalanxConfig::default();
         config.storage.vault_path = path.to_string();
 
-        // 1. Setup Default Physics
         let physics = PhalanxPhysics::default();
-
-        // 2. Load or Generate Identity
         let identity_path = std::path::Path::new(path).join("identity.pem");
-
-        // Attempt load, fallback to generation (Ephemeral Mode)
         let identity = init_identity(&identity_path).unwrap_or_default();
 
-        // 3. Initialize Core
         Self::new(config, identity, physics, None)
     }
 
-    /// The Main Gated Event Loop
-    /// # Errors
-    ///
-    /// Returns a `Box<dyn Error>` if the event loop encounters a fatal failure. While most
-    /// gate failures (Forensic, Capacity, Integrity) are logged and skipped, critical
-    /// issues with the swarm network stream or internal channel desynchronization will
-    /// terminate the loop.
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
         let local_peer_id = *self.swarm.local_peer_id();
         let local_network_id = NetworkId::from(local_peer_id);
 
-        // GossipSub Topic
-        let topic = libp2p::gossipsub::IdentTopic::new("phalanx/1.0.0");
-
-        info!(
-            "Phalanx Engine: Active and Gated. PeerID: {}",
-            local_peer_id
-        );
+        info!("Phalanx Engine: Active and Gated. PeerID: {}", local_peer_id);
 
         loop {
             tokio::select! {
-                // ------------------------------------------------------------------
-                // PIPELINE 1: RECEPTION (Ingress: Network -> Storage)
-                // Gates: Forensic -> Capacity -> Integrity
-                // ------------------------------------------------------------------
+                // Pipeline 1: Network Ingress -> Sentinel -> Guardian
                 event = self.swarm.select_next_some() => {
                     if let SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(
-                        libp2p::gossipsub::Event::Message {
-                            propagation_source: peer,
-                            message_id: _,
-                            message,
-                        }
+                        libp2p::gossipsub::Event::Message { propagation_source: peer, message, .. }
                     )) = event {
-                        let peer_id = NetworkId::from(peer);
-
-                        // 1. Forensic Gate: Safe Deserialization
-                        let envelope = match postcard::from_bytes::<WitnessEnvelope>(&message.data)
-                            .gate("deserialization_err", &local_network_id, "Malformed wire packet")
-                        {
-                            Ok(env) => env,
-                            Err(_) => continue,
-                        };
-
-                        // 2 & 3. Capacity & Integrity Gates (Result Chaining)
-                        let verified_env = envelope
-                            .check_capacity(&peer_id, 0, 1024 * 1024 * 50)
-                            .and_then(|env| env.check_integrity(&local_network_id, &self.clock, 10));
-
-                        // 4. Persistence
-                        if let Ok(env) = verified_env {
-                            if let Err(e) = self.guardian.ingest_envelope(env) {
-                                error!(event = "vault_write_err", error = %e, "Failed to persist foreign evidence");
-                            }
-                        }
+                        self.handle_network_ingress(NetworkId::from(peer), &message.data, local_network_id.clone()).await;
                     }
                 }
-
-                // ------------------------------------------------------------------
-                // PIPELINE 2: VIDEO INGESTION (Egress: Sensor -> Network)
-                // Gates: Privacy -> Witness -> Forensic (Chunking)
-                // ------------------------------------------------------------------
+                
+                // Pipeline 2: Video Sensor Egress -> Network
                 Some(shard) = self.video_rx.recv() => {
-                    let shard_id = ShardId(self.seq_counter as u32);
-
-                    let chunks_result = Evidence::Video(shard)
-                        .safeguard(&self.network_key) // 1. Privacy Gate
-                        .and_then(|ev| {
-                            // 2. Witness Gate
-                            ev.seal(&self.identity, local_network_id)
-                        })
-                        .and_then(|env| {
-                            // 3. Discretization
-                            env.chunkify(shard_id)
-                        })
-                        // 4. Centralized Telemetry
-                        .gate("evidence_pipeline_failure", &local_network_id, "Ingestion pipeline dropped evidence unit");
-
-                    if let Ok(chunks) = chunks_result {
-                        for chunk in chunks {
-                            // Broadcast via GossipSub
-                            if let Ok(data) = postcard::to_stdvec(&chunk) {
-                                let _ = self.swarm
-                                    .behaviour_mut()
-                                    .gossipsub
-                                    .publish(topic.clone(), data);
-                            }
-                        }
-                        self.seq_counter += 1;
-                    }
+                    self.process_media_egress(Evidence::Video(shard), local_network_id.clone());
                 }
 
-                // ------------------------------------------------------------------
-                // PIPELINE 3: AUDIO INGESTION (Egress: Sensor -> Network)
-                // Gates: Privacy -> Witness -> Forensic (Chunking)
-                // ------------------------------------------------------------------
+                // Pipeline 3: Audio Sensor Egress -> Network
                 Some(shard) = self.audio_rx.recv() => {
-                    let shard_id = ShardId(self.seq_counter as u32);
+                    self.process_media_egress(Evidence::Audio(shard), local_network_id.clone());
+                }
+            }
+        }
+    }
 
-                    let chunks_result = Evidence::Audio(shard)
-                        .safeguard(&self.network_key) // 1. Privacy Gate
-                        .and_then(|ev| {
-                            // 2. Witness Gate
-                            ev.seal(&self.identity, local_network_id)
-                        })
-                        .and_then(|env| {
-                            // 3. Discretization
-                            env.chunkify(shard_id)
-                        })
-                        // 4. Centralized Telemetry
-                        .gate("evidence_pipeline_failure", &local_network_id, "Ingestion pipeline dropped audio evidence unit");
+    // =========================================================================
+    // INGRESS PIPELINE
+    // =========================================================================
+    async fn handle_network_ingress(&mut self, peer_id: NetworkId, data: &[u8], local_network_id: NetworkId) {
+        // 1. Forensic Gate: Strict ShardChunk Deserialization
+        let chunk = match postcard::from_bytes::<ShardChunk>(data)
+            .gate("deserialization_err", &local_network_id, "Malformed wire packet")
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
 
-                    if let Ok(chunks) = chunks_result {
-                        for chunk in chunks {
-                            // Broadcast via GossipSub
-                            if let Ok(data) = postcard::to_stdvec(&chunk) {
-                                let _ = self.swarm
-                                    .behaviour_mut()
-                                    .gossipsub
-                                    .publish(topic.clone(), data);
-                            }
-                        }
-                        self.seq_counter += 1;
+        let owner_did = chunk.owner_did.clone();
+
+        // 2. Preemptive Reputation Gate (Vampire Defense)
+        if self.trust_registry.is_blacklisted(&owner_did) {
+            tracing::warn!(
+                event = "AttackAttemptBlocked",
+                attacker = %peer_id,
+                target = %local_network_id,
+                reason = "Peer is blacklisted"
+            );
+            return;
+        }
+
+        // 3. Transient Reassembly via Sentinel
+        let topic = &self.config.network.video_topic; // Route dynamically if topics split
+        let sentinel_result = self.sentinel.process_chunk(
+            chunk,
+            topic,
+            &self.config,
+            &self.identity,
+            local_network_id.clone(),
+        );
+
+        match sentinel_result {
+            Ok(Some(envelope)) => {
+                self.process_assembled_envelope(peer_id, local_network_id, envelope).await;
+            }
+            Ok(None) => {} // Assembly in progress
+            Err(e) => tracing::error!(error = %e, "Sentinel chunk processing failure"),
+        }
+    }
+
+    async fn process_assembled_envelope(&mut self, peer_id: NetworkId, local_network_id: NetworkId, envelope: WitnessEnvelope) {
+        let owner_did = envelope.did.clone();
+
+        // 4. Capacity & Integrity Gates
+        match envelope
+            .check_capacity(&peer_id, 0, 1024 * 1024 * 50)
+            .and_then(|env| env.check_integrity(&local_network_id, &self.clock, 10))
+        {
+            Ok(verified_env) => {
+                // 5. Persistent Storage Delegation
+                if let Err(e) = self.guardian.ingest_envelope(verified_env) {
+                    tracing::error!(event = "vault_write_err", error = %e, "Failed to persist foreign evidence");
+
+                    // Penalize Logic Hacks (e.g. Replay Attacks)
+                    if matches!(e, GuardianError::ReplayDetected(_)) {
+                        self.trust_registry
+                            .record_offense(&owner_did, crate::security::trust::Offense::ReplayAttack, &self.clock)
+                            .await;
+
+                        tracing::warn!(
+                            event = "AttackAttemptBlocked",
+                            attacker = %peer_id,
+                            target = %local_network_id,
+                            reason = "Replay attack detected"
+                        );
                     }
                 }
             }
+            Err(e) => {
+                tracing::warn!(event = "verification_failure", error = %e, "Envelope failed security gates");
+
+                let was_blacklisted = self.trust_registry.is_blacklisted(&owner_did);
+
+                // Penalize Cryptographic Failures
+                self.trust_registry
+                    .record_offense(&owner_did, crate::security::trust::Offense::InvalidSignature, &self.clock)
+                    .await;
+
+                // Ensure the test harness receives telemetry immediately upon threshold breach
+                if !was_blacklisted && self.trust_registry.is_blacklisted(&owner_did) {
+                    tracing::warn!(
+                        event = "AttackAttemptBlocked",
+                        attacker = %peer_id,
+                        target = %local_network_id,
+                        reason = "Cryptographic failure threshold exceeded"
+                    );
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // EGRESS PIPELINE
+    // =========================================================================
+    fn process_media_egress(&mut self, evidence: Evidence, local_network_id: NetworkId) {
+        let topic = libp2p::gossipsub::IdentTopic::new("phalanx/1.0.0");
+        let shard_id = ShardId(self.seq_counter as u32);
+
+        let chunks_result = evidence
+            .safeguard(&self.network_key) // 1. Privacy Gate
+            .and_then(|ev| ev.seal(&self.identity, local_network_id.clone())) // 2. Witness Gate
+            .and_then(|env| env.chunkify(shard_id)) // 3. Discretization
+            .gate("evidence_pipeline_failure", &local_network_id, "Ingestion pipeline dropped evidence unit");
+
+        if let Ok(chunks) = chunks_result {
+            for chunk in chunks {
+                if let Ok(data) = postcard::to_stdvec(&chunk) {
+                    let _ = self.swarm.behaviour_mut().gossipsub.publish(topic.clone(), data);
+                }
+            }
+            self.seq_counter += 1;
         }
     }
 }
@@ -277,11 +304,9 @@ mod tests {
 
     #[test]
     fn test_new_at_path_ephemeral_fallback() {
-        // 1. Utilize TempDir to guarantee test isolation
         let temp_dir = tempfile::tempdir().expect("Failed to create ephemeral test directory");
         let path = temp_dir.path().to_string_lossy().into_owned();
 
-        // 2. Initialize
         let engine_result = PhalanxEngine::new_at_path(&path);
 
         assert!(
@@ -292,8 +317,6 @@ mod tests {
 
         let engine = engine_result.unwrap();
         assert_eq!(engine.seq_counter, 0);
-
-        // Cleanup happens automatically when temp_dir drops out of scope
     }
 
     #[tokio::test]
@@ -302,11 +325,8 @@ mod tests {
         let identity = PhalanxIdentity::new();
         let engine = PhalanxEngine::new(config, identity, physics, None).unwrap();
 
-        // Check 1: Capacity Gate limits are set (buffer sizes)
         assert!(engine.video_rx.capacity() > 0);
         assert!(engine.audio_rx.capacity() > 0);
-
-        // Check 2: Clock is running (Chronos Gate)
         assert!(engine.clock.now().is_ok());
     }
 }
