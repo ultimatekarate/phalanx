@@ -68,11 +68,12 @@ impl PhalanxBehaviour {
         self.kademlia
             .start_providing(record_key)
             .map_err(|_| DiscoveryError::StorageError)
-            .ok_or_log(
+            .gate(
                 "dht_announce_fail",
                 local_node_id,
                 "DHT Announcement Failed",
             )
+            .ok()
     }
 
     pub fn find_strongholds(&mut self) -> kad::QueryId {
