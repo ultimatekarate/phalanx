@@ -160,3 +160,24 @@ impl ChronosGate for TrustedClock {
         })
     }
 }
+
+/// The core extension for monadic forensic gating.
+pub trait ForensicGate<T, E> {
+    /// Observes a Result in the pipeline, logging failures with forensic context 
+    /// while preserving the original Result for the next link in the chain.
+    fn gate(self, event: &str, node: &NetworkId, msg: &str) -> Result<T, E>;
+}
+
+impl<T, E: std::fmt::Display> ForensicGate<T, E> for Result<T, E> {
+    fn gate(self, event: &str, node: &NetworkId, msg: &str) -> Result<T, E> {
+        if let Err(ref e) = self {
+            error!(
+                event = event,
+                node = %node,
+                error = %e,
+                "{msg}"
+            );
+        }
+        self
+    }
+}
