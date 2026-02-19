@@ -8,7 +8,6 @@ use crate::primitives::shards::{
     WitnessEnvelope,
 };
 
-use crate::primitives::time::TrustedClock;
 use crate::security::gate::BufferCapacityGate;
 
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};

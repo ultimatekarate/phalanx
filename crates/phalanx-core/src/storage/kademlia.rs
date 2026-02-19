@@ -1,10 +1,46 @@
 use libp2p::kad::store::{Error, RecordStore, Result};
-use libp2p::kad::{ProviderRecord, Record, RecordKey, K_VALUE};
+use libp2p::kad::{ProviderRecord, Record, RecordKey};
 use libp2p::PeerId;
-use redb::{Database, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use std::borrow::Cow;
 use std::path::Path;
 use tracing::{debug, error, instrument};
+
+// =====================
+// NEWTYPE DEFINITIONS
+// =====================
+
+/// Strongly typed wrapper for Kademlia DHT Keys
+#[derive(Debug, Clone)]
+pub struct DhtRecordKey(Vec<u8>);
+
+impl DhtRecordKey {
+    pub fn new(key: &libp2p::kad::RecordKey) -> Self {
+        Self(key.as_ref().to_vec())
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Strongly typed wrapper for serialized DHT Payloads
+#[derive(Debug, Clone)]
+pub struct DhtPayload(Vec<u8>);
+
+impl DhtPayload {
+    pub fn new(data: Vec<u8>) -> Self {
+        Self(data)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> Vec<u8> {
+        self.0
+    }
+}
 
 // =====================
 // SCHEMA DEFINITION
@@ -53,42 +89,58 @@ impl RedbStore {
         // Placeholder for strict verification logic
         true
     }
-}
 
-impl RecordStore for RedbStore {
-    type RecordsIter<'a> = std::vec::IntoIter<Cow<'a, Record>>;
-    type ProvidedIter<'a> = std::vec::IntoIter<Cow<'a, ProviderRecord>>;
-
-    #[instrument(skip(self, record), level = "debug")]
-    fn put(&mut self, record: Record) -> Result<()> {
-        // 1. Zero-Trust Gate: Reject unverified data before disk allocation
-        if !self.verify_record_signature(&record) {
-            error!(key = ?record.key, "Record failed cryptographic verification. Dropping.");
-            return Err(Error::ValueTooLarge); // Utilizing existing Error variant as proxy for rejection
-        }
-
-        // 2. Atomic Transaction
+    fn persist_record_safely(
+        &self,
+        key: DhtRecordKey,
+        payload: DhtPayload,
+    ) -> libp2p::kad::store::Result<()> {
         let write_txn = self.db.begin_write().map_err(|_| Error::MaxProvidedKeys)?;
 
         {
             let mut table = write_txn
                 .open_table(DHT_RECORDS_TABLE)
                 .map_err(|_| Error::MaxProvidedKeys)?;
+
+            // Raw bytes are isolated to this single, verifiable execution block.
             table
-                .insert(record.key.as_ref(), record.value.as_slice())
+                .insert(key.as_bytes(), payload.as_bytes())
                 .map_err(|_| Error::MaxProvidedKeys)?;
         }
 
         write_txn.commit().map_err(|_| Error::MaxProvidedKeys)?;
+        Ok(())
+    }
+}
 
+impl RecordStore for RedbStore {
+    type RecordsIter<'a> = std::vec::IntoIter<Cow<'a, Record>>;
+    type ProvidedIter<'a> = std::vec::IntoIter<Cow<'a, ProviderRecord>>;
+
+#[instrument(skip(self, record), level = "debug")]
+    fn put(&mut self, record: Record) -> Result<()> {
+        if !self.verify_record_signature(&record) {
+            error!(key = ?record.key, "Record failed cryptographic verification. Dropping.");
+            return Err(Error::ValueTooLarge); 
+        }
+
+        // Convert libp2p types into localized, strictly typed domain boundaries
+        let typed_key = DhtRecordKey::new(&record.key);
+        let typed_payload = DhtPayload::new(record.value);
+
+        self.persist_record_safely(typed_key, typed_payload)?;
+        
         debug!(key = ?record.key, "Record securely persisted to disk");
         Ok(())
     }
 
     fn get(&self, key: &RecordKey) -> Option<Cow<'_, Record>> {
+        // Requires ReadableDatabase
         let read_txn = self.db.begin_read().ok()?;
         let table = read_txn.open_table(DHT_RECORDS_TABLE).ok()?;
 
+        // Requires ReadableTable. ok() converts Result to Option,
+        // the second ? unwraps the inner Option if the key exists.
         let value_access = table.get(key.as_ref()).ok()??;
         let value = value_access.value().to_vec();
 
@@ -96,7 +148,7 @@ impl RecordStore for RedbStore {
             key: key.clone(),
             value,
             publisher: None,
-            expires: None, // Expiration logic requires a separate metadata table in production
+            expires: None,
         };
 
         Some(Cow::Owned(record))
