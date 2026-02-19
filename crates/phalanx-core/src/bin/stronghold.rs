@@ -232,7 +232,7 @@ impl StrongholdEngine {
         Ok(())
     }
 
-/// Processes high-velocity `GossipSub` messages.
+    /// Processes high-velocity `GossipSub` messages.
     ///
     /// Distinction:
     /// * **Control Signals:** Updates the internal "Reputation Table" (Justiciar).
@@ -264,19 +264,44 @@ impl StrongholdEngine {
         // ------------------------------------------------------------------
         // BRANCH B: DATA PLANE (Evidence Shards)
         // ------------------------------------------------------------------
-        let chunk_result = postcard::from_bytes::<phalanx_core::primitives::shards::ShardChunk>(&message.data)
-            .gate("data_parse_fail", &local_peer, "Malformed data chunk");
 
-        if let Ok(chunk) = chunk_result {
-            // Sentinel applies: PrivacyGate -> WitnessGate -> IntegrityGate
-            if let Some(envelope) = self.sentinel.process_chunk(chunk, &topic, &self.config, &self.identity, local_peer.clone()) {
-                // Storage applies: CapacityGate -> ForensicGate
-                let _ = self.storage.ingest_envelope(envelope).gate(
-                    "vault_ingest_fail",
-                    &local_peer,
-                    "Vault rejected envelope",
-                );
-            }
+        // 1. Parsing Boundary
+        let chunk = match postcard::from_bytes::<phalanx_core::primitives::shards::ShardChunk>(
+            &message.data,
+        )
+        .gate("data_parse_fail", &local_peer, "Malformed data chunk")
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        // 2. Sentinel Boundary (Reputation & Reassembly)
+        let envelope_opt = match self
+            .sentinel
+            .process_chunk(
+                chunk,
+                &topic,
+                &self.config,
+                &self.identity,
+                local_peer.clone(),
+                &self.storage, // ReputationGate Injection
+            )
+            .gate(
+                "reassembly_fail",
+                &local_peer,
+                "Sentinel rejected data chunk",
+            ) {
+            Ok(env) => env,
+            Err(_) => return,
+        };
+
+        // 3. Guardian Boundary (Capacity, Integrity, Persistence)
+        if let Some(envelope) = envelope_opt {
+            let _ = self.storage.ingest_envelope(envelope).gate(
+                "vault_ingest_fail",
+                &local_peer,
+                "Vault rejected envelope",
+            );
         }
     }
 
@@ -296,7 +321,7 @@ impl StrongholdEngine {
         let vitality = VitalityRate::calculate(&self.physics, PowerState::Normal, load);
         let interval = vitality.as_duration();
         let sender_id = NetworkId(*self.swarm.local_peer_id());
-        
+
         // 3. Construct Proof
         let heartbeat_msg = ControlMessage {
             sender: sender_id.clone(),

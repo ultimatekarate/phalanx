@@ -306,7 +306,7 @@ async fn test_leaf_mode_isolation() {
 }
 
 #[tokio::test]
-async fn test_vampire_attack_defense() {
+async fn test_vampire_attack_defense() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
     let config = PhalanxConfig::test_defaults();
     let physics = PhalanxPhysics::test_profile();
@@ -314,89 +314,76 @@ async fn test_vampire_attack_defense() {
     // 1. Init Mesh
     let (mut harness, mut telemetry_rx) = SimulationHarness::init_mesh(config.clone(), physics);
 
-    let _victim_did = harness.spawn_node("Victim", NodeRole::Guardian).await;
+    // FIX 1: Capture the victim's identity for explicit routing
+    let victim_did = harness.spawn_node("Victim", NodeRole::Guardian).await;
 
-    // 2. Setup Attacker (Use ONE identity for both Transport and Application layers)
-    let (attacker_identity, _) = PhalanxIdentity::generate().unwrap();
-    let attacker_did = attacker_identity.did.clone(); // DID B
-    let attacker_net_id = NetworkId::random();
+    // 2. Setup Attacker
+    let (attacker_identity, _) = PhalanxIdentity::generate()?;
+    let attacker_did = attacker_identity.did.clone();
+    let attacker_net_id = attacker_did
+        .as_str()
+        .parse::<NetworkId>()
+        .map_err(|_| "Failed to parse NetworkId from attacker DID")?;
 
     // 3. Launch Attack
     for i in 0..10 {
-        let shard = create_video_shard(vec![vec![1]], StorageSequence(i), 30, "vampire".into())
-            .expect("Failed to generate attack shard");
-        let mut envelope =
-            WitnessEnvelope::new(Evidence::Video(shard), &attacker_identity, attacker_net_id)
-                .expect("Failed to sign envelope");
+        // Strict evaluation pipeline
+        let shard = create_video_shard(vec![vec![1]], StorageSequence(i), 30, "vampire".into())?;
 
-        // POISON: Set FPS to 145 (Illegal)
+        let mut envelope = WitnessEnvelope::new(
+            Evidence::Video(shard),
+            &attacker_identity,
+            attacker_net_id.clone(),
+        )?;
+
+        // POISON: Invalidate signature post-sealing
         if let Evidence::Video(ref mut v) = envelope.evidence {
             v.fps = 145;
         }
 
-        let Ok(serialized_envelope) = postcard::to_stdvec(&envelope) else {
-            tracing::error!(
-                event = "serialization_failure",
-                node = %attacker_did,
-                "Failed to serialize envelope for adversarial injection"
-            );
-            return; // Or continue if in a loop
-        };
+        // Serialization boundary
+        let serialized_envelope =
+            postcard::to_stdvec(&envelope).map_err(|e| format!("Serialization failed: {}", e))?;
 
-        // 2. Safe Discretization (Handle ShardError)
-        let chunks_result = shards::chunkify(
+        // Discretization boundary
+        let chunks = shards::chunkify(
             shards::ShardId(i as u32),
             serialized_envelope,
             4096,
             attacker_did.clone(),
             ChunkType::Witnessed,
-        );
+        )?;
 
-        let chunks = match chunks_result {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!(
-                    event = "discretization_failure",
-                    error = %e,
-                    node = %attacker_did,
-                    "Chunkify failed during adversarial simulation"
-                );
-                return;
-            }
-        };
-
-        // 3. Safe Indexing (Sentinel Access)
-        if let Some(first_chunk) = chunks.get(0) {
+        // FIX 2: Route attack strictly to the Victim Guardian
+        if let Some(first_chunk) = chunks.first() {
             harness
                 .broadcast(
-                    &attacker_did,
+                    &victim_did,
                     SimEvent::ChunkIngested {
-                        origin: attacker_net_id,
+                        origin: attacker_net_id.clone(),
                         chunk: first_chunk.clone(),
                     },
                 )
                 .await;
-        } else {
-            tracing::warn!(
-                event = "empty_payload",
-                node = %attacker_did,
-                "Discretization produced zero chunks; skipping broadcast"
-            );
         }
     }
 
     // 4. Verify Defense
     let mut detected = false;
-    let timeout = tokio::time::sleep(Duration::from_millis(2000));
+    let timeout = tokio::time::sleep(std::time::Duration::from_millis(2000));
     tokio::pin!(timeout);
 
     loop {
         tokio::select! {
             Some(event) = telemetry_rx.recv() => {
                 if let SimEvent::AttackAttemptBlocked { attacker, target, reason } = event {
-                    // The event uses 'origin' (NetworkId) which matches attacker_net_id
                     if attacker == attacker_net_id {
-                        info!("Defense Success: {} Blocked {} due to '{}'", target, attacker, reason);
+                        tracing::info!(
+                            "Defense Success: {} Blocked {} due to '{}'",
+                            target,
+                            attacker,
+                            reason
+                        );
                         detected = true;
                         break;
                     }
@@ -408,6 +395,8 @@ async fn test_vampire_attack_defense() {
 
     assert!(
         detected,
-        "Vampire defense failed: No block event detected (Identity Mismatch?)"
+        "Vampire defense failed: Victim node did not trigger AttackAttemptBlocked telemetry"
     );
+
+    Ok(())
 }

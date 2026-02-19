@@ -541,6 +541,14 @@ impl Guardian {
     }
 }
 
+impl crate::security::sentinel::ReputationGate for Guardian {
+    fn is_blacklisted(&self, did: &Did) -> bool {
+        self.peer_registry
+            .get(did)
+            .is_some_and(|rep| rep.is_blacklisted)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

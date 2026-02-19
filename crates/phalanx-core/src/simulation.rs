@@ -412,59 +412,81 @@ impl SimNode {
         let size = chunk.data.len() as u64;
         let topic = MeshTopic::new("sim_topic");
 
-        // GATE ENFORCEMENT
-        // Bypassing hallucinated vault inspections by running the chunk through
-        // the Sentinel's actual verification boundary (Integrity/Capacity).
-        if let Some(envelope) = self.sentinel.process_chunk(
+        // GATE ENFORCEMENT: Sentinel Boundary (Reputation/Privacy/Witness)
+        let chunk_result = self.sentinel.process_chunk(
             chunk,
             &topic,
             &self.config,
             &self.identity,
             self.network_id,
-        ) {
-            // Valid chunk passed all gates; persist it.
-            let _ = self.storage.ingest_envelope(envelope);
+            &self.storage, // The Guardian implements ReputationGate
+        );
 
-            let _ = self.telemetry_tx.try_send(SimEvent::ShardProcessed {
-                peer_id: origin,
-                byte_size: ByteCapacity(size),
-            });
-
-            // GOSSIP VISUALIZATION (Guardian -> Guardian)
-            if self.role == NodeRole::Guardian && origin != self.network_id {
-                let _ = self.telemetry_tx.try_send(SimEvent::OffloadComplete {
-                    origin,
-                    target: self.network_id,
-                    size: ByteCapacity(size),
-                });
-            }
-
-            // OFFLOAD LOGIC (Guardian -> Stronghold)
-            if self.role == NodeRole::Guardian {
-                self.staged_bytes += size; // Strongly Typed AddAssign
-                let threshold = ByteCapacity(4096 * 5);
-
-                if self.staged_bytes > threshold && !self.known_strongholds.is_empty() {
-                    let target_idx = rand::rng().random_range(0..self.known_strongholds.len());
-
-                    if let Some(target) = self.known_strongholds.get(target_idx).cloned() {
-                        let _ = self.telemetry_tx.try_send(SimEvent::OffloadComplete {
-                            origin: self.network_id,
-                            target,
-                            size: self.staged_bytes,
+        match chunk_result {
+            Ok(Some(envelope)) => {
+                // GATE ENFORCEMENT: Guardian Boundary (Capacity/Integrity/Forensic)
+                match self.storage.ingest_envelope(envelope) {
+                    Ok(_) => {
+                        // Valid envelope passed all gates; persist it.
+                        let _ = self.telemetry_tx.try_send(SimEvent::ShardProcessed {
+                            peer_id: origin,
+                            byte_size: ByteCapacity(size),
                         });
 
-                        self.staged_bytes = ByteCapacity::default();
+                        // GOSSIP VISUALIZATION (Guardian -> Guardian)
+                        if self.role == NodeRole::Guardian && origin != self.network_id {
+                            let _ = self.telemetry_tx.try_send(SimEvent::OffloadComplete {
+                                origin,
+                                target: self.network_id,
+                                size: ByteCapacity(size),
+                            });
+                        }
+
+                        // OFFLOAD LOGIC (Guardian -> Stronghold)
+                        if self.role == NodeRole::Guardian {
+                            self.staged_bytes += size; // Strongly Typed AddAssign
+                            let threshold = ByteCapacity(4096 * 5);
+
+                            if self.staged_bytes > threshold && !self.known_strongholds.is_empty() {
+                                let target_idx =
+                                    rand::rng().random_range(0..self.known_strongholds.len());
+
+                                if let Some(target) =
+                                    self.known_strongholds.get(target_idx).cloned()
+                                {
+                                    let _ = self.telemetry_tx.try_send(SimEvent::OffloadComplete {
+                                        origin: self.network_id,
+                                        target,
+                                        size: self.staged_bytes,
+                                    });
+
+                                    self.staged_bytes = ByteCapacity::default();
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // BLOCKED BY GUARDIAN GATES (e.g., Invalid Signature, Quota)
+                        let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
+                            attacker: origin,
+                            target: self.network_id,
+                            reason: format!("Vault Gating Rejected Payload: {}", e),
+                        });
                     }
                 }
             }
-        } else {
-            // BLOCKED BY GATES
-            let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
-                attacker: origin,
-                target: self.network_id,
-                reason: "Sentinel Gating (Integrity/Capacity/Trust) Rejected Payload".into(),
-            });
+            Ok(None) => {
+                // BENIGN: Chunk accepted, but reassembly is ongoing (or dropped safely in Leaf Mode)
+                // Do not emit attack telemetry here.
+            }
+            Err(e) => {
+                // BLOCKED BY SENTINEL GATES (e.g., Peer Blacklisted, Validation Failed)
+                let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
+                    attacker: origin,
+                    target: self.network_id,
+                    reason: format!("Sentinel Gating Rejected Payload: {}", e),
+                });
+            }
         }
     }
 }
