@@ -72,7 +72,11 @@ impl DashboardState {
                 self.metrics.total_bytes_processed += byte_size.as_u64();
                 self.active_peers.insert(peer_id, Instant::now());
             }
-            SimEvent::AttackAttemptBlocked { attacker, target, reason } => {
+            SimEvent::AttackAttemptBlocked {
+                attacker,
+                target,
+                reason,
+            } => {
                 self.push_log(format!("[DEFENSE] {} -> {}: {}", attacker, target, reason));
                 self.active_vectors.push(ActiveVector {
                     origin: attacker,
@@ -81,7 +85,11 @@ impl DashboardState {
                     style: VectorStyle::Attack,
                 });
             }
-            SimEvent::OffloadComplete { origin, target, size } => {
+            SimEvent::OffloadComplete {
+                origin,
+                target,
+                size,
+            } => {
                 let target_role = self.node_roles.get(&target).unwrap_or(&NodeRole::Guardian);
 
                 if *target_role == NodeRole::Stronghold {

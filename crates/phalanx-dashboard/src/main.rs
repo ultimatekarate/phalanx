@@ -36,19 +36,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Node Initialization
     let did_alpha = harness.spawn_node("Alpha", NodeRole::Guardian).await;
-    let net_alpha = harness.resolve_did(&did_alpha).await.expect("Resolution failed");
+    let net_alpha = harness
+        .resolve_did(&did_alpha)
+        .await
+        .expect("Resolution failed");
     state.node_roles.insert(net_alpha, NodeRole::Guardian);
 
     let did_beta = harness.spawn_node("Beta", NodeRole::Guardian).await;
-    let net_beta = harness.resolve_did(&did_beta).await.expect("Resolution failed");
+    let net_beta = harness
+        .resolve_did(&did_beta)
+        .await
+        .expect("Resolution failed");
     state.node_roles.insert(net_beta, NodeRole::Guardian);
 
     let did_gamma = harness.spawn_node("Gamma", NodeRole::Guardian).await;
-    let net_gamma = harness.resolve_did(&did_gamma).await.expect("Resolution failed");
+    let net_gamma = harness
+        .resolve_did(&did_gamma)
+        .await
+        .expect("Resolution failed");
     state.node_roles.insert(net_gamma, NodeRole::Guardian);
 
     let did_bastion = harness.spawn_node("Bastion", NodeRole::Stronghold).await;
-    let net_bastion = harness.resolve_did(&did_bastion).await.expect("Resolution failed");
+    let net_bastion = harness
+        .resolve_did(&did_bastion)
+        .await
+        .expect("Resolution failed");
     state.node_roles.insert(net_bastion, NodeRole::Stronghold);
 
     while state.is_running {
@@ -59,13 +71,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Char('q') => state.is_running = false,
                     KeyCode::Char('1') => {
                         state.current_scenario = "Alpha: Packet Loss".to_string();
-                        state.node_modes.insert(net_alpha, ChaosMode::PacketLoss(0.5));
-                        harness.inject_chaos(&did_alpha, ChaosMode::PacketLoss(0.5)).await;
+                        state
+                            .node_modes
+                            .insert(net_alpha, ChaosMode::PacketLoss(0.5));
+                        harness
+                            .inject_chaos(&did_alpha, ChaosMode::PacketLoss(0.5))
+                            .await;
                     }
                     KeyCode::Char('2') => {
                         state.current_scenario = "Beta: Vampire Attack".to_string();
                         state.node_modes.insert(net_beta, ChaosMode::Hyperactive);
-                        harness.inject_chaos(&did_beta, ChaosMode::Hyperactive).await;
+                        harness
+                            .inject_chaos(&did_beta, ChaosMode::Hyperactive)
+                            .await;
                     }
                     KeyCode::Char('3') => {
                         state.current_scenario = "Gamma: Byzantine Fault".to_string();

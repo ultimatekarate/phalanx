@@ -142,7 +142,8 @@ impl<'a> NetworkRadar<'a> {
                 ChaosMode::Byzantine => Color::Red,
                 ChaosMode::PacketLoss(_) => Color::Blue,
                 ChaosMode::Stable | ChaosMode::HighLatency(_) => {
-                    let idle_duration_seconds = current_time.duration_since(*last_seen).as_secs_f32();
+                    let idle_duration_seconds =
+                        current_time.duration_since(*last_seen).as_secs_f32();
                     if idle_duration_seconds < 2.0 {
                         if *node_role == NodeRole::Stronghold {
                             Color::Cyan

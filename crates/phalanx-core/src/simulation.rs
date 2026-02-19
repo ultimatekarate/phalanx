@@ -17,9 +17,7 @@ use crate::storage::vault::Guardian;
 // INTEGRATING SECURITY GATES
 use crate::security::gate::{ForensicGate, PrivacyGate, WitnessGate};
 
-use crate::primitives::shards::{
-    create_video_shard, Evidence, ShardId, StorageSequence, VolleyId,
-};
+use crate::primitives::shards::{create_video_shard, Evidence, ShardId, StorageSequence, VolleyId};
 
 // =========================================================================================
 //  INFRASTRUCTURE: The Harness
@@ -202,7 +200,7 @@ struct SimNode {
 
     chaos_mode: ChaosMode,
     known_strongholds: Vec<NetworkId>,
-    
+
     // STRONGLY TYPED STATE
     seq_counter: StorageSequence,
     staged_bytes: ByteCapacity,
@@ -286,7 +284,8 @@ impl SimNode {
         }
 
         // STRONGLY TYPED: Baseline vitality
-        let vitality = VitalityRate::calculate(&self.physics, PowerState::Normal, UnitInterval::new(0.10));
+        let vitality =
+            VitalityRate::calculate(&self.physics, PowerState::Normal, UnitInterval::new(0.10));
 
         if let ChaosMode::PacketLoss(prob) = self.chaos_mode {
             if rand::rng().random_range(0.0..1.0) < prob {
@@ -299,7 +298,7 @@ impl SimNode {
             uptime: self.start_time.elapsed().as_secs(),
             health: vitality,
         };
-        
+
         let _ = self
             .broadcast_tx
             .send((self.identity.did.clone(), self.network_id, event))
@@ -319,13 +318,9 @@ impl SimNode {
             let shard_id = ShardId(self.seq_counter.0);
 
             // 1. Generation Gate (Forensic)
-            let shard_opt = create_video_shard(
-                frames,
-                self.seq_counter,
-                30,
-                VolleyId::new("sim_volley"),
-            )
-            .ok_or_log("sim_gen_err", &self.network_id, "Video generation failed");
+            let shard_opt =
+                create_video_shard(frames, self.seq_counter, 30, VolleyId::new("sim_volley"))
+                    .ok_or_log("sim_gen_err", &self.network_id, "Video generation failed");
 
             if let Some(shard) = shard_opt {
                 // 2. Privacy Gate
@@ -337,7 +332,7 @@ impl SimNode {
                         // CHAOS INTERCEPTOR: Tamper *after* signing, *before* sending.
                         if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
                             if let Evidence::Video(ref mut v) = envelope.evidence {
-                                v.fps = 145; 
+                                v.fps = 145;
                             }
                         }
                         envelope
@@ -382,7 +377,8 @@ impl SimNode {
                 }
             }
 
-            SimEvent::ShardPublished { origin, chunk } | SimEvent::ChunkIngested { origin, chunk } => {
+            SimEvent::ShardPublished { origin, chunk }
+            | SimEvent::ChunkIngested { origin, chunk } => {
                 if origin != self.network_id {
                     self.process_inbound_chunk(origin, chunk).await;
                 }
@@ -394,7 +390,7 @@ impl SimNode {
                     debug!("Registered Stronghold: {}", peer);
                 }
             }
-            
+
             SimEvent::SystemStressUpdate(interval) => {
                 self.physics.apply_system_load(interval);
             }
@@ -413,7 +409,7 @@ impl SimNode {
         let topic = MeshTopic::new("sim_topic");
 
         // GATE ENFORCEMENT
-        // Bypassing hallucinated vault inspections by running the chunk through 
+        // Bypassing hallucinated vault inspections by running the chunk through
         // the Sentinel's actual verification boundary (Integrity/Capacity).
         if let Some(envelope) = self.sentinel.process_chunk(
             chunk,

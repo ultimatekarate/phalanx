@@ -54,12 +54,11 @@ pub enum DiscoverySource {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SimEvent {
     // --- Hardware/Network Layer Events ---
-    
     ChunkIngested {
         origin: NetworkId,
         chunk: ShardChunk,
     },
-    
+
     // REFACTORED: Now carries structured health data instead of raw bytes
     Heartbeat {
         origin: NetworkId,
@@ -75,7 +74,6 @@ pub enum SimEvent {
     },
 
     // --- Orchestration Layer Events ---
-    
     PeerDiscovered {
         peer: NetworkId,
         role: NodeRole,
@@ -86,7 +84,7 @@ pub enum SimEvent {
         peer_id: NetworkId,
         byte_size: ByteCapacity,
     },
-    
+
     CrucibleFinalized {
         volley_id: VolleyId,
     },
@@ -98,7 +96,6 @@ pub enum SimEvent {
     },
 
     // --- System Layer Events ---
-    
     SystemStressUpdate(UnitInterval),
     Shutdown,
 
@@ -108,7 +105,7 @@ pub enum SimEvent {
         target: NetworkId,
         mode: ChaosMode,
     },
-    
+
     // NEW: Generic broadcast for Echo/Gossip simulation
     ShardPublished {
         origin: NetworkId,

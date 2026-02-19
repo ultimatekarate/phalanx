@@ -59,7 +59,10 @@ fn render_telemetry_stats(f: &mut Frame, state: &DashboardState, area: ratatui::
 
     let stats_text = vec![
         Line::from(format!("Active Nodes: {}", state.active_peers.len())),
-        Line::from(format!("Throughput:   {} bytes", state.metrics.total_bytes_processed)),
+        Line::from(format!(
+            "Throughput:   {} bytes",
+            state.metrics.total_bytes_processed
+        )),
         Line::from(format!("Active Flows: {}", state.active_vectors.len())),
         Line::from(""),
         Line::from(Span::styled(
@@ -91,9 +94,13 @@ fn render_event_stream(f: &mut Frame, state: &DashboardState, area: ratatui::lay
             } else if msg.contains("DATA") {
                 Style::default().fg(Color::Green)
             } else if msg.contains("DEFENSE") {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else if msg.contains("ARCHIVE") {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
