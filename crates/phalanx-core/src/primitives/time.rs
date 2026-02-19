@@ -1,10 +1,8 @@
-use sntpc;
+use serde::{Deserialize, Serialize};
 use std::net::UdpSocket;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 use tracing::{info, warn};
-
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TimeError {
@@ -29,7 +27,65 @@ pub enum TimeError {
 
 pub type TimeResult<T> = Result<T, TimeError>;
 
-// --- MOCKABLE CLOCK INTERFACE ---
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PhalanxTimestamp(u64);
+
+impl PhalanxTimestamp {
+    /// Captures current network time safely using the provided clock.
+    pub fn now_from(clock: &TrustedClock) -> TimeResult<Self> {
+        clock.now()
+    }
+
+    /// Wraps a raw value.
+    ///
+    /// ARCHITECTURAL NOTE: This does NOT validate against the clock.
+    /// This allows us to deserialize historical data (which is by definition "stale")
+    /// without the constructor failing.
+    #[must_use]
+    pub fn from_u64(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    #[must_use]
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+
+    /// Strict validation for LIVE traffic.
+    ///  
+    /// Call this immediately after receiving a packet from the network
+    /// to ensure it isn't a replay attack.
+    pub fn verify_freshness(&self, clock: &TrustedClock, tolerance_secs: u64) -> TimeResult<()> {
+        let now_val = clock.now()?.as_u64();
+        let claimed_val = self.0;
+
+        // Check for Future (Time Travelers)
+        if claimed_val > now_val + tolerance_secs {
+            return Err(TimeError::Future(claimed_val - now_val));
+        }
+
+        // Check for Past (Replays)
+        if claimed_val < now_val.saturating_sub(tolerance_secs) {
+            return Err(TimeError::Stale(now_val - claimed_val));
+        }
+
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn abs_diff(&self, other: u64) -> u64 {
+        self.0.abs_diff(other)
+    }
+}
+
+impl From<u64> for PhalanxTimestamp {
+    fn from(t: u64) -> Self {
+        Self(t)
+    }
+}
+
+// --- CLOCK INTERFACE ---
 
 /// Represents the source of truth for Network Time.
 #[derive(Clone, Debug)]
@@ -47,12 +103,12 @@ impl TrustedClock {
         }
     }
 
-    /// Returns the current "True Time" (Local + Offset) in seconds.
+    /// Returns the current "True Time" (Local + Offset) as a PhalanxTimestamp.
     ///
     /// # Forensic Safety
     /// Returns `TimeError` if the system clock is before UNIX_EPOCH or if
     /// the internal lock is poisoned.
-    pub fn now(&self) -> TimeResult<u64> {
+    pub fn now(&self) -> TimeResult<PhalanxTimestamp> {
         let local = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(TimeError::ClockSkew)?
@@ -66,26 +122,10 @@ impl TrustedClock {
         let offset_sec = *offset_guard / 1000;
 
         // Ensure we don't return negative time if offset is massive
-        Ok((local + offset_sec).max(0) as u64)
-    }
-
-    /// Validates if a timestamp is within the acceptable window of True Time.
-    /// Used to reject Replay Attacks (too old) or Time Travelers (too new).
-    pub fn is_valid(
-        &self,
-        claimed_time: PhalanxTimestamp,
-        tolerance_secs: u64,
-    ) -> TimeResult<bool> {
-        let now = self.now()?;
-
-        // We use saturating logic to avoid underflow
-        let diff = claimed_time.abs_diff(now);
-
-        Ok(diff <= tolerance_secs)
+        Ok(PhalanxTimestamp((local + offset_sec).max(0) as u64))
     }
 
     /// Updates the offset manually (for testing or NTP sync)
-    #[allow(clippy::missing_errors_doc)]
     pub fn set_offset(&self, new_offset: i64) -> TimeResult<()> {
         let mut w = self
             .offset_ms
@@ -96,9 +136,13 @@ impl TrustedClock {
     }
 
     /// Performs an NTP synchronization to calculate the time offset.
+    ///
+    /// # Async Deadlock Warning
+    /// This method performs blocking I/O (UDP socket operations). 
+    /// If called from an async context, it **MUST** be wrapped in `tokio::task::spawn_blocking`.
     pub fn synchronize(&self) -> TimeResult<()> {
         // 1. Bind a local UDP socket to an available port (0)
-        let socket = UdpSocket::bind("0.0.0.0:0")
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0")
             .map_err(|e| TimeError::NtpError(format!("UDP Bind failed: {}", e)))?;
 
         // 2. Set a timeout so we don't hang forever if NTP is down
@@ -106,7 +150,6 @@ impl TrustedClock {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .map_err(|e| TimeError::NtpError(format!("Socket configuration failed: {}", e)))?;
 
-        // NTP uses UDP port 123
         match sntpc::simple_get_time("pool.ntp.org", &socket) {
             Ok(time) => {
                 let ntp_sec = time.sec();
@@ -118,11 +161,9 @@ impl TrustedClock {
                 let system_sec = system_now.as_secs();
 
                 // Simple offset calculation (Network - Local)
-                // If Network is 1000 and Local is 990, offset is +10.
                 let diff_sec = (ntp_sec as i64) - (system_sec as i64);
                 let offset_ms = diff_sec * 1000;
 
-                // Safe lock acquisition
                 let mut w = self.offset_ms.write().map_err(|_| {
                     TimeError::LockPoisoned("offset_ms write lock poisoned".to_string())
                 })?;
@@ -147,63 +188,6 @@ impl Default for TrustedClock {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct PhalanxTimestamp(u64);
-
-impl PhalanxTimestamp {
-    /// Captures current network time safely.
-    pub fn now(clock: &TrustedClock) -> TimeResult<Self> {
-        Ok(Self(clock.now()?))
-    }
-
-    /// Wraps a raw value.
-    ///
-    /// ARCHITECTURAL NOTE: This does NOT validate against the clock.
-    /// This allows us to deserialize historical data (which is by definition "stale")
-    /// without the constructor failing.
-    #[must_use]
-    pub fn from_u64(raw: u64) -> Self {
-        Self(raw)
-    }
-
-    #[must_use]
-    pub fn as_u64(&self) -> u64 {
-        self.0
-    }
-
-    /// Strict validation for LIVE traffic.
-    ///  
-    /// Call this immediately after receiving a packet from the network
-    /// to ensure it isn't a replay attack.
-    pub fn verify_freshness(&self, clock: &TrustedClock, tolerance_secs: u64) -> TimeResult<()> {
-        let now = clock.now()?;
-
-        // Check for Future (Time Travelers)
-        if self.0 > now + tolerance_secs {
-            return Err(TimeError::Future(self.0 - now));
-        }
-
-        // Check for Past (Replays)
-        if self.0 < now.saturating_sub(tolerance_secs) {
-            return Err(TimeError::Stale(now - self.0));
-        }
-
-        Ok(())
-    }
-
-    #[must_use]
-    pub fn abs_diff(&self, other: u64) -> u64 {
-        self.0.abs_diff(other)
-    }
-}
-
-impl From<u64> for PhalanxTimestamp {
-    fn from(t: u64) -> Self {
-        Self(t)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,23 +195,24 @@ mod tests {
     #[test]
     fn test_valid_timestamp_acceptance() -> TimeResult<()> {
         let clock = TrustedClock::new();
-        let now = clock.now()?;
+        let now_ts = clock.now()?;
+        let now_val = now_ts.as_u64();
 
         // Timestamp is "now", tolerance is 5s
         assert!(
-            clock.is_valid(PhalanxTimestamp(now), 5)?,
+            PhalanxTimestamp::from_u64(now_val).verify_freshness(&clock, 5).is_ok(),
             "Current time should be valid"
         );
 
         // Timestamp is 2s ago, tolerance 5s
         assert!(
-            clock.is_valid(PhalanxTimestamp(now - 2), 5)?,
+            PhalanxTimestamp::from_u64(now_val - 2).verify_freshness(&clock, 5).is_ok(),
             "Recent past should be valid"
         );
 
         // Timestamp is 2s future, tolerance 5s
         assert!(
-            clock.is_valid(PhalanxTimestamp(now + 2), 5)?,
+            PhalanxTimestamp::from_u64(now_val + 2).verify_freshness(&clock, 5).is_ok(),
             "Near future should be valid"
         );
 
@@ -237,13 +222,15 @@ mod tests {
     #[test]
     fn test_replay_attack_rejection() -> TimeResult<()> {
         let clock = TrustedClock::new();
-        let now = clock.now()?;
+        let now_val = clock.now()?.as_u64();
 
-        // Attack: Replaying a message from 1 minute ago
-        let stale_timestamp = now - 60;
+        // Attack: Replaying a message from 60 seconds ago
+        let stale_timestamp = PhalanxTimestamp::from_u64(now_val - 60);
+        let result = stale_timestamp.verify_freshness(&clock, 5);
+        
         assert!(
-            !clock.is_valid(PhalanxTimestamp(stale_timestamp), 5)?,
-            "Old timestamp should be rejected"
+            matches!(result, Err(TimeError::Stale(_))),
+            "Old timestamp should be rejected as Stale"
         );
         Ok(())
     }
@@ -251,13 +238,15 @@ mod tests {
     #[test]
     fn test_future_attack_rejection() -> TimeResult<()> {
         let clock = TrustedClock::new();
-        let now = clock.now()?;
+        let now_val = clock.now()?.as_u64();
 
-        // Attack: Message claiming to be from next year
-        let future_timestamp = now + 3600;
+        // Attack: Message claiming to be from an hour in the future
+        let future_timestamp = PhalanxTimestamp::from_u64(now_val + 3600);
+        let result = future_timestamp.verify_freshness(&clock, 5);
+        
         assert!(
-            !clock.is_valid(PhalanxTimestamp(future_timestamp), 5)?,
-            "Far future timestamp should be rejected"
+            matches!(result, Err(TimeError::Future(_))),
+            "Far future timestamp should be rejected as Future"
         );
         Ok(())
     }
@@ -266,19 +255,14 @@ mod tests {
     fn test_clock_skew_correction() -> TimeResult<()> {
         let clock = TrustedClock::new();
 
-        // SCENARIO: Local machine is 10 seconds BEHIND reality.
-        // Real time is 100. Local thinks it is 90.
-        // We set offset to +10,000ms.
         clock.set_offset(10_000)?;
 
-        // Local system time (simulated)
         let local_sys_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(TimeError::ClockSkew)?
             .as_secs();
 
-        // The clock.now() should return local + 10
-        let adjusted_time = clock.now()?;
+        let adjusted_time = clock.now()?.as_u64();
 
         assert!(
             adjusted_time >= local_sys_time + 9,

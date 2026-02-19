@@ -139,7 +139,7 @@ impl Mold for VolleyAmalgam {
 
         // 2. Get the time safely (No panic/unwrap)
         // This returns a Result. Use '?' to propagate errors or 'match' to handle them.
-        let now = clock.forensic_now()?;
+        let now = clock.forensic_now();
         let mut expected_seq: Option<u32> = None;
 
         for (seq, env) in acc.artifacts {

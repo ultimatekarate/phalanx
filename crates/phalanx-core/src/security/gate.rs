@@ -1,6 +1,6 @@
 use crate::primitives::identity::{NetworkId, PhalanxIdentity};
 use crate::primitives::shards::{Evidence, ShardError, WitnessEnvelope};
-use crate::primitives::time::{TimeError, TrustedClock};
+use crate::primitives::time::{PhalanxTimestamp, TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
 use tracing::{error, warn};
 
@@ -124,11 +124,11 @@ impl CapacityGate for WitnessEnvelope {
 /// Enforces Temporal Availability.
 /// Safely acquires the current forensic time, propagating strict TimeError types.
 pub trait ChronosGate {
-    fn forensic_now(&self) -> Result<u64, TimeError>;
+    fn forensic_now(&self) -> Result<PhalanxTimestamp, TimeError>;
 }
 
 impl ChronosGate for TrustedClock {
-    fn forensic_now(&self) -> Result<u64, TimeError> {
+    fn forensic_now(&self) -> Result<PhalanxTimestamp, TimeError> {
         self.now().map_err(|e| {
             // Critical system failure: Time is broken.
             error!(

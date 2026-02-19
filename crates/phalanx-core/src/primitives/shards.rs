@@ -206,7 +206,7 @@ pub struct ShardChunk {
 pub struct ForensicGap {
     pub start_seq: u32,
     pub end_seq: u32,
-    pub detected_at: u64,
+    pub detected_at: PhalanxTimestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]

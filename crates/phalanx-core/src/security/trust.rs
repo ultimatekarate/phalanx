@@ -1,6 +1,6 @@
 use crate::base::config::PhalanxConfig;
 use crate::primitives::identity::Did;
-use crate::primitives::time::{TimeError, TrustedClock};
+use crate::primitives::time::{PhalanxTimestamp, TimeError, TrustedClock};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -90,8 +90,8 @@ pub struct PeerRecord {
     /// This is strictly local and never transmitted over the network.
     pub pet_name: PetName,
     pub level: TrustLevel,
-    pub added_at: u64,
-    pub last_interaction: u64,
+    pub added_at: PhalanxTimestamp,
+    pub last_interaction: PhalanxTimestamp,
 }
 
 /// Manages the "Social Graph" of the node with bi-directional lookup.
