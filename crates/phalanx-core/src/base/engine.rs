@@ -250,53 +250,54 @@ mod tests {
     use super::*;
     use crate::base::config::PhalanxConfig;
     use crate::primitives::identity::PhalanxIdentity;
-    use std::fs;
+    use tempfile::TempDir;
 
-    fn setup_test_env() -> (PhalanxConfig, PhalanxPhysics) {
+    fn setup_test_env() -> (PhalanxConfig, PhalanxPhysics, TempDir) {
+        let temp_dir = tempfile::tempdir().expect("Failed to create ephemeral test directory");
+
         let config = PhalanxConfig {
             storage: crate::base::config::StorageConfig {
-                vault_path: "test_vault_engine".into(),
+                vault_path: temp_dir.path().to_string_lossy().into_owned(),
                 ..Default::default()
             },
             ..Default::default()
         };
         let physics = PhalanxPhysics::default();
-        (config, physics)
+        (config, physics, temp_dir)
     }
 
     #[test]
     fn test_engine_initialization() {
-        let (config, physics) = setup_test_env();
+        let (config, physics, _temp_dir) = setup_test_env();
         let identity = PhalanxIdentity::new();
 
         let engine = PhalanxEngine::new(config, identity, physics, None);
         assert!(engine.is_ok(), "Engine should initialize with valid inputs");
     }
 
-    #[test]
+#[test]
     fn test_new_at_path_ephemeral_fallback() {
-        // 1. Point to a non-existent path
-        let path = "temp_test_engine_boot";
-        let _ = fs::remove_dir_all(path); // Cleanup pre
+        // 1. Utilize TempDir to guarantee test isolation
+        let temp_dir = tempfile::tempdir().expect("Failed to create ephemeral test directory");
+        let path = temp_dir.path().to_string_lossy().into_owned();
 
         // 2. Initialize
-        let engine_result = PhalanxEngine::new_at_path(path);
+        let engine_result = PhalanxEngine::new_at_path(&path);
 
         assert!(
             engine_result.is_ok(),
-            "Should successfully bootstrap ephemeral node"
+            "Should successfully bootstrap ephemeral node. Error: {:?}", engine_result.err()
         );
 
         let engine = engine_result.unwrap();
         assert_eq!(engine.seq_counter, 0);
-
-        // Cleanup post
-        let _ = fs::remove_dir_all(path);
+        
+        // Cleanup happens automatically when temp_dir drops out of scope
     }
 
     #[tokio::test]
     async fn test_pipeline_gates_active() {
-        let (config, physics) = setup_test_env();
+        let (config, physics, _temp_dir) = setup_test_env();
         let identity = PhalanxIdentity::new();
         let engine = PhalanxEngine::new(config, identity, physics, None).unwrap();
 
@@ -307,4 +308,5 @@ mod tests {
         // Check 2: Clock is running (Chronos Gate)
         assert!(engine.clock.now().is_ok());
     }
+    
 }
