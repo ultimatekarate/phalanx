@@ -10,6 +10,23 @@ use std::path::PathBuf;
 use thiserror::Error;
 use tracing::{info, warn};
 
+/// Tracks the real-time behavior and security metrics of remote peers.
+/// Centralized to prevent split-brain logic between transient and persistent layers.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct PeerReputation {
+    pub invalid_sigs: u32,
+    pub total_shards_sent: u64,
+    pub active_buffers: usize,
+    pub last_seen_load: f32,
+    pub is_blacklisted: bool,
+}
+
+/// Dependency Inversion boundary.
+/// Allows any component to verify peer standing without knowing internal registry logic.
+pub trait ReputationGate {
+    fn is_blacklisted(&self, did: &Did) -> bool;
+}
+
 /// A user-defined local identifier for a DID (Pet name).
 ///
 /// Constraints:
@@ -92,6 +109,7 @@ pub struct PeerRecord {
     pub level: TrustLevel,
     pub added_at: PhalanxTimestamp,
     pub last_interaction: PhalanxTimestamp,
+    pub reputation: PeerReputation,
 }
 
 /// Manages the "Social Graph" of the node with bi-directional lookup.
@@ -111,7 +129,6 @@ impl TrustRegistry {
     pub fn new(config: &PhalanxConfig) -> Self {
         let vault = PathBuf::from(&config.storage.vault_path);
 
-        // Ensure the directory exists before trying to access the file
         if !vault.exists() {
             let _ = fs::create_dir_all(&vault);
         }
@@ -132,10 +149,6 @@ impl TrustRegistry {
     }
 
     /// Registers or updates a peer with a specific Trust Level and Alias.
-    ///
-    /// # Consistency Check
-    /// If the alias is already used by *another* DID, this returns an error.
-    /// If the alias is used by the *same* DID, it updates the record.
     #[allow(clippy::missing_errors_doc)]
     pub fn set_peer(
         &mut self,
@@ -144,22 +157,21 @@ impl TrustRegistry {
         level: TrustLevel,
         clock: &TrustedClock,
     ) -> Result<(), TrustError> {
-        // 1. Check Alias Uniqueness
         if let Some(existing_did) = self.pet_name_index.get(pet_name) {
             if *existing_did != *did {
                 return Err(TrustError::PetnameCollision(pet_name.to_string()));
             }
         }
 
-        // 2. Remove old pet name if the user is renaming this DID
+        let mut existing_reputation = PeerReputation::default();
+
         if let Some(old_record) = self.contacts.get(did) {
+            existing_reputation = old_record.reputation.clone();
             if old_record.pet_name != *pet_name {
                 self.pet_name_index.remove(&old_record.pet_name);
             }
         }
 
-        // 3. Update Indices - no need to use trusted time here, this is local
-        // to the device.
         let timestamp = clock.now()?;
 
         let original_added_at = self
@@ -173,6 +185,7 @@ impl TrustRegistry {
             level,
             added_at: original_added_at,
             last_interaction: timestamp,
+            reputation: existing_reputation,
         };
 
         self.contacts.insert(did.clone(), record);
@@ -184,21 +197,17 @@ impl TrustRegistry {
         Ok(())
     }
 
+    /// Retrieves a mutable reference to a peer's reputation state.
+    pub fn get_reputation_mut(&mut self, did: &Did) -> Option<&mut PeerReputation> {
+        self.contacts.get_mut(did).map(|record| &mut record.reputation)
+    }
+
     /// Updates the last interaction timestamp.
-    ///
-    /// # Forensic Safety
-    /// This method absorbs clock errors rather than propagating them,
-    /// preventing telemetry glitches from crashing the main loop.
-    /// Failures are logged as warnings.
     pub fn touch(&mut self, did: &Did, clock: &TrustedClock) {
-        // We only proceed if the peer exists
         if let Some(record) = self.contacts.get_mut(did) {
-            // Sentinel: Attempt to get time, handle failure gracefully
             match clock.now() {
                 Ok(now) => {
                     record.last_interaction = now;
-
-                    // Best-effort save. We log errors but don't panic.
                     if let Err(e) = self.save() {
                         tracing::warn!(
                             target: "trust",
@@ -209,7 +218,6 @@ impl TrustRegistry {
                     }
                 }
                 Err(e) => {
-                    // Log the forensic failure (Clock Skew / Poison)
                     tracing::error!(
                         target: "trust",
                         did = %did,
@@ -221,21 +229,16 @@ impl TrustRegistry {
         }
     }
 
-    /// Resolves a local pet name (e.g., "Alice") to a global DID.
-    /// Returns None if the alias is unknown.
     #[must_use]
     pub fn resolve_pet_name(&self, pet_name: &PetName) -> Option<&Did> {
         self.pet_name_index.get(pet_name)
     }
 
-    /// Reverse lookup: Get the local alias for a given DID.
-    /// Useful for logging: `info!("Message from {}", registry.get_pet_name(did))`
     #[must_use]
     pub fn get_alias(&self, did: &Did) -> Option<&str> {
         self.contacts.get(did).map(|r| r.pet_name.as_str())
     }
 
-    /// Gets the trust level. Returns `Ignored` (Neutral) for unknown DIDs.
     #[must_use]
     pub fn check_trust(&self, did: &Did) -> TrustLevel {
         self.contacts
@@ -243,7 +246,6 @@ impl TrustRegistry {
             .map_or(TrustLevel::Ignored, |r| r.level)
     }
 
-    /// Removes a peer from the registry entirely.
     pub fn remove_peer(&mut self, did: &Did) -> Result<(), TrustError> {
         if let Some(record) = self.contacts.remove(did) {
             self.pet_name_index.remove(&record.pet_name);
@@ -252,14 +254,10 @@ impl TrustRegistry {
         Ok(())
     }
 
-    // --- Persistence Logic ---
-
     fn save(&self) -> Result<(), TrustError> {
-        // We only serialize `contacts`. `pet_name_index` is rebuilt on load.
         let data = postcard::to_stdvec(&self.contacts)
             .map_err(|e| TrustError::SerializationError(e.to_string()))?;
 
-        // Atomic Write
         let temp_path = self.storage_path.with_extension("tmp");
         let mut file = File::create(&temp_path)?;
         file.write_all(&data)?;
@@ -283,7 +281,6 @@ impl TrustRegistry {
 
         self.contacts = loaded;
 
-        // Rebuild the Alias Index
         self.pet_name_index.clear();
         for (did, record) in &self.contacts {
             self.pet_name_index
@@ -291,6 +288,14 @@ impl TrustRegistry {
         }
 
         Ok(())
+    }
+}
+
+impl ReputationGate for TrustRegistry {
+    fn is_blacklisted(&self, did: &Did) -> bool {
+        self.contacts
+            .get(did)
+            .is_some_and(|record| record.reputation.is_blacklisted)
     }
 }
 
@@ -312,16 +317,14 @@ mod tests {
         let big_pet_name: PetName =
             PetName::new("BigAlice").expect("Static string should be valid");
         let clock = TrustedClock::new();
-        // Set Alice
+        
         registry
             .set_peer(&did1.clone(), &pet_name.clone(), TrustLevel::Ally, &clock)
             .unwrap();
 
-        // Resolve Alice
         assert_eq!(registry.resolve_pet_name(&pet_name.clone()), Some(&did1));
         assert_eq!(registry.get_alias(&did1), Some("Alice"));
 
-        // Attempt Collision
         let err = registry.set_peer(
             &did2.clone(),
             &pet_name.clone(),
@@ -330,7 +333,6 @@ mod tests {
         );
         assert!(matches!(err, Err(TrustError::PetnameCollision(_))));
 
-        // Rename Alice -> BigAlice
         registry
             .set_peer(
                 &did1.clone(),
@@ -343,6 +345,6 @@ mod tests {
             registry.resolve_pet_name(&big_pet_name.clone()),
             Some(&did1)
         );
-        assert_eq!(registry.resolve_pet_name(&pet_name.clone()), None); // Old alias freed
+        assert_eq!(registry.resolve_pet_name(&pet_name.clone()), None); 
     }
 }
