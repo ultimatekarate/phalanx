@@ -65,7 +65,7 @@ impl IntegrityGate for WitnessEnvelope {
             Ok(_) => Ok(self),
             Err(e) => {
                 error!(event = "temporal_failure", node = %node_id, peer = %self.did, error = %e, "TIME_INVALID");
-                Err(ShardError::TimeSource(e.to_string()))
+                Err(ShardError::TimeSource(e))
             }
         }
     }
