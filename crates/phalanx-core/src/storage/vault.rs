@@ -202,7 +202,6 @@ impl Guardian {
     }
 
     /// Stage 1: Micro-Layer (Chunk Ingestion)
-    /// Note: CapacityGate trait is not implemented for ShardChunk yet, so we use logic here.
     #[instrument(skip(self, chunk), level = "debug")]
     pub fn ingest_chunk(&mut self, chunk: ShardChunk, is_leaf_mode: bool) {
         // 1. Governance State Sync
@@ -258,7 +257,6 @@ impl Guardian {
     }
 
     /// Stage 2: Macro-Layer (Envelope Ingestion)
-    /// REFACTORED: Now uses Sentinel Gates for linear security.
     pub fn ingest_envelope(&mut self, envelope: WitnessEnvelope) -> Result<(), GuardianError> {
         let local_network_id = self
             .local_did
@@ -288,42 +286,38 @@ impl Guardian {
             self.foreign_storage_usage.0 as usize
         };
 
-        let peer_id = envelope.witness_peer_id;
+        let peer_id = envelope.witness_peer_id.clone();
 
-        // If the gate returns None, we drop and return Error
         let envelope = envelope
-            .check_capacity(&peer_id.clone(), current_usage, limit)
-            .ok_or(GuardianError::QuotaExceeded(ByteCapacity(limit as u64)))?;
+            .check_capacity(&peer_id, current_usage, limit)
+            .map_err(|_| GuardianError::QuotaExceeded(ByteCapacity(limit as u64)))?;
 
         // ------------------------------------------------------------------
         // GATE 2: INTEGRITY GATE (Verification)
         // ------------------------------------------------------------------
         let peer_did = envelope.did.clone();
 
-        // Checks Ed25519 signature and Timestamp freshness (10s tolerance)
         let envelope = envelope
             .check_integrity(&local_network_id, &self.clock, 10)
-            .ok_or_else(|| {
+            .map_err(|e| {
                 // Side Effect: Penalize peer on integrity failure
                 self.penalize_peer(
                     peer_did,
                     "Integrity Gate Rejected: Invalid Signature or Timestamp",
                 );
-
-                GuardianError::InvalidSignature("Integrity Gate Rejected".into())
+                GuardianError::InvalidSignature(e.to_string())
             })?;
 
         // ------------------------------------------------------------------
         // GATE 3: FORENSIC GATE (Persistence)
         // ------------------------------------------------------------------
-        // Write to WAL. If it fails, ForensicGate logs it and returns None.
         self.write_to_wal(&envelope)
-            .ok_or_log(
+            .gate(
                 "wal_write_failed",
                 &local_network_id,
                 "CRITICAL: WAL Persistence Failure",
             )
-            .ok_or(GuardianError::WalWriteFailed("WAL IO Error".into()))?;
+            .map_err(|e| GuardianError::WalWriteFailed(e.to_string()))?;
 
         // --- Post-Gating Logic (In-Memory Updates) ---
 
@@ -405,12 +399,12 @@ impl Guardian {
 
         // Forensic Gate: Directory Creation
         if fs::create_dir_all(&archive_dir)
-            .ok_or_log(
+            .gate(
                 "fs_create_err",
                 &local_network_id,
                 "Archive Dir Create Failed",
             )
-            .is_none()
+            .is_err()
         {
             return;
         }
@@ -439,32 +433,32 @@ impl Guardian {
         let tmp_path = archive_dir.join(format!("{}.tmp", volley.id));
 
         // Forensic Gate: Serialization
-        let bytes = match postcard::to_stdvec(&volley).ok_or_log(
+        let bytes = match postcard::to_stdvec(&volley).gate(
             "serialize_err",
             &local_network_id,
             "Volley Serialization Failed",
         ) {
-            Some(b) => b,
-            None => return,
+            Ok(b) => b,
+            Err(_) => return,
         };
         let file_size = bytes.len() as u64;
 
         // Forensic Gate: Write Temp
         if fs::write(&tmp_path, bytes)
-            .ok_or_log(
+            .gate(
                 "fs_write_err",
                 &local_network_id,
                 "Archive Temp Write Failed",
             )
-            .is_none()
+            .is_err()
         {
             return;
         }
 
         // Forensic Gate: Atomic Rename
         if fs::rename(&tmp_path, &final_path)
-            .ok_or_log("fs_rename_err", &local_network_id, "Archive Rename Failed")
-            .is_none()
+            .gate("fs_rename_err", &local_network_id, "Archive Rename Failed")
+            .is_err()
         {
             return;
         }
@@ -472,9 +466,9 @@ impl Guardian {
         info!(path = ?final_path, size = file_size, "Volley successfully archived");
 
         // Governance Update
-        self.current_storage_usage += file_size;
+        self.current_storage_usage = self.current_storage_usage.saturating_add(file_size);
         if safe_did != self.local_did.to_safe_name() {
-            self.foreign_storage_usage += file_size;
+            self.foreign_storage_usage = self.foreign_storage_usage.saturating_add(file_size);
         }
 
         // Cleanup WAL (Best effort, no gating needed)
@@ -520,13 +514,13 @@ impl Guardian {
             .unwrap_or_else(|_| NetworkId::random());
 
         // Forensic Gate: Directory Read
-        let entries = match fs::read_dir(&self.wal_directory).ok_or_log(
+        let entries = match fs::read_dir(&self.wal_directory).gate(
             "wal_read_err",
             &local_network_id,
             "WAL Dir Read Failed",
         ) {
-            Some(e) => e,
-            None => return,
+            Ok(e) => e,
+            Err(_) => return,
         };
 
         for entry in entries.flatten() {
@@ -547,7 +541,6 @@ impl Guardian {
     }
 }
 
-// ... [Keep existing tests, they are compatible with the Gate interface] ...
 #[cfg(test)]
 mod tests {
     use super::*;
