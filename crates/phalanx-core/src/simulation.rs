@@ -462,6 +462,7 @@ impl SimNode {
             // BLOCKED BY GATES
             let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
                 attacker: origin,
+                target: self.network_id,
                 reason: "Sentinel Gating (Integrity/Capacity/Trust) Rejected Payload".into(),
             });
         }

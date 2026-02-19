@@ -59,7 +59,7 @@ impl DashboardState {
         }
     }
 
-    pub fn ingest_telemetry(&mut self, reporter: NetworkId, event: SimEvent) {
+    pub fn ingest_telemetry(&mut self, event: SimEvent) {
         match event {
             SimEvent::Heartbeat { origin, .. } => {
                 self.active_peers.insert(origin, Instant::now());
@@ -72,11 +72,11 @@ impl DashboardState {
                 self.metrics.total_bytes_processed += byte_size.as_u64();
                 self.active_peers.insert(peer_id, Instant::now());
             }
-            SimEvent::AttackAttemptBlocked { attacker, reason } => {
-                self.push_log(format!("[DEFENSE] {} -> {}: {}", attacker, reporter, reason));
+            SimEvent::AttackAttemptBlocked { attacker, target, reason } => {
+                self.push_log(format!("[DEFENSE] {} -> {}: {}", attacker, target, reason));
                 self.active_vectors.push(ActiveVector {
                     origin: attacker,
-                    target: reporter,
+                    target, // Use the extracted target
                     timestamp: Instant::now(),
                     style: VectorStyle::Attack,
                 });

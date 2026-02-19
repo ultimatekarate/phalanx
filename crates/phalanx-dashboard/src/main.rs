@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = PhalanxConfig::test_defaults();
     let physics = PhalanxPhysics::test_profile();
 
-    let (harness, mut telemetry_rx) = SimulationHarness::init_mesh(config, physics);
+    let (mut harness, mut telemetry_rx) = SimulationHarness::init_mesh(config, physics);
     let mut state = DashboardState::new();
 
     // Node Initialization
@@ -88,11 +88,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Process Telemetry Batch (Throttle at 100 events to maintain UI framerate)
         let mut events_processed = 0;
-        while let Ok((reporter, event)) = telemetry_rx.try_recv() {
+        while let Ok(event) = telemetry_rx.try_recv() {
             if events_processed >= 100 {
                 break;
             }
-            state.ingest_telemetry(reporter, event);
+            state.ingest_telemetry(event);
             events_processed += 1;
         }
 

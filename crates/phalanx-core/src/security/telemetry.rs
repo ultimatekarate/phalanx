@@ -93,6 +93,7 @@ pub enum SimEvent {
 
     AttackAttemptBlocked {
         attacker: NetworkId,
+        target: NetworkId,
         reason: String,
     },
 
