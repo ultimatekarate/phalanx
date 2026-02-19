@@ -317,7 +317,7 @@ impl Guardian {
         let envelope = envelope
             .check_integrity(&local_network_id, &self.clock, 10)
             .map_err(|e| {
-                // Updated to use the strict Offense typestate
+                // Updated to use the strict Offense type state
                 self.penalize_peer(peer_did, Offense::InvalidSignature);
                 GuardianError::InvalidSignature(e.to_string())
             })?;
