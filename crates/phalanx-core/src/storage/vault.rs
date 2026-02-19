@@ -23,6 +23,14 @@ pub enum NodeMode {
     Standard,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Offense {
+    InvalidSignature,
+    ReplayAttack,
+    QuotaExceeded,
+    MalformedPacket,
+}
+
 /// Enumerates specific failure modes for storage and security operations.
 #[derive(Debug, thiserror::Error)]
 pub enum GuardianError {
@@ -309,11 +317,8 @@ impl Guardian {
         let envelope = envelope
             .check_integrity(&local_network_id, &self.clock, 10)
             .map_err(|e| {
-                // Side Effect: Penalize peer on integrity failure
-                self.penalize_peer(
-                    peer_did,
-                    "Integrity Gate Rejected: Invalid Signature or Timestamp",
-                );
+                // Updated to use the strict Offense typestate
+                self.penalize_peer(peer_did, Offense::InvalidSignature);
                 GuardianError::InvalidSignature(e.to_string())
             })?;
 
@@ -375,10 +380,16 @@ impl Guardian {
         UnitInterval::new(total_raw.min(1.0) as f32)
     }
 
-    pub fn penalize_peer(&mut self, did: Did, reason: &str) {
+    pub fn penalize_peer(&mut self, did: Did, offense: Offense) {
         let rep = self.peer_registry.entry(did.clone()).or_default();
         rep.invalid_sigs += 1;
-        warn!(%did, %reason, count = rep.invalid_sigs, "Peer penalized for bad behavior.");
+
+        warn!(
+            %did,
+            ?offense,
+            count = rep.invalid_sigs,
+            "Peer penalized for bad behavior."
+        );
 
         if rep.invalid_sigs >= self.max_sig_failures {
             rep.is_blacklisted = true;
