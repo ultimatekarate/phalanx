@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
 use crate::primitives::time::{PhalanxTimestamp, TrustedClock};
-use crate::security::e2ee;
+use crate::security::e2ee::{self, CryptoError, SymmetricKey};
 
 // =====================
 // DATA STRUCTURES
@@ -164,7 +164,7 @@ pub struct VideoShard {
 }
 
 impl VideoShard {
-    pub fn encrypt(&mut self, key: &[u8; 32]) -> Result<(), e2ee::CryptoError> {
+    pub fn encrypt(&mut self, key: &SymmetricKey) -> Result<(), CryptoError> {
         self.payload.encrypt(key)
     }
 }
@@ -180,7 +180,7 @@ pub struct AudioShard {
 }
 
 impl AudioShard {
-    pub fn encrypt(&mut self, key: &[u8; 32]) -> Result<(), e2ee::CryptoError> {
+    pub fn encrypt(&mut self, key: &SymmetricKey) -> Result<(), CryptoError> {
         self.payload.encrypt(key)
     }
 }
@@ -342,19 +342,19 @@ impl Default for DataPayload {
 }
 
 impl DataPayload {
-    pub fn encrypt(&mut self, key: &[u8; 32]) -> Result<(), e2ee::CryptoError> {
+    pub fn encrypt(&mut self, key: &SymmetricKey) -> Result<(), CryptoError> {
         if let DataPayload::Clear(data) = self {
-            let (nonce, ciphertext) = e2ee::encrypt_bytes(key, data)?;
+            let (nonce, ciphertext) = e2ee::encrypt_bytes(key.as_bytes(), data)?;
             *self = DataPayload::Encrypted { nonce, ciphertext };
         }
         Ok(())
     }
 
-    pub fn decrypt(&self, key: &[u8; 32]) -> Result<Vec<u8>, e2ee::CryptoError> {
+    pub fn decrypt(&self, key: &SymmetricKey) -> Result<Vec<u8>, CryptoError> {
         match self {
             DataPayload::Clear(data) => Ok(data.clone()),
             DataPayload::Encrypted { nonce, ciphertext } => {
-                e2ee::decrypt_bytes(key, nonce, ciphertext)
+                e2ee::decrypt_bytes(key.as_bytes(), nonce, ciphertext)
             }
         }
     }
@@ -460,8 +460,8 @@ pub fn create_audio_shard(
 mod tests {
     use super::*;
 
-    fn get_test_key() -> [u8; 32] {
-        [0x42; 32]
+    fn get_test_key() -> SymmetricKey {
+        SymmetricKey([0x42; 32])
     }
 
     #[test]
@@ -518,8 +518,8 @@ mod tests {
         let audio_data = vec![1, 2, 3, 4];
         let mut shard = create_audio_shard(audio_data, StorageSequence(1), 44100, 2, "v1".into())?;
 
-        let correct_key = [1u8; 32];
-        let wrong_key = [2u8; 32];
+        let correct_key = SymmetricKey([1u8; 32]);
+        let wrong_key = SymmetricKey([2u8; 32]);
 
         shard.payload.encrypt(&correct_key)?;
 

@@ -1,6 +1,7 @@
 use crate::primitives::identity::{NetworkId, PhalanxIdentity};
-use crate::primitives::shards::{Evidence, WitnessEnvelope};
+use crate::primitives::shards::{Evidence, ShardError, WitnessEnvelope};
 use crate::primitives::time::TrustedClock;
+use crate::security::e2ee::SymmetricKey;
 use tracing::{error, warn};
 
 /// Gate 1: The Witnessing Gate
@@ -80,25 +81,33 @@ impl IntegrityGate for WitnessEnvelope {
 /// Enforces Confidentiality.
 /// Ensures that no evidence leaves this node without XChaCha20Poly1305 encryption.
 pub trait PrivacyGate {
-    fn safeguard(self, key: &[u8; 32]) -> Option<Self>
+    fn safeguard(self, key: &SymmetricKey) -> Result<Self, ShardError>
     where
         Self: Sized;
 }
 
 impl PrivacyGate for Evidence {
-    fn safeguard(mut self, key: &[u8; 32]) -> Option<Self> {
+    fn safeguard(mut self, key: &SymmetricKey) -> Result<Self, ShardError> {
         // We perform the encryption in place.
         // If it fails (e.g., bad nonce gen), we drop the packet to prevent leakage.
-        let result = match &mut self {
+        let encryption_result = match &mut self {
             Evidence::Video(s) => s.encrypt(key),
             Evidence::Audio(s) => s.encrypt(key),
         };
 
-        match result {
-            Ok(_) => Some(self),
-            Err(e) => {
-                error!(event = "privacy_failure", error = %e, "Dropped unencrypted unit to prevent leak");
-                None
+        match encryption_result {
+            Ok(_) => Ok(self),
+            Err(crypto_error) => {
+                // Log the failure at the point of origin for forensic auditability
+                error!(
+                    event = "privacy_failure",
+                    error = %crypto_error,
+                    "Cryptographic safeguarding failed; evidence unit is unsafe for promotion"
+                );
+
+                // Propagate the specific error to the caller (e.g., Guardian Layer)
+                // so it can definitively drop the packet and update peer reputation.
+                Err(ShardError::Encryption(crypto_error))
             }
         }
     }

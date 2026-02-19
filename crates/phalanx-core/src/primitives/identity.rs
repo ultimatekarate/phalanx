@@ -325,10 +325,14 @@ impl PhalanxIdentity {
     ///
     /// Returns a `CryptoError` if the internal Ed25519 signing key cannot be
     /// transcoded into a valid `libp2p` protobuf-encoded keypair.
-    pub fn to_libp2p_keypair(&self) -> Result<libp2p::identity::Keypair, IdentityError> {
+    #[must_use]
+    pub fn to_libp2p_keypair(&self) -> libp2p::identity::Keypair {
         let mut bytes = self.keypair.to_bytes();
+
+        // We use expect here explicitly because state corruption at this level
+        // implies a critical memory violation, not a recoverable runtime error.
         libp2p::identity::Keypair::ed25519_from_bytes(&mut bytes)
-            .map_err(|e| IdentityError::CryptoError(e.to_string()))
+            .expect("Critical: PhalanxIdentity contains invalid Ed25519 material")
     }
 
     pub fn save_to_disk<P: AsRef<Path>>(&self, path: P) -> Result<(), IdentityError> {

@@ -7,8 +7,11 @@ use tracing::{error, info};
 
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
 use crate::primitives::identity::{init_identity, Did, IdentityError, NetworkId, PhalanxIdentity};
-use crate::primitives::shards::{AudioShard, Evidence, ShardId, VideoShard, WitnessEnvelope};
+use crate::primitives::shards::{
+    AudioShard, Evidence, ShardId, VideoShard, WitnessEnvelope,
+};
 use crate::primitives::time::{TimeError, TrustedClock};
+use crate::security::e2ee::SymmetricKey;
 // IMPORT ALL GATES
 use crate::security::gate::{CapacityGate, ForensicGate, IntegrityGate, PrivacyGate, WitnessGate};
 use crate::storage::strategies::ShardAmalgam;
@@ -46,7 +49,7 @@ pub struct PhalanxEngine {
     // Internal state
     seq_counter: u64,
     // TODO: Rotate this via KeyStore in production
-    network_key: [u8; 32],
+    network_key: SymmetricKey,
 }
 
 impl PhalanxEngine {
@@ -57,9 +60,7 @@ impl PhalanxEngine {
         physics: PhalanxPhysics,
         psk: Option<PreSharedKey>,
     ) -> Result<Self, Box<dyn Error>> {
-        let network_keypair = identity
-            .to_libp2p_keypair()
-            .map_err(|e| EngineError::StartupFailure(format!("Identity invalid: {}", e)))?;
+        let network_keypair = identity.to_libp2p_keypair();
 
         // Guardian init (Storage)
         let local_peer_id = network_keypair.public().to_peer_id();
@@ -87,7 +88,7 @@ impl PhalanxEngine {
             video_rx,
             audio_rx,
             seq_counter: 0,
-            network_key: [0x42; 32], // Default/Placeholder Key
+            network_key: SymmetricKey([0x42; 32]), // Default/Placeholder Key
         })
     }
 
@@ -137,100 +138,128 @@ impl PhalanxEngine {
 
         loop {
             tokio::select! {
-                // ------------------------------------------------------------------
-                // PIPELINE 1: RECEPTION (Ingress: Network -> Storage)
-                // Gates: Forensic -> Capacity -> Integrity
-                // ------------------------------------------------------------------
-                event = self.swarm.select_next_some() => {
-                    if let SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(
-                        libp2p::gossipsub::Event::Message {
-                            propagation_source: peer,
-                            message_id: _,
-                            message,
-                        }
-                    )) = event {
-                        let peer_id = NetworkId::from(peer);
+                                    // ------------------------------------------------------------------
+                                    // PIPELINE 1: RECEPTION (Ingress: Network -> Storage)
+                                    // Gates: Forensic -> Capacity -> Integrity
+                                    // ------------------------------------------------------------------
+                                    event = self.swarm.select_next_some() => {
+                                        if let SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(
+                                            libp2p::gossipsub::Event::Message {
+                                                propagation_source: peer,
+                                                message_id: _,
+                                                message,
+                                            }
+                                        )) = event {
+                                            let peer_id = NetworkId::from(peer);
 
-                        // 1. Forensic Gate: Safe Deserialization
-                        let envelope_opt = postcard::from_bytes::<WitnessEnvelope>(&message.data)
-                            .ok_or_log("deserialization_err", &local_network_id, "Malformed wire packet");
+                                            // 1. Forensic Gate: Safe Deserialization
+                                            let envelope_opt = postcard::from_bytes::<WitnessEnvelope>(&message.data)
+                                                .ok_or_log("deserialization_err", &local_network_id, "Malformed wire packet");
 
-                        // 2. Capacity Gate: DoS Protection
-                        // (Checking against a 50MB buffer limit placeholder)
-                        let envelope_opt = envelope_opt.and_then(|env| {
-                            env.check_capacity(&peer_id, 0, 1024 * 1024 * 50)
-                        });
+                                            // 2. Capacity Gate: DoS Protection
+                                            // (Checking against a 50MB buffer limit placeholder)
+                                            let envelope_opt = envelope_opt.and_then(|env| {
+                                                env.check_capacity(&peer_id, 0, 1024 * 1024 * 50)
+                                            });
 
-                        // 3. Integrity Gate: Crypto & Time Validation
-                        let verified_env = envelope_opt.and_then(|env| {
-                            env.check_integrity(&peer_id, &self.clock, 10) // 10s tolerance
-                        });
+                                            // 3. Integrity Gate: Crypto & Time Validation
+                                            let verified_env = envelope_opt.and_then(|env| {
+                                                env.check_integrity(&peer_id, &self.clock, 10) // 10s tolerance
+                                            });
 
-                        // 4. Persistence
-                        if let Some(env) = verified_env {
-                            if let Err(e) = self.guardian.ingest_envelope(env) {
-                                error!(event = "vault_write_err", error = %e, "Failed to persist foreign evidence");
-                            }
-                        }
-                    }
-                }
+                                            // 4. Persistence
+                                            if let Some(env) = verified_env {
+                                                if let Err(e) = self.guardian.ingest_envelope(env) {
+                                                    error!(event = "vault_write_err", error = %e, "Failed to persist foreign evidence");
+                                                }
+                                            }
+                                        }
+                                    }
 
-                // ------------------------------------------------------------------
-                // PIPELINE 2: VIDEO INGESTION (Egress: Sensor -> Network)
-                // Gates: Privacy -> Witness -> Forensic (Chunking)
-                // ------------------------------------------------------------------
-                Some(shard) = self.video_rx.recv() => {
-                    let shard_id = ShardId(self.seq_counter as u32);
+                                    // ------------------------------------------------------------------
+                                    // PIPELINE 2: VIDEO INGESTION (Egress: Sensor -> Network)
+                                    // Gates: Privacy -> Witness -> Forensic (Chunking)
+                                    // ------------------------------------------------------------------
+                                    Some(shard) = self.video_rx.recv() => {
+                                        let shard_id = ShardId(self.seq_counter as u32);
 
-                    let chunks_opt = Evidence::Video(shard)
-                        .safeguard(&self.network_key)                      // 1. Privacy Gate (Encrypt)
-                        .and_then(|ev| ev.seal(&self.identity, local_network_id))  // 2. Witness Gate (Sign)
-                        .and_then(|env| env.chunkify(shard_id)             // 3. Discretization
-                            .ok_or_log("chunkify_err", &local_network_id, "Video processing failed")
+                                        let chunks_result = Evidence::Video(shard)
+                                            .safeguard(&self.network_key) // 1. Privacy Gate: Result<Evidence, ShardError>
+                                            .and_then(|ev| {
+                                                // 2. Witness Gate: Create the envelope.
+                                                // WitnessEnvelope::new returns Result<WitnessEnvelope, ShardError> natively.
+                                                WitnessEnvelope::new(ev, &self.identity, local_network_id)
+                                            })
+                                            .and_then(|env| {
+                                                // 3. Discretization: chunkify returns Result<Vec<ShardChunk>, ShardError> natively.
+                                                env.chunkify(shard_id)
+                                            })
+                                            .inspect_err(|e| {
+                                                // 4. Centralized Telemetry
+                                                error!(
+                                                    event = "evidence_pipeline_failure",
+                                                    error = %e,
+                                                    network_id = %local_network_id,
+                                                    "Ingestion pipeline dropped evidence unit"
+                                                );
+                                            });
+
+                                        // The result is now definitively Result<Vec<ShardChunk>, ShardError>
+                                        if let Ok(chunks) = chunks_result {
+                                            for chunk in chunks {
+                                                // Broadcast via GossipSub
+                                                if let Ok(data) = postcard::to_stdvec(&chunk) {
+                                                    let _ = self.swarm
+                                                        .behaviour_mut()
+                                                        .gossipsub
+                                                        .publish(topic.clone(), data);
+                                                }
+                                            }
+                                            self.seq_counter += 1;
+                                        }
+                                    }
+
+                                    // ------------------------------------------------------------------
+                                    // PIPELINE 3: AUDIO INGESTION (Egress: Sensor -> Network)
+                                    // Gates: Privacy -> Witness -> Forensic (Chunking)
+                                    // ------------------------------------------------------------------
+                                    Some(shard) = self.audio_rx.recv() => {
+                let shard_id = ShardId(self.seq_counter as u32);
+
+                let chunks_result = Evidence::Audio(shard)
+                    .safeguard(&self.network_key) // 1. Privacy Gate: Result<Evidence, ShardError>
+                    .and_then(|ev| {
+                        // 2. Witness Gate: natively returns Result<WitnessEnvelope, ShardError>
+                        WitnessEnvelope::new(ev, &self.identity, local_network_id)
+                    })
+                    .and_then(|env| {
+                        // 3. Discretization: natively returns Result<Vec<ShardChunk>, ShardError>
+                        env.chunkify(shard_id)
+                    })
+                    .inspect_err(|e| {
+                        // 4. Centralized Telemetry
+                        error!(
+                            event = "evidence_pipeline_failure",
+                            error = %e,
+                            network_id = %local_network_id,
+                            "Ingestion pipeline dropped audio evidence unit"
                         );
+                    });
 
-                    if let Some(chunks) = chunks_opt {
-                        for chunk in chunks {
-                             // Broadcast via GossipSub
-                            if let Ok(data) = postcard::to_stdvec(&chunk) {
-                                let _ = self.swarm
-                                    .behaviour_mut()
-                                    .gossipsub
-                                    .publish(topic.clone(), data);
-                            }
+                if let Ok(chunks) = chunks_result {
+                    for chunk in chunks {
+                        // Broadcast via GossipSub
+                        if let Ok(data) = postcard::to_stdvec(&chunk) {
+                            let _ = self.swarm
+                                .behaviour_mut()
+                                .gossipsub
+                                .publish(topic.clone(), data);
                         }
-                        self.seq_counter += 1;
                     }
-                }
-
-                // ------------------------------------------------------------------
-                // PIPELINE 3: AUDIO INGESTION (Egress: Sensor -> Network)
-                // Gates: Privacy -> Witness -> Forensic (Chunking)
-                // ------------------------------------------------------------------
-                Some(shard) = self.audio_rx.recv() => {
-                    let shard_id = ShardId(self.seq_counter as u32);
-
-                    let chunks_opt = Evidence::Audio(shard)
-                        .safeguard(&self.network_key)                      // 1. Privacy Gate (Encrypt)
-                        .and_then(|ev| ev.seal(&self.identity, local_network_id))  // 2. Witness Gate (Sign)
-                        .and_then(|env| env.chunkify(shard_id)             // 3. Discretization
-                            .ok_or_log("chunkify_err", &local_network_id, "Audio processing failed")
-                        );
-
-                    if let Some(chunks) = chunks_opt {
-                        for chunk in chunks {
-                             // Broadcast via GossipSub
-                            if let Ok(data) = postcard::to_stdvec(&chunk) {
-                                let _ = self.swarm
-                                    .behaviour_mut()
-                                    .gossipsub
-                                    .publish(topic.clone(), data);
-                            }
-                        }
-                        self.seq_counter += 1;
-                    }
+                    self.seq_counter += 1;
                 }
             }
+                                }
         }
     }
 }
