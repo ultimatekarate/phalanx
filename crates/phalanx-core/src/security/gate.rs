@@ -163,7 +163,7 @@ impl ChronosGate for TrustedClock {
 
 /// The core extension for monadic forensic gating.
 pub trait ForensicGate<T, E> {
-    /// Observes a Result in the pipeline, logging failures with forensic context 
+    /// Observes a Result in the pipeline, logging failures with forensic context
     /// while preserving the original Result for the next link in the chain.
     fn gate(self, event: &str, node: &NetworkId, msg: &str) -> Result<T, E>;
 }

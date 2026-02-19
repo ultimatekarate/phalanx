@@ -8,11 +8,11 @@ use image::{DynamicImage, ImageFormat};
 use serde::{Deserialize, Serialize};
 
 use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
-use crate::primitives::time::{PhalanxTimestamp, TrustedClock, TimeError};
+use crate::primitives::time::{PhalanxTimestamp, TimeError, TrustedClock};
 use crate::security::e2ee::{self, CryptoError, SymmetricKey};
 use crate::security::gate::ChronosGate;
 
-use tracing::{error};
+use tracing::error;
 // =====================
 // DATA STRUCTURES
 // =====================
@@ -423,14 +423,7 @@ pub fn create_video_shard(
     volley_id: VolleyId,
 ) -> Result<VideoShard, ShardError> {
     let clock = TrustedClock::new();
-    let now = match clock.forensic_now() {
-        Ok(timestamp) => timestamp,
-        Err(err) => {
-            error!(error = %err, "create_video_shard: Failed to acquire forensic timestamp");
-            return Err(ShardError::from(err));
-        }
-    };
-
+    let now = clock.forensic_now()?;
 
     let raw_bytes =
         postcard::to_stdvec(&frames).map_err(|e| ShardError::Serialization(e.to_string()))?;
@@ -453,13 +446,7 @@ pub fn create_audio_shard(
     volley_id: VolleyId,
 ) -> Result<AudioShard, ShardError> {
     let clock = TrustedClock::new();
-        let now = match clock.forensic_now() {
-        Ok(timestamp) => timestamp,
-        Err(err) => {
-            error!(error = %err, "create_audio_shard: Failed to acquire forensic timestamp");
-            return Err(ShardError::from(err));
-        }
-    };
+    let now = clock.forensic_now()?;
 
     Ok(AudioShard {
         timestamp: now,

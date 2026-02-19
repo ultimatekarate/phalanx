@@ -319,13 +319,16 @@ impl SimNode {
             let shard_id = ShardId(self.seq_counter.0);
 
             // 1. Generation Gate (Forensic)
-            let shard_opt =
-                create_video_shard(frames, self.seq_counter, 30, VolleyId::new("sim_volley"))
-                    .ok_or_log("sim_gen_err", &self.network_id, "Video generation failed");
+            let shard_result =
+                create_video_shard(frames, self.seq_counter, 30, VolleyId::new("sim_volley")).gate(
+                    "sim_gen_err",
+                    &self.network_id,
+                    "Video generation failed",
+                );
 
-            if let Some(shard) = shard_opt {
+            if let Ok(shard) = shard_result {
                 // 2. Privacy Gate
-                let chunks_opt = Evidence::Video(shard)
+                let chunks_result = Evidence::Video(shard)
                     .safeguard(&self.network_key)
                     // 3. Witness Gate
                     .and_then(|ev| ev.seal(&self.identity, self.network_id))
@@ -340,14 +343,14 @@ impl SimNode {
                     })
                     // 4. Forensic Gate (Chunking/Discretization)
                     .and_then(|env| {
-                        env.chunkify(shard_id).ok_or_log(
+                        env.chunkify(shard_id).gate(
                             "sim_chunk_err",
                             &self.network_id,
                             "Discretization failed",
                         )
                     });
 
-                if let Some(chunks) = chunks_opt {
+                if let Ok(chunks) = chunks_result {
                     if let Some(first_chunk) = chunks.first() {
                         let event = SimEvent::ShardPublished {
                             origin: self.network_id,

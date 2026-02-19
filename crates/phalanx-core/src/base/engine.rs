@@ -12,9 +12,7 @@ use crate::primitives::time::{TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
 
 // IMPORT ALL GATES
-use crate::security::gate::{
-    CapacityGate, ForensicGate, IntegrityGate, PrivacyGate, WitnessGate,
-};
+use crate::security::gate::{CapacityGate, ForensicGate, IntegrityGate, PrivacyGate, WitnessGate};
 use crate::storage::strategies::ShardAmalgam;
 use crate::storage::vault::Guardian;
 use crate::{PhalanxBehaviour, PhalanxEvent};

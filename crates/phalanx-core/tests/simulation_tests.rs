@@ -1,12 +1,14 @@
 use tokio::time::Duration;
-use tracing::{error, info};
+use tracing::info;
 
 // Import from the public API
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
 use phalanx_core::primitives::identity::{NetworkId, PhalanxIdentity};
 use phalanx_core::primitives::shards::{
-    self, create_video_shard, ChunkType, DataPayload, Evidence, StorageSequence, WitnessEnvelope,
+    self, create_video_shard, ChunkType, DataPayload, Evidence, ShardError, StorageSequence,
+    WitnessEnvelope,
 };
+use phalanx_core::security::gate::ForensicGate;
 use phalanx_core::security::telemetry::{NodeRole, SimEvent};
 use phalanx_core::simulation::SimulationHarness;
 use phalanx_core::storage::vault::Guardian;
@@ -225,24 +227,46 @@ async fn test_stronghold_crash_recovery() {
 
 #[tokio::test]
 async fn test_leaf_mode_isolation() {
-    use tracing::warn;
+    use tracing::{error, warn};
 
-    // Unaffected by Harness changes.
-    let (me, _) = PhalanxIdentity::generate().unwrap();
-    let (stranger, _) = PhalanxIdentity::generate().unwrap();
-    let config = PhalanxConfig::default();
-    let mut storage = Guardian::new("sim_vault/leaf_test", &config, me.did.clone());
-
-    let shard = create_video_shard(vec![vec![1]], StorageSequence(1), 30, "v1".into());
-
-    let Ok(serialized_shard) = postcard::to_stdvec(&shard) else {
-        error!(
-            event = "serialization_failure",
-            "Failed to serialize shard for chunking"
-        );
-        return;
+    // Harness Setup
+    let (me, _) = match PhalanxIdentity::generate() {
+        Ok(id) => id,
+        Err(e) => panic!("Failed to generate local identity: {}", e),
     };
 
+    let (stranger, _) = match PhalanxIdentity::generate() {
+        Ok(id) => id,
+        Err(e) => panic!("Failed to generate foreign identity: {}", e),
+    };
+
+    let config = PhalanxConfig::default();
+    let mut storage = Guardian::new("sim_vault/leaf_test", &config, me.did.clone());
+    let net_id = NetworkId::random();
+
+    // 1. Generation Gate: Resolve the Shard payload
+    let shard = match create_video_shard(vec![vec![1]], StorageSequence(1), 30, "v1".into()).gate(
+        "shard_generation_failure",
+        &net_id,
+        "Failed to generate video shard",
+    ) {
+        Ok(s) => s,
+        Err(e) => panic!("Test setup failed at generation: {}", e),
+    };
+
+    // 2. Serialization Gate: Serialize the unwrapped Shard and resolve the bytes
+    let serialized_shard = match postcard::to_stdvec(&shard)
+        .map_err(|e| ShardError::Serialization(e.to_string()))
+        .gate(
+            "serialization_failure",
+            &net_id,
+            "Failed to serialize shard for chunking",
+        ) {
+        Ok(bytes) => bytes,
+        Err(e) => panic!("Test setup failed at serialization: {}", e),
+    };
+
+    // 3. Discretization Phase: Utilize the unwrapped bytes
     let chunks = match shards::chunkify(
         shards::ShardId(1),
         serialized_shard,
@@ -263,7 +287,7 @@ async fn test_leaf_mode_isolation() {
     };
 
     let is_leaf_mode = true;
-    if let Some(first_chunk) = chunks.get(0) {
+    if let Some(first_chunk) = chunks.first() {
         storage.ingest_chunk(first_chunk.clone(), is_leaf_mode);
     } else {
         warn!(
@@ -273,6 +297,7 @@ async fn test_leaf_mode_isolation() {
         );
     }
 
+    // Verification
     assert_eq!(
         storage.micro_layer.len(),
         0,
@@ -368,10 +393,10 @@ async fn test_vampire_attack_defense() {
     loop {
         tokio::select! {
             Some(event) = telemetry_rx.recv() => {
-                if let SimEvent::AttackAttemptBlocked { attacker, reason } = event {
+                if let SimEvent::AttackAttemptBlocked { attacker, target, reason } = event {
                     // The event uses 'origin' (NetworkId) which matches attacker_net_id
                     if attacker == attacker_net_id {
-                        info!("Defense Success: Blocked {} due to '{}'", attacker, reason);
+                        info!("Defense Success: {} Blocked {} due to '{}'", target, attacker, reason);
                         detected = true;
                         break;
                     }
