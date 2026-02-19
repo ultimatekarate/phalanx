@@ -39,8 +39,6 @@ pub fn get_storage_key() -> RecordKey {
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "PhalanxEvent")]
 pub struct PhalanxBehaviour {
-    // ARCHITECTURAL FIX: First-class identity storage
-    // The behaviour now knows "Self" without asking the Swarm.
     pub gossipsub: gossipsub::Behaviour,
     pub mdns: mdns::tokio::Behaviour,
     pub kademlia: kad::Behaviour<PhalanxKadStore>,
@@ -415,4 +413,5 @@ mod tests {
             "Announce stronghold should succeed in a clean memory store"
         );
     }
+
 }

@@ -197,19 +197,36 @@ impl Sentinel {
 
         // 3. Route to correct buffer based on network topic
         let is_video = topic == &config.network.video_topic;
-        let buffers = if is_video {
-            &mut self.video_buffers
+        let (buffers, capacity_limit) = if is_video {
+            (&mut self.video_buffers, config.storage.max_video_buffer)
         } else {
-            &mut self.audio_buffers
+            (&mut self.audio_buffers, config.storage.max_audio_buffer)
         };
 
         let shard_id = chunk.shard_id;
+
+        // 4. Capacity Gate (OOM Defense via LRU Eviction)
+        if !buffers.contains_key(&shard_id) && buffers.len() >= capacity_limit {
+            if let Some(stale_shard_id) = buffers
+                .iter()
+                .min_by_key(|(_, buffer)| buffer.last_activity)
+                .map(|(key, _)| *key)
+            {
+                warn!(
+                    evicted_shard = %stale_shard_id,
+                    incoming_shard = %shard_id,
+                    "Sentinel CapacityGate limit reached. Evicting oldest partial reassembly."
+                );
+                buffers.remove(&stale_shard_id);
+            }
+        }
+
         let buffer = buffers
             .entry(shard_id)
             .or_insert_with(|| ReassemblyBuffer::new(chunk.total_chunks as usize));
 
         // 4. Update buffer state
-        buffer.last_activity = Instant::now();
+        buffer.last_activity = Instant::now(); // todo: forensic now
         if chunk.chunk_index < chunk.total_chunks {
             buffer.chunks[chunk.chunk_index as usize] = Some(chunk.data);
         }
