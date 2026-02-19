@@ -85,16 +85,7 @@ impl StrongholdEngine {
         }
 
         // 3. Swarm Construction
-        let libp2p_key = identity.to_libp2p_keypair().map_err(|e| {
-            // FORENSIC GATE: Log the format mismatch before aborting
-            tracing::error!(
-                target: "phalanx::forensics",
-                event_code = "identity_format_err",
-                error = %e,
-                "Engine boot aborted: Failed to map PhalanxIdentity to libp2p format"
-            );
-            e
-        })?;
+        let libp2p_key = identity.to_libp2p_keypair();
 
         let mut swarm = setup_phalanx_swarm(libp2p_key, &config, &physics, psk)?;
 
@@ -195,9 +186,6 @@ impl StrongholdEngine {
         }
     }
 
-    /// The "Whamjangler" for Network Events- you know, throw some things
-    /// together and whamjangle it into something useful!
-    ///
     /// Routes disparate libp2p events to their specific subsystems:
     /// * **Gossipsub:** Data shards -> Vault (Salvage).
     /// * **Mdns/Identify:** Peer Discovery -> Kademlia (Routing Table).
@@ -244,14 +232,13 @@ impl StrongholdEngine {
         Ok(())
     }
 
-    /// Processes high-velocity `GossipSub` messages.
+/// Processes high-velocity `GossipSub` messages.
     ///
     /// Distinction:
     /// * **Control Signals:** Updates the internal "Reputation Table" (Justiciar).
     /// * **Data Shards:** Immediately persisted to the Vault ("Salvage").
     fn handle_gossip(&mut self, event: gossipsub::Event) {
         // 1. Extract the message or exit immediately
-
         let gossipsub::Event::Message { message, .. } = event else {
             return;
         };
@@ -263,7 +250,7 @@ impl StrongholdEngine {
         // BRANCH A: CONTROL PLANE (Heartbeats)
         // ------------------------------------------------------------------
         if topic == self.config.network.control_topic {
-            if let Some(msg) = postcard::from_bytes::<ControlMessage>(&message.data).ok_or_log(
+            if let Ok(msg) = postcard::from_bytes::<ControlMessage>(&message.data).gate(
                 "ctrl_parse_fail",
                 &local_peer,
                 "Malformed heartbeat",
@@ -277,22 +264,20 @@ impl StrongholdEngine {
         // ------------------------------------------------------------------
         // BRANCH B: DATA PLANE (Evidence Shards)
         // ------------------------------------------------------------------
-        // We chain the gates into a single, flat forensic pipeline.
-        let _ = postcard::from_bytes::<phalanx_core::primitives::shards::ShardChunk>(&message.data)
-            .ok_or_log("data_parse_fail", &local_peer, "Malformed data chunk")
-            .and_then(|chunk| {
-                // Sentinel applies: PrivacyGate -> WitnessGate -> IntegrityGate
-                self.sentinel
-                    .process_chunk(chunk, &topic, &self.config, &self.identity, local_peer)
-            })
-            .and_then(|envelope| {
+        let chunk_result = postcard::from_bytes::<phalanx_core::primitives::shards::ShardChunk>(&message.data)
+            .gate("data_parse_fail", &local_peer, "Malformed data chunk");
+
+        if let Ok(chunk) = chunk_result {
+            // Sentinel applies: PrivacyGate -> WitnessGate -> IntegrityGate
+            if let Some(envelope) = self.sentinel.process_chunk(chunk, &topic, &self.config, &self.identity, local_peer.clone()) {
                 // Storage applies: CapacityGate -> ForensicGate
-                self.storage.ingest_envelope(envelope).ok_or_log(
+                let _ = self.storage.ingest_envelope(envelope).gate(
                     "vault_ingest_fail",
                     &local_peer,
                     "Vault rejected envelope",
-                )
-            });
+                );
+            }
+        }
     }
 
     /// Calculates the Node's "Vitality Rate" and broadcasts a heartbeat.
@@ -311,9 +296,10 @@ impl StrongholdEngine {
         let vitality = VitalityRate::calculate(&self.physics, PowerState::Normal, load);
         let interval = vitality.as_duration();
         let sender_id = NetworkId(*self.swarm.local_peer_id());
+        
         // 3. Construct Proof
         let heartbeat_msg = ControlMessage {
-            sender: sender_id,
+            sender: sender_id.clone(),
             load_factor: load.as_f32(),
             storage_remaining_mb: 10240, // TODO: Real disk check
             heartbeat_ms: vitality.as_u64(),
@@ -321,9 +307,9 @@ impl StrongholdEngine {
         };
 
         // 4. Broadcast
-        if let Some(data) = postcard::to_stdvec(&heartbeat_msg).ok_or_log(
+        if let Ok(data) = postcard::to_stdvec(&heartbeat_msg).gate(
             "heartbeat_enc_fail",
-            &sender_id.clone(),
+            &sender_id,
             "Failed to encode heartbeat",
         ) {
             let topic = gossipsub::IdentTopic::new(self.config.network.control_topic.to_string());

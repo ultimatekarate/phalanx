@@ -12,7 +12,6 @@ use crate::primitives::time::{PhalanxTimestamp, TimeError, TrustedClock};
 use crate::security::e2ee::{self, CryptoError, SymmetricKey};
 use crate::security::gate::ChronosGate;
 
-use tracing::error;
 // =====================
 // DATA STRUCTURES
 // =====================
