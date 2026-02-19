@@ -11,7 +11,7 @@ use phalanx_core::primitives::shards::{
 use phalanx_core::security::gate::ForensicGate;
 use phalanx_core::security::telemetry::{NodeRole, SimEvent};
 use phalanx_core::simulation::SimulationHarness;
-use phalanx_core::storage::vault::Guardian;
+use phalanx_core::storage::vault::{Guardian, NodeMode};
 
 // Helper to init logging for tests
 fn init_tracing() {
@@ -286,9 +286,8 @@ async fn test_leaf_mode_isolation() {
         }
     };
 
-    let is_leaf_mode = true;
     if let Some(first_chunk) = chunks.first() {
-        storage.ingest_chunk(first_chunk.clone(), is_leaf_mode);
+        storage.ingest_chunk(first_chunk.clone(), NodeMode::Leaf);
     } else {
         warn!(
             event = "empty_chunk_set",

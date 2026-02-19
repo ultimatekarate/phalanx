@@ -17,6 +17,12 @@ use std::path::PathBuf;
 use tokio::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeMode {
+    Leaf,
+    Standard,
+}
+
 /// Enumerates specific failure modes for storage and security operations.
 #[derive(Debug, thiserror::Error)]
 pub enum GuardianError {
@@ -203,14 +209,17 @@ impl Guardian {
 
     /// Stage 1: Micro-Layer (Chunk Ingestion)
     #[instrument(skip(self, chunk), level = "debug")]
-    pub fn ingest_chunk(&mut self, chunk: ShardChunk, is_leaf_mode: bool) {
+    pub fn ingest_chunk(&mut self, chunk: ShardChunk, mode: NodeMode) {
         // 1. Governance State Sync
-        if is_leaf_mode {
-            self.governor
-                .set_state(crate::base::types::PowerState::Leaf);
-        } else {
-            self.governor
-                .set_state(crate::base::types::PowerState::Normal);
+        match mode {
+            NodeMode::Leaf => {
+                self.governor
+                    .set_state(crate::base::types::PowerState::Leaf);
+            }
+            NodeMode::Standard => {
+                self.governor
+                    .set_state(crate::base::types::PowerState::Normal);
+            }
         }
 
         // 2. Security Check (Governance Gate)
@@ -222,7 +231,7 @@ impl Guardian {
             return;
         }
 
-        if is_leaf_mode && chunk.owner_did != self.local_did {
+        if matches!(mode, NodeMode::Leaf) && chunk.owner_did != self.local_did {
             warn!(did = %chunk.owner_did, "Leaf Mode Active: Shedding foreign chunk");
             return;
         }
@@ -878,8 +887,8 @@ mod guardian_leaf_tests {
         };
 
         // 5. Ingest while Leaf Mode is ACTIVE
-        let is_leaf_mode = true;
-        guardian.ingest_chunk(local_chunk, is_leaf_mode);
+        let mode = NodeMode::Leaf;
+        guardian.ingest_chunk(local_chunk, mode);
 
         // 6. Verification
         assert_eq!(
