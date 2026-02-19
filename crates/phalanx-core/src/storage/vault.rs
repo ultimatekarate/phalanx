@@ -303,7 +303,7 @@ impl Guardian {
             self.foreign_storage_usage.0 as usize
         };
 
-        let peer_id = envelope.witness_peer_id.clone();
+        let peer_id = envelope.witness_peer_id;
 
         let envelope = envelope
             .check_capacity(&peer_id, current_usage, limit)

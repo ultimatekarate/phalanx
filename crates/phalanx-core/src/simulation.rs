@@ -129,7 +129,7 @@ impl SimulationHarness {
             network_id,
             role,
             config: self.config.clone(),
-            physics: self.physics.clone(),
+            physics: self.physics,
         };
 
         let actor = SimNode::new(

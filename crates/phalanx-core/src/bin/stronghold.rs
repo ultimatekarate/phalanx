@@ -283,7 +283,7 @@ impl StrongholdEngine {
                 &topic,
                 &self.config,
                 &self.identity,
-                local_peer.clone(),
+                local_peer,
                 &self.storage, // ReputationGate Injection
             )
             .gate(
@@ -324,7 +324,7 @@ impl StrongholdEngine {
 
         // 3. Construct Proof
         let heartbeat_msg = ControlMessage {
-            sender: sender_id.clone(),
+            sender: sender_id,
             load_factor: load.as_f32(),
             storage_remaining_mb: 10240, // TODO: Real disk check
             heartbeat_ms: vitality.as_u64(),

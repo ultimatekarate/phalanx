@@ -184,7 +184,7 @@ impl PhalanxEngine {
                         .safeguard(&self.network_key) // 1. Privacy Gate
                         .and_then(|ev| {
                             // 2. Witness Gate
-                            ev.seal(&self.identity, local_network_id.clone())
+                            ev.seal(&self.identity, local_network_id)
                         })
                         .and_then(|env| {
                             // 3. Discretization
@@ -218,7 +218,7 @@ impl PhalanxEngine {
                         .safeguard(&self.network_key) // 1. Privacy Gate
                         .and_then(|ev| {
                             // 2. Witness Gate
-                            ev.seal(&self.identity, local_network_id.clone())
+                            ev.seal(&self.identity, local_network_id)
                         })
                         .and_then(|env| {
                             // 3. Discretization
