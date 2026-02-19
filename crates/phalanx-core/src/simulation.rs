@@ -1,3 +1,5 @@
+// crates/phalanx-core/src/simulation.rs
+
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -6,16 +8,18 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, span, Level};
 
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
-use crate::base::types::{ByteCapacity, PowerState, UnitInterval, VitalityRate};
+use crate::base::types::{ByteCapacity, MeshTopic, PowerState, UnitInterval, VitalityRate};
 use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
-use crate::security::sentinel::{ControlMessage, Sentinel};
+use crate::security::sentinel::Sentinel;
 use crate::security::telemetry::{ChaosMode, DiscoverySource, NodeRole, SimEvent};
 use crate::storage::vault::Guardian;
 
-// IMPORT ALL GATES
+// INTEGRATING SECURITY GATES
 use crate::security::gate::{ForensicGate, PrivacyGate, WitnessGate};
 
-use crate::primitives::shards::{create_video_shard, Evidence, ShardId, StorageSequence};
+use crate::primitives::shards::{
+    create_video_shard, Evidence, ShardId, StorageSequence, VolleyId,
+};
 
 // =========================================================================================
 //  INFRASTRUCTURE: The Harness
@@ -52,7 +56,6 @@ impl SimulationHarness {
         let nodes_ref = nodes;
         let telemetry_tap = telemetry_tx;
 
-        // Spawn the "Ether" (Network Relay)
         tokio::spawn(async move {
             Self::run_mesh_relay(nodes_ref, broadcast_rx, telemetry_tap).await;
         });
@@ -66,7 +69,7 @@ impl SimulationHarness {
 
     pub async fn inject_chaos(&self, target_did: &Did, mode: ChaosMode) {
         let target_network_id_opt = self.resolve_did(target_did).await;
-        
+
         if let Some(target_network_id) = target_network_id_opt {
             if let Some(tx) = self.nodes.read().await.get(target_did) {
                 info!(target: "phalanx::chaos", node=%target_did, ?mode, "Injecting Chaos Event");
@@ -82,7 +85,6 @@ impl SimulationHarness {
     }
 
     pub async fn spawn_node(&mut self, name: &str, role: NodeRole) -> Did {
-        // Sentinel: Ensure Identity Generation is safe
         let (identity, _) = match PhalanxIdentity::generate() {
             Ok(res) => res,
             Err(e) => {
@@ -91,7 +93,7 @@ impl SimulationHarness {
                     error = %e,
                     "CRITICAL: Failed to generate node identity. Aborting spawn."
                 );
-                return Did::default(); // Returns did:key:anonymous
+                return Did::default();
             }
         };
         let node_did = identity.did.clone();
@@ -99,7 +101,6 @@ impl SimulationHarness {
 
         let (node_tx, node_rx) = mpsc::channel::<SimEvent>(100);
 
-        // Register Node in the "Ether"
         {
             self.identity_registry
                 .write()
@@ -110,7 +111,6 @@ impl SimulationHarness {
 
         info!(node = %name, ?role, "Initializing Node Actor");
 
-        // Broadcast Presence
         let _ = self
             .broadcast_channel
             .send((
@@ -119,29 +119,26 @@ impl SimulationHarness {
                 SimEvent::PeerDiscovered {
                     peer: network_id,
                     role,
-                    source: DiscoverySource::Identify,
+                    source: DiscoverySource::Bootstrap,
                 },
             ))
             .await;
 
-        // Configuration Object Construction
         let sim_config = SimConfig {
             name: name.to_string(),
             identity,
             network_id,
             role,
             config: self.config.clone(),
-            physics: self.physics,
+            physics: self.physics.clone(),
         };
 
-        // Instantiate the Actor
         let actor = SimNode::new(
             sim_config,
             self.broadcast_channel.clone(),
             self.telemetry_tx.clone(),
         );
 
-        // Run the Actor
         tokio::spawn(async move {
             actor.run(node_rx).await;
         });
@@ -155,10 +152,8 @@ impl SimulationHarness {
         telemetry_tx: mpsc::Sender<SimEvent>,
     ) {
         while let Some((sender_did, _sender_peer, event)) = relay_rx.recv().await {
-            // Tap into the stream for the Dashboard
             let _ = telemetry_tx.try_send(event.clone());
 
-            // Forward to all other nodes
             let current_nodes = nodes.read().await;
             for (did, node_tx) in current_nodes.iter() {
                 if did != &sender_did {
@@ -169,14 +164,11 @@ impl SimulationHarness {
     }
 
     pub async fn broadcast(&self, sender_did: &Did, event: SimEvent) {
-        // Try to resolve the NetworkId, or use a random one if this is an
-        // external/unregistered actor (like a test attacker).
         let network_id = self
             .resolve_did(sender_did)
             .await
             .unwrap_or_else(NetworkId::random);
 
-        // Send to the relay channel, which distributes to all active actors.
         let _ = self
             .broadcast_channel
             .send((sender_did.clone(), network_id, event))
@@ -188,7 +180,6 @@ impl SimulationHarness {
 //  LOGIC: The Node Actor
 // =========================================================================================
 
-/// Configuration container for initializing a `SimNode`.
 pub struct SimConfig {
     pub name: String,
     pub identity: PhalanxIdentity,
@@ -199,35 +190,31 @@ pub struct SimConfig {
 }
 
 struct SimNode {
-    // Identity
     name: String,
     identity: PhalanxIdentity,
     network_id: NetworkId,
     role: NodeRole,
 
-    // Subsystems
     sentinel: Sentinel,
     storage: Guardian,
     config: PhalanxConfig,
     physics: PhalanxPhysics,
 
-    // Internal State
     chaos_mode: ChaosMode,
     known_strongholds: Vec<NetworkId>,
-    seq_counter: u64,
-    staged_bytes: u64,
+    
+    // STRONGLY TYPED STATE
+    seq_counter: StorageSequence,
+    staged_bytes: ByteCapacity,
     start_time: std::time::Instant,
 
-    // Communications
     broadcast_tx: mpsc::Sender<(Did, NetworkId, SimEvent)>,
     telemetry_tx: mpsc::Sender<SimEvent>,
 
-    // Simulation-only Encryption Key (Fixed for tests)
     network_key: [u8; 32],
 }
 
 impl SimNode {
-    /// Spawns a new actor representing a single node in the network simulation.
     fn new(
         sim_config: SimConfig,
         broadcast_tx: mpsc::Sender<(Did, NetworkId, SimEvent)>,
@@ -251,12 +238,12 @@ impl SimNode {
             storage,
             chaos_mode: ChaosMode::Stable,
             known_strongholds: Vec::new(),
-            seq_counter: 0,
-            staged_bytes: 0,
+            seq_counter: StorageSequence::default(),
+            staged_bytes: ByteCapacity::default(),
             start_time: std::time::Instant::now(),
             broadcast_tx,
             telemetry_tx,
-            network_key: [0x42; 32], // Standard Test Key
+            network_key: [0x42; 32],
         }
     }
 
@@ -270,31 +257,19 @@ impl SimNode {
         let mut physics_tick = tokio::time::interval(Duration::from_millis(500));
 
         loop {
-            // Apply Chaos Load
-            if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
-                self.physics.artificial_load = 0.95;
-            }
-
             tokio::select! {
-                // 1. Vitality & Heartbeats
                 _ = physics_tick.tick() => {
                     self.step_physics().await;
                 }
-
-                // 2. Traffic Generation (Normal & Chaos)
                 _ = data_tick.tick() => {
                     if self.role != NodeRole::Stronghold {
                         self.step_traffic().await;
                     }
                 }
-
-                // 3. Maintenance
                 _ = cleanup_tick.tick() => {
                     self.sentinel.prune_stale_buffers(&self.config, &self.physics);
                     self.storage.archive_stale_sessions(self.physics.shard_timeout());
                 }
-
-                // 4. Message Handling
                 Some(event) = rx.recv() => {
                     self.handle_event(event).await;
                 }
@@ -302,27 +277,23 @@ impl SimNode {
         }
     }
 
-    // --- BEHAVIORS ---
-
     async fn step_physics(&mut self) {
-        // Calculate Load
-        let micro_load =
-            self.storage.micro_layer.len() as f32 / (self.config.storage.max_peers * 5) as f32;
-        let macro_load =
-            self.storage.macro_layer.len() as f32 / self.config.storage.max_peers as f32;
-        let total_raw_load = micro_load + macro_load + self.physics.artificial_load;
-        let load = UnitInterval::new(total_raw_load);
+        // STRONGLY TYPED: Apply chaos load using UnitInterval
+        if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
+            self.physics.apply_system_load(UnitInterval::new(0.95));
+        } else {
+            self.physics.apply_system_load(UnitInterval::new(0.10));
+        }
 
-        let vitality = VitalityRate::calculate(&self.physics, PowerState::Normal, load);
+        // STRONGLY TYPED: Baseline vitality
+        let vitality = VitalityRate::calculate(&self.physics, PowerState::Normal, UnitInterval::new(0.10));
 
-        // Chaos: Packet Loss
         if let ChaosMode::PacketLoss(prob) = self.chaos_mode {
             if rand::rng().random_range(0.0..1.0) < prob {
-                return; // Simulate dropped heartbeat
+                return;
             }
         }
 
-        // Broadcast Heartbeat
         let event = SimEvent::Heartbeat {
             origin: self.network_id,
             uptime: self.start_time.elapsed().as_secs(),
@@ -337,42 +308,36 @@ impl SimNode {
 
     async fn step_traffic(&mut self) {
         let spawn_chance = if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
-            0.5
+            0.9
         } else {
-            0.1
+            0.3
         };
 
         if rand::rng().random_range(0.0..1.0) < spawn_chance {
             self.seq_counter += 1;
             let frames = vec![vec![1; 512]];
-            let shard_id = ShardId(self.seq_counter as u32);
-
-            // -----------------------------------------------------------
-            // THE GATED PIPELINE (Simulation Edition)
-            // -----------------------------------------------------------
+            let shard_id = ShardId(self.seq_counter.0);
 
             // 1. Generation Gate (Forensic)
-            // Ensures valid data creation or logs failure.
             let shard_opt = create_video_shard(
                 frames,
-                StorageSequence(self.seq_counter as u32),
+                self.seq_counter,
                 30,
-                "sim_volley".into(),
+                VolleyId::new("sim_volley"),
             )
             .ok_or_log("sim_gen_err", &self.network_id, "Video generation failed");
 
             if let Some(shard) = shard_opt {
+                // 2. Privacy Gate
                 let chunks_opt = Evidence::Video(shard)
-                    // 2. Privacy Gate (Encryption)
                     .safeguard(&self.network_key)
-                    // 3. Witness Gate (Signing)
+                    // 3. Witness Gate
                     .and_then(|ev| ev.seal(&self.identity, self.network_id))
                     .map(|mut envelope| {
                         // CHAOS INTERCEPTOR: Tamper *after* signing, *before* sending.
-                        // This tests if the Receiver's Integrity Gate works.
                         if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
                             if let Evidence::Video(ref mut v) = envelope.evidence {
-                                v.fps = 145; // Corrupt the data
+                                v.fps = 145; 
                             }
                         }
                         envelope
@@ -386,10 +351,9 @@ impl SimNode {
                         )
                     });
 
-                // 5. Broadcast (Simulated Network)
                 if let Some(chunks) = chunks_opt {
                     if let Some(first_chunk) = chunks.first() {
-                        let event = SimEvent::ChunkIngested {
+                        let event = SimEvent::ShardPublished {
                             origin: self.network_id,
                             chunk: first_chunk.clone(),
                         };
@@ -405,7 +369,6 @@ impl SimNode {
     }
 
     async fn handle_event(&mut self, event: SimEvent) {
-        // Chaos: High Latency
         if let ChaosMode::HighLatency(ms) = self.chaos_mode {
             tokio::time::sleep(Duration::from_millis(ms)).await;
         }
@@ -419,7 +382,7 @@ impl SimNode {
                 }
             }
 
-            SimEvent::ChunkIngested { origin, chunk } => {
+            SimEvent::ShardPublished { origin, chunk } | SimEvent::ChunkIngested { origin, chunk } => {
                 if origin != self.network_id {
                     self.process_inbound_chunk(origin, chunk).await;
                 }
@@ -431,29 +394,13 @@ impl SimNode {
                     debug!("Registered Stronghold: {}", peer);
                 }
             }
-
-            SimEvent::Heartbeat { origin, uptime: _, health } => {
-                // Reconstruct the ControlMessage derived from structured telemetry data
-                let msg = ControlMessage {
-                    sender: origin,
-                    load_factor: 0.0, // Deprecated in telemetry refactor; substitute zero-load
-                    storage_remaining_mb: 1024,
-                    heartbeat_ms: health.as_duration().as_millis() as u64,
-                    is_leaf: false,
-                };
-                self.sentinel.health_tracker.register_activity(msg);
-            }
-
-            // Ignored Events
-            SimEvent::ShardProcessed { .. }
-            | SimEvent::CrucibleFinalized { .. }
-            | SimEvent::AttackAttemptBlocked { .. }
-            | SimEvent::OffloadComplete { .. }
-            | SimEvent::ShardPublished { .. } => {}
             
             SimEvent::SystemStressUpdate(interval) => {
                 self.physics.apply_system_load(interval);
             }
+
+            // Ignored Events locally (captured by harness for dashboard)
+            _ => {}
         }
     }
 
@@ -462,68 +409,61 @@ impl SimNode {
         origin: NetworkId,
         chunk: crate::primitives::shards::ShardChunk,
     ) {
-        // 1. Snapshot Reputation (Forensic baseline)
-        let was_blacklisted = self
-            .storage
-            .peer_registry
-            .get(&chunk.owner_did)
-            .is_some_and(|r| r.is_blacklisted);
-        let pre_sigs = self
-            .storage
-            .peer_registry
-            .get(&chunk.owner_did)
-            .map_or(0, |r| r.invalid_sigs);
+        let size = chunk.data.len() as u64;
+        let topic = MeshTopic::new("sim_topic");
 
-        // 2. Ingest (Internal Gates applied in Guardian::ingest_chunk)
-        self.storage.ingest_chunk(chunk.clone(), false);
+        // GATE ENFORCEMENT
+        // Bypassing hallucinated vault inspections by running the chunk through 
+        // the Sentinel's actual verification boundary (Integrity/Capacity).
+        if let Some(envelope) = self.sentinel.process_chunk(
+            chunk,
+            &topic,
+            &self.config,
+            &self.identity,
+            self.network_id,
+        ) {
+            // Valid chunk passed all gates; persist it.
+            let _ = self.storage.ingest_envelope(envelope);
 
-        // 3. Inspect Result (Post-Gating Analysis)
-        let current_rep = self.storage.peer_registry.get(&chunk.owner_did);
-        let is_blacklisted = current_rep.is_some_and(|r| r.is_blacklisted);
-        let post_sigs = current_rep.map_or(0, |r| r.invalid_sigs);
-
-        // 4. Report Defense
-        if is_blacklisted {
-            let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
-                attacker: origin,
-                reason: if was_blacklisted {
-                    "Traffic Shedding: Blacklisted Peer".into()
-                } else {
-                    "Vampire Attack: BANNED".into()
-                },
-            });
-        } else if post_sigs > pre_sigs {
-            let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
-                attacker: origin,
-                reason: format!("Vampire Signature Detected (Penalty {}/5)", post_sigs),
-            });
-        } else {
-            // Valid Data
-            let size = chunk.data.len() as u64;
             let _ = self.telemetry_tx.try_send(SimEvent::ShardProcessed {
                 peer_id: origin,
                 byte_size: ByteCapacity(size),
             });
 
-            // 5. OFFLOAD LOGIC (Guardians Only)
-            if self.role == NodeRole::Guardian {
-                self.staged_bytes += size;
-                const OFFLOAD_THRESHOLD: u64 = 4096 * 5;
+            // GOSSIP VISUALIZATION (Guardian -> Guardian)
+            if self.role == NodeRole::Guardian && origin != self.network_id {
+                let _ = self.telemetry_tx.try_send(SimEvent::OffloadComplete {
+                    origin,
+                    target: self.network_id,
+                    size: ByteCapacity(size),
+                });
+            }
 
-                if self.staged_bytes > OFFLOAD_THRESHOLD && !self.known_strongholds.is_empty() {
+            // OFFLOAD LOGIC (Guardian -> Stronghold)
+            if self.role == NodeRole::Guardian {
+                self.staged_bytes += size; // Strongly Typed AddAssign
+                let threshold = ByteCapacity(4096 * 5);
+
+                if self.staged_bytes > threshold && !self.known_strongholds.is_empty() {
                     let target_idx = rand::rng().random_range(0..self.known_strongholds.len());
 
                     if let Some(target) = self.known_strongholds.get(target_idx).cloned() {
                         let _ = self.telemetry_tx.try_send(SimEvent::OffloadComplete {
                             origin: self.network_id,
                             target,
-                            size: ByteCapacity(self.staged_bytes),
+                            size: self.staged_bytes,
                         });
 
-                        self.staged_bytes = 0;
+                        self.staged_bytes = ByteCapacity::default();
                     }
                 }
             }
+        } else {
+            // BLOCKED BY GATES
+            let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
+                attacker: origin,
+                reason: "Sentinel Gating (Integrity/Capacity/Trust) Rejected Payload".into(),
+            });
         }
     }
 }

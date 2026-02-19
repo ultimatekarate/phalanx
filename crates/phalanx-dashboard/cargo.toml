@@ -11,3 +11,4 @@ anyhow = "1.0"
 
 # Local Core Dependency (with Simulation features enabled)
 phalanx-core = { path = "../phalanx-core", features = ["sim"] }
+ui = "0.1.0"
