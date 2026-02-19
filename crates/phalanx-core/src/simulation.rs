@@ -10,6 +10,7 @@ use tracing::{debug, error, info, span, Level};
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
 use crate::base::types::{ByteCapacity, MeshTopic, PowerState, UnitInterval, VitalityRate};
 use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
+use crate::security::e2ee::SymmetricKey;
 use crate::security::sentinel::Sentinel;
 use crate::security::telemetry::{ChaosMode, DiscoverySource, NodeRole, SimEvent};
 use crate::storage::vault::Guardian;
@@ -209,7 +210,7 @@ struct SimNode {
     broadcast_tx: mpsc::Sender<(Did, NetworkId, SimEvent)>,
     telemetry_tx: mpsc::Sender<SimEvent>,
 
-    network_key: [u8; 32],
+    network_key: SymmetricKey,
 }
 
 impl SimNode {
@@ -241,7 +242,7 @@ impl SimNode {
             start_time: std::time::Instant::now(),
             broadcast_tx,
             telemetry_tx,
-            network_key: [0x42; 32],
+            network_key: SymmetricKey([0x42; 32]),
         }
     }
 
