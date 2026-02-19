@@ -275,7 +275,7 @@ mod tests {
         assert!(engine.is_ok(), "Engine should initialize with valid inputs");
     }
 
-#[test]
+    #[test]
     fn test_new_at_path_ephemeral_fallback() {
         // 1. Utilize TempDir to guarantee test isolation
         let temp_dir = tempfile::tempdir().expect("Failed to create ephemeral test directory");
@@ -286,12 +286,13 @@ mod tests {
 
         assert!(
             engine_result.is_ok(),
-            "Should successfully bootstrap ephemeral node. Error: {:?}", engine_result.err()
+            "Should successfully bootstrap ephemeral node. Error: {:?}",
+            engine_result.err()
         );
 
         let engine = engine_result.unwrap();
         assert_eq!(engine.seq_counter, 0);
-        
+
         // Cleanup happens automatically when temp_dir drops out of scope
     }
 
@@ -308,5 +309,4 @@ mod tests {
         // Check 2: Clock is running (Chronos Gate)
         assert!(engine.clock.now().is_ok());
     }
-    
 }

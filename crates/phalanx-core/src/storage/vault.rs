@@ -5,6 +5,7 @@ use crate::primitives::shards::{Evidence, ShardChunk, StorageSequence, Volley, W
 use crate::primitives::time::TrustedClock;
 use crate::storage::crucible::Crucible;
 use crate::storage::strategies::{ShardAmalgam, VolleyAmalgam};
+use crate::security::sentinel::ReputationGate;
 
 // IMPORT GATES
 use crate::security::gate::{CapacityGate, ForensicGate, IntegrityGate};
@@ -51,6 +52,9 @@ pub enum GuardianError {
 
     #[error("Time synchronization failure: {0}")]
     TimeSource(#[from] TimeError),
+
+    #[error("Attack attempt blocked: Peer {0} is blacklisted")]
+    BlacklistedPeer(String),
 }
 
 /// Tracks the behavior of remote peers to prevent "Vampire Attacks" (Resource Exhaustion).
@@ -281,7 +285,14 @@ impl Guardian {
             .parse::<NetworkId>()
             .unwrap_or_else(|_| NetworkId::random());
 
-        // 0. Foreign Data Pruning (Pre-Check)
+        // 0. GATE 0: REPUTATION GATE (Vampire Defense)
+        // Preemptively drop envelopes from known malicious peers to prevent CPU exhaustion.
+        if self.is_blacklisted(&envelope.did) {
+            warn!(did = %envelope.did, "Blocked ingest_envelope attempt from blacklisted peer");
+            return Err(GuardianError::BlacklistedPeer(envelope.did.to_string()));
+        }
+
+        // 1. Foreign Data Pruning (Pre-Check)
         if envelope.did != self.local_did
             && self.foreign_storage_usage > self.max_foreign_storage_bytes
         {
