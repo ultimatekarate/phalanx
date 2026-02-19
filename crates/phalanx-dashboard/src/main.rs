@@ -25,7 +25,7 @@ use phalanx_core::primitives::identity::NetworkId;
 use phalanx_core::security::telemetry::{ChaosMode, NodeRole, SimEvent};
 use phalanx_core::simulation::SimulationHarness;
 
-use widgets::{NetworkRadar, TrafficVector};
+use widgets::{NetworkRadar, TrafficVector, VectorStyle};
 
 struct ActiveVector {
     origin: NetworkId,
@@ -268,6 +268,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     from: v.origin,
                     to: v.target,
                     age_seconds: v.timestamp.elapsed().as_secs_f32(),
+                    style: VectorStyle::Standard,
                 })
                 .collect();
 

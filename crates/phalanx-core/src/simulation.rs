@@ -65,9 +65,19 @@ impl SimulationHarness {
     }
 
     pub async fn inject_chaos(&self, target_did: &Did, mode: ChaosMode) {
-        if let Some(tx) = self.nodes.read().await.get(target_did) {
-            info!(target: "phalanx::chaos", node=%target_did, ?mode, "Injecting Chaos Event");
-            let _ = tx.send(SimEvent::ChaosUpdate(mode)).await;
+        let target_network_id_opt = self.resolve_did(target_did).await;
+        
+        if let Some(target_network_id) = target_network_id_opt {
+            if let Some(tx) = self.nodes.read().await.get(target_did) {
+                info!(target: "phalanx::chaos", node=%target_did, ?mode, "Injecting Chaos Event");
+                let event = SimEvent::ChaosUpdate {
+                    target: target_network_id,
+                    mode,
+                };
+                let _ = tx.send(event).await;
+            }
+        } else {
+            error!(target: "phalanx::chaos", node=%target_did, "Failed to resolve DID to NetworkId for Chaos injection.");
         }
     }
 
@@ -206,6 +216,7 @@ struct SimNode {
     known_strongholds: Vec<NetworkId>,
     seq_counter: u64,
     staged_bytes: u64,
+    start_time: std::time::Instant,
 
     // Communications
     broadcast_tx: mpsc::Sender<(Did, NetworkId, SimEvent)>,
@@ -242,6 +253,7 @@ impl SimNode {
             known_strongholds: Vec::new(),
             seq_counter: 0,
             staged_bytes: 0,
+            start_time: std::time::Instant::now(),
             broadcast_tx,
             telemetry_tx,
             network_key: [0x42; 32], // Standard Test Key
@@ -302,7 +314,6 @@ impl SimNode {
         let load = UnitInterval::new(total_raw_load);
 
         let vitality = VitalityRate::calculate(&self.physics, PowerState::Normal, load);
-        let interval = vitality.as_duration();
 
         // Chaos: Packet Loss
         if let ChaosMode::PacketLoss(prob) = self.chaos_mode {
@@ -312,37 +323,16 @@ impl SimNode {
         }
 
         // Broadcast Heartbeat
-        let mut msg = ControlMessage {
-            sender: self.network_id,
-            load_factor: load.as_f32(),
-            storage_remaining_mb: 1024,
-            heartbeat_ms: interval.as_millis() as u64,
-            is_leaf: false,
+        let event = SimEvent::Heartbeat {
+            origin: self.network_id,
+            uptime: self.start_time.elapsed().as_secs(),
+            health: vitality,
         };
-
-        if matches!(self.chaos_mode, ChaosMode::Byzantine) {
-            msg.storage_remaining_mb = 99999999;
-        }
-
-        // FORENSIC GATE: Heartbeat Serialization
-        // If serialization fails, we log it via ok_or_log and skip sending.
-        // This replaces the raw `if let Ok` block with standardized reporting.
-        let payload_opt = postcard::to_stdvec(&msg).ok_or_log(
-            "heartbeat_serialize_error",
-            &self.network_id,
-            "Failed to encode heartbeat",
-        );
-
-        if let Some(data) = payload_opt {
-            let event = SimEvent::Heartbeat {
-                origin: self.network_id,
-                payload: data,
-            };
-            let _ = self
-                .broadcast_tx
-                .send((self.identity.did.clone(), self.network_id, event))
-                .await;
-        }
+        
+        let _ = self
+            .broadcast_tx
+            .send((self.identity.did.clone(), self.network_id, event))
+            .await;
     }
 
     async fn step_traffic(&mut self) {
@@ -423,8 +413,10 @@ impl SimNode {
         match event {
             SimEvent::Shutdown => std::process::exit(0),
 
-            SimEvent::ChaosUpdate(mode) => {
-                self.chaos_mode = mode;
+            SimEvent::ChaosUpdate { target, mode } => {
+                if target == self.network_id {
+                    self.chaos_mode = mode;
+                }
             }
 
             SimEvent::ChunkIngested { origin, chunk } => {
@@ -440,24 +432,25 @@ impl SimNode {
                 }
             }
 
-            SimEvent::Heartbeat { payload, .. } => {
-                // Forensic Gate: Deserialization
-                let msg_opt = postcard::from_bytes::<ControlMessage>(&payload).ok_or_log(
-                    "heartbeat_rx_err",
-                    &self.network_id,
-                    "Malformed heartbeat",
-                );
-
-                if let Some(msg) = msg_opt {
-                    self.sentinel.health_tracker.register_activity(msg);
-                }
+            SimEvent::Heartbeat { origin, uptime: _, health } => {
+                // Reconstruct the ControlMessage derived from structured telemetry data
+                let msg = ControlMessage {
+                    sender: origin,
+                    load_factor: 0.0, // Deprecated in telemetry refactor; substitute zero-load
+                    storage_remaining_mb: 1024,
+                    heartbeat_ms: health.as_duration().as_millis() as u64,
+                    is_leaf: false,
+                };
+                self.sentinel.health_tracker.register_activity(msg);
             }
 
             // Ignored Events
             SimEvent::ShardProcessed { .. }
             | SimEvent::CrucibleFinalized { .. }
             | SimEvent::AttackAttemptBlocked { .. }
-            | SimEvent::OffloadComplete { .. } => {}
+            | SimEvent::OffloadComplete { .. }
+            | SimEvent::ShardPublished { .. } => {}
+            
             SimEvent::SystemStressUpdate(interval) => {
                 self.physics.apply_system_load(interval);
             }

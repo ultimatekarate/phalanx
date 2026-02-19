@@ -192,12 +192,12 @@ impl PhalanxEngine {
                     if let Some(chunks) = chunks_opt {
                         for chunk in chunks {
                              // Broadcast via GossipSub
-                             if let Ok(data) = postcard::to_stdvec(&chunk) {
-                                 let _ = self.swarm
+                            if let Ok(data) = postcard::to_stdvec(&chunk) {
+                                let _ = self.swarm
                                     .behaviour_mut()
                                     .gossipsub
                                     .publish(topic.clone(), data);
-                             }
+                            }
                         }
                         self.seq_counter += 1;
                     }
