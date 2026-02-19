@@ -327,7 +327,9 @@ impl RedbStore {
 
     /// Iterates through the records table and compiles a distribution of payload variants.
     /// Excludes expired records from the metric count.
-    pub fn get_storage_metrics(&self) -> std::result::Result<std::collections::HashMap<PayloadKind, usize>, redb::Error> {
+    pub fn get_storage_metrics(
+        &self,
+    ) -> std::result::Result<std::collections::HashMap<PayloadKind, usize>, redb::Error> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(DHT_RECORDS_TABLE)?;
         let mut metrics = std::collections::HashMap::new();
@@ -357,24 +359,13 @@ impl RecordStore for RedbStore {
         }
 
         let typed_key = DhtRecordKey::new(&record.key);
-
-        // Determine variant based on forensic context (can be extended)
         let variant = PayloadKind::ShardPointer;
 
         let typed_payload = DhtPayload::new(record.value, variant, record.expires);
 
         let payload_bytes = typed_payload.encode()?;
 
-        let write_txn = self.db.begin_write().map_err(|_| Error::ValueTooLarge)?;
-        {
-            let mut table = write_txn
-                .open_table(DHT_RECORDS_TABLE)
-                .map_err(|_| Error::ValueTooLarge)?;
-            table
-                .insert(typed_key.as_bytes(), payload_bytes.as_slice())
-                .map_err(|_| Error::ValueTooLarge)?;
-        }
-        write_txn.commit().map_err(|_| Error::ValueTooLarge)?;
+        self.persist_record_safely(typed_key, &payload_bytes)?;
 
         Ok(())
     }
@@ -421,6 +412,13 @@ impl RecordStore for RedbStore {
     }
 
     fn add_provider(&mut self, record: ProviderRecord) -> Result<()> {
+        // Prevent malicious peers from constantly reflecting our own ID back to us
+        // to exhaust disk I/O.
+        if record.provider == self.local_peer_id {
+            tracing::debug!("Discarding self-referential provider record injection.");
+            return Ok(());
+        }
+
         let typed_key = DhtRecordKey::new(&record.key);
         let write_txn = self.db.begin_write().map_err(|_| Error::MaxProvidedKeys)?;
 
