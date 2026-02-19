@@ -125,11 +125,10 @@ impl Mold for VolleyAmalgam {
     }
 
     fn assemble(key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output> {
-        // 🔍 DEBUG: Log Volley Assembly
-        info!(key=%key, count=%acc.artifacts.len(), "VolleyAmalgam: Assembling volley...");
+        info!(key = %key, count = %acc.artifacts.len(), "VolleyAmalgam: Assembling volley...");
 
         if acc.artifacts.is_empty() {
-            warn!(key=%key, "VolleyAmalgam: Artifacts empty. Aborting.");
+            warn!(key = %key, "VolleyAmalgam: Artifacts empty. Aborting.");
             return None;
         }
 
@@ -137,20 +136,28 @@ impl Mold for VolleyAmalgam {
         let mut gaps = Vec::new();
         let clock = TrustedClock::new();
 
-        // 2. Get the time safely (No panic/unwrap)
-        // This returns a Result. Use '?' to propagate errors or 'match' to handle them.
-        let now = clock.forensic_now();
+        // Explicit error handling for the forensic clock to ensure reliability
+        let now = match clock.forensic_now() {
+            Ok(timestamp) => timestamp,
+            Err(err) => {
+                error!(key = %key, error = %err, "VolleyAmalgam: Failed to acquire forensic timestamp");
+                return None;
+            }
+        };
+
         let mut expected_seq: Option<u32> = None;
 
+        // Logic assumes acc.artifacts is sorted by sequence number
         for (seq, env) in acc.artifacts {
             let current_seq = seq.0;
 
             if let Some(expected) = expected_seq {
                 if current_seq > expected {
+                    // Gap detected: sequence numbers are non-contiguous
                     gaps.push(ForensicGap {
                         start_seq: expected,
                         end_seq: current_seq - 1,
-                        detected_at: now, // Safe u64
+                        detected_at: now,
                     });
                 }
             }
@@ -158,7 +165,7 @@ impl Mold for VolleyAmalgam {
             sorted_artifacts.push(env);
         }
 
-        info!(id=%acc.volley_id, "VolleyAmalgam: Assembly SUCCESS");
+        info!(id = %acc.volley_id, "VolleyAmalgam: Assembly SUCCESS");
 
         Some(Volley {
             id: acc.volley_id.into(),

@@ -8,14 +8,16 @@ use image::{DynamicImage, ImageFormat};
 use serde::{Deserialize, Serialize};
 
 use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
-use crate::primitives::time::{PhalanxTimestamp, TrustedClock};
+use crate::primitives::time::{PhalanxTimestamp, TrustedClock, TimeError};
 use crate::security::e2ee::{self, CryptoError, SymmetricKey};
+use crate::security::gate::ChronosGate;
 
+use tracing::{error};
 // =====================
 // DATA STRUCTURES
 // =====================
 
-#[derive(Debug, thiserror::Error, Serialize, Deserialize)]
+#[derive(Debug, thiserror::Error)]
 pub enum ShardError {
     #[error("Dataset capacity exceeded: calculated chunk count {0} exceeds u32 limit")]
     CapacityExceeded(u64),
@@ -26,8 +28,8 @@ pub enum ShardError {
     #[error("Serialization failed: {0}")]
     Serialization(String),
 
-    #[error("Time source error: {0}")]
-    TimeSource(String),
+    #[error("Time source error.")]
+    TimeSource(#[from] TimeError),
 
     #[error("Cryptographic signing failed: {0}")]
     SigningError(String),
@@ -421,7 +423,14 @@ pub fn create_video_shard(
     volley_id: VolleyId,
 ) -> Result<VideoShard, ShardError> {
     let clock = TrustedClock::new();
-    let now = PhalanxTimestamp::now(&clock).map_err(|e| ShardError::TimeSource(e.to_string()))?;
+    let now = match clock.forensic_now() {
+        Ok(timestamp) => timestamp,
+        Err(err) => {
+            error!(error = %err, "create_video_shard: Failed to acquire forensic timestamp");
+            return Err(ShardError::from(err));
+        }
+    };
+
 
     let raw_bytes =
         postcard::to_stdvec(&frames).map_err(|e| ShardError::Serialization(e.to_string()))?;
@@ -444,7 +453,13 @@ pub fn create_audio_shard(
     volley_id: VolleyId,
 ) -> Result<AudioShard, ShardError> {
     let clock = TrustedClock::new();
-    let now = PhalanxTimestamp::now(&clock).map_err(|e| ShardError::TimeSource(e.to_string()))?;
+        let now = match clock.forensic_now() {
+        Ok(timestamp) => timestamp,
+        Err(err) => {
+            error!(error = %err, "create_audio_shard: Failed to acquire forensic timestamp");
+            return Err(ShardError::from(err));
+        }
+    };
 
     Ok(AudioShard {
         timestamp: now,

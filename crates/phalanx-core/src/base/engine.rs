@@ -7,13 +7,11 @@ use tracing::{error, info};
 
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
 use crate::primitives::identity::{init_identity, Did, IdentityError, NetworkId, PhalanxIdentity};
-use crate::primitives::shards::{
-    AudioShard, Evidence, ShardId, VideoShard, WitnessEnvelope,
-};
+use crate::primitives::shards::{AudioShard, Evidence, ShardId, VideoShard, WitnessEnvelope};
 use crate::primitives::time::{TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
 // IMPORT ALL GATES
-use crate::security::gate::{CapacityGate, ForensicGate, IntegrityGate, PrivacyGate, WitnessGate};
+use crate::security::gate::{CapacityGate, IntegrityGate, PrivacyGate};
 use crate::storage::strategies::ShardAmalgam;
 use crate::storage::vault::Guardian;
 use crate::{PhalanxBehaviour, PhalanxEvent};

@@ -7,11 +7,19 @@ use tracing::{error, warn};
 /// Gate 1: The Witnessing Gate
 /// Converts raw Evidence into a signed, verifiable WitnessEnvelope.
 pub trait WitnessGate {
-    fn seal(self, identity: &PhalanxIdentity, peer_id: NetworkId) -> Result<WitnessEnvelope, ShardError>;
+    fn seal(
+        self,
+        identity: &PhalanxIdentity,
+        peer_id: NetworkId,
+    ) -> Result<WitnessEnvelope, ShardError>;
 }
 
 impl WitnessGate for Evidence {
-    fn seal(self, identity: &PhalanxIdentity, peer_id: NetworkId) -> Result<WitnessEnvelope, ShardError> {
+    fn seal(
+        self,
+        identity: &PhalanxIdentity,
+        peer_id: NetworkId,
+    ) -> Result<WitnessEnvelope, ShardError> {
         WitnessEnvelope::new(self, identity, peer_id).map_err(|e| {
             error!(event = "signing_failure", error = %e, "Witness Gate: Failed to cryptographically seal unit");
             e
@@ -20,7 +28,7 @@ impl WitnessGate for Evidence {
 }
 
 /// Gate 2: The Forensic Pipeline Gate (DEPRECATED)
-/// REMOVED: The `ok_or_log` anti-pattern has been eradicated. 
+/// REMOVED: The `ok_or_log` anti-pattern has been eradicated.
 /// Use the standard library `Result::inspect_err` directly in the pipeline for side-effect telemetry.
 
 /// Gate 3: The Integrity Gate (Reception Side)
@@ -47,7 +55,9 @@ impl IntegrityGate for WitnessEnvelope {
         if !self.verify() {
             error!(event = "integrity_failure", node = %node_id, peer = %self.did, "SIGNATURE_INVALID");
             // Maps to ShardError::SigningError to enable GossipSub rejection and peer penalization
-            return Err(ShardError::SigningError("Cryptographic signature verification failed".to_string()));
+            return Err(ShardError::SigningError(
+                "Cryptographic signature verification failed".to_string(),
+            ));
         }
 
         // 2. Temporal Freshness (Replay Protection)
@@ -95,13 +105,23 @@ impl PrivacyGate for Evidence {
 /// Enforces Availability.
 /// Prevents Denial of Service (DoS) by checking quotas BEFORE cryptographic verification.
 pub trait CapacityGate {
-    fn check_capacity(self, peer: &NetworkId, pending_bytes: usize, limit: usize) -> Result<Self, ShardError>
+    fn check_capacity(
+        self,
+        peer: &NetworkId,
+        pending_bytes: usize,
+        limit: usize,
+    ) -> Result<Self, ShardError>
     where
         Self: Sized;
 }
 
 impl CapacityGate for WitnessEnvelope {
-    fn check_capacity(self, peer: &NetworkId, pending_bytes: usize, limit: usize) -> Result<Self, ShardError> {
+    fn check_capacity(
+        self,
+        peer: &NetworkId,
+        pending_bytes: usize,
+        limit: usize,
+    ) -> Result<Self, ShardError> {
         if pending_bytes > limit {
             warn!(
                 event = "capacity_shedding",

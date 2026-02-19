@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::net::UdpSocket;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH};
 use tracing::{info, warn};
@@ -138,7 +137,7 @@ impl TrustedClock {
     /// Performs an NTP synchronization to calculate the time offset.
     ///
     /// # Async Deadlock Warning
-    /// This method performs blocking I/O (UDP socket operations). 
+    /// This method performs blocking I/O (UDP socket operations).
     /// If called from an async context, it **MUST** be wrapped in `tokio::task::spawn_blocking`.
     pub fn synchronize(&self) -> TimeResult<()> {
         // 1. Bind a local UDP socket to an available port (0)
@@ -200,19 +199,25 @@ mod tests {
 
         // Timestamp is "now", tolerance is 5s
         assert!(
-            PhalanxTimestamp::from_u64(now_val).verify_freshness(&clock, 5).is_ok(),
+            PhalanxTimestamp::from_u64(now_val)
+                .verify_freshness(&clock, 5)
+                .is_ok(),
             "Current time should be valid"
         );
 
         // Timestamp is 2s ago, tolerance 5s
         assert!(
-            PhalanxTimestamp::from_u64(now_val - 2).verify_freshness(&clock, 5).is_ok(),
+            PhalanxTimestamp::from_u64(now_val - 2)
+                .verify_freshness(&clock, 5)
+                .is_ok(),
             "Recent past should be valid"
         );
 
         // Timestamp is 2s future, tolerance 5s
         assert!(
-            PhalanxTimestamp::from_u64(now_val + 2).verify_freshness(&clock, 5).is_ok(),
+            PhalanxTimestamp::from_u64(now_val + 2)
+                .verify_freshness(&clock, 5)
+                .is_ok(),
             "Near future should be valid"
         );
 
@@ -227,7 +232,7 @@ mod tests {
         // Attack: Replaying a message from 60 seconds ago
         let stale_timestamp = PhalanxTimestamp::from_u64(now_val - 60);
         let result = stale_timestamp.verify_freshness(&clock, 5);
-        
+
         assert!(
             matches!(result, Err(TimeError::Stale(_))),
             "Old timestamp should be rejected as Stale"
@@ -243,7 +248,7 @@ mod tests {
         // Attack: Message claiming to be from an hour in the future
         let future_timestamp = PhalanxTimestamp::from_u64(now_val + 3600);
         let result = future_timestamp.verify_freshness(&clock, 5);
-        
+
         assert!(
             matches!(result, Err(TimeError::Future(_))),
             "Far future timestamp should be rejected as Future"
