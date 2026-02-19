@@ -1,9 +1,9 @@
 use crate::primitives::identity::{NetworkId, PhalanxIdentity};
-use crate::primitives::shards::{Evidence, ShardError, WitnessEnvelope};
+use crate::primitives::shards::{Evidence, ReassemblyBuffer, ShardError, ShardId, WitnessEnvelope};
 use crate::primitives::time::{PhalanxTimestamp, TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
+use std::collections::HashMap;
 use tracing::{error, warn};
-
 /// Gate 1: The Witnessing Gate
 /// Converts raw Evidence into a signed, verifiable WitnessEnvelope.
 pub trait WitnessGate {
@@ -174,5 +174,48 @@ impl<T, E: std::fmt::Display> ForensicGate<T, E> for Result<T, E> {
             );
         }
         self
+    }
+}
+
+/// Gate 7: The Buffer Capacity Gate (OOM Defense)
+/// Enforces strict memory bounds on incomplete shard assemblies.
+pub trait BufferCapacityGate {
+    /// Evaluates the current collection size against the capacity limit.
+    /// Evicts the most stale partial assembly if the limit is reached and a new allocation is required.
+    fn enforce_capacity_limit(
+        &mut self,
+        incoming_shard: &ShardId,
+        capacity_limit: usize,
+    ) -> Result<&mut Self, ShardError>;
+}
+
+impl BufferCapacityGate for HashMap<ShardId, ReassemblyBuffer> {
+    fn enforce_capacity_limit(
+        &mut self,
+        incoming_shard: &ShardId,
+        capacity_limit: usize,
+    ) -> Result<&mut Self, ShardError> {
+        if !self.contains_key(incoming_shard) && self.len() >= capacity_limit {
+            let stale_shard_id = self
+                .iter()
+                .min_by_key(|(_, buffer)| buffer.last_activity)
+                .map(|(key, _)| *key);
+
+            if let Some(evicted_id) = stale_shard_id {
+                warn!(
+                    event = "buffer_eviction",
+                    evicted_shard = %evicted_id,
+                    incoming_shard = %incoming_shard,
+                    "CapacityGate: Memory limit reached. Evicting stale partial reassembly."
+                );
+                self.remove(&evicted_id);
+            } else {
+                return Err(ShardError::InvalidConfiguration(
+                    "Buffer capacity limit is configured to zero".into(),
+                ));
+            }
+        }
+
+        Ok(self)
     }
 }

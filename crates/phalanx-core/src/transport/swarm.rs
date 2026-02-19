@@ -16,9 +16,10 @@ use crate::base::config::{PhalanxConfig, PhalanxPhysics};
 use crate::base::types::{PowerState, UnitInterval, VitalityRate};
 use crate::primitives::identity::NetworkId;
 use crate::security::gate::ForensicGate;
+use crate::storage::kademlia::RedbStore;
 
 // --- CONSTANTS ---
-pub type PhalanxKadStore = kad::store::MemoryStore;
+pub type PhalanxKadStore = RedbStore;
 pub const SERVICE_STORAGE: &[u8] = b"phalanx/service/storage/v1";
 pub const STRONGHOLD_NAMESPACE: &[u8] = b"phalanx.stronghold.v1";
 
@@ -311,6 +312,18 @@ pub fn setup_phalanx_swarm(
     let local_peer_id = local_key.public().to_peer_id();
     tracing::info!(peer_id=%local_peer_id, "Initializing Network Stack...");
 
+    // 1. Initialize Persistent Kademlia Store
+    let dht_db_path = Path::new(&config.storage.vault_path).join("dht_store.redb");
+    let persistent_store = RedbStore::new(&dht_db_path)?;
+
+    // 2. Configure Kademlia with the persistent store
+    let mut kad_config = kad::Config::default();
+    kad_config.set_protocol_names(vec![std::borrow::Cow::Owned(
+        config.network.protocol_version.clone().into_bytes(),
+    )]);
+
+    let kademlia = kad::Behaviour::with_config(local_peer_id, persistent_store, kad_config);
+
     let (relay_transport, relay_client) = relay::client::new(local_peer_id);
 
     let transport = build_base_transport(&local_key, psk)?;
@@ -413,5 +426,4 @@ mod tests {
             "Announce stronghold should succeed in a clean memory store"
         );
     }
-
 }

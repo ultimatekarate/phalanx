@@ -26,6 +26,8 @@ pub enum TimeError {
 
 pub type TimeResult<T> = Result<T, TimeError>;
 
+/// PhalanxTimestamp is meant to enforce a strict boundary between forensic layer and transient layer.
+/// If a process interacts with the global mesh, it MUST use this type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PhalanxTimestamp(u64);
