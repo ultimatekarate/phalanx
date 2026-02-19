@@ -3,8 +3,8 @@ use libp2p::kad::RecordKey;
 pub use libp2p::pnet::PreSharedKey;
 use libp2p::{
     autonat, core::upgrade::Version, dcutr, gossipsub, identify, identity::Keypair, kad, mdns,
-    noise, pnet, relay, swarm::NetworkBehaviour, tcp, yamux, PeerId, Swarm, SwarmBuilder,
-    Transport,
+    noise, pnet, relay, swarm::NetworkBehaviour, tcp, yamux, PeerId, StreamProtocol, Swarm,
+    SwarmBuilder, Transport,
 };
 
 use std::error::Error;
@@ -16,9 +16,10 @@ use crate::base::config::{PhalanxConfig, PhalanxPhysics};
 use crate::base::types::{PowerState, UnitInterval, VitalityRate};
 use crate::primitives::identity::NetworkId;
 use crate::security::gate::ForensicGate;
+use crate::storage::kademlia::RedbStore;
 
 // --- CONSTANTS ---
-pub type PhalanxKadStore = kad::store::MemoryStore;
+pub type PhalanxKadStore = RedbStore;
 pub const SERVICE_STORAGE: &[u8] = b"phalanx/service/storage/v1";
 pub const STRONGHOLD_NAMESPACE: &[u8] = b"phalanx.stronghold.v1";
 
@@ -209,6 +210,7 @@ fn build_behaviour(
     config: &PhalanxConfig,
     physics: &PhalanxPhysics,
     relay_client: relay::client::Behaviour,
+    mut kademlia: kad::Behaviour<PhalanxKadStore>,
 ) -> Result<PhalanxBehaviour, Box<dyn Error>> {
     let local_peer_id = local_key.public().to_peer_id();
 
@@ -228,8 +230,6 @@ fn build_behaviour(
             .map_err(std::io::Error::other)?,
     )?;
 
-    let mut kademlia =
-        kad::Behaviour::new(local_peer_id, kad::store::MemoryStore::new(local_peer_id));
     kademlia.set_mode(Some(kad::Mode::Server));
 
     let identify = identify::Behaviour::new(identify::Config::new(
@@ -311,10 +311,24 @@ pub fn setup_phalanx_swarm(
     let local_peer_id = local_key.public().to_peer_id();
     tracing::info!(peer_id=%local_peer_id, "Initializing Network Stack...");
 
+    // 1. Initialize Persistent Kademlia Store
+    let dht_db_path = Path::new(&config.storage.vault_path).join("dht_store.redb");
+    let persistent_store = RedbStore::new(&dht_db_path, local_peer_id)?;
+
+    let protocol_str = format!("/phalanx/kad/{}", config.network.protocol_version);
+
+    // Parse the dynamically formatted string into a strictly typed StreamProtocol
+    let kad_protocol = StreamProtocol::try_from_owned(protocol_str)?;
+
+    // Instantiate Config using the validated protocol
+    let kad_config = kad::Config::new(kad_protocol);
+
+    let kademlia = kad::Behaviour::with_config(local_peer_id, persistent_store, kad_config);
+
     let (relay_transport, relay_client) = relay::client::new(local_peer_id);
 
     let transport = build_base_transport(&local_key, psk)?;
-    let behaviour = build_behaviour(&local_key, config, physics, relay_client)?;
+    let behaviour = build_behaviour(&local_key, config, physics, relay_client, kademlia)?;
 
     let swarm = SwarmBuilder::with_existing_identity(local_key.clone())
         .with_tokio()
@@ -386,8 +400,22 @@ mod tests {
         let (config, physics) = get_test_config();
         let local_peer_id = keypair.public().to_peer_id();
 
+        // Setup ephemeral RedbStore for testing
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_dht.redb");
+        let store = RedbStore::new(&db_path, local_peer_id).unwrap();
+        let kademlia = kad::Behaviour::with_config(local_peer_id, store, kad::Config::default());
+
         let (_, relay_client_behaviour) = relay::client::new(local_peer_id);
-        let result = build_behaviour(&keypair, &config, &physics, relay_client_behaviour);
+
+        // Pass the constructed kademlia
+        let result = build_behaviour(
+            &keypair,
+            &config,
+            &physics,
+            relay_client_behaviour,
+            kademlia,
+        );
 
         assert!(
             result.is_ok(),
@@ -401,10 +429,20 @@ mod tests {
         let (config, physics) = get_test_config();
         let local_peer_id = keypair.public().to_peer_id();
         let network_id = NetworkId::from(local_peer_id); // Explicit ID
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_dht.redb");
+        let store = RedbStore::new(&db_path, local_peer_id).unwrap();
+        let kademlia = kad::Behaviour::with_config(local_peer_id, store, kad::Config::default());
 
         let (_, relay_client_behaviour) = relay::client::new(local_peer_id);
-        let mut behaviour = build_behaviour(&keypair, &config, &physics, relay_client_behaviour)
-            .expect("Setup failed");
+        let mut behaviour = build_behaviour(
+            &keypair,
+            &config,
+            &physics,
+            relay_client_behaviour,
+            kademlia,
+        )
+        .expect("Setup failed");
 
         // Verify that the announcement returns a valid QueryId
         let result = behaviour.announce_stronghold(&network_id);
@@ -413,5 +451,4 @@ mod tests {
             "Announce stronghold should succeed in a clean memory store"
         );
     }
-
 }

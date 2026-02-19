@@ -8,6 +8,8 @@ use crate::primitives::shards::{
     WitnessEnvelope,
 };
 
+use crate::security::gate::BufferCapacityGate;
+
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
 use crate::base::types::{MeshTopic, PowerState, TrafficGovernor, UnitInterval, VitalityRate};
 
@@ -206,20 +208,7 @@ impl Sentinel {
         let shard_id = chunk.shard_id;
 
         // 4. Capacity Gate (OOM Defense via LRU Eviction)
-        if !buffers.contains_key(&shard_id) && buffers.len() >= capacity_limit {
-            if let Some(stale_shard_id) = buffers
-                .iter()
-                .min_by_key(|(_, buffer)| buffer.last_activity)
-                .map(|(key, _)| *key)
-            {
-                warn!(
-                    evicted_shard = %stale_shard_id,
-                    incoming_shard = %shard_id,
-                    "Sentinel CapacityGate limit reached. Evicting oldest partial reassembly."
-                );
-                buffers.remove(&stale_shard_id);
-            }
-        }
+        buffers.enforce_capacity_limit(&shard_id, capacity_limit)?;
 
         let buffer = buffers
             .entry(shard_id)

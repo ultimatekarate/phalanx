@@ -18,6 +18,7 @@ pub mod primitives {
 // --- 3. STORAGE ---
 pub mod storage {
     pub mod crucible;
+    pub mod kademlia;
     pub mod strategies;
     pub mod vault;
 }
