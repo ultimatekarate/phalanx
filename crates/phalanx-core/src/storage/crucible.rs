@@ -67,6 +67,7 @@ pub struct WorkContext<S: Mold> {
 }
 
 impl<S: Mold> Crucible<S> {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             contexts: BTreeMap::new(),
@@ -75,6 +76,7 @@ impl<S: Mold> Crucible<S> {
         }
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.contexts.len()
     }
@@ -127,10 +129,12 @@ impl<S: Mold> Crucible<S> {
         None
     }
 
+    #[must_use]
     pub fn active_count(&self) -> usize {
         self.contexts.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.contexts.is_empty()
     }

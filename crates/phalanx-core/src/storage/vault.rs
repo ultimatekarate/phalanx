@@ -77,6 +77,7 @@ pub struct Guardian {
 }
 
 impl Guardian {
+    #[must_use]
     pub fn new(vault_path: &str, config: &PhalanxConfig, local_did: Did) -> Self {
         let root = PathBuf::from(vault_path);
         let wal = root.join("wal");
@@ -382,6 +383,7 @@ impl Guardian {
         }
     }
 
+    #[must_use]
     pub fn get_active_volley_shards(
         &self,
         did: &Did,

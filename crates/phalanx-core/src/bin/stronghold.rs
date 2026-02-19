@@ -51,22 +51,21 @@ impl StrongholdEngine {
     ///
     /// Loads configuration, generates/loads identity, establishes the Vault,
     /// and performs the cryptographic handshake to join the Swarm.
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     pub async fn new(config_path: &str) -> Result<Self, Box<dyn Error>> {
         let config = PhalanxConfig::load(config_path)?;
-        let (identity, _) = PhalanxIdentity::generate()
-            .map_err(|e| {
-                // FORENSIC GATE: Report the entropy failure to telemetry
-                tracing::error!(
-                    target: "phalanx::forensics",
-                    event_code = "config_load_err",
-                    error = %e,
-                    "Engine boot aborted: Configuration missing or corrupt"
-                );
-                e
-            })?;
+        let (identity, _) = PhalanxIdentity::generate().map_err(|e| {
+            // FORENSIC GATE: Report the entropy failure to telemetry
+            tracing::error!(
+                target: "phalanx::forensics",
+                event_code = "config_load_err",
+                error = %e,
+                "Engine boot aborted: Configuration missing or corrupt"
+            );
+            e
+        })?;
 
         // Physics Profile: WAN (High Latency Tolerance)
         // Strongholds are usually servers, but they deal with mobile peers.
@@ -86,24 +85,18 @@ impl StrongholdEngine {
         }
 
         // 3. Swarm Construction
-        let libp2p_key = identity.to_libp2p_keypair()
-            .map_err(|e| {
-                // FORENSIC GATE: Log the format mismatch before aborting
-                tracing::error!(
-                    target: "phalanx::forensics",
-                    event_code = "identity_format_err",
-                    error = %e,
-                    "Engine boot aborted: Failed to map PhalanxIdentity to libp2p format"
-                );
-                e
-            })?;
+        let libp2p_key = identity.to_libp2p_keypair().map_err(|e| {
+            // FORENSIC GATE: Log the format mismatch before aborting
+            tracing::error!(
+                target: "phalanx::forensics",
+                event_code = "identity_format_err",
+                error = %e,
+                "Engine boot aborted: Failed to map PhalanxIdentity to libp2p format"
+            );
+            e
+        })?;
 
-        let mut swarm = setup_phalanx_swarm(
-            libp2p_key,
-            &config,
-            &physics,
-            psk,
-        )?;
+        let mut swarm = setup_phalanx_swarm(libp2p_key, &config, &physics, psk)?;
 
         // 4. Service Advertisement (DHT)
         let storage_key = get_storage_key();
@@ -260,7 +253,7 @@ impl StrongholdEngine {
         // 1. Extract the message or exit immediately
 
         let gossipsub::Event::Message { message, .. } = event else {
-            return ;
+            return;
         };
 
         let topic: MeshTopic = message.topic.as_str().into();
@@ -278,7 +271,7 @@ impl StrongholdEngine {
                 self.sentinel.health_tracker.register_activity(msg);
             }
 
-            return ;
+            return;
         }
 
         // ------------------------------------------------------------------
@@ -300,8 +293,6 @@ impl StrongholdEngine {
                     "Vault rejected envelope",
                 )
             });
-
-        
     }
 
     /// Calculates the Node's "Vitality Rate" and broadcasts a heartbeat.
@@ -330,17 +321,15 @@ impl StrongholdEngine {
         };
 
         // 4. Broadcast
-        if let Some(data) = postcard::to_stdvec(&heartbeat_msg)
-            .ok_or_log(
-                "heartbeat_enc_fail",
-                &sender_id.clone(),
-                "Failed to encode heartbeat",
-            ) {
-                let topic =
-                    gossipsub::IdentTopic::new(self.config.network.control_topic.to_string());
+        if let Some(data) = postcard::to_stdvec(&heartbeat_msg).ok_or_log(
+            "heartbeat_enc_fail",
+            &sender_id.clone(),
+            "Failed to encode heartbeat",
+        ) {
+            let topic = gossipsub::IdentTopic::new(self.config.network.control_topic.to_string());
 
-                let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, data);
-            }
+            let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, data);
+        }
 
         interval
     }

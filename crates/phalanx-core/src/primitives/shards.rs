@@ -43,6 +43,8 @@ pub struct ReassemblyBuffer {
 }
 
 impl ReassemblyBuffer {
+    #[must_use]
+    #[allow(clippy::missing_errors_doc)]
     pub fn new(total_chunks: usize) -> Self {
         Self {
             chunks: vec![None; total_chunks],
@@ -51,11 +53,13 @@ impl ReassemblyBuffer {
         }
     }
 
+    #[must_use]
     pub fn is_complete(&self) -> bool {
         self.chunks.iter().all(|c| c.is_some())
     }
 
     /// Concatenates chunks into a single byte vector. Assumes is_complete() is true.
+    #[must_use]
     pub fn assemble(&self) -> Vec<u8> {
         self.chunks.iter().flatten().flatten().cloned().collect()
     }
@@ -68,6 +72,7 @@ pub enum Evidence {
 }
 
 impl Evidence {
+    #[must_use]
     pub fn sequence_id(&self) -> StorageSequence {
         match self {
             Evidence::Video(s) => s.sequence_id,
@@ -75,6 +80,7 @@ impl Evidence {
         }
     }
 
+    #[must_use]
     pub fn volley_id(&self) -> &VolleyId {
         match self {
             Evidence::Video(s) => &s.volley_id,
@@ -82,6 +88,7 @@ impl Evidence {
         }
     }
 
+    #[must_use]
     pub fn timestamp(&self) -> PhalanxTimestamp {
         match self {
             Evidence::Video(s) => s.timestamp,
@@ -210,6 +217,7 @@ impl VolleyId {
         Self(id.into())
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -264,6 +272,7 @@ pub struct WitnessEnvelope {
 
 impl WitnessEnvelope {
     /// Verifies the envelope signature without panicking.
+    #[must_use]
     pub fn verify(&self) -> bool {
         let clean_did = self.did.0.replace("did:key:", "");
 

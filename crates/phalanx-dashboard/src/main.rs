@@ -25,13 +25,19 @@ use phalanx_core::primitives::identity::NetworkId;
 use phalanx_core::security::telemetry::{ChaosMode, NodeRole, SimEvent};
 use phalanx_core::simulation::SimulationHarness;
 
-use widgets::NetworkRadar;
+use widgets::{NetworkRadar, TrafficVector};
+
+struct ActiveVector {
+    origin: NetworkId,
+    target: NetworkId,
+    timestamp: Instant,
+}
 
 struct AppState {
     active_peers: HashMap<NetworkId, Instant>,
     node_modes: HashMap<NetworkId, ChaosMode>,
-    // Store roles to determine shape (Circle vs Square)
     node_roles: HashMap<NetworkId, NodeRole>,
+    active_vectors: Vec<ActiveVector>,
     logs: Vec<String>,
     total_bytes_processed: u64,
     current_scenario: String,
@@ -43,6 +49,7 @@ impl AppState {
             active_peers: HashMap::new(),
             node_modes: HashMap::new(),
             node_roles: HashMap::new(),
+            active_vectors: Vec::new(),
             logs: Vec::new(),
             total_bytes_processed: 0,
             current_scenario: "Stable".to_string(),
@@ -54,6 +61,11 @@ impl AppState {
         if self.logs.len() > 50 {
             self.logs.pop();
         }
+    }
+
+    fn prune_vectors(&mut self) {
+        self.active_vectors
+            .retain(|v| v.timestamp.elapsed() < Duration::from_secs(2));
     }
 }
 
@@ -111,6 +123,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match key.code {
                     KeyCode::Char('q') => running = false,
 
+                    KeyCode::Char('t') => {
+                        // 1. Pick two random nodes if we have them
+                        let nodes: Vec<NetworkId> = app.active_peers.keys().cloned().collect();
+                        if nodes.len() >= 2 {
+                            let origin = nodes[0];
+                            let target = nodes[1];
+
+                            app.add_log(format!("[TEST] Forcing Vector {} -> {}", origin, target));
+
+                            // 2. Manually push to active_vectors
+                            app.active_vectors.push(ActiveVector {
+                                origin,
+                                target,
+                                timestamp: Instant::now(),
+                            });
+                        } else {
+                            app.add_log("[ERR] Not enough nodes for test vector".to_string());
+                        }
+                    }
+
                     // --- CHAOS CONTROLS ---
                     KeyCode::Char('1') => {
                         app.current_scenario = "Alpha: Packet Loss".to_string();
@@ -146,6 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        app.prune_vectors();
 
         while let Ok(event) = telemetry_rx.try_recv() {
             match event {
@@ -153,7 +186,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     app.active_peers.insert(origin, Instant::now());
                 }
                 SimEvent::PeerDiscovered { peer, role, source } => {
-                    // Important: Update our local role map when peers discover each other
                     app.node_roles.insert(peer, role);
                     app.active_peers.insert(peer, Instant::now());
                     app.add_log(format!("[DISCOVERY] {:?} {} via {:?}", role, peer, source));
@@ -175,12 +207,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     target,
                     size,
                 } => {
-                    app.add_log(format!(
-                        "[OFFLOAD] {} -> {}: {} bytes archived",
-                        origin,
-                        target,
-                        size.as_u64()
-                    ));
+                    // Check the Role of the Target to determine the Log Message
+                    let target_role = app.node_roles.get(&target).unwrap_or(&NodeRole::Guardian);
+
+                    let log_msg = if *target_role == NodeRole::Stronghold {
+                        format!(
+                            "[ARCHIVE] {} -> {}: {} bytes secured",
+                            origin,
+                            target,
+                            size.as_u64()
+                        )
+                    } else {
+                        format!("[GOSSIP] {} -> {}: sync", origin, target)
+                    };
+
+                    // Only log Archive events to avoid flooding the list,
+                    // OR log Gossip sparingly.
+                    if *target_role == NodeRole::Stronghold {
+                        app.add_log(log_msg);
+                    }
+
+                    // ALWAYS Register Vector for Visualization
+                    // This ensures the green/cyan lines appear for all traffic
+                    if let Some(existing) = app
+                        .active_vectors
+                        .iter_mut()
+                        .find(|v| v.origin == origin && v.target == target)
+                    {
+                        existing.timestamp = Instant::now();
+                    } else {
+                        app.active_vectors.push(ActiveVector {
+                            origin,
+                            target,
+                            timestamp: Instant::now(),
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -200,12 +261,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let peer_list: Vec<(NetworkId, Instant)> =
                 app.active_peers.iter().map(|(k, v)| (*k, *v)).collect();
 
+            let widget_vectors: Vec<TrafficVector> = app
+                .active_vectors
+                .iter()
+                .map(|v| TrafficVector {
+                    from: v.origin,
+                    to: v.target,
+                    age_seconds: v.timestamp.elapsed().as_secs_f32(),
+                })
+                .collect();
+
             f.render_widget(
                 NetworkRadar {
                     title: "Phalanx Mesh Radar",
                     nodes: &peer_list,
                     node_states: &app.node_modes,
-                    node_roles: &app.node_roles, // Pass the Roles map to widgets.rs
+                    node_roles: &app.node_roles,
+                    traffic: &widget_vectors, // Pass the new traffic slice
                 },
                 left_chunks[0],
             );

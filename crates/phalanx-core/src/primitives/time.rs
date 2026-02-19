@@ -40,6 +40,7 @@ pub struct TrustedClock {
 }
 
 impl TrustedClock {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             offset_ms: Arc::new(RwLock::new(0)),
@@ -84,6 +85,7 @@ impl TrustedClock {
     }
 
     /// Updates the offset manually (for testing or NTP sync)
+    #[allow(clippy::missing_errors_doc)]
     pub fn set_offset(&self, new_offset: i64) -> TimeResult<()> {
         let mut w = self
             .offset_ms
@@ -160,10 +162,12 @@ impl PhalanxTimestamp {
     /// ARCHITECTURAL NOTE: This does NOT validate against the clock.
     /// This allows us to deserialize historical data (which is by definition "stale")
     /// without the constructor failing.
+    #[must_use]
     pub fn from_u64(raw: u64) -> Self {
         Self(raw)
     }
 
+    #[must_use]
     pub fn as_u64(&self) -> u64 {
         self.0
     }
@@ -188,6 +192,7 @@ impl PhalanxTimestamp {
         Ok(())
     }
 
+    #[must_use]
     pub fn abs_diff(&self, other: u64) -> u64 {
         self.0.abs_diff(other)
     }

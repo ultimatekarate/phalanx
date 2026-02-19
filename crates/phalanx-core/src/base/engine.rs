@@ -50,6 +50,7 @@ pub struct PhalanxEngine {
 }
 
 impl PhalanxEngine {
+    #[allow(clippy::missing_errors_doc)]
     pub fn new(
         config: PhalanxConfig,
         identity: PhalanxIdentity,
@@ -93,6 +94,11 @@ impl PhalanxEngine {
     /// FFI Compatibility Helper.
     /// Bootstraps an engine from a storage path using default physics and config.
     /// Zero-Panic: Uses fallbacks if identity loading fails.
+    /// # Errors
+    ///
+    /// Returns an error if the underlying `PhalanxEngine::new` call fails. Note that this
+    /// function is "Zero-Panic" regarding identity; if an identity cannot be loaded
+    /// from the path, it will generate a new ephemeral one rather than returning an `Err`.
     pub fn new_at_path(path: &str) -> Result<Self, Box<dyn Error>> {
         let mut config = PhalanxConfig::default();
         config.storage.vault_path = path.to_string();
@@ -104,16 +110,19 @@ impl PhalanxEngine {
         let identity_path = std::path::Path::new(path).join("identity.pem");
 
         // Attempt load, fallback to generation (Ephemeral Mode)
-        let identity = match init_identity(&identity_path) {
-            Ok(id) => id,
-            Err(_) => PhalanxIdentity::new(),
-        };
+        let identity = init_identity(&identity_path).unwrap_or_default();
 
         // 3. Initialize Core
         Self::new(config, identity, physics, None)
     }
 
     /// The Main Gated Event Loop
+    /// # Errors
+    ///
+    /// Returns a `Box<dyn Error>` if the event loop encounters a fatal failure. While most
+    /// gate failures (Forensic, Capacity, Integrity) are logged and skipped, critical
+    /// issues with the swarm network stream or internal channel desynchronization will
+    /// terminate the loop.
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
         let local_peer_id = *self.swarm.local_peer_id();
         let local_network_id = NetworkId::from(local_peer_id);

@@ -1,3 +1,5 @@
+// crates/phalanx-core/src/security/telemetry.rs
+
 use std::sync::Once;
 use tracing::Level;
 use tracing_appender::rolling;
@@ -7,7 +9,7 @@ use tracing_subscriber::{fmt, prelude::*};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    base::types::{ByteCapacity, UnitInterval},
+    base::types::{ByteCapacity, UnitInterval, VitalityRate},
     primitives::{
         identity::NetworkId,
         shards::{ShardChunk, VolleyId},
@@ -43,6 +45,7 @@ pub enum ChaosMode {
 /// Discovery source attribution.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum DiscoverySource {
+    Bootstrap, // Changed from Kademlia/Mdns/Identify to generic Bootstrap for Sim
     Kademlia,
     Mdns,
     Identify,
@@ -50,21 +53,29 @@ pub enum DiscoverySource {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SimEvent {
-    // Hardware/Network Layer Events
+    // --- Hardware/Network Layer Events ---
+    
     ChunkIngested {
         origin: NetworkId,
         chunk: ShardChunk,
     },
+    
+    // REFACTORED: Now carries structured health data instead of raw bytes
     Heartbeat {
         origin: NetworkId,
-        payload: Vec<u8>,
+        uptime: u64,
+        health: VitalityRate,
     },
+
+    // REFACTORED: Supports Gossip (Guardian->Guardian) and Archive (Guardian->Stronghold)
     OffloadComplete {
         origin: NetworkId,
         target: NetworkId,
         size: ByteCapacity,
     },
-    // Orchestration Layer Events
+
+    // --- Orchestration Layer Events ---
+    
     PeerDiscovered {
         peer: NetworkId,
         role: NodeRole,
@@ -75,6 +86,7 @@ pub enum SimEvent {
         peer_id: NetworkId,
         byte_size: ByteCapacity,
     },
+    
     CrucibleFinalized {
         volley_id: VolleyId,
     },
@@ -83,13 +95,26 @@ pub enum SimEvent {
         attacker: NetworkId,
         reason: String,
     },
-    // System Layer Events
+
+    // --- System Layer Events ---
+    
     SystemStressUpdate(UnitInterval),
     Shutdown,
 
     /// A command to alter a node's operating mode.
-    ChaosUpdate(ChaosMode),
+    /// REFACTORED: Now targets a specific node ID.
+    ChaosUpdate {
+        target: NetworkId,
+        mode: ChaosMode,
+    },
+    
+    // NEW: Generic broadcast for Echo/Gossip simulation
+    ShardPublished {
+        origin: NetworkId,
+        chunk: ShardChunk,
+    },
 }
+
 /// Global telemetry bus for the Phalanx node.
 pub struct TelemetryHub {
     _tx: broadcast::Sender<SimEvent>,

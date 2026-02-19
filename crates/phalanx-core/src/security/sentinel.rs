@@ -24,6 +24,7 @@ pub struct HealthTracker {
 }
 
 impl HealthTracker {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             heartbeats: HashMap::new(),
@@ -40,6 +41,7 @@ impl HealthTracker {
         self.capacities.insert(peer_id, msg);
     }
 
+    #[must_use]
     pub fn is_peer_stale(&self, peer_id: &NetworkId, physics: &PhalanxPhysics) -> bool {
         let last_time = match self.heartbeats.get(peer_id) {
             Some(t) => t,
@@ -108,6 +110,7 @@ pub struct Sentinel {
 }
 
 impl Sentinel {
+    #[must_use]
     pub fn new(_config: &PhalanxConfig) -> Self {
         Self {
             video_buffers: HashMap::new(),
@@ -139,6 +142,7 @@ impl Sentinel {
     }
 
     // Returns true if the node should ignore all foreign traffic.
+    #[must_use]
     pub fn is_leaf_mode(&self) -> bool {
         self.power_state == PowerState::Leaf
     }

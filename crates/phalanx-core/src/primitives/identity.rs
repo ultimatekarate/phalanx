@@ -37,16 +37,19 @@ pub enum IdentityError {
 pub struct Did(pub String);
 
 impl Did {
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     /// Sanitizes the DID string for use in file paths or unsafe contexts.
     /// Replaces colons `:` with underscores `_`.
+    #[must_use]
     pub fn to_safe_name(&self) -> String {
         self.0.replace(":", "_")
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -94,6 +97,7 @@ impl NetworkId {
     /// Generates a random NetworkId (wrapping a random PeerId).
     /// I wrote this purely for testing purposes. This stupid thing
     /// has saved me so much trouble.
+    #[must_use]
     pub fn random() -> Self {
         Self(PeerId::random())
     }
@@ -186,6 +190,7 @@ impl PhalanxIdentity {
     ///
     /// # Panics
     /// Panics if system entropy is unavailable (Fatal OS error).
+    #[must_use]
     pub fn new() -> Self {
         let (identity, _mnemonic) = Self::generate()
             .expect("Critical: System entropy source unavailable for ephemeral identity");
@@ -198,6 +203,13 @@ impl PhalanxIdentity {
     /// - Input: None (uses system entropy).
     /// - Output: `Result<(Self, String), IdentityError>`
     /// - Behavior: Propagates RNG or derivation failures to the caller.
+    /// # Errors
+    ///
+    /// This function returns an `IdentityError` if:
+    /// 1. System entropy is unavailable or insufficient for mnemonic generation.
+    /// 2. Cryptographic key derivation fails, specifically if the generated seed
+    ///    is of an invalid length for Ed25519.
+    /// 3. The derived key is rejected by the `libp2p` identity subsystem.
     pub fn generate() -> Result<(Self, String), IdentityError> {
         let mut rng = rand::rng();
         let mut entropy = [0u8; 16];
@@ -240,6 +252,13 @@ impl PhalanxIdentity {
     }
 
     /// Restores an identity from an existing BIP39 mnemonic phrase.
+    /// # Errors
+    ///
+    /// Returns an `IdentityError` if:
+    /// 1. The provided `phrase` is not a valid BIP39 mnemonic (e.g., checksum error
+    ///    or invalid words).
+    /// 2. The seed derived from the mnemonic fails to meet Ed25519 cryptographic
+    ///    length requirements.
     pub fn restore(phrase: &str) -> Result<Self, IdentityError> {
         let mnemonic = Mnemonic::parse_in(Language::English, phrase)
             .map_err(|e| IdentityError::MnemonicError(e.to_string()))?;
@@ -274,6 +293,7 @@ impl PhalanxIdentity {
     /// # Functional Specification
     /// - Returns `false` on any error (encoding, length, or signature mismatch).
     /// - No panics.
+    #[must_use]
     pub fn verify(pubkey: &[u8], msg: &[u8], sig: &[u8]) -> bool {
         let key_bytes_opt: Option<&[u8]> = if pubkey.len() == 32 {
             Some(pubkey)
@@ -295,11 +315,16 @@ impl PhalanxIdentity {
         false
     }
 
+    #[must_use]
     pub fn sign(&self, msg: &[u8]) -> Signature {
         self.keypair.sign(msg)
     }
 
     /// Converts the internal Ed25519 key to a Libp2p Keypair.
+    /// # Errors
+    ///
+    /// Returns a `CryptoError` if the internal Ed25519 signing key cannot be
+    /// transcoded into a valid `libp2p` protobuf-encoded keypair.
     pub fn to_libp2p_keypair(&self) -> Result<libp2p::identity::Keypair, IdentityError> {
         let mut bytes = self.keypair.to_bytes();
         libp2p::identity::Keypair::ed25519_from_bytes(&mut bytes)
@@ -312,6 +337,7 @@ impl PhalanxIdentity {
         fs::write(path, bytes).map_err(IdentityError::IoError)
     }
 
+    #[allow(clippy::missing_errors_doc)]
     pub fn load_from_disk<P: AsRef<Path>>(path: P) -> Result<Self, IdentityError> {
         let bytes = fs::read(&path).map_err(IdentityError::IoError)?;
 
@@ -360,7 +386,6 @@ impl Default for PhalanxIdentity {
         Self::new()
     }
 }
-    
 
 /// Standalone boot strapper for the identity primitive.
 pub fn init_identity<P: AsRef<Path>>(path: P) -> Result<PhalanxIdentity, IdentityError> {

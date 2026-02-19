@@ -46,3 +46,4 @@ large_futures = "warn"
 # Code Quality
 cognitive_complexity = "warn"
 undocumented_unsafe_blocks = "deny"
+todo = "warn"

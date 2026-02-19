@@ -12,6 +12,7 @@ pub struct UnitInterval(f32);
 
 impl UnitInterval {
     /// Creates a new UnitInterval, clamping the value between 0.0 and 1.0.
+    #[must_use]
     pub fn new(val: f32) -> Self {
         if val.is_nan() {
             // FORENSIC PROTOCOL: Panic or default to max load on NaN?
@@ -24,16 +25,19 @@ impl UnitInterval {
     }
 
     /// Returns the underlying float value.
+    #[must_use]
     pub fn as_f32(&self) -> f32 {
         self.0
     }
 
     /// Convenience check for the 15% Leaf Mode threshold.
+    #[must_use]
     pub fn is_critical(&self) -> bool {
         self.0 < 0.15
     }
 
     /// Inverts the interval (e.g., Load -> Capacity).
+    #[must_use]
     pub fn complement(&self) -> Self {
         Self(1.0 - self.0)
     }
@@ -108,24 +112,29 @@ impl PartialOrd<f64> for UnitInterval {
 pub struct ByteCapacity(pub u64);
 
 impl ByteCapacity {
+    #[must_use]
     pub fn from_mib(mib: u64) -> Self {
         Self(mib * 1024 * 1024)
     }
 
+    #[must_use]
     pub fn as_u64(&self) -> u64 {
         self.0
     }
 
+    #[must_use]
     pub fn as_mib(&self) -> u64 {
         self.0 / (1024 * 1024)
     }
 
     /// Safe addition that prevents overflow.
+    #[must_use]
     pub fn saturating_add(self, other: u64) -> Self {
         Self(self.0.saturating_add(other))
     }
 
     /// Safe subtraction that prevents underflow.
+    #[must_use]
     pub fn saturating_sub(self, other: u64) -> Self {
         Self(self.0.saturating_sub(other))
     }
@@ -167,6 +176,7 @@ impl AddAssign<ByteCapacity> for ByteCapacity {
 pub struct MeshTopic(String);
 
 impl MeshTopic {
+    #[must_use]
     pub fn new(name: &str) -> Self {
         // Ensure the topic is lowercase and follows our namespace
         let formatted = if name.starts_with("/phalanx/") {
@@ -177,6 +187,7 @@ impl MeshTopic {
         Self(formatted)
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -253,11 +264,13 @@ impl VitalityRate {
     /// Maximum allowed heartbeat (30s) to prevent node timeout in the mesh.
     const MAX_MS: u64 = 30_000;
 
+    #[must_use]
     pub fn new(ms: u64) -> Self {
         Self(ms.clamp(Self::MIN_MS, Self::MAX_MS))
     }
 
     /// Derives a heartbeat interval based on current system power and load.
+    #[must_use]
     pub fn calculate(physics: &PhalanxPhysics, state: PowerState, load: UnitInterval) -> Self {
         let base_ms = (physics.tau_rtt / 2) as f32;
 
@@ -272,10 +285,12 @@ impl VitalityRate {
         Self::new(dynamic_ms as u64)
     }
 
+    #[must_use]
     pub fn as_duration(&self) -> Duration {
         Duration::from_millis(self.0)
     }
 
+    #[must_use]
     pub fn as_u64(&self) -> u64 {
         self.0
     }
@@ -296,6 +311,7 @@ pub struct TrafficGovernor {
 }
 
 impl TrafficGovernor {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             power_state: PowerState::Normal,
@@ -303,6 +319,7 @@ impl TrafficGovernor {
     }
 
     /// Primary security gate: Determines if a chunk should be processed.
+    #[must_use]
     pub fn should_accept(
         &self,
         chunk_owner: &crate::primitives::identity::Did,

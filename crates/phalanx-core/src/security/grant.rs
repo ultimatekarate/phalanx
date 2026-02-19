@@ -100,6 +100,7 @@ impl SealedLocator {
     /// * `sender_did` - Your DID.
     /// * `sender_sk_bytes` - Your raw Ed25519 private key bytes (32 bytes).
     /// * `recipient_did` - The Target DID.
+    #[allow(clippy::missing_errors_doc)]
     pub fn new(
         volley_id: VolleyId,
         volley_key: &[u8; 32],

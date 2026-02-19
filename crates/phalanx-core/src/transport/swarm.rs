@@ -30,6 +30,7 @@ pub enum DiscoveryError {
     StorageError,
 }
 
+#[must_use]
 pub fn get_storage_key() -> RecordKey {
     RecordKey::new(&SERVICE_STORAGE)
 }

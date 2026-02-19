@@ -21,6 +21,7 @@ use tracing::{info, warn};
 pub struct PetName(String);
 
 impl PetName {
+    #[allow(clippy::missing_errors_doc)]
     pub fn new(s: impl Into<String>) -> Result<Self, TrustError> {
         let s = s.into();
         if s.trim().is_empty() {
@@ -41,6 +42,7 @@ impl PetName {
         Ok(Self(s))
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -134,6 +136,7 @@ impl TrustRegistry {
     /// # Consistency Check
     /// If the alias is already used by *another* DID, this returns an error.
     /// If the alias is used by the *same* DID, it updates the record.
+    #[allow(clippy::missing_errors_doc)]
     pub fn set_peer(
         &mut self,
         did: &Did,

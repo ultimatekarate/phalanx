@@ -49,6 +49,7 @@ pub struct PhalanxPhysics {
 
 impl PhalanxPhysics {
     /// Optimized for high-latency mobile WANs.
+    #[must_use]
     pub fn default_wan() -> Self {
         Self {
             tau_rtt: 300,
@@ -59,6 +60,7 @@ impl PhalanxPhysics {
     }
 
     /// Optimized for local/CI environments.
+    #[must_use]
     pub fn test_profile() -> Self {
         Self {
             tau_rtt: 50,
@@ -70,6 +72,7 @@ impl PhalanxPhysics {
 
     /// Derives the "Max Survival Time" for a shard in transit.
     /// If a shard doesn't arrive by this time, it is considered lost.
+    #[must_use]
     pub fn shard_timeout(&self) -> std::time::Duration {
         let ms = self.jitter_factor * (self.tau_rtt + self.delta_cpu);
         std::time::Duration::from_millis(ms)
@@ -192,6 +195,7 @@ impl Default for HardwareConfig {
 }
 
 impl PhalanxConfig {
+    #[allow(clippy::missing_errors_doc)]
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let content = fs::read_to_string(path)?;
         let config: PhalanxConfig = toml::from_str(&content)?;
@@ -200,6 +204,7 @@ impl PhalanxConfig {
 
     /// Loads the configuration.
     /// REFACTOR: Removed .expect() to satisfy Forensic Integrity standards.
+    #[allow(clippy::missing_errors_doc)]
     pub fn load_default() -> Result<Self, ConfigError> {
         // 1. Attempt to load the file
         // 2. Return the Result directly instead of unwrapping/expecting
@@ -207,18 +212,21 @@ impl PhalanxConfig {
             .map_err(|e| ConfigError::NotFound(format!("Critical: Missing phalanx.toml - {e}")))
     }
 
+    #[must_use]
     pub fn load_from_env() -> Self {
         let path = env::var("PHALANX_CONFIG").unwrap_or_else(|_| "phalanx.toml".to_string());
         Self::load(path).unwrap_or_else(|_| Self::default())
     }
 
     /// Restored: Specifically for simulation environments (src/sim.rs).
+    #[must_use]
     pub fn test_defaults() -> Self {
         let mut cfg = Self::default();
         cfg.network.cleanup_interval_secs = 5; // Aggressive cleanup for tests
         cfg
     }
 
+    #[must_use]
     pub fn test_salvage_on_node_death() -> Self {
         let mut cfg = Self::default();
         cfg.storage.vault_path = "sim_vault".to_string();
