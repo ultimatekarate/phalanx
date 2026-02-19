@@ -26,11 +26,6 @@ impl WitnessGate for Evidence {
         })
     }
 }
-
-/// Gate 2: The Forensic Pipeline Gate (DEPRECATED)
-/// REMOVED: The `ok_or_log` anti-pattern has been eradicated.
-/// Use the standard library `Result::inspect_err` directly in the pipeline for side-effect telemetry.
-
 /// Gate 3: The Integrity Gate (Reception Side)
 /// Validates incoming Envelopes before they reach storage or the Crucible.
 pub trait IntegrityGate {
