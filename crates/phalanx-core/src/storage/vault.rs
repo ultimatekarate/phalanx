@@ -792,13 +792,15 @@ mod tests {
             chunk_type: ChunkType::ForensicUnit,
         };
 
-        let _ = sentinel.process_chunk(
-            foreign_chunk,
-            &config.network.video_topic,
-            &config,
-            &identity,
-            local_peer.clone(),
-        ).await?;
+        let _ = sentinel
+            .process_chunk(
+                foreign_chunk,
+                &config.network.video_topic,
+                &config,
+                &identity,
+                local_peer.clone(),
+            )
+            .await?;
 
         assert_eq!(
             sentinel.video_buffers.len(),
@@ -806,13 +808,15 @@ mod tests {
             "Sentinel leaked foreign data in Leaf Mode"
         );
 
-        let _ = sentinel.process_chunk(
-            local_chunk,
-            &config.network.video_topic,
-            &config,
-            &identity,
-            local_peer,
-        ).await?;
+        let _ = sentinel
+            .process_chunk(
+                local_chunk,
+                &config.network.video_topic,
+                &config,
+                &identity,
+                local_peer,
+            )
+            .await?;
 
         assert_eq!(
             sentinel.video_buffers.len(),

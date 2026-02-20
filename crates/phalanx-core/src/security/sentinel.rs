@@ -1,7 +1,7 @@
 use std::collections::HashMap;
+use tokio::io::AsyncWriteExt;
 use tokio::time::Instant;
 use tracing::{debug, instrument, warn};
-use tokio::io::AsyncWriteExt;
 
 use crate::primitives::identity::{NetworkId, PhalanxIdentity};
 use crate::primitives::shards::{
@@ -154,7 +154,7 @@ impl Sentinel {
     }
 
     /// Primary entry point for reassembling network chunks into signed Evidence.
-/// Primary entry point for reassembling network chunks into signed Evidence.
+    /// Primary entry point for reassembling network chunks into signed Evidence.
     #[instrument(skip(self, identity, chunk), level = "debug")]
     pub async fn process_chunk(
         &mut self,
@@ -173,7 +173,7 @@ impl Sentinel {
         // 2. WAL Integration: State Serialization and Disk Flush
         let serialized_chunk_bytes = postcard::to_allocvec(&chunk)
             .map_err(|err| ShardError::Serialization(err.to_string()))?;
-        
+
         let payload_byte_length = serialized_chunk_bytes.len() as u32;
 
         let mut wal_file = tokio::fs::OpenOptions::new()
@@ -184,9 +184,15 @@ impl Sentinel {
             .map_err(ShardError::Io)?;
 
         // Append 4-byte Little-Endian prefix followed by the exact payload
-        wal_file.write_all(&payload_byte_length.to_le_bytes()).await.map_err(ShardError::Io)?;
-        wal_file.write_all(&serialized_chunk_bytes).await.map_err(ShardError::Io)?;
-        
+        wal_file
+            .write_all(&payload_byte_length.to_le_bytes())
+            .await
+            .map_err(ShardError::Io)?;
+        wal_file
+            .write_all(&serialized_chunk_bytes)
+            .await
+            .map_err(ShardError::Io)?;
+
         // Enforce physical disk synchronization before memory promotion
         wal_file.sync_data().await.map_err(ShardError::Io)?;
 
@@ -200,8 +206,6 @@ impl Sentinel {
         };
 
         let shard_id = chunk.shard_id;
-
-        
 
         // 4. Capacity Gate (OOM Defense via LRU Eviction)
         buffers.enforce_capacity_limit(&shard_id, capacity_limit)?;
@@ -243,8 +247,6 @@ impl Sentinel {
                             .map(Evidence::Audio)
                             .map_err(|err| ShardError::Serialization(err.to_string()))?
                     };
-
-                    
 
                     // 7. Witness Gate: Fallible cryptographic seal
                     let witness_envelope = WitnessEnvelope::new(evidence, identity, local_peer_id)?;
@@ -316,13 +318,15 @@ mod leaf_mode_tests {
         };
 
         // 3. Process Foreign
-        let _ = sentinel.process_chunk(
-            foreign_chunk,
-            &config.network.video_topic,
-            &config,
-            &identity,
-            local_peer.clone(),
-        ).await?;
+        let _ = sentinel
+            .process_chunk(
+                foreign_chunk,
+                &config.network.video_topic,
+                &config,
+                &identity,
+                local_peer.clone(),
+            )
+            .await?;
 
         assert_eq!(
             sentinel.video_buffers.len(),
@@ -331,13 +335,15 @@ mod leaf_mode_tests {
         );
 
         // 4. Process Local
-        let _ = sentinel.process_chunk(
-            local_chunk,
-            &config.network.video_topic,
-            &config,
-            &identity,
-            local_peer,
-        ).await?;
+        let _ = sentinel
+            .process_chunk(
+                local_chunk,
+                &config.network.video_topic,
+                &config,
+                &identity,
+                local_peer,
+            )
+            .await?;
 
         assert_eq!(
             sentinel.video_buffers.len(),

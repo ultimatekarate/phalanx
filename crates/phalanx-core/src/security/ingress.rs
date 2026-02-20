@@ -51,13 +51,11 @@ impl IngressOrchestrator {
         }
 
         // 2. Transient Validation (Sentinel)
-        match pipeline.sentinel.process_chunk(
-            chunk,
-            topic,
-            ctx.config,
-            ctx.identity,
-            ctx.network_id,
-        ).await {
+        match pipeline
+            .sentinel
+            .process_chunk(chunk, topic, ctx.config, ctx.identity, ctx.network_id)
+            .await
+        {
             Ok(Some(envelope)) => {
                 // 3. Persistent Validation (Guardian)
                 match pipeline.guardian.ingest_envelope(envelope) {

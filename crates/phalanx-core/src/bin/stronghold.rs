@@ -1,9 +1,9 @@
+use phalanx_core::security::sentinel::HealthTracker;
 use std::error::Error;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
-use phalanx_core::security::sentinel::HealthTracker;
 use tokio::time::Sleep;
 
 use libp2p::{futures::StreamExt, gossipsub, identify, kad, mdns, swarm::SwarmEvent, Swarm};
@@ -28,9 +28,8 @@ use phalanx_core::{
 
 use tokio::sync::mpsc;
 
-use std::sync::atomic::{Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-
 
 /// The Dedicated Storage Node.
 ///
@@ -90,7 +89,7 @@ impl StrongholdEngine {
             identity: identity.clone(),
             chunk_rx,
             active_tasks_metric: actor_load_metric,
-            physics
+            physics,
         };
 
         // Spawn the Storage Actor onto the Tokio runtime independently
@@ -251,7 +250,7 @@ impl StrongholdEngine {
         Ok(())
     }
 
-   /// Processes high-velocity `GossipSub` messages.
+    /// Processes high-velocity `GossipSub` messages.
     ///
     /// Distinction:
     /// * **Control Signals:** Updates the internal "Reputation Table" synchronously.
@@ -300,12 +299,12 @@ impl StrongholdEngine {
         // to the dedicated disk I/O Tokio task.
         if let Err(err) = self.chunk_tx.try_send((chunk, topic, local_peer)) {
             tracing::error!(
-                error = %err, 
+                error = %err,
                 "StorageActor channel is full or closed. Data payload dropped."
             );
         }
     }
-    
+
     /// Calculates the Node's "Vitality Rate" and broadcasts a heartbeat.
     ///
     /// **The Physics:**
@@ -358,7 +357,7 @@ pub struct StorageActor {
 }
 
 impl StorageActor {
-pub async fn run(mut self) {
+    pub async fn run(mut self) {
         // Run maintenance every 10 seconds
         let mut maintenance_timer = tokio::time::interval(std::time::Duration::from_secs(10));
 
@@ -387,7 +386,7 @@ pub async fn run(mut self) {
                     }
 
                     self.active_tasks_metric.store(
-                        self.storage.micro_layer.len(), 
+                        self.storage.micro_layer.len(),
                         Ordering::Relaxed
                     );
                 }
