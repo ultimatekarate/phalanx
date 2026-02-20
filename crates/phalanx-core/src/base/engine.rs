@@ -6,21 +6,22 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
+use crate::base::types::{NodeMode, TrafficGovernor};
 use crate::primitives::identity::{init_identity, Did, IdentityError, NetworkId, PhalanxIdentity};
-use crate::primitives::shards::{AudioShard, Evidence, ShardChunk, ShardId, VideoShard};
+use crate::primitives::shards::{Evidence, ShardChunk, ShardError, ShardId};
 use crate::primitives::time::{TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
 use crate::security::ingress::{
     IngressContext, IngressError, IngressOrchestrator, SecurityPipeline,
 };
-use crate::security::trust::ReputationGate;
-use crate::storage::reassembler::Reassembler;
-
+use crate::security::trust::TrustRegistry;
+use crate::storage::reassembler::{Reassembler, TransientJournal};
+use crate::transport::health::HealthTracker;
 // IMPORT ALL GATES
 use crate::security::gate::{ForensicGate, PrivacyGate, WitnessGate};
-use crate::storage::strategies::ShardAmalgam;
+
 use crate::storage::vault::Guardian;
-use crate::{PhalanxBehaviour, PhalanxEvent};
+use crate::PhalanxEvent;
 
 pub use libp2p::pnet::PreSharedKey;
 
@@ -38,23 +39,33 @@ pub enum EngineError {
     Simulation(String),
 }
 
-pub struct PhalanxEngine {
-    #[allow(dead_code)]
-    config: PhalanxConfig,
-    identity: PhalanxIdentity,
-    clock: TrustedClock,
-    swarm: Swarm<PhalanxBehaviour>,
-    #[allow(dead_code)]
-    crucible: crate::storage::crucible::Crucible<ShardAmalgam>,
-    reassembler: Reassembler,
-    guardian: Guardian,
-    trust_registry: crate::security::trust::TrustRegistry,
-    video_rx: mpsc::Receiver<VideoShard>,
-    audio_rx: mpsc::Receiver<AudioShard>,
+// POLYFILL: Required until Phase 5 (Mobile Binary Integration) is complete
+pub struct NoOpJournal;
+#[async_trait::async_trait]
+impl TransientJournal for NoOpJournal {
+    async fn record_chunk(&mut self, _chunk: &ShardChunk) -> Result<(), ShardError> {
+        Ok(())
+    }
+    async fn sync(&mut self) -> Result<(), ShardError> {
+        Ok(())
+    }
+}
 
-    seq_counter: u64,
-    // TODO: Rotate this via KeyStore in production
-    network_key: SymmetricKey,
+pub struct PhalanxEngine {
+    pub reassembler: Reassembler,
+    pub guardian: Guardian,
+    pub trust_registry: TrustRegistry,
+    pub health_tracker: HealthTracker,
+    pub governor: TrafficGovernor,
+    pub mode: NodeMode,
+    pub config: PhalanxConfig,
+    pub identity: PhalanxIdentity,
+    pub clock: TrustedClock,
+    pub swarm: Swarm<crate::transport::swarm::PhalanxBehaviour>,
+    pub video_rx: mpsc::Receiver<crate::primitives::shards::VideoShard>,
+    pub audio_rx: mpsc::Receiver<crate::primitives::shards::AudioShard>,
+    pub seq_counter: u64,
+    pub network_key: SymmetricKey,
 }
 
 impl PhalanxEngine {
@@ -71,8 +82,13 @@ impl PhalanxEngine {
         let local_did = Did::from(local_peer_id.to_string());
 
         // Data boundaries
-        let reassembler = Reassembler::new(&config);
+        let reassembler = Reassembler::new();
         let guardian = Guardian::new(&config.storage.vault_path, &config, local_did);
+
+        // Orchestration state
+        let health_tracker = HealthTracker::new();
+        let governor = TrafficGovernor::new();
+        let mode = NodeMode::Standard;
 
         // Network
         let swarm =
@@ -102,10 +118,12 @@ impl PhalanxEngine {
             identity,
             clock,
             swarm,
-            crucible: crate::storage::crucible::Crucible::new(),
             reassembler,
             guardian,
             trust_registry,
+            health_tracker,
+            governor,
+            mode,
             video_rx,
             audio_rx,
             seq_counter: 0,
@@ -184,12 +202,18 @@ impl PhalanxEngine {
             identity: &self.identity,
             network_id: local_network_id,
             clock: &self.clock,
+            governor: &self.governor,
+            mode: self.mode,
         };
+
+        let mut journal = NoOpJournal;
 
         let mut pipeline = SecurityPipeline {
             reassembler: &mut self.reassembler,
             guardian: &mut self.guardian,
             trust_registry: &mut self.trust_registry,
+            health_tracker: &mut self.health_tracker,
+            journal: &mut journal,
         };
 
         // 2. Execute Shared Orchestration
@@ -207,7 +231,8 @@ impl PhalanxEngine {
                 tracing::warn!(%did, "Dropped connection from blacklisted peer.");
             }
             Err(e) => {
-                if self.trust_registry.is_blacklisted(&sender_did) {
+                let trust_level = self.trust_registry.check_trust(&sender_did);
+                if matches!(trust_level, crate::security::trust::TrustLevel::Blocked) {
                     let _ = self.swarm.disconnect_peer_id(peer_id);
                     tracing::warn!(%sender_did, error = %e, "Peer blacklisted due to protocol offense.");
                 } else {

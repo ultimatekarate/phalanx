@@ -26,6 +26,7 @@ pub mod storage {
 
 // --- 4. TRANSPORT ---
 pub mod transport {
+    pub mod health;
     pub mod swarm;
 }
 

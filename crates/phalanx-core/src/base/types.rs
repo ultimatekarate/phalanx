@@ -255,6 +255,16 @@ impl AsRef<str> for MeshTopic {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum NodeMode {
+    /// A mobile or edge device. Only accepts and reassembles local ForensicUnits.
+    /// Rejects all foreign relay traffic to conserve battery and bandwidth.
+    Leaf,
+    /// A full mesh participant. Reassembles both local data and witnessed
+    /// relay traffic from the network.
+    Standard,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct VitalityRate(pub u64); // Milliseconds
 
