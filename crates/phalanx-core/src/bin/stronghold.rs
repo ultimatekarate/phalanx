@@ -1,7 +1,9 @@
 use std::error::Error;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
+use phalanx_core::security::sentinel::HealthTracker;
 use tokio::time::Sleep;
 
 use libp2p::{futures::StreamExt, gossipsub, identify, kad, mdns, swarm::SwarmEvent, Swarm};
@@ -13,6 +15,7 @@ use phalanx_core::{
         types::{MeshTopic, PowerState, UnitInterval, VitalityRate},
     },
     primitives::identity::{NetworkId, PhalanxIdentity},
+    primitives::shards::ShardChunk,
     security::{
         gate::ForensicGate,
         sentinel::{ControlMessage, Sentinel},
@@ -22,6 +25,12 @@ use phalanx_core::{
     transport::swarm::{get_storage_key, load_swarm_key, setup_phalanx_swarm},
     PhalanxEvent,
 };
+
+use tokio::sync::mpsc;
+
+use std::sync::atomic::{Ordering};
+use std::sync::Arc;
+
 
 /// The Dedicated Storage Node.
 ///
@@ -34,16 +43,13 @@ pub struct StrongholdEngine {
     config: PhalanxConfig,
     identity: PhalanxIdentity,
     physics: PhalanxPhysics,
-
-    /// The Vault interface. Manages the Write-Ahead Log (WAL) and on-disk archives.
-    storage: Guardian,
-
-    /// We keep a Sentinel instance not for capturing, but for its `Justiciar` logic:
-    /// verifying signatures and tracking the reputation of other peers.
-    sentinel: Sentinel,
-
     /// The libp2p network stack.
     swarm: Swarm<phalanx_core::PhalanxBehaviour>,
+    // Channel for the storage actor
+    chunk_tx: mpsc::Sender<(ShardChunk, MeshTopic, NetworkId)>,
+    health_tracker: HealthTracker,
+    power_state: PowerState,
+    storage_load: Arc<AtomicUsize>,
 }
 
 impl StrongholdEngine {
@@ -72,8 +78,25 @@ impl StrongholdEngine {
         let physics = PhalanxPhysics::default_wan();
 
         // 1. Storage & Security Init
-        let storage = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
-        let sentinel = Sentinel::new(&config);
+        let (chunk_tx, chunk_rx) = mpsc::channel(1024); // Back pressure limit
+
+        let storage_load = Arc::new(AtomicUsize::new(0));
+        let actor_load_metric = Arc::clone(&storage_load);
+
+        let storage_actor = StorageActor {
+            sentinel: Sentinel::new(&config),
+            storage: Guardian::new(&config.storage.vault_path, &config, identity.did.clone()),
+            config: config.clone(),
+            identity: identity.clone(),
+            chunk_rx,
+            active_tasks_metric: actor_load_metric,
+            physics
+        };
+
+        // Spawn the Storage Actor onto the Tokio runtime independently
+        tokio::spawn(async move {
+            storage_actor.run().await;
+        });
 
         // 2. Network Security (PSK)
         let psk_path = Path::new("swarm.key");
@@ -112,9 +135,11 @@ impl StrongholdEngine {
             config,
             identity,
             physics,
-            storage,
-            sentinel,
             swarm,
+            chunk_tx,
+            health_tracker: HealthTracker::new(),
+            power_state: PowerState::Normal,
+            storage_load,
         })
     }
 
@@ -161,7 +186,6 @@ impl StrongholdEngine {
 
         info!(peer_id = %local_id, "Stronghold Engine Online.");
 
-        let mut cleanup_timer = tokio::time::interval(Duration::from_secs(10));
         let mut heartbeat_timer: Pin<Box<Sleep>> =
             Box::pin(tokio::time::sleep(Duration::from_millis(100)));
 
@@ -172,12 +196,7 @@ impl StrongholdEngine {
                     self.handle_swarm_event(event).await?;
                 }
 
-                // --- DOMAIN B: Maintenance ---
-                _ = cleanup_timer.tick() => {
-                    self.perform_maintenance();
-                }
-
-                // --- DOMAIN C: Vitality (The "Pulse") ---
+                // --- DOMAIN B: Vitality (The "Pulse") ---
                 () = &mut heartbeat_timer => {
                     let next_interval = self.pulse_vitality();
                     heartbeat_timer.as_mut().reset((Instant::now() + next_interval).into());
@@ -232,11 +251,11 @@ impl StrongholdEngine {
         Ok(())
     }
 
-    /// Processes high-velocity `GossipSub` messages.
+   /// Processes high-velocity `GossipSub` messages.
     ///
     /// Distinction:
-    /// * **Control Signals:** Updates the internal "Reputation Table" (Justiciar).
-    /// * **Data Shards:** Immediately persisted to the Vault ("Salvage").
+    /// * **Control Signals:** Updates the internal "Reputation Table" synchronously.
+    /// * **Data Shards:** Dispatched asynchronously to the StorageActor via mpsc channel.
     fn handle_gossip(&mut self, event: gossipsub::Event) {
         // 1. Extract the message or exit immediately
         let gossipsub::Event::Message { message, .. } = event else {
@@ -255,7 +274,8 @@ impl StrongholdEngine {
                 &local_peer,
                 "Malformed heartbeat",
             ) {
-                self.sentinel.health_tracker.register_activity(msg);
+                // NOTE: If Sentinel was moved to StorageActor, update this to `self.health_tracker`
+                self.health_tracker.register_activity(msg);
             }
 
             return;
@@ -275,35 +295,17 @@ impl StrongholdEngine {
             Err(_) => return,
         };
 
-        // 2. Sentinel Boundary (Reputation & Reassembly)
-        let envelope_opt = match self
-            .sentinel
-            .process_chunk(
-                chunk,
-                &topic,
-                &self.config,
-                &self.identity,
-                local_peer, // ReputationGate Injection
-            )
-            .gate(
-                "reassembly_fail",
-                &local_peer,
-                "Sentinel rejected data chunk",
-            ) {
-            Ok(env) => env,
-            Err(_) => return,
-        };
-
-        // 3. Guardian Boundary (Capacity, Integrity, Persistence)
-        if let Some(envelope) = envelope_opt {
-            let _ = self.storage.ingest_envelope(envelope).gate(
-                "vault_ingest_fail",
-                &local_peer,
-                "Vault rejected envelope",
+        // 2. Storage Actor Boundary (Non-Blocking Dispatch)
+        // Replaces the asynchronous Sentinel and Guardian processing, routing the data
+        // to the dedicated disk I/O Tokio task.
+        if let Err(err) = self.chunk_tx.try_send((chunk, topic, local_peer)) {
+            tracing::error!(
+                error = %err, 
+                "StorageActor channel is full or closed. Data payload dropped."
             );
         }
     }
-
+    
     /// Calculates the Node's "Vitality Rate" and broadcasts a heartbeat.
     ///
     /// **The Physics:**
@@ -312,7 +314,7 @@ impl StrongholdEngine {
     /// This allows the network to route data away from stressed nodes naturally.
     fn pulse_vitality(&mut self) -> Duration {
         // 1. Measure Stress
-        let active_storage_tasks = self.storage.micro_layer.len() as f32;
+        let active_storage_tasks = self.storage_load.load(Ordering::Relaxed) as f32;
         let max_capacity = self.config.storage.max_peers as f32;
         let load = UnitInterval::new(active_storage_tasks / max_capacity);
 
@@ -327,7 +329,7 @@ impl StrongholdEngine {
             load_factor: load.as_f32(),
             storage_remaining_mb: 10240, // TODO: Real disk check
             heartbeat_ms: vitality.as_u64(),
-            is_leaf: self.sentinel.is_leaf_mode(),
+            is_leaf: self.power_state == PowerState::Leaf,
         };
 
         // 4. Broadcast
@@ -343,16 +345,65 @@ impl StrongholdEngine {
 
         interval
     }
+}
 
-    fn perform_maintenance(&mut self) {
-        // 1. Prune partial reassembly buffers that timed out
-        self.sentinel
-            .prune_stale_buffers(&self.config, &self.physics);
+pub struct StorageActor {
+    pub sentinel: Sentinel,
+    pub storage: Guardian,
+    pub config: PhalanxConfig,
+    pub identity: PhalanxIdentity,
+    pub chunk_rx: mpsc::Receiver<(ShardChunk, MeshTopic, NetworkId)>,
+    pub active_tasks_metric: Arc<AtomicUsize>,
+    pub physics: PhalanxPhysics,
+}
 
-        // 2. Archive completed sessions from WAL to Cold Storage
-        self.storage.archive_stale_sessions(Duration::from_secs(
-            self.config.storage.stale_session_threshold,
-        ));
+impl StorageActor {
+pub async fn run(mut self) {
+        // Run maintenance every 10 seconds
+        let mut maintenance_timer = tokio::time::interval(std::time::Duration::from_secs(10));
+
+        loop {
+            tokio::select! {
+                // --- EVENT: INCOMING DATA SHARD ---
+                Some((chunk, topic, peer_id)) = self.chunk_rx.recv() => {
+                    let envelope_opt = match self.sentinel.process_chunk(
+                        chunk,
+                        &topic,
+                        &self.config,
+                        &self.identity,
+                        peer_id,
+                    ).await {
+                        Ok(env) => env,
+                        Err(err) => {
+                            tracing::warn!(error = %err, "Sentinel rejected data chunk");
+                            continue;
+                        }
+                    };
+
+                    if let Some(envelope) = envelope_opt {
+                        if let Err(err) = self.storage.ingest_envelope(envelope) {
+                            tracing::error!(error = %err, "Vault rejected envelope");
+                        }
+                    }
+
+                    self.active_tasks_metric.store(
+                        self.storage.micro_layer.len(), 
+                        Ordering::Relaxed
+                    );
+                }
+
+                // --- EVENT: PERIODIC MAINTENANCE ---
+                _ = maintenance_timer.tick() => {
+                    // 1. Prune partial reassembly buffers that timed out
+                    self.sentinel.prune_stale_buffers(&self.config, &self.physics);
+
+                    // 2. Archive completed sessions from WAL to Cold Storage
+                    self.storage.archive_stale_sessions(
+                        std::time::Duration::from_secs(self.config.storage.stale_session_threshold)
+                    );
+                }
+            }
+        }
     }
 }
 

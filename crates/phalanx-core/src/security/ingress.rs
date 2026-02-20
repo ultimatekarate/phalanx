@@ -57,7 +57,7 @@ impl IngressOrchestrator {
             ctx.config,
             ctx.identity,
             ctx.network_id,
-        ) {
+        ).await {
             Ok(Some(envelope)) => {
                 // 3. Persistent Validation (Guardian)
                 match pipeline.guardian.ingest_envelope(envelope) {

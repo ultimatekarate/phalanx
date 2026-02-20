@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use tokio::time::Instant;
 use tracing::{debug, instrument, warn};
+use tokio::io::AsyncWriteExt;
 
 use crate::primitives::identity::{NetworkId, PhalanxIdentity};
 use crate::primitives::shards::{
@@ -153,8 +154,9 @@ impl Sentinel {
     }
 
     /// Primary entry point for reassembling network chunks into signed Evidence.
+/// Primary entry point for reassembling network chunks into signed Evidence.
     #[instrument(skip(self, identity, chunk), level = "debug")]
-    pub fn process_chunk(
+    pub async fn process_chunk(
         &mut self,
         chunk: ShardChunk,
         topic: &MeshTopic,
@@ -168,7 +170,27 @@ impl Sentinel {
             return Ok(None); // Benign load-shedding, not an error.
         }
 
-        // 2. Route to correct buffer based on network topic
+        // 2. WAL Integration: State Serialization and Disk Flush
+        let serialized_chunk_bytes = postcard::to_allocvec(&chunk)
+            .map_err(|err| ShardError::Serialization(err.to_string()))?;
+        
+        let payload_byte_length = serialized_chunk_bytes.len() as u32;
+
+        let mut wal_file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("crucible_wal.bin")
+            .await
+            .map_err(ShardError::Io)?;
+
+        // Append 4-byte Little-Endian prefix followed by the exact payload
+        wal_file.write_all(&payload_byte_length.to_le_bytes()).await.map_err(ShardError::Io)?;
+        wal_file.write_all(&serialized_chunk_bytes).await.map_err(ShardError::Io)?;
+        
+        // Enforce physical disk synchronization before memory promotion
+        wal_file.sync_data().await.map_err(ShardError::Io)?;
+
+        // 3. Route to correct buffer based on network topic
         let is_video = topic == &config.network.video_topic;
 
         let (buffers, capacity_limit) = if is_video {
@@ -179,7 +201,9 @@ impl Sentinel {
 
         let shard_id = chunk.shard_id;
 
-        // 3. Capacity Gate (OOM Defense via LRU Eviction)
+        
+
+        // 4. Capacity Gate (OOM Defense via LRU Eviction)
         buffers.enforce_capacity_limit(&shard_id, capacity_limit)?;
 
         tracing::debug!(%shard_id, chunk_index = chunk.chunk_index, "Buffering chunk");
@@ -187,50 +211,53 @@ impl Sentinel {
             .entry(shard_id)
             .or_insert_with(|| ReassemblyBuffer::new(chunk.total_chunks as usize));
 
-        // 4. Update buffer state
-        buffer.last_activity = Instant::now(); // todo: forensic now
+        // 5. Update buffer state
+        buffer.last_activity = Instant::now(); // Note: Pending TrustedClock forensic_now() integration
         if chunk.chunk_index < chunk.total_chunks {
             buffer.chunks[chunk.chunk_index as usize] = Some(chunk.data);
         }
 
-        // 5. Finalize if reassembly is complete
+        // 6. Finalize if reassembly is complete
         if buffer.is_complete() {
             tracing::info!(%shard_id, "Reassembly complete. Finalizing evidence.");
-            let raw_data = buffer.assemble();
+            let reassembled_raw_data = buffer.assemble();
 
-            // Immediate cleanup of the completed buffer
+            // Immediate cleanup of the completed buffer to free transient memory
             buffers.remove(&shard_id);
 
             match chunk.chunk_type {
                 ChunkType::Witnessed => {
                     // Relayed envelope from the mesh
-                    postcard::from_bytes::<WitnessEnvelope>(&raw_data)
+                    postcard::from_bytes::<WitnessEnvelope>(&reassembled_raw_data)
                         .map(Some)
-                        .map_err(|e| ShardError::Serialization(e.to_string()))
+                        .map_err(|err| ShardError::Serialization(err.to_string()))
                 }
                 ChunkType::ForensicUnit => {
-                    // Local raw data; wrap in an envelope
+                    // Local raw data; reconstruct the internal struct
                     let evidence = if is_video {
-                        postcard::from_bytes::<VideoShard>(&raw_data)
+                        postcard::from_bytes::<VideoShard>(&reassembled_raw_data)
                             .map(Evidence::Video)
-                            .map_err(|e| ShardError::Serialization(e.to_string()))?
+                            .map_err(|err| ShardError::Serialization(err.to_string()))?
                     } else {
-                        postcard::from_bytes::<AudioShard>(&raw_data)
+                        postcard::from_bytes::<AudioShard>(&reassembled_raw_data)
                             .map(Evidence::Audio)
-                            .map_err(|e| ShardError::Serialization(e.to_string()))?
+                            .map_err(|err| ShardError::Serialization(err.to_string()))?
                     };
 
-                    // Witness Gate: Fallible cryptographic seal
-                    let envelope = WitnessEnvelope::new(evidence, identity, local_peer_id)?;
+                    
+
+                    // 7. Witness Gate: Fallible cryptographic seal
+                    let witness_envelope = WitnessEnvelope::new(evidence, identity, local_peer_id)?;
                     tracing::info!(%shard_id, "Successfully witnessed local forensic unit.");
 
-                    Ok(Some(envelope))
+                    Ok(Some(witness_envelope))
                 }
             }
         } else {
-            Ok(None) // Assembly in progress
+            Ok(None) // Assembly remains in progress
         }
     }
+
     /// Garbage collection for incomplete reassemblies that have timed out.
     pub fn prune_stale_buffers(&mut self, _config: &PhalanxConfig, physics: &PhalanxPhysics) {
         let timeout = physics.shard_timeout();
@@ -258,8 +285,8 @@ mod leaf_mode_tests {
     use super::*;
     use std::error::Error;
 
-    #[test]
-    fn test_sentinel_leaf_mode_filtering() -> Result<(), Box<dyn Error>> {
+    #[tokio::test]
+    async fn test_sentinel_leaf_mode_filtering() -> Result<(), Box<dyn Error>> {
         let (identity, _) = PhalanxIdentity::generate()?;
         let (stranger, _) = PhalanxIdentity::generate()?;
         let config = PhalanxConfig::default();
@@ -295,7 +322,7 @@ mod leaf_mode_tests {
             &config,
             &identity,
             local_peer.clone(),
-        )?;
+        ).await?;
 
         assert_eq!(
             sentinel.video_buffers.len(),
@@ -310,7 +337,7 @@ mod leaf_mode_tests {
             &config,
             &identity,
             local_peer,
-        )?;
+        ).await?;
 
         assert_eq!(
             sentinel.video_buffers.len(),

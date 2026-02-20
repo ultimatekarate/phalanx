@@ -798,7 +798,7 @@ mod tests {
             &config,
             &identity,
             local_peer.clone(),
-        )?;
+        ).await?;
 
         assert_eq!(
             sentinel.video_buffers.len(),
@@ -812,7 +812,7 @@ mod tests {
             &config,
             &identity,
             local_peer,
-        )?;
+        ).await?;
 
         assert_eq!(
             sentinel.video_buffers.len(),
