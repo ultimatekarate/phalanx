@@ -4,6 +4,11 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tracing::{debug, info, instrument, warn};
 
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
+fn default_cleanup_interval() -> Duration {
+    Duration::from_secs(1)
+}
 /// A stateful aggregation strategy for transforming stream-based inputs into unified outputs.
 ///
 /// The `Mold` trait defines the "logic of completion" for a specific data type. It utilizes
@@ -15,26 +20,19 @@ use tracing::{debug, info, instrument, warn};
 pub trait Mold {
     type Input;
     type Output;
-    type Key: Ord + Clone + std::fmt::Debug;
-    type Accumulator;
+    // ENFORCEMENT: Keys must be serializable to reconstruct the BTreeMap
+    type Key: Ord + Clone + std::fmt::Debug + Serialize + DeserializeOwned;
+    // ENFORCEMENT: Accumulators must serialize their internal byte states
+    type Accumulator: Serialize + DeserializeOwned;
 
-    /// Identity derivation: Determines which bucket (Accumulator) an item belongs to.
     fn get_key(item: &Self::Input) -> Self::Key;
-
-    /// Initialize a new buffer (accumulator) when a new key is encountered.
     fn init_accumulator(item: &Self::Input) -> Self::Accumulator;
-
-    /// Ingests data into the existing buffer, updating the internal state of the Accumulator.
     fn ingest(acc: &mut Self::Accumulator, item: Self::Input);
 
-    /// Evaluates whether the Accumulator has met the threshold for finalization.
-    /// This can be based on the number of received items, total byte size, or elapsed time.
+    // CORRECTED: Aligned with crucible.rs process() and strategies.rs
     fn is_ready(acc: &Self::Accumulator, elapsed: Duration) -> bool;
-
-    /// The final transformation step: Consumes the Accumulator and produces the final Output.
     fn assemble(key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output>;
 }
-
 /// A generic execution engine and container for stateful data aggregation.
 ///
 /// `Crucible` acts as a "workbench" that manages multiple active **WorkContexts**.
@@ -50,29 +48,35 @@ pub trait Mold {
 /// items that have exceeded a Time-To-Live (TTL) threshold. These stale items
 /// are force-sealed and assembled, allowing the system to recover partial data (such as
 /// a Volley with detected gaps) rather than losing the information entirely.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(
+    bound = "S::Key: Serialize + DeserializeOwned, S::Accumulator: Serialize + DeserializeOwned"
+)]
 pub struct Crucible<S: Mold> {
-    /// Active work units currently being aggregated.
-    contexts: BTreeMap<S::Key, WorkContext<S>>,
-    /// Frequency at which internal house-cleaning is performed.
-    cleanup_interval: Duration,
-    /// The last time the workbench was pruned.
-    last_cleanup: Instant,
-}
+    pub contexts: BTreeMap<S::Key, WorkContext<S::Accumulator>>,
+    #[serde(skip, default = "tokio::time::Instant::now")]
+    pub last_cleanup: tokio::time::Instant,
 
+    #[serde(skip, default = "default_cleanup_interval")]
+    pub cleanup_interval: Duration,
+}
 // --- THE WRAPPER (The Work Unit) ---
 // Wraps the raw data (Accumulator) with metadata (Time)
-pub struct WorkContext<S: Mold> {
-    pub accumulator: S::Accumulator,
-    pub created_at: Instant,
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkContext<A> {
+    pub accumulator: A,
+    #[serde(skip, default = "tokio::time::Instant::now")]
+    pub created_at: tokio::time::Instant,
 }
 
 impl<S: Mold> Crucible<S> {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            contexts: BTreeMap::new(),
+            contexts: std::collections::BTreeMap::new(),
+            last_cleanup: tokio::time::Instant::now(),
             cleanup_interval: Duration::from_secs(1),
-            last_cleanup: Instant::now(),
         }
     }
 

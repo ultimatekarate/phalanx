@@ -3,25 +3,32 @@ const VOLLEY_TIME_THRESHOLD: Duration = Duration::from_secs(1);
 
 use crate::primitives::identity::Did;
 use crate::primitives::shards::{
-    ForensicGap, ShardChunk, ShardId, StorageSequence, Volley, WitnessEnvelope,
+    ForensicGap, ShardChunk, ShardId, StorageSequence, Volley, VolleyId, WitnessEnvelope,
 };
 use crate::primitives::time::TrustedClock;
 use crate::security::gate::ChronosGate;
 use crate::storage::crucible::Mold;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
+use tracing::{error, info, warn};
 
-use tracing::{error, info, warn}; // <--- ADDED TRACING
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ShardBuffer {
+    pub total_chunks: u32,
+    pub received_count: u32,
+    pub parts: BTreeMap<u32, Vec<u8>>,
+    pub estimated_chunk_size: usize,
+}
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VolleyBuffer {
+    pub volley_id: VolleyId,
+    pub owner_did: Did,
+    pub artifacts: BTreeMap<StorageSequence, WitnessEnvelope>,
+}
 // --- STRATEGY 1: SHARD REASSEMBLY (Chunks -> Envelope) --
 pub struct ShardAmalgam;
-
-pub struct ShardBuffer {
-    total_chunks: u32,
-    received_count: u32,
-    parts: BTreeMap<u32, Vec<u8>>,
-    estimated_chunk_size: usize,
-}
 
 impl Mold for ShardAmalgam {
     type Input = ShardChunk;
@@ -88,12 +95,6 @@ impl Mold for ShardAmalgam {
 // --- STRATEGY 2: VOLLEY ASSEMBLY (Envelopes -> Volley) ---
 pub struct VolleyAmalgam;
 
-pub struct VolleyBuffer {
-    pub artifacts: BTreeMap<StorageSequence, WitnessEnvelope>,
-    pub volley_id: String, // keep this string for now
-    pub owner_did: Did,
-}
-
 impl Mold for VolleyAmalgam {
     type Input = WitnessEnvelope;
     type Output = Volley;
@@ -110,7 +111,7 @@ impl Mold for VolleyAmalgam {
 
         VolleyBuffer {
             artifacts,
-            volley_id: item.evidence.volley_id().to_string(),
+            volley_id: item.evidence.volley_id().clone(),
             owner_did: item.did.clone(),
         }
     }

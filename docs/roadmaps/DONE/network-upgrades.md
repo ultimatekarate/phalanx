@@ -60,14 +60,14 @@ This roadmap details the steps to upgrade Phalanx from a Local-Only Mesh (mDNS) 
 
 *Goal: Prevent unauthorized nodes from joining the swarm using a Pre-Shared Key (PSK).*
 
-  - [x] Check for existence of file `swarm.key` in the current directory.
-  - [x] **If exists (Private Mode):**
-    - [x] Read bytes from `swarm.key`.
-    - [x] Create `libp2p::pnet::PreSharedKey`.
-    - [x] Wrap the TCP transport with `PnetConfig::new(psk)`.
-  - [x] **If missing (Public Mode):**
-    - [x] Log a warning (`tracing::warn!`).
-    - [x] Use standard TCP transport.
+- [x] Check for existence of file `swarm.key` in the current directory.
+- [x] **If exists (Private Mode):**
+  - [x] Read bytes from `swarm.key`.
+  - [x] Create `libp2p::pnet::PreSharedKey`.
+  - [x] Wrap the TCP transport with `PnetConfig::new(psk)`.
+- [x] **If missing (Public Mode):**
+  - [x] Log a warning (`tracing::warn!`).
+  - [x] Use standard TCP transport.
 
 - [x] **Key Generation Utility**
   - [x] Create a helper function `generate_swarm_key()` that writes 32 random bytes to `swarm.key` (can be a separate binary or a `--init` CLI flag).
