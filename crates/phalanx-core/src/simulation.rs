@@ -1,5 +1,5 @@
 use crate::security::trust::ReputationGate;
-use crate::security::trust::{Offense, TrustRegistry, TrustLevel};
+use crate::security::trust::{Offense, TrustRegistry};
 use crate::storage::vault::GuardianError;
 
 use rand::Rng;
