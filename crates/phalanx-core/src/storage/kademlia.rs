@@ -273,15 +273,13 @@ impl RedbStore {
             let mut records_table = write_txn.open_table(DHT_RECORDS_TABLE)?;
             let mut invalid_record_keys = Vec::new();
 
-            for result in records_table.iter()? {
-                if let Ok((k, v)) = result {
-                    match DhtPayload::decode(v.value()) {
-                        Ok(payload) if is_expired(payload.expires_at_unix) => {
-                            invalid_record_keys.push(k.value().to_vec());
-                        }
-                        Err(_) => invalid_record_keys.push(k.value().to_vec()), // Prune corrupted bytes
-                        _ => {}
+            for (k, v) in records_table.iter()?.flatten() {
+                match DhtPayload::decode(v.value()) {
+                    Ok(payload) if is_expired(payload.expires_at_unix) => {
+                        invalid_record_keys.push(k.value().to_vec());
                     }
+                    Err(_) => invalid_record_keys.push(k.value().to_vec()), // Prune corrupted bytes
+                    _ => {}
                 }
             }
 
@@ -294,21 +292,19 @@ impl RedbStore {
             let mut keys_to_delete = Vec::new();
             let mut keys_to_update = Vec::new();
 
-            for result in providers_table.iter()? {
-                if let Ok((k, v)) = result {
-                    match DhtProviderSet::decode(v.value()) {
-                        Ok(mut set) => {
-                            let initial_len = set.0.len();
-                            set.0.retain(|p| !is_expired(p.expires_at_unix));
+            for (k, v) in providers_table.iter()?.flatten() {
+                match DhtProviderSet::decode(v.value()) {
+                    Ok(mut set) => {
+                        let initial_len = set.0.len();
+                        set.0.retain(|p| !is_expired(p.expires_at_unix));
 
-                            if set.0.is_empty() {
-                                keys_to_delete.push(k.value().to_vec());
-                            } else if set.0.len() < initial_len {
-                                keys_to_update.push((k.value().to_vec(), set.encode()));
-                            }
+                        if set.0.is_empty() {
+                            keys_to_delete.push(k.value().to_vec());
+                        } else if set.0.len() < initial_len {
+                            keys_to_update.push((k.value().to_vec(), set.encode()));
                         }
-                        Err(_) => keys_to_delete.push(k.value().to_vec()),
                     }
+                    Err(_) => keys_to_delete.push(k.value().to_vec()),
                 }
             }
 
@@ -334,12 +330,10 @@ impl RedbStore {
         let table = read_txn.open_table(DHT_RECORDS_TABLE)?;
         let mut metrics = std::collections::HashMap::new();
 
-        for result in table.iter()? {
-            if let Ok((_, v)) = result {
-                if let Ok(payload) = DhtPayload::decode(v.value()) {
-                    if !is_expired(payload.expires_at_unix) {
-                        *metrics.entry(payload.variant).or_insert(0) += 1;
-                    }
+        for (_, v) in table.iter()?.flatten() {
+            if let Ok(payload) = DhtPayload::decode(v.value()) {
+                if !is_expired(payload.expires_at_unix) {
+                    *metrics.entry(payload.variant).or_insert(0) += 1;
                 }
             }
         }
