@@ -170,7 +170,7 @@ impl Sentinel {
 
         // 2. Route to correct buffer based on network topic
         let is_video = topic == &config.network.video_topic;
-        
+
         let (buffers, capacity_limit) = if is_video {
             (&mut self.video_buffers, config.storage.max_video_buffer)
         } else {
@@ -178,7 +178,7 @@ impl Sentinel {
         };
 
         let shard_id = chunk.shard_id;
-        
+
         // 3. Capacity Gate (OOM Defense via LRU Eviction)
         buffers.enforce_capacity_limit(&shard_id, capacity_limit)?;
 

@@ -1,6 +1,5 @@
 use crate::security::trust::ReputationGate;
-use crate::security::trust::{Offense, TrustRegistry};
-use crate::storage::vault::GuardianError;
+use crate::security::trust::TrustRegistry;
 
 use rand::Rng;
 use std::collections::HashMap;
@@ -12,16 +11,17 @@ use tracing::{debug, error, info, span, Level};
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
 use crate::base::types::{ByteCapacity, MeshTopic, PowerState, UnitInterval, VitalityRate};
 use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
+use crate::primitives::time::TrustedClock;
 use crate::security::e2ee::SymmetricKey;
+use crate::security::ingress::IngressOrchestrator;
 use crate::security::sentinel::Sentinel;
 use crate::security::telemetry::{ChaosMode, DiscoverySource, NodeRole, SimEvent};
 use crate::storage::vault::Guardian;
-use crate::primitives::time::TrustedClock;
 
 // INTEGRATING SECURITY GATES
 use crate::security::gate::{ForensicGate, PrivacyGate, WitnessGate};
 
-use crate::primitives::shards::{create_video_shard, Evidence, ShardError, ShardId, StorageSequence, VolleyId};
+use crate::primitives::shards::{create_video_shard, Evidence, ShardId, StorageSequence, VolleyId};
 
 // =========================================================================================
 //  INFRASTRUCTURE: The Harness
@@ -139,7 +139,8 @@ impl SimulationHarness {
             sim_config,
             self.broadcast_channel.clone(),
             self.telemetry_tx.clone(),
-        ).await;
+        )
+        .await;
 
         tokio::spawn(async move {
             actor.run(node_rx).await;
@@ -225,7 +226,7 @@ impl SimNode {
         telemetry_tx: mpsc::Sender<SimEvent>,
     ) -> Self {
         let sentinel = Sentinel::new(&sim_config.config);
-        
+
         let vault_path = format!("sim_vault/{}", sim_config.name);
         let storage = Guardian::new(
             &vault_path,
@@ -236,7 +237,7 @@ impl SimNode {
         let mut trust_config = PhalanxConfig::default();
         trust_config.storage.vault_path = format!("{}_trust", vault_path);
         let trust_registry = TrustRegistry::build(&trust_config).await;
-        
+
         let clock = TrustedClock::new();
 
         Self {
@@ -397,7 +398,10 @@ impl SimNode {
             }
 
             SimEvent::PeerDiscovered { peer, role, .. } => {
-                if peer != self.network_id && role == NodeRole::Stronghold && !self.known_strongholds.contains(&peer) {
+                if peer != self.network_id
+                    && role == NodeRole::Stronghold
+                    && !self.known_strongholds.contains(&peer)
+                {
                     self.known_strongholds.push(peer);
                     debug!("Registered Stronghold: {}", peer);
                 }
@@ -420,87 +424,51 @@ impl SimNode {
         let topic = MeshTopic::new("sim_topic");
         let sender_did = chunk.owner_did.clone();
 
-        // 1. PREEMPTIVE GATING: Verify reputation prior to processing
-        if self.trust_registry.is_blacklisted(&sender_did) {
-            let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
-                attacker: origin,
-                target: self.network_id,
-                reason: format!("Preemptive Gate: Peer {} is blacklisted", sender_did.as_str()),
-            });
-            return; 
-        }
-
-        // GATE ENFORCEMENT: Sentinel Boundary (Reputation/Privacy/Witness)
-        let chunk_result = self.sentinel.process_chunk(
+        let orchestration_result = IngressOrchestrator::process_chunk(
             chunk,
             &topic,
             &self.config,
             &self.identity,
             self.network_id,
-        );
+            &mut self.sentinel,
+            &mut self.storage,
+            &mut self.trust_registry,
+            &self.clock,
+        )
+        .await;
 
-        match chunk_result {
-            Ok(Some(envelope)) => {
-                // GATE ENFORCEMENT: Guardian Boundary (Capacity/Integrity/Forensic)
-                match self.storage.ingest_envelope(envelope) {
-                    Ok(_) => {
-                        let _ = self.telemetry_tx.try_send(SimEvent::ShardProcessed {
-                            peer_id: origin,
-                            byte_size: ByteCapacity(size),
-                        });
+        match orchestration_result {
+            Ok(Some(_finalized_size)) => {
+                let _ = self.telemetry_tx.try_send(SimEvent::ShardProcessed {
+                    peer_id: origin,
+                    byte_size: ByteCapacity(size),
+                });
 
-                        if self.role == NodeRole::Guardian && origin != self.network_id {
+                // GOSSIP VISUALIZATION (Guardian -> Guardian)
+                if self.role == NodeRole::Guardian && origin != self.network_id {
+                    let _ = self.telemetry_tx.try_send(SimEvent::OffloadComplete {
+                        origin,
+                        target: self.network_id,
+                        size: ByteCapacity(size),
+                    });
+                }
+
+                // OFFLOAD LOGIC (Guardian -> Stronghold)
+                if self.role == NodeRole::Guardian {
+                    self.staged_bytes += size;
+                    let threshold = ByteCapacity(4096 * 5);
+
+                    if self.staged_bytes > threshold && !self.known_strongholds.is_empty() {
+                        let target_idx = rand::rng().random_range(0..self.known_strongholds.len());
+
+                        if let Some(target) = self.known_strongholds.get(target_idx).cloned() {
                             let _ = self.telemetry_tx.try_send(SimEvent::OffloadComplete {
-                                origin,
-                                target: self.network_id,
-                                size: ByteCapacity(size),
+                                origin: self.network_id,
+                                target,
+                                size: self.staged_bytes,
                             });
-                        }
 
-                        if self.role == NodeRole::Guardian {
-                            self.staged_bytes += size;
-                            let threshold = ByteCapacity(4096 * 5);
-
-                            if self.staged_bytes > threshold && !self.known_strongholds.is_empty() {
-                                let target_idx =
-                                    rand::rng().random_range(0..self.known_strongholds.len());
-
-                                if let Some(target) =
-                                    self.known_strongholds.get(target_idx).cloned()
-                                {
-                                    let _ = self.telemetry_tx.try_send(SimEvent::OffloadComplete {
-                                        origin: self.network_id,
-                                        target,
-                                        size: self.staged_bytes,
-                                    });
-
-                                    self.staged_bytes = ByteCapacity::default();
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        // 3. GUARDIAN ERROR INTERCEPTION
-                        let mapped_offense = match &e {
-                            GuardianError::InvalidSignature(_) => Some(Offense::InvalidSignature),
-                            GuardianError::ReplayDetected(_) => Some(Offense::ReplayAttack),
-                            GuardianError::QuotaExceeded(_) => Some(Offense::QuotaExceeded),
-                            _ => None,
-                        };
-
-                        if let Some(offense) = mapped_offense {
-                            self.trust_registry
-                                .record_offense(&sender_did, offense, &self.clock)
-                                .await;
-
-                            // Only emit telemetry if the configured offense threshold is breached.
-                            if self.trust_registry.is_blacklisted(&sender_did) {
-                                let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
-                                    attacker: origin,
-                                    target: self.network_id,
-                                    reason: format!("Vault Trust Threshold Breached: {}", e),
-                                });
-                            }
+                            self.staged_bytes = ByteCapacity::default();
                         }
                     }
                 }
@@ -508,28 +476,22 @@ impl SimNode {
             Ok(None) => {
                 // BENIGN: Chunk accepted, but reassembly is ongoing
             }
+            Err(crate::security::ingress::IngressError::Blacklisted(_)) => {
+                let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
+                    attacker: origin,
+                    target: self.network_id,
+                    reason: "Preemptive Gate: Peer is blacklisted".to_string(),
+                });
+            }
             Err(e) => {
-                // 3b. SENTINEL ERROR INTERCEPTION
-                let mapped_offense = match &e {
-                    ShardError::SigningError(_) => Some(Offense::InvalidSignature),
-                    ShardError::CapacityExceeded(_) => Some(Offense::QuotaExceeded),
-                    ShardError::InvalidConfiguration(_) | ShardError::Serialization(_) | ShardError::Encryption(_) => Some(Offense::MalformedPacket),
-                    _ => None,
-                };
-
-                if let Some(offense) = mapped_offense {
-                    self.trust_registry
-                        .record_offense(&sender_did, offense, &self.clock)
-                        .await;
-
-                    // Only emit telemetry if the configured offense threshold is breached.
-                    if self.trust_registry.is_blacklisted(&sender_did) {
-                        let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
-                            attacker: origin,
-                            target: self.network_id,
-                            reason: format!("Sentinel Trust Threshold Breached: {}", e),
-                        });
-                    }
+                // Determine if this specific rejection caused a blacklist threshold breach.
+                // Both SentinelRejected and GuardianRejected variants map to protocol offenses.
+                if self.trust_registry.is_blacklisted(&sender_did) {
+                    let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
+                        attacker: origin,
+                        target: self.network_id,
+                        reason: format!("Trust Threshold Breached: {}", e),
+                    });
                 }
             }
         }

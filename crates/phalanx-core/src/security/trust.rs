@@ -29,12 +29,6 @@ pub enum Offense {
     MalformedPacket,
 }
 
-/// Dependency Inversion boundary.
-/// Allows any component to verify peer standing without knowing internal registry logic.
-pub trait ReputationGate {
-    fn is_blacklisted(&self, did: &Did) -> bool;
-}
-
 /// A user-defined local identifier for a DID (Pet name).
 ///
 /// Constraints:
@@ -359,6 +353,12 @@ impl TrustRegistry {
             .get_mut(did)
             .map(|record| &mut record.reputation)
     }
+}
+
+/// Dependency Inversion boundary.
+/// Allows any component to verify peer standing without knowing internal registry logic.
+pub trait ReputationGate {
+    fn is_blacklisted(&self, did: &Did) -> bool;
 }
 
 impl ReputationGate for TrustRegistry {

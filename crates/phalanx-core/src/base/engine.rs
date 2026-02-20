@@ -7,18 +7,17 @@ use tracing::info;
 
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
 use crate::primitives::identity::{init_identity, Did, IdentityError, NetworkId, PhalanxIdentity};
-use crate::primitives::shards::{
-    AudioShard, Evidence, ShardChunk, ShardId, VideoShard, WitnessEnvelope,
-};
+use crate::primitives::shards::{AudioShard, Evidence, ShardChunk, ShardId, VideoShard};
 use crate::primitives::time::{TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
+use crate::security::ingress::{IngressError, IngressOrchestrator};
 use crate::security::sentinel::Sentinel;
 use crate::security::trust::ReputationGate;
 
 // IMPORT ALL GATES
-use crate::security::gate::{CapacityGate, ForensicGate, IntegrityGate, PrivacyGate, WitnessGate};
+use crate::security::gate::{ForensicGate, PrivacyGate, WitnessGate};
 use crate::storage::strategies::ShardAmalgam;
-use crate::storage::vault::{Guardian, GuardianError};
+use crate::storage::vault::Guardian;
 use crate::{PhalanxBehaviour, PhalanxEvent};
 
 pub use libp2p::pnet::PreSharedKey;
@@ -68,7 +67,7 @@ impl PhalanxEngine {
 
         let local_peer_id = network_keypair.public().to_peer_id();
         let local_did = Did::from(local_peer_id.to_string());
-        
+
         // Data boundaries
         let sentinel = Sentinel::new(&config);
         let guardian = Guardian::new(&config.storage.vault_path, &config, local_did);
@@ -127,7 +126,10 @@ impl PhalanxEngine {
         let local_peer_id = *self.swarm.local_peer_id();
         let local_network_id = NetworkId::from(local_peer_id);
 
-        info!("Phalanx Engine: Active and Gated. PeerID: {}", local_peer_id);
+        info!(
+            "Phalanx Engine: Active and Gated. PeerID: {}",
+            local_peer_id
+        );
 
         loop {
             tokio::select! {
@@ -136,18 +138,19 @@ impl PhalanxEngine {
                     if let SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(
                         libp2p::gossipsub::Event::Message { propagation_source: peer, message, .. }
                     )) = event {
-                        self.handle_network_ingress(NetworkId::from(peer), &message.data, local_network_id.clone()).await;
+                        let topic = crate::base::types::MeshTopic::new(message.topic.as_str());
+                        self.handle_network_ingress(peer, &message.data, topic).await;
                     }
                 }
-                
+
                 // Pipeline 2: Video Sensor Egress -> Network
                 Some(shard) = self.video_rx.recv() => {
-                    self.process_media_egress(Evidence::Video(shard), local_network_id.clone());
+                    self.process_media_egress(Evidence::Video(shard), local_network_id);
                 }
 
                 // Pipeline 3: Audio Sensor Egress -> Network
                 Some(shard) = self.audio_rx.recv() => {
-                    self.process_media_egress(Evidence::Audio(shard), local_network_id.clone());
+                    self.process_media_egress(Evidence::Audio(shard), local_network_id);
                 }
             }
         }
@@ -156,95 +159,55 @@ impl PhalanxEngine {
     // =========================================================================
     // INGRESS PIPELINE
     // =========================================================================
-    async fn handle_network_ingress(&mut self, peer_id: NetworkId, data: &[u8], local_network_id: NetworkId) {
-        tracing::info!(%peer_id, "Received raw network bytes");
-        // 1. Forensic Gate: Strict ShardChunk Deserialization
-        let chunk = match postcard::from_bytes::<ShardChunk>(data)
-            .gate("deserialization_err", &local_network_id, "Malformed wire packet")
-        {
+    async fn handle_network_ingress(
+        &mut self,
+        peer_id: libp2p::PeerId,
+        chunk_bytes: &[u8],
+        topic: crate::base::types::MeshTopic,
+    ) {
+        let chunk: ShardChunk = match postcard::from_bytes(chunk_bytes) {
             Ok(c) => c,
-            Err(_) => return,
+            Err(e) => {
+                tracing::debug!(error = %e, "Failed to deserialize ingress chunk");
+                return;
+            }
         };
 
-        let owner_did = chunk.owner_did.clone();
-        tracing::info!(%owner_did, "Successfully deserialized ShardChunk");
-        // 2. Preemptive Reputation Gate (Vampire Defense)
-        if self.trust_registry.is_blacklisted(&owner_did) {
-            tracing::info!(
-                event = "AttackAttemptBlocked",
-                attacker = %peer_id,
-                target = %local_network_id,
-                reason = "Peer is blacklisted"
-            );
-            return;
-        }
+        let sender_did = chunk.owner_did.clone();
+        let local_network_id = NetworkId::from(*self.swarm.local_peer_id());
 
-        // 3. Transient Reassembly via Sentinel
-        let topic = &self.config.network.video_topic; // Route dynamically if topics split
-        let sentinel_result = self.sentinel.process_chunk(
+        let orchestration_result = IngressOrchestrator::process_chunk(
             chunk,
-            topic,
+            &topic,
             &self.config,
             &self.identity,
-            local_network_id.clone(),
-        );
+            local_network_id,
+            &mut self.sentinel,
+            &mut self.guardian,
+            &mut self.trust_registry,
+            &self.clock,
+        )
+        .await;
 
-
-        match sentinel_result {
-            Ok(Some(envelope)) => {
-                self.process_assembled_envelope(peer_id, local_network_id, envelope).await;
+        match orchestration_result {
+            Ok(Some(_size)) => {
+                // Data finalized successfully. Emit production metrics.
             }
-            Ok(None) => {} // Assembly in progress
-            Err(e) => tracing::error!(error = %e, "Sentinel chunk processing failure"),
-        }
-    }
-
-    async fn process_assembled_envelope(&mut self, peer_id: NetworkId, local_network_id: NetworkId, envelope: WitnessEnvelope) {
-        let owner_did = envelope.did.clone();
-
-        // 4. Capacity & Integrity Gates
-        match envelope
-            .check_capacity(&peer_id, 0, 1024 * 1024 * 50)
-            .and_then(|env| env.check_integrity(&local_network_id, &self.clock, 10))
-        {
-            Ok(verified_env) => {
-                // 5. Persistent Storage Delegation
-                if let Err(e) = self.guardian.ingest_envelope(verified_env) {
-                    tracing::error!(event = "vault_write_err", error = %e, "Failed to persist foreign evidence");
-
-                    // Penalize Logic Hacks (e.g. Replay Attacks)
-                    if matches!(e, GuardianError::ReplayDetected(_)) {
-                        self.trust_registry
-                            .record_offense(&owner_did, crate::security::trust::Offense::ReplayAttack, &self.clock)
-                            .await;
-
-                        tracing::warn!(
-                            event = "AttackAttemptBlocked",
-                            attacker = %peer_id,
-                            target = %local_network_id,
-                            reason = "Replay attack detected"
-                        );
-                    }
-                }
+            Ok(None) => {
+                // Data buffered during reassembly.
+            }
+            Err(IngressError::Blacklisted(did)) => {
+                // Drop the libp2p connection immediately
+                let _ = self.swarm.disconnect_peer_id(peer_id);
+                tracing::warn!(%did, "Dropped connection from blacklisted peer.");
             }
             Err(e) => {
-                tracing::warn!(event = "verification_failure", error = %e, "Envelope failed security gates");
-
-                let was_blacklisted = self.trust_registry.is_blacklisted(&owner_did);
-
-                // Penalize Cryptographic Failures
-                self.trust_registry
-                    .record_offense(&owner_did, crate::security::trust::Offense::InvalidSignature, &self.clock)
-                    .await;
-
-                // Ensure the test harness receives telemetry immediately upon threshold breach
-                if !was_blacklisted && self.trust_registry.is_blacklisted(&owner_did) {
-                    tracing::warn!(
-                        event = "AttackAttemptBlocked",
-                        attacker = %peer_id,
-                        target = %local_network_id,
-                        reason = "Cryptographic failure threshold exceeded"
-                    );
+                // If a threshold was crossed, drop the physical connection
+                if self.trust_registry.is_blacklisted(&sender_did) {
+                    let _ = self.swarm.disconnect_peer_id(peer_id);
+                    tracing::warn!(%sender_did, error = %e, "Peer blacklisted due to protocol offense.");
+                } else {
+                    tracing::debug!(error = %e, "Ingress rejected.");
                 }
             }
         }
@@ -259,14 +222,22 @@ impl PhalanxEngine {
 
         let chunks_result = evidence
             .safeguard(&self.network_key) // 1. Privacy Gate
-            .and_then(|ev| ev.seal(&self.identity, local_network_id.clone())) // 2. Witness Gate
+            .and_then(|ev| ev.seal(&self.identity, local_network_id)) // 2. Witness Gate
             .and_then(|env| env.chunkify(shard_id)) // 3. Discretization
-            .gate("evidence_pipeline_failure", &local_network_id, "Ingestion pipeline dropped evidence unit");
+            .gate(
+                "evidence_pipeline_failure",
+                &local_network_id,
+                "Ingestion pipeline dropped evidence unit",
+            );
 
         if let Ok(chunks) = chunks_result {
             for chunk in chunks {
                 if let Ok(data) = postcard::to_stdvec(&chunk) {
-                    let _ = self.swarm.behaviour_mut().gossipsub.publish(topic.clone(), data);
+                    let _ = self
+                        .swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .publish(topic.clone(), data);
                 }
             }
             self.seq_counter += 1;
