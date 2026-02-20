@@ -16,7 +16,7 @@ use phalanx_core::storage::vault::{Guardian, NodeMode};
 // Helper to init logging for tests
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter("phalanx=debug,info,warn,error")
+        .with_env_filter("phalanx=info,warn,error")
         .try_init();
 }
 

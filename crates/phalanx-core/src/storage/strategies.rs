@@ -169,7 +169,7 @@ impl Mold for VolleyAmalgam {
         info!(id = %acc.volley_id, "VolleyAmalgam: Assembly SUCCESS");
 
         Some(Volley {
-            id: acc.volley_id.into(),
+            id: acc.volley_id,
             owner_did: acc.owner_did.to_string(),
             artifacts: sorted_artifacts,
             gaps,
