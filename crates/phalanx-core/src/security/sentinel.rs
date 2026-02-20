@@ -280,12 +280,119 @@ impl Sentinel {
             active
         });
     }
+
+    /// Internal method strictly for WAL replay. Bypasses the Governor and WAL append.
+    pub fn replay_chunk(
+        &mut self,
+        chunk: ShardChunk,
+        config: &PhalanxConfig,
+        identity: &PhalanxIdentity,
+        local_peer_id: NetworkId,
+    ) -> Result<Option<WitnessEnvelope>, ShardError> {
+        let is_video = chunk.chunk_type == ChunkType::Witnessed; // Adjust based on your topic/type mapping
+
+        let (buffers, capacity_limit) = if is_video {
+            (&mut self.video_buffers, config.storage.max_video_buffer)
+        } else {
+            (&mut self.audio_buffers, config.storage.max_audio_buffer)
+        };
+
+        let shard_id = chunk.shard_id;
+
+        // Capacity Gate (OOM Defense)
+        buffers.enforce_capacity_limit(&shard_id, capacity_limit)?;
+
+        let buffer = buffers
+            .entry(shard_id)
+            .or_insert_with(|| ReassemblyBuffer::new(chunk.total_chunks as usize));
+
+        buffer.last_activity = Instant::now();
+        if chunk.chunk_index < chunk.total_chunks {
+            buffer.chunks[chunk.chunk_index as usize] = Some(chunk.data);
+        }
+
+        if buffer.is_complete() {
+            let reassembled_raw_data = buffer.assemble();
+            buffers.remove(&shard_id);
+
+            match chunk.chunk_type {
+                ChunkType::Witnessed => {
+                    postcard::from_bytes::<WitnessEnvelope>(&reassembled_raw_data)
+                        .map(Some)
+                        .map_err(|err| ShardError::Serialization(err.to_string()))
+                }
+                ChunkType::ForensicUnit => {
+                    let evidence = if is_video {
+                        postcard::from_bytes::<VideoShard>(&reassembled_raw_data)
+                            .map(Evidence::Video)
+                            .map_err(|err| ShardError::Serialization(err.to_string()))?
+                    } else {
+                        postcard::from_bytes::<AudioShard>(&reassembled_raw_data)
+                            .map(Evidence::Audio)
+                            .map_err(|err| ShardError::Serialization(err.to_string()))?
+                    };
+
+                    WitnessEnvelope::new(evidence, identity, local_peer_id).map(Some)
+                }
+            }
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(test)]
-mod leaf_mode_tests {
+mod tests {
     use super::*;
     use std::error::Error;
+
+    #[test]
+    fn test_sentinel_replay_chunk_reassembly() {
+        let (identity, _) = PhalanxIdentity::generate().unwrap();
+        let config = PhalanxConfig::default();
+        let mut sentinel = Sentinel::new(&config);
+        let local_peer = identity.to_network_id();
+
+        // Create two halves of a Shard
+        let chunk_1 = ShardChunk {
+            shard_id: ShardId(99),
+            chunk_index: 0,
+            total_chunks: 2,
+            data: vec![1, 2, 3],
+            owner_did: identity.did.clone(),
+            chunk_type: ChunkType::Witnessed,
+        };
+
+        let chunk_2 = ShardChunk {
+            shard_id: ShardId(99),
+            chunk_index: 1,
+            total_chunks: 2,
+            data: vec![4, 5, 6],
+            owner_did: identity.did.clone(),
+            chunk_type: ChunkType::Witnessed,
+        };
+
+        // Replay Chunk 1 - Should buffer and return Ok(None)
+        let result_1 = sentinel
+            .replay_chunk(chunk_1, &config, &identity, local_peer.clone())
+            .unwrap();
+        assert!(
+            result_1.is_none(),
+            "First chunk should not trigger assembly"
+        );
+        assert_eq!(sentinel.video_buffers.len(), 1, "Buffer should be created");
+
+        // Replay Chunk 2 - Should complete assembly, clear buffer, return Envelope
+        let result_2 = sentinel
+            .replay_chunk(chunk_2, &config, &identity, local_peer)
+            .unwrap();
+        assert!(result_2.is_some(), "Second chunk should trigger assembly");
+        assert_eq!(
+            sentinel.video_buffers.len(),
+            0,
+            "Buffer should be cleared after assembly"
+        );
+    }
 
     #[tokio::test]
     async fn test_sentinel_leaf_mode_filtering() -> Result<(), Box<dyn Error>> {

@@ -383,6 +383,12 @@ impl PhalanxIdentity {
 
         Err(IdentityError::Corruption("Unknown identity format".into()))
     }
+
+    #[must_use]
+    pub fn to_network_id(&self) -> NetworkId {
+        let libp2p_key = self.to_libp2p_keypair();
+        NetworkId(libp2p_key.public().to_peer_id())
+    }
 }
 
 impl Default for PhalanxIdentity {
@@ -422,6 +428,24 @@ mod tests {
         assert!(!identity.did.0.starts_with("did:key:"));
         assert!(identity.did.0.len() > 40);
         assert_eq!(identity.version, IDENTITY_VERSION);
+    }
+
+    #[test]
+    fn test_network_id_derivation() {
+        // Generate a fresh identity
+        let (identity, _) = PhalanxIdentity::generate().expect("Failed to generate identity");
+
+        // Derive the NetworkId using our encapsulated method
+        let network_id = identity.to_network_id();
+
+        // Manually derive the PeerId to cross-check
+        let expected_peer_id = identity.to_libp2p_keypair().public().to_peer_id();
+
+        // Ensure they mathematically match
+        assert_eq!(
+            network_id.0, expected_peer_id,
+            "The derived NetworkId does not match the authoritative libp2p PeerId."
+        );
     }
 
     #[test]

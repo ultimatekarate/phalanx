@@ -40,10 +40,11 @@ pub enum ShardError {
     #[error("Disk I/O failed: {0}")]
     Io(#[from] std::io::Error),
 }
-
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReassemblyBuffer {
     pub chunks: Vec<Option<Vec<u8>>>,
     pub total_chunks: usize,
+    #[serde(skip, default = "tokio::time::Instant::now")]
     pub last_activity: tokio::time::Instant,
 }
 
