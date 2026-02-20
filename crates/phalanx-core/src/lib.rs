@@ -19,6 +19,7 @@ pub mod primitives {
 pub mod storage {
     pub mod crucible;
     pub mod kademlia;
+    pub mod reassembler;
     pub mod strategies;
     pub mod vault;
 }
@@ -35,7 +36,7 @@ pub mod security {
     pub mod grant;
     pub mod ingress;
     pub mod locator;
-    pub mod sentinel;
+
     pub mod telemetry;
     pub mod trust;
 }

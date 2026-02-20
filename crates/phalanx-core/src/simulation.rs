@@ -14,8 +14,8 @@ use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
 use crate::primitives::time::TrustedClock;
 use crate::security::e2ee::SymmetricKey;
 use crate::security::ingress::IngressOrchestrator;
-use crate::security::sentinel::Sentinel;
 use crate::security::telemetry::{ChaosMode, DiscoverySource, NodeRole, SimEvent};
+use crate::storage::reassembler::Reassembler;
 use crate::storage::vault::Guardian;
 
 // INTEGRATING SECURITY GATES
@@ -198,7 +198,7 @@ struct SimNode {
     network_id: NetworkId,
     role: NodeRole,
 
-    sentinel: Sentinel,
+    reassembler: Reassembler,
     storage: Guardian,
     config: PhalanxConfig,
     physics: PhalanxPhysics,
@@ -225,7 +225,7 @@ impl SimNode {
         broadcast_tx: mpsc::Sender<(Did, NetworkId, SimEvent)>,
         telemetry_tx: mpsc::Sender<SimEvent>,
     ) -> Self {
-        let sentinel = Sentinel::new(&sim_config.config);
+        let reassembler = Reassembler::new(&sim_config.config);
 
         let vault_path = format!("sim_vault/{}", sim_config.name);
         let storage = Guardian::new(
@@ -247,7 +247,7 @@ impl SimNode {
             role: sim_config.role,
             config: sim_config.config,
             physics: sim_config.physics,
-            sentinel,
+            reassembler,
             storage,
             chaos_mode: ChaosMode::Stable,
             known_strongholds: Vec::new(),
@@ -282,7 +282,7 @@ impl SimNode {
                     }
                 }
                 _ = cleanup_tick.tick() => {
-                    self.sentinel.prune_stale_buffers(&self.config, &self.physics);
+                    self.reassembler.prune_stale_buffers(&self.config, &self.physics);
                     self.storage.archive_stale_sessions(self.physics.shard_timeout());
                 }
                 Some(event) = rx.recv() => {
@@ -433,7 +433,7 @@ impl SimNode {
         };
 
         let mut pipeline = crate::security::ingress::SecurityPipeline {
-            sentinel: &mut self.sentinel,
+            reassembler: &mut self.reassembler,
             guardian: &mut self.storage,
             trust_registry: &mut self.trust_registry,
         };

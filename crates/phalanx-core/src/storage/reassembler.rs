@@ -87,10 +87,10 @@ pub struct ControlMessage {
 }
 
 // =====================
-// SENTINEL CORE
+// REASSEMBLER CORE
 // =====================
 
-pub struct Sentinel {
+pub struct Reassembler {
     pub governor: TrafficGovernor,
     pub video_buffers: HashMap<ShardId, ReassemblyBuffer>,
     pub audio_buffers: HashMap<ShardId, ReassemblyBuffer>,
@@ -100,7 +100,7 @@ pub struct Sentinel {
     pub battery_level: UnitInterval,
 }
 
-impl Sentinel {
+impl Reassembler {
     #[must_use]
     pub fn new(_config: &PhalanxConfig) -> Self {
         Self {
@@ -146,7 +146,7 @@ impl Sentinel {
 
     pub fn set_power_state(&mut self, state: PowerState) {
         if self.power_state != state {
-            warn!(new_state = ?state, "Sentinel power state transition");
+            warn!(new_state = ?state, "Reassembler power state transition");
             self.power_state = state;
 
             self.governor.set_state(state);
@@ -346,19 +346,44 @@ mod tests {
     use super::*;
     use std::error::Error;
 
-    #[test]
-    fn test_sentinel_replay_chunk_reassembly() {
+    use crate::primitives::time::PhalanxTimestamp;
+    use crate::primitives::shards::{VolleyId, DataPayload, StorageSequence};
+
+#[tokio::test]
+    async fn test_reassembler_replay_chunk_reassembly() {
         let (identity, _) = PhalanxIdentity::generate().unwrap();
         let config = PhalanxConfig::default();
-        let mut sentinel = Sentinel::new(&config);
+        let mut reassembler = Reassembler::new(&config);
         let local_peer = identity.to_network_id();
 
-        // Create two halves of a Shard
+        // 1. Create a valid, fully-populated VideoShard
+        let evidence = Evidence::Video(VideoShard {
+            timestamp: PhalanxTimestamp::now(), 
+            sequence_id: StorageSequence(1),
+            fps: 30,
+            volley_id: VolleyId::new("id"), // Or VolleyId(0)
+            payload:DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        });
+
+        // 2. Wrap in an envelope and sign it (This provides valid bytes for postcard)
+        let original_envelope = WitnessEnvelope::new(
+            evidence, 
+            &identity, 
+            local_peer.clone()
+        ).expect("Failed to sign envelope");
+        
+        let serialized_envelope = postcard::to_stdvec(&original_envelope)
+            .expect("Failed to serialize envelope");
+        
+        // 3. Shard the serialized bytes into two halves
+        let mid = serialized_envelope.len() / 2;
+        let (part1, part2) = serialized_envelope.split_at(mid);
+
         let chunk_1 = ShardChunk {
             shard_id: ShardId(99),
             chunk_index: 0,
             total_chunks: 2,
-            data: vec![1, 2, 3],
+            data: part1.to_vec(),
             owner_did: identity.did.clone(),
             chunk_type: ChunkType::Witnessed,
         };
@@ -367,42 +392,35 @@ mod tests {
             shard_id: ShardId(99),
             chunk_index: 1,
             total_chunks: 2,
-            data: vec![4, 5, 6],
+            data: part2.to_vec(),
             owner_did: identity.did.clone(),
             chunk_type: ChunkType::Witnessed,
         };
 
-        // Replay Chunk 1 - Should buffer and return Ok(None)
-        let result_1 = sentinel
-            .replay_chunk(chunk_1, &config, &identity, local_peer.clone())
-            .unwrap();
-        assert!(
-            result_1.is_none(),
-            "First chunk should not trigger assembly"
-        );
-        assert_eq!(sentinel.video_buffers.len(), 1, "Buffer should be created");
+        // 4. Execute Replay Flow
+        let result_1 = reassembler.replay_chunk(chunk_1, &config, &identity, local_peer.clone()).unwrap();
+        assert!(result_1.is_none(), "Buffer should be pending after first chunk");
 
-        // Replay Chunk 2 - Should complete assembly, clear buffer, return Envelope
-        let result_2 = sentinel
-            .replay_chunk(chunk_2, &config, &identity, local_peer)
-            .unwrap();
-        assert!(result_2.is_some(), "Second chunk should trigger assembly");
-        assert_eq!(
-            sentinel.video_buffers.len(),
-            0,
-            "Buffer should be cleared after assembly"
-        );
+        let result_2 = reassembler.replay_chunk(chunk_2, &config, &identity, local_peer).unwrap();
+        
+        // 5. Final Verification
+        assert!(result_2.is_some(), "Reassembly should be complete");
+        let recovered_envelope = result_2.unwrap();
+        
+        // Assert cryptographic integrity survived the sharding/replay process
+        assert_eq!(recovered_envelope.witness_signature, original_envelope.witness_signature);
+        assert_eq!(reassembler.video_buffers.len(), 0, "Memory leak: Buffer not cleared");
     }
 
     #[tokio::test]
-    async fn test_sentinel_leaf_mode_filtering() -> Result<(), Box<dyn Error>> {
+    async fn test_reassembler_leaf_mode_filtering() -> Result<(), Box<dyn Error>> {
         let (identity, _) = PhalanxIdentity::generate()?;
         let (stranger, _) = PhalanxIdentity::generate()?;
         let config = PhalanxConfig::default();
         let local_peer = NetworkId::random();
 
-        let mut sentinel = Sentinel::new(&config);
-        sentinel.set_power_state(PowerState::Leaf);
+        let mut reassembler = Reassembler::new(&config);
+        reassembler.set_power_state(PowerState::Leaf);
 
         // 1. Foreign chunk (labeled as Witnessed/Relayed)
         let foreign_chunk = ShardChunk {
@@ -425,7 +443,7 @@ mod tests {
         };
 
         // 3. Process Foreign
-        let _ = sentinel
+        let _ = reassembler
             .process_chunk(
                 foreign_chunk,
                 &config.network.video_topic,
@@ -436,13 +454,13 @@ mod tests {
             .await?;
 
         assert_eq!(
-            sentinel.video_buffers.len(),
+            reassembler.video_buffers.len(),
             0,
-            "Sentinel leaked foreign data in Leaf Mode"
+            "Reassembler leaked foreign data in Leaf Mode"
         );
 
         // 4. Process Local
-        let _ = sentinel
+        let _ = reassembler
             .process_chunk(
                 local_chunk,
                 &config.network.video_topic,
@@ -453,9 +471,9 @@ mod tests {
             .await?;
 
         assert_eq!(
-            sentinel.video_buffers.len(),
+            reassembler.video_buffers.len(),
             1,
-            "Sentinel failed to process local data in Leaf Mode"
+            "Reassembler failed to process local data in Leaf Mode"
         );
 
         Ok(())

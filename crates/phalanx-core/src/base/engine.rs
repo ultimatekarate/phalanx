@@ -13,8 +13,8 @@ use crate::security::e2ee::SymmetricKey;
 use crate::security::ingress::{
     IngressContext, IngressError, IngressOrchestrator, SecurityPipeline,
 };
-use crate::security::sentinel::Sentinel;
 use crate::security::trust::ReputationGate;
+use crate::storage::reassembler::Reassembler;
 
 // IMPORT ALL GATES
 use crate::security::gate::{ForensicGate, PrivacyGate, WitnessGate};
@@ -46,7 +46,7 @@ pub struct PhalanxEngine {
     swarm: Swarm<PhalanxBehaviour>,
     #[allow(dead_code)]
     crucible: crate::storage::crucible::Crucible<ShardAmalgam>,
-    sentinel: Sentinel,
+    reassembler: Reassembler,
     guardian: Guardian,
     trust_registry: crate::security::trust::TrustRegistry,
     video_rx: mpsc::Receiver<VideoShard>,
@@ -71,7 +71,7 @@ impl PhalanxEngine {
         let local_did = Did::from(local_peer_id.to_string());
 
         // Data boundaries
-        let sentinel = Sentinel::new(&config);
+        let reassembler = Reassembler::new(&config);
         let guardian = Guardian::new(&config.storage.vault_path, &config, local_did);
 
         // Network
@@ -103,7 +103,7 @@ impl PhalanxEngine {
             clock,
             swarm,
             crucible: crate::storage::crucible::Crucible::new(),
-            sentinel,
+            reassembler,
             guardian,
             trust_registry,
             video_rx,
@@ -135,7 +135,7 @@ impl PhalanxEngine {
 
         loop {
             tokio::select! {
-                // Pipeline 1: Network Ingress -> Sentinel -> Guardian
+                // Pipeline 1: Network Ingress -> Reassembler -> Guardian
                 event = self.swarm.select_next_some() => {
                     if let SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(
                         libp2p::gossipsub::Event::Message { propagation_source: peer, message, .. }
@@ -187,7 +187,7 @@ impl PhalanxEngine {
         };
 
         let mut pipeline = SecurityPipeline {
-            sentinel: &mut self.sentinel,
+            reassembler: &mut self.reassembler,
             guardian: &mut self.guardian,
             trust_registry: &mut self.trust_registry,
         };

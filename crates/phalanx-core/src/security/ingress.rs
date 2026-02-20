@@ -3,8 +3,8 @@ use crate::base::types::MeshTopic;
 use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
 use crate::primitives::shards::{ShardChunk, ShardError};
 use crate::primitives::time::TrustedClock;
-use crate::security::sentinel::Sentinel;
 use crate::security::trust::{Offense, ReputationGate, TrustRegistry};
+use crate::storage::reassembler::Reassembler;
 use crate::storage::vault::{Guardian, GuardianError};
 
 pub struct IngressContext<'a> {
@@ -15,7 +15,7 @@ pub struct IngressContext<'a> {
 }
 
 pub struct SecurityPipeline<'a> {
-    pub sentinel: &'a mut Sentinel,
+    pub reassembler: &'a mut Reassembler,
     pub guardian: &'a mut Guardian,
     pub trust_registry: &'a mut TrustRegistry,
 }
@@ -52,7 +52,7 @@ impl IngressOrchestrator {
 
         // 2. Transient Validation (Sentinel)
         match pipeline
-            .sentinel
+            .reassembler
             .process_chunk(chunk, topic, ctx.config, ctx.identity, ctx.network_id)
             .await
         {

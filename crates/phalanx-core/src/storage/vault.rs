@@ -761,18 +761,18 @@ mod tests {
 
     use crate::base::types::PowerState;
     use crate::primitives::shards::{ChunkType, ShardId};
-    use crate::security::sentinel::Sentinel;
+    use crate::storage::reassembler::Reassembler;
     use std::error::Error;
 
     #[tokio::test]
-    async fn test_sentinel_leaf_mode_filtering() -> Result<(), Box<dyn Error>> {
+    async fn test_reassembler_leaf_mode_filtering() -> Result<(), Box<dyn Error>> {
         let (identity, _) = PhalanxIdentity::generate()?;
         let (stranger, _) = PhalanxIdentity::generate()?;
         let config = PhalanxConfig::default();
         let local_peer = NetworkId::random();
 
-        let mut sentinel = Sentinel::new(&config);
-        sentinel.set_power_state(PowerState::Leaf);
+        let mut reassembler = Reassembler::new(&config);
+        reassembler.set_power_state(PowerState::Leaf);
 
         let foreign_chunk = ShardChunk {
             shard_id: ShardId(1),
@@ -792,7 +792,7 @@ mod tests {
             chunk_type: ChunkType::ForensicUnit,
         };
 
-        let _ = sentinel
+        let _ = reassembler
             .process_chunk(
                 foreign_chunk,
                 &config.network.video_topic,
@@ -803,12 +803,12 @@ mod tests {
             .await?;
 
         assert_eq!(
-            sentinel.video_buffers.len(),
+            reassembler.video_buffers.len(),
             0,
-            "Sentinel leaked foreign data in Leaf Mode"
+            "Reassembler leaked foreign data in Leaf Mode"
         );
 
-        let _ = sentinel
+        let _ = reassembler
             .process_chunk(
                 local_chunk,
                 &config.network.video_topic,
@@ -819,9 +819,9 @@ mod tests {
             .await?;
 
         assert_eq!(
-            sentinel.video_buffers.len(),
+            reassembler.video_buffers.len(),
             1,
-            "Sentinel failed to process local data in Leaf Mode"
+            "Reassembler failed to process local data in Leaf Mode"
         );
 
         Ok(())

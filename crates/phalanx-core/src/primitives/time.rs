@@ -54,6 +54,15 @@ impl PhalanxTimestamp {
         self.0
     }
 
+    pub fn now() -> Self {
+        let duration = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("System clock is set before 1970");
+
+        // Phalanx uses milliseconds for high-resolution forensic markers
+        Self::from_u64(duration.as_millis() as u64)
+    }
+
     /// Strict validation for LIVE traffic.
     ///  
     /// Call this immediately after receiving a packet from the network

@@ -1,4 +1,3 @@
-use phalanx_core::security::sentinel::HealthTracker;
 use std::error::Error;
 use std::path::Path;
 use std::pin::Pin;
@@ -18,12 +17,11 @@ use phalanx_core::{
     },
     primitives::identity::{NetworkId, PhalanxIdentity},
     primitives::shards::{ShardChunk, ShardError},
-    security::{
-        gate::ForensicGate,
-        sentinel::{ControlMessage, Sentinel},
-        telemetry,
+    security::{gate::ForensicGate, telemetry},
+    storage::{
+        reassembler::{ControlMessage, HealthTracker, Reassembler},
+        vault::Guardian,
     },
-    storage::vault::Guardian,
     transport::swarm::{get_storage_key, load_swarm_key, setup_phalanx_swarm},
     PhalanxEvent,
 };
@@ -87,7 +85,7 @@ impl StrongholdEngine {
         let actor_load_metric = Arc::clone(&storage_load);
 
         let storage_actor = StorageActor {
-            sentinel: Sentinel::new(&config),
+            reassembler: Reassembler::new(&config),
             storage: Guardian::new(&config.storage.vault_path, &config, identity.did.clone()),
             config: config.clone(),
             identity: identity.clone(),
@@ -277,7 +275,7 @@ impl StrongholdEngine {
                 &local_peer,
                 "Malformed heartbeat",
             ) {
-                // NOTE: If Sentinel was moved to StorageActor, update this to `self.health_tracker`
+                // NOTE: If Reassembler was moved to StorageActor, update this to `self.health_tracker`
                 self.health_tracker.register_activity(msg);
             }
 
@@ -299,7 +297,7 @@ impl StrongholdEngine {
         };
 
         // 2. Storage Actor Boundary (Non-Blocking Dispatch)
-        // Replaces the asynchronous Sentinel and Guardian processing, routing the data
+        // Replaces the asynchronous Reassembler and Guardian processing, routing the data
         // to the dedicated disk I/O Tokio task.
         if let Err(err) = self.chunk_tx.try_send((chunk, topic, local_peer)) {
             tracing::error!(
@@ -351,7 +349,7 @@ impl StrongholdEngine {
 }
 
 pub struct StorageActor {
-    pub sentinel: Sentinel,
+    pub reassembler: Reassembler,
     pub storage: Guardian,
     pub config: PhalanxConfig,
     pub identity: PhalanxIdentity,
@@ -375,7 +373,7 @@ impl StorageActor {
             tokio::select! {
                 // --- EVENT: INCOMING DATA SHARD ---
                 Some((chunk, topic, peer_id)) = self.chunk_rx.recv() => {
-                    let envelope_opt = match self.sentinel.process_chunk(
+                    let envelope_opt = match self.reassembler.process_chunk(
                         chunk,
                         &topic,
                         &self.config,
@@ -384,7 +382,7 @@ impl StorageActor {
                     ).await {
                         Ok(env) => env,
                         Err(err) => {
-                            tracing::warn!(error = %err, "Sentinel rejected data chunk");
+                            tracing::warn!(error = %err, "Reassembler rejected data chunk");
                             continue;
                         }
                     };
@@ -404,7 +402,7 @@ impl StorageActor {
                 // --- EVENT: PERIODIC MAINTENANCE ---
                 _ = maintenance_timer.tick() => {
                     // 1. Prune partial reassembly buffers that timed out
-                    self.sentinel.prune_stale_buffers(&self.config, &self.physics);
+                    self.reassembler.prune_stale_buffers(&self.config, &self.physics);
 
                     // 2. Archive completed sessions from WAL to Cold Storage
                     self.storage.archive_stale_sessions(
@@ -422,8 +420,8 @@ impl StorageActor {
 
     /// Executes the Boot-Time Replay Sequence.
     pub async fn restore_state(&mut self) -> Result<(), ShardError> {
-        // 1. Snapshot Restoration (Omitted for brevity; load crucible_state.bin and map to self.sentinel.buffers if utilized)
-        // If crucible_state.bin exists, read bytes, deserialize, and assign to Sentinel.
+        // 1. Snapshot Restoration (Omitted for brevity; load crucible_state.bin and map to self.reassembler.buffers if utilized)
+        // If crucible_state.bin exists, read bytes, deserialize, and assign to Reassembler.
 
         // 2. WAL Replay
         let mut wal_file = match tokio::fs::File::open("crucible_wal.bin").await {
@@ -452,7 +450,7 @@ impl StorageActor {
 
             if let Ok(chunk) = postcard::from_bytes::<ShardChunk>(&payload) {
                 // CORRECTED: Use the injected local_peer_id
-                if let Ok(Some(envelope)) = self.sentinel.replay_chunk(
+                if let Ok(Some(envelope)) = self.reassembler.replay_chunk(
                     chunk,
                     &self.config,
                     &self.identity,
@@ -472,7 +470,7 @@ impl StorageActor {
     pub async fn snapshot_state(&mut self) -> Result<(), ShardError> {
         // 1. Serialize State
         // (Assuming you define a wrapper struct for the buffers or serialize them individually)
-        // let state_bytes = postcard::to_allocvec(&self.sentinel.get_serializable_state())?;
+        // let state_bytes = postcard::to_allocvec(&self.reassembler.get_serializable_state())?;
 
         // Example atomic write placeholder
         let state_bytes: Vec<u8> = vec![]; // Replace with actual buffer serialization
@@ -566,7 +564,7 @@ mod actor_tests {
         let actor_load_metric = Arc::clone(&storage_load);
 
         let storage_actor = StorageActor {
-            sentinel: Sentinel::new(&config),
+            reassembler: Reassembler::new(&config),
             storage: Guardian::new("test_vault_metrics", &config, identity.did.clone()),
             config: config.clone(),
             identity: identity.clone(),
@@ -602,7 +600,7 @@ mod actor_tests {
         // Yield to allow actor to process the chunk and update the atomic metric
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // The Sentinel should have processed it, passed it to Guardian, and updated the metric.
+        // The Reassembler should have processed it, passed it to Guardian, and updated the metric.
         // Even if Guardian rejects a malformed payload, the actor run loop should have advanced
         // and called `store` on the atomic variable.
 
