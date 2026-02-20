@@ -7,6 +7,19 @@ use crate::security::sentinel::Sentinel;
 use crate::security::trust::{Offense, ReputationGate, TrustRegistry};
 use crate::storage::vault::{Guardian, GuardianError};
 
+pub struct IngressContext<'a> {
+    pub config: &'a PhalanxConfig,
+    pub identity: &'a PhalanxIdentity,
+    pub network_id: NetworkId,
+    pub clock: &'a TrustedClock,
+}
+
+pub struct SecurityPipeline<'a> {
+    pub sentinel: &'a mut Sentinel,
+    pub guardian: &'a mut Guardian,
+    pub trust_registry: &'a mut TrustRegistry,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum IngressError {
     #[error("Peer is blacklisted: {0}")]
@@ -23,31 +36,31 @@ pub struct IngressOrchestrator;
 
 impl IngressOrchestrator {
     /// Unifies the ingress pipeline for both PhalanxEngine and SimNode.
-    /// Intercepts stateless errors, maps them to offenses, and mutates the TrustRegistry.
     pub async fn process_chunk(
         chunk: ShardChunk,
         topic: &MeshTopic,
-        config: &PhalanxConfig,
-        identity: &PhalanxIdentity,
-        local_network_id: NetworkId,
-        sentinel: &mut Sentinel,
-        guardian: &mut Guardian,
-        trust_registry: &mut TrustRegistry,
-        clock: &TrustedClock,
+        ctx: &IngressContext<'_>,
+        pipeline: &mut SecurityPipeline<'_>,
     ) -> Result<Option<u64>, IngressError> {
         let sender_did = chunk.owner_did.clone();
         let payload_size = chunk.data.len() as u64;
 
         // 1. Preemptive Gating
-        if trust_registry.is_blacklisted(&sender_did) {
+        if pipeline.trust_registry.is_blacklisted(&sender_did) {
             return Err(IngressError::Blacklisted(sender_did));
         }
 
         // 2. Transient Validation (Sentinel)
-        match sentinel.process_chunk(chunk, topic, config, identity, local_network_id) {
+        match pipeline.sentinel.process_chunk(
+            chunk, 
+            topic, 
+            ctx.config, 
+            ctx.identity, 
+            ctx.network_id
+        ) {
             Ok(Some(envelope)) => {
                 // 3. Persistent Validation (Guardian)
-                match guardian.ingest_envelope(envelope) {
+                match pipeline.guardian.ingest_envelope(envelope) {
                     Ok(_) => Ok(Some(payload_size)),
                     Err(guardian_error) => {
                         let mapped_offense = match &guardian_error {
@@ -58,8 +71,8 @@ impl IngressOrchestrator {
                         };
 
                         if let Some(offense) = mapped_offense {
-                            trust_registry
-                                .record_offense(&sender_did, offense, clock)
+                            pipeline.trust_registry
+                                .record_offense(&sender_did, offense, ctx.clock)
                                 .await;
                         }
 
@@ -79,8 +92,8 @@ impl IngressOrchestrator {
                 };
 
                 if let Some(offense) = mapped_offense {
-                    trust_registry
-                        .record_offense(&sender_did, offense, clock)
+                    pipeline.trust_registry
+                        .record_offense(&sender_did, offense, ctx.clock)
                         .await;
                 }
 
