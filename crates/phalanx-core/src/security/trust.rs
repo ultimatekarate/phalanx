@@ -277,12 +277,23 @@ impl TrustRegistry {
     pub async fn record_offense(&mut self, did: &Did, offense: Offense, clock: &TrustedClock) {
         // Ensure the peer is tracked in the registry. If unknown, register as Ignored.
         if !self.contacts.contains_key(did) {
-            let fallback_name = format!(
+            let base_name = format!(
                 "Unknown-{}",
                 did.as_str().chars().take(8).collect::<String>()
             );
-            let pet_name =
-                PetName::new(fallback_name).unwrap_or_else(|_| PetName::new("Unknown").unwrap());
+            let mut fallback_name = base_name.clone();
+            let mut counter = 1;
+
+            let mut pet_name =
+                PetName::new(&fallback_name).unwrap_or_else(|_| PetName::new("Unknown").unwrap());
+
+            // Deterministic collision resolution: Append suffix until unique
+            while self.pet_name_index.contains_key(&pet_name) {
+                fallback_name = format!("{}-{}", base_name, counter);
+                pet_name = PetName::new(&fallback_name)
+                    .unwrap_or_else(|_| PetName::new("Unknown").unwrap());
+                counter += 1;
+            }
 
             if let Err(e) = self
                 .set_peer(did, &pet_name, TrustLevel::Ignored, clock)

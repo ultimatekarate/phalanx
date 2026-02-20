@@ -10,7 +10,9 @@ use crate::primitives::identity::{init_identity, Did, IdentityError, NetworkId, 
 use crate::primitives::shards::{AudioShard, Evidence, ShardChunk, ShardId, VideoShard};
 use crate::primitives::time::{TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
-use crate::security::ingress::{IngressError, IngressOrchestrator};
+use crate::security::ingress::{
+    IngressContext, IngressError, IngressOrchestrator, SecurityPipeline,
+};
 use crate::security::sentinel::Sentinel;
 use crate::security::trust::ReputationGate;
 
@@ -176,33 +178,35 @@ impl PhalanxEngine {
         let sender_did = chunk.owner_did.clone();
         let local_network_id = NetworkId::from(*self.swarm.local_peer_id());
 
-        let orchestration_result = IngressOrchestrator::process_chunk(
-            chunk,
-            &topic,
-            &self.config,
-            &self.identity,
-            local_network_id,
-            &mut self.sentinel,
-            &mut self.guardian,
-            &mut self.trust_registry,
-            &self.clock,
-        )
-        .await;
+        // 1. Allocate Parameter Objects
+        let ctx = IngressContext {
+            config: &self.config,
+            identity: &self.identity,
+            network_id: local_network_id,
+            clock: &self.clock,
+        };
 
+        let mut pipeline = SecurityPipeline {
+            sentinel: &mut self.sentinel,
+            guardian: &mut self.guardian,
+            trust_registry: &mut self.trust_registry,
+        };
+
+        // 2. Execute Shared Orchestration
+        let orchestration_result =
+            IngressOrchestrator::process_chunk(chunk, &topic, &ctx, &mut pipeline).await;
+
+        // 3. Handle Production-Specific Physical Actions
         match orchestration_result {
             Ok(Some(_size)) => {
-                // Data finalized successfully. Emit production metrics.
+                // Future integration point for physical node metrics mapping
             }
-            Ok(None) => {
-                // Data buffered during reassembly.
-            }
+            Ok(None) => {}
             Err(IngressError::Blacklisted(did)) => {
-                // Drop the libp2p connection immediately
                 let _ = self.swarm.disconnect_peer_id(peer_id);
                 tracing::warn!(%did, "Dropped connection from blacklisted peer.");
             }
             Err(e) => {
-                // If a threshold was crossed, drop the physical connection
                 if self.trust_registry.is_blacklisted(&sender_did) {
                     let _ = self.swarm.disconnect_peer_id(peer_id);
                     tracing::warn!(%sender_did, error = %e, "Peer blacklisted due to protocol offense.");

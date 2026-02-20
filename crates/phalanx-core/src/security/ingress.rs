@@ -52,11 +52,11 @@ impl IngressOrchestrator {
 
         // 2. Transient Validation (Sentinel)
         match pipeline.sentinel.process_chunk(
-            chunk, 
-            topic, 
-            ctx.config, 
-            ctx.identity, 
-            ctx.network_id
+            chunk,
+            topic,
+            ctx.config,
+            ctx.identity,
+            ctx.network_id,
         ) {
             Ok(Some(envelope)) => {
                 // 3. Persistent Validation (Guardian)
@@ -71,7 +71,8 @@ impl IngressOrchestrator {
                         };
 
                         if let Some(offense) = mapped_offense {
-                            pipeline.trust_registry
+                            pipeline
+                                .trust_registry
                                 .record_offense(&sender_did, offense, ctx.clock)
                                 .await;
                         }
@@ -92,7 +93,8 @@ impl IngressOrchestrator {
                 };
 
                 if let Some(offense) = mapped_offense {
-                    pipeline.trust_registry
+                    pipeline
+                        .trust_registry
                         .record_offense(&sender_did, offense, ctx.clock)
                         .await;
                 }

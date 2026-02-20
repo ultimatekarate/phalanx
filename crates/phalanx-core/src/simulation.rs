@@ -424,19 +424,25 @@ impl SimNode {
         let topic = MeshTopic::new("sim_topic");
         let sender_did = chunk.owner_did.clone();
 
-        let orchestration_result = IngressOrchestrator::process_chunk(
-            chunk,
-            &topic,
-            &self.config,
-            &self.identity,
-            self.network_id,
-            &mut self.sentinel,
-            &mut self.storage,
-            &mut self.trust_registry,
-            &self.clock,
-        )
-        .await;
+        // 1. Allocate Parameter Objects
+        let ctx = crate::security::ingress::IngressContext {
+            config: &self.config,
+            identity: &self.identity,
+            network_id: self.network_id,
+            clock: &self.clock,
+        };
 
+        let mut pipeline = crate::security::ingress::SecurityPipeline {
+            sentinel: &mut self.sentinel,
+            guardian: &mut self.storage,
+            trust_registry: &mut self.trust_registry,
+        };
+
+        // 2. Execute Shared Orchestration
+        let orchestration_result =
+            IngressOrchestrator::process_chunk(chunk, &topic, &ctx, &mut pipeline).await;
+
+        // 3. Handle Simulation-Specific Telemetry
         match orchestration_result {
             Ok(Some(_finalized_size)) => {
                 let _ = self.telemetry_tx.try_send(SimEvent::ShardProcessed {
@@ -444,7 +450,6 @@ impl SimNode {
                     byte_size: ByteCapacity(size),
                 });
 
-                // GOSSIP VISUALIZATION (Guardian -> Guardian)
                 if self.role == NodeRole::Guardian && origin != self.network_id {
                     let _ = self.telemetry_tx.try_send(SimEvent::OffloadComplete {
                         origin,
@@ -453,29 +458,24 @@ impl SimNode {
                     });
                 }
 
-                // OFFLOAD LOGIC (Guardian -> Stronghold)
                 if self.role == NodeRole::Guardian {
                     self.staged_bytes += size;
                     let threshold = ByteCapacity(4096 * 5);
 
                     if self.staged_bytes > threshold && !self.known_strongholds.is_empty() {
                         let target_idx = rand::rng().random_range(0..self.known_strongholds.len());
-
                         if let Some(target) = self.known_strongholds.get(target_idx).cloned() {
                             let _ = self.telemetry_tx.try_send(SimEvent::OffloadComplete {
                                 origin: self.network_id,
                                 target,
                                 size: self.staged_bytes,
                             });
-
                             self.staged_bytes = ByteCapacity::default();
                         }
                     }
                 }
             }
-            Ok(None) => {
-                // BENIGN: Chunk accepted, but reassembly is ongoing
-            }
+            Ok(None) => {}
             Err(crate::security::ingress::IngressError::Blacklisted(_)) => {
                 let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
                     attacker: origin,
@@ -484,8 +484,6 @@ impl SimNode {
                 });
             }
             Err(e) => {
-                // Determine if this specific rejection caused a blacklist threshold breach.
-                // Both SentinelRejected and GuardianRejected variants map to protocol offenses.
                 if self.trust_registry.is_blacklisted(&sender_did) {
                     let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
                         attacker: origin,
