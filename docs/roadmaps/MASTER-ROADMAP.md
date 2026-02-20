@@ -51,11 +51,11 @@ This plan synthesizes all specialized roadmaps (Network, Security, Stronghold, H
 *Goal: Verify the system works at scale without physical deployment.*
 **Dependencies:** `monitoring-roadmap.md` `justiciar-roadmap.md`
 
-- [ ] **Simulation Dashboard**
+- [x] **Simulation Dashboard**
   
-  - [ ] Implement `SimMetrics` struct and telemetry channel in `sim.rs`.
-  - [ ] Build the **TUI Dashboard** using `ratatui` to visualize node states, TPS, and storage.
-  - [ ] Add **Chaos Controls** (kill node, sever stronghold) to interactive simulation.
+  - [x] Implement `SimMetrics` struct and telemetry channel in `sim.rs`.
+  - [x] Build the **TUI Dashboard** using `ratatui` to visualize node states, TPS, and storage.
+  - [x] Add **Chaos Controls** (kill node, sever stronghold) to interactive simulation.
 
 - [ ] **WAN Integration Tests**
   - [ ] Create `tests/wan_integration.rs` to verify Bootstrapping and Service Discovery in a simulated WAN environment.
@@ -65,9 +65,9 @@ This plan synthesizes all specialized roadmaps (Network, Security, Stronghold, H
 *Goal: Package the Rust core into a user-friendly Android/iOS application.*
 **Dependencies:** `mobile-ui-roadmap.md`
 
-- [ ] **Rust Bridge (FFI)**
-  - [ ] Refactor `lib.rs` to expose C-compatible FFI methods (`phalanx_init`, `phalanx_start_camera`).
-  - [ ] Set up **Cross-Compilation** for Android (`cargo ndk`) and iOS (`cargo lipo`).
+- [x] **Rust Bridge (FFI)**
+  - [x] Refactor `lib.rs` to expose C-compatible FFI methods (`phalanx_init`, `phalanx_start_camera`).
+  - [x] Set up **Cross-Compilation** for Android (`cargo ndk`) and iOS (`cargo lipo`).
 
 - [ ] **Flutter UI Shell**
   - [ ] Initialize `phalanx_mobile` Flutter project.

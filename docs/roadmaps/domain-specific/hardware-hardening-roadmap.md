@@ -17,8 +17,8 @@
 
 ## Camera Module (`camera.rs`)
 
-- [ ] **Fix Time Drift**
-  - [ ] Replace simple `sleep()` with `Instant` delta calculation (Spin-wait or precise sleep).
+- [x] **Fix Time Drift**
+  - [x] Replace simple `sleep()` with `Instant` delta calculation (Spin-wait or precise sleep).
 - [ ] **Implement Hot-Plug/Reconnection**
   - [ ] Wrap `capture_frame` in a `Result`.
   - [ ] If Error > 5 times sequentially:

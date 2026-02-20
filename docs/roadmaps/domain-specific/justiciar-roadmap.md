@@ -7,7 +7,7 @@
 
 ## **Phase 2: Network Discovery & Routing**
 
-* [ ] **Kademlia Service Search**: Implement `GetProviders` queries to find nodes advertising the `guardian_service_key`.
+* [x] **Kademlia Service Search**: Implement `GetProviders` queries to find nodes advertising the `guardian_service_key`.
 * [ ] **Direct Dialing**: Establish authenticated `noise` protocol links to discovered Stronghold nodes.
 
 ## Phase 3: Data Retrieval Protocol
@@ -17,8 +17,8 @@
 
 ## Phase 4: Reconstruction & Decryption
 
-* [ ] **Client-Side Crucible**: Port `Macro Layer` reassembly logic to align `StorageSequence` shards chronologically.
-* [ ] **E2EE Decryption**: Implement `DataPayload::decrypt` logic using session keys to unlock raw JPEG/PCM data.
+* [x] **Client-Side Crucible**: Port `Macro Layer` reassembly logic to align `StorageSequence` shards chronologically.
+* [x] **E2EE Decryption**: Implement `DataPayload::decrypt` logic using session keys to unlock raw JPEG/PCM data.
 
 ## Phase 5: Forensic Presentation
 

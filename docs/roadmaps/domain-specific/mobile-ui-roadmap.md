@@ -6,17 +6,17 @@ This roadmap outlines the transition of Phalanx from a headless Rust daemon to a
 
 *Goal: Compile the existing Rust code into a library that a mobile app can talk to.*
 
-- [ ] **Refactor for Library Mode**
-  - [ ] **Task:** In `Cargo.toml`, add `crate-type = ["cdylib", "staticlib"]` to compile as a C-compatible library.
-  - [ ] **Task:** Create `src/ffi.rs` to expose public API methods:
+- [x] **Refactor for Library Mode**
+  - [x] **Task:** In `Cargo.toml`, add `crate-type = ["cdylib", "staticlib"]` to compile as a C-compatible library.
+  - [x] **Task:** Create `src/ffi.rs` to expose public API methods:
     - `phalanx_init(config_json: *const c_char)`
     - `phalanx_start_camera()`
     - `phalanx_get_status() -> *const c_char`
-  - [ ] **Task:** Use `flutter_rust_bridge` (FRB) to automatically generate the glue code between Dart and Rust.
+  - [x] **Task:** Use `flutter_rust_bridge` (FRB) to automatically generate the glue code between Dart and Rust.
 
-- [ ] **Cross-Compilation Setup**
-  - [ ] **Task:** Install Android NDK and iOS SDK toolchains.
-  - [ ] **Task:** Create a build script (`build_mobile.sh`) that runs `cargo ndk` (for Android) and `cargo lipo` (for iOS) to generate the `.so` and `.a` binary files.
+- [x] **Cross-Compilation Setup**
+  - [x] **Task:** Install Android NDK and iOS SDK toolchains.
+  - [x] **Task:** Create a build script (`build_mobile.sh`) that runs `cargo ndk` (for Android) and `cargo lipo` (for iOS) to generate the `.so` and `.a` binary files.
 
 ## Phase 2: The Flutter Shell (UI Layer)
 

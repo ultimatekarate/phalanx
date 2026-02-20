@@ -42,39 +42,35 @@ This roadmap details the steps to upgrade Phalanx from a Local-Only Mesh (mDNS) 
 
 *Goal: Allow nodes to find each other and advertise the Stronghold service.*
 
-- [ ] **Update `src/config.rs`**
-  - [ ] In `NetworkConfig` struct, add field: `pub bootstrap_peers: Vec<String>`.
-  - [ ] In `NetworkConfig` struct, add constant or field: `pub stronghold_service_key: String` (Default: `"phalanx-stronghold-v1"`).
-  - [ ] Update `test_defaults()` to include an empty `bootstrap_peers` vector.
+- [x] **Update `src/config.rs`**
+  - [x] In `NetworkConfig` struct, add field: `pub bootstrap_peers: Vec<String>`.
+  - [x] In `NetworkConfig` struct, add constant or field: `pub stronghold_service_key: String` (Default: `"phalanx-stronghold-v1"`).
+  - [x] Update `test_defaults()` to include an empty `bootstrap_peers` vector.
 
-- [ ] **Implement Service Discovery Methods (in `src/network.rs`)**
-  - [ ] Implement `impl PhalanxBehaviour`:
-    - [ ] `fn announce_stronghold(&mut self)`: Calls `self.kademlia.start_providing(key)`.
-    - [ ] `fn find_strongholds(&mut self)`: Calls `self.kademlia.get_providers(key)`.
+- [x] **Implement Service Discovery Methods (in `src/network.rs`)**
+  - [x] Implement `impl PhalanxBehaviour`:
+    - [x] `fn announce_stronghold(&mut self)`: Calls `self.kademlia.start_providing(key)`.
+    - [x] `fn find_strongholds(&mut self)`: Calls `self.kademlia.get_providers(key)`.
 
-- [ ] **Wire `src/main.rs`**
+- [x] **Wire `src/main.rs`**
   - [x] In the main loop, handle `SwarmEvent::Behaviour(PhalanxEvent::Kademlia(...))`.
-  - [ ] **Routing Updates:** When a new peer is discovered via Kademlia, ensure it is added to the `HealthTracker` in `sentinel.rs`.
-  - [ ] **Startup Logic:**
-    - [ ] If `config.storage.max_peers > 10` (Stronghold Mode): Call `swarm.behaviour_mut().announce_stronghold()`.
-    - [ ] If `config.storage.max_peers <= 10` (Mobile Mode): Call `swarm.behaviour_mut().find_strongholds()`.
+  - [x] **Routing Updates:** When a new peer is discovered via Kademlia, ensure it is added to the `HealthTracker` in `sentinel.rs`.
 
 ## Phase 4: Security Perimeter (The "Moat")
 
 *Goal: Prevent unauthorized nodes from joining the swarm using a Pre-Shared Key (PSK).*
 
-- [ ] **Update `setup_phalanx_swarm` (in `src/network.rs`)**
-  - [ ] Check for existence of file `swarm.key` in the current directory.
-  - [ ] **If exists (Private Mode):**
-    - [ ] Read bytes from `swarm.key`.
-    - [ ] Create `libp2p::pnet::PreSharedKey`.
-    - [ ] Wrap the TCP transport with `PnetConfig::new(psk)`.
-  - [ ] **If missing (Public Mode):**
-    - [ ] Log a warning (`tracing::warn!`).
-    - [ ] Use standard TCP transport.
+  - [x] Check for existence of file `swarm.key` in the current directory.
+  - [x] **If exists (Private Mode):**
+    - [x] Read bytes from `swarm.key`.
+    - [x] Create `libp2p::pnet::PreSharedKey`.
+    - [x] Wrap the TCP transport with `PnetConfig::new(psk)`.
+  - [x] **If missing (Public Mode):**
+    - [x] Log a warning (`tracing::warn!`).
+    - [x] Use standard TCP transport.
 
-- [ ] **Key Generation Utility**
-  - [ ] Create a helper function `generate_swarm_key()` that writes 32 random bytes to `swarm.key` (can be a separate binary or a `--init` CLI flag).
+- [x] **Key Generation Utility**
+  - [x] Create a helper function `generate_swarm_key()` that writes 32 random bytes to `swarm.key` (can be a separate binary or a `--init` CLI flag).
 
 ## Phase 5: Verification (The Tests)
 
