@@ -1,4 +1,6 @@
-// crates/phalanx-core/src/simulation.rs
+use crate::security::trust::ReputationGate;
+use crate::security::trust::{Offense, TrustRegistry, TrustLevel};
+use crate::storage::vault::GuardianError;
 
 use rand::Rng;
 use std::collections::HashMap;
@@ -14,11 +16,12 @@ use crate::security::e2ee::SymmetricKey;
 use crate::security::sentinel::Sentinel;
 use crate::security::telemetry::{ChaosMode, DiscoverySource, NodeRole, SimEvent};
 use crate::storage::vault::Guardian;
+use crate::primitives::time::TrustedClock;
 
 // INTEGRATING SECURITY GATES
 use crate::security::gate::{ForensicGate, PrivacyGate, WitnessGate};
 
-use crate::primitives::shards::{create_video_shard, Evidence, ShardId, StorageSequence, VolleyId};
+use crate::primitives::shards::{create_video_shard, Evidence, ShardError, ShardId, StorageSequence, VolleyId};
 
 // =========================================================================================
 //  INFRASTRUCTURE: The Harness
@@ -136,7 +139,7 @@ impl SimulationHarness {
             sim_config,
             self.broadcast_channel.clone(),
             self.telemetry_tx.clone(),
-        );
+        ).await;
 
         tokio::spawn(async move {
             actor.run(node_rx).await;
@@ -150,14 +153,14 @@ impl SimulationHarness {
         mut relay_rx: mpsc::Receiver<(Did, NetworkId, SimEvent)>,
         telemetry_tx: mpsc::Sender<SimEvent>,
     ) {
-        while let Some((sender_did, _sender_peer, event)) = relay_rx.recv().await {
+        while let Some((_sender_did, _sender_peer, event)) = relay_rx.recv().await {
             let _ = telemetry_tx.try_send(event.clone());
 
             let current_nodes = nodes.read().await;
-            for (did, node_tx) in current_nodes.iter() {
-                if did != &sender_did {
-                    let _ = node_tx.send(event.clone()).await;
-                }
+            for node_tx in current_nodes.values() {
+                // Modified to strictly map relay events to all node actors.
+                // The actors inherently evaluate source bounds via origin matching.
+                let _ = node_tx.send(event.clone()).await;
             }
         }
     }
@@ -211,20 +214,30 @@ struct SimNode {
     telemetry_tx: mpsc::Sender<SimEvent>,
 
     network_key: SymmetricKey,
+    trust_registry: TrustRegistry,
+    clock: TrustedClock,
 }
 
 impl SimNode {
-    fn new(
+    async fn new(
         sim_config: SimConfig,
         broadcast_tx: mpsc::Sender<(Did, NetworkId, SimEvent)>,
         telemetry_tx: mpsc::Sender<SimEvent>,
     ) -> Self {
         let sentinel = Sentinel::new(&sim_config.config);
+        
+        let vault_path = format!("sim_vault/{}", sim_config.name);
         let storage = Guardian::new(
-            &format!("sim_vault/{}", sim_config.name),
+            &vault_path,
             &sim_config.config,
             sim_config.identity.did.clone(),
         );
+
+        let mut trust_config = PhalanxConfig::default();
+        trust_config.storage.vault_path = format!("{}_trust", vault_path);
+        let trust_registry = TrustRegistry::build(&trust_config).await;
+        
+        let clock = TrustedClock::new();
 
         Self {
             name: sim_config.name,
@@ -243,6 +256,8 @@ impl SimNode {
             broadcast_tx,
             telemetry_tx,
             network_key: SymmetricKey([0x42; 32]),
+            trust_registry,
+            clock,
         }
     }
 
@@ -277,14 +292,12 @@ impl SimNode {
     }
 
     async fn step_physics(&mut self) {
-        // STRONGLY TYPED: Apply chaos load using UnitInterval
         if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
             self.physics.apply_system_load(UnitInterval::new(0.95));
         } else {
             self.physics.apply_system_load(UnitInterval::new(0.10));
         }
 
-        // STRONGLY TYPED: Baseline vitality
         let vitality =
             VitalityRate::calculate(&self.physics, PowerState::Normal, UnitInterval::new(0.10));
 
@@ -318,7 +331,6 @@ impl SimNode {
             let frames = vec![vec![1; 512]];
             let shard_id = ShardId(self.seq_counter.0);
 
-            // 1. Generation Gate (Forensic)
             let shard_result =
                 create_video_shard(frames, self.seq_counter, 30, VolleyId::new("sim_volley")).gate(
                     "sim_gen_err",
@@ -327,13 +339,10 @@ impl SimNode {
                 );
 
             if let Ok(shard) = shard_result {
-                // 2. Privacy Gate
                 let chunks_result = Evidence::Video(shard)
                     .safeguard(&self.network_key)
-                    // 3. Witness Gate
                     .and_then(|ev| ev.seal(&self.identity, self.network_id))
                     .map(|mut envelope| {
-                        // CHAOS INTERCEPTOR: Tamper *after* signing, *before* sending.
                         if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
                             if let Evidence::Video(ref mut v) = envelope.evidence {
                                 v.fps = 145;
@@ -341,7 +350,6 @@ impl SimNode {
                         }
                         envelope
                     })
-                    // 4. Forensic Gate (Chunking/Discretization)
                     .and_then(|env| {
                         env.chunkify(shard_id).gate(
                             "sim_chunk_err",
@@ -389,7 +397,7 @@ impl SimNode {
             }
 
             SimEvent::PeerDiscovered { peer, role, .. } => {
-                if role == NodeRole::Stronghold && !self.known_strongholds.contains(&peer) {
+                if peer != self.network_id && role == NodeRole::Stronghold && !self.known_strongholds.contains(&peer) {
                     self.known_strongholds.push(peer);
                     debug!("Registered Stronghold: {}", peer);
                 }
@@ -399,7 +407,6 @@ impl SimNode {
                 self.physics.apply_system_load(interval);
             }
 
-            // Ignored Events locally (captured by harness for dashboard)
             _ => {}
         }
     }
@@ -411,6 +418,17 @@ impl SimNode {
     ) {
         let size = chunk.data.len() as u64;
         let topic = MeshTopic::new("sim_topic");
+        let sender_did = chunk.owner_did.clone();
+
+        // 1. PREEMPTIVE GATING: Verify reputation prior to processing
+        if self.trust_registry.is_blacklisted(&sender_did) {
+            let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
+                attacker: origin,
+                target: self.network_id,
+                reason: format!("Preemptive Gate: Peer {} is blacklisted", sender_did.as_str()),
+            });
+            return; 
+        }
 
         // GATE ENFORCEMENT: Sentinel Boundary (Reputation/Privacy/Witness)
         let chunk_result = self.sentinel.process_chunk(
@@ -426,13 +444,11 @@ impl SimNode {
                 // GATE ENFORCEMENT: Guardian Boundary (Capacity/Integrity/Forensic)
                 match self.storage.ingest_envelope(envelope) {
                     Ok(_) => {
-                        // Valid envelope passed all gates; persist it.
                         let _ = self.telemetry_tx.try_send(SimEvent::ShardProcessed {
                             peer_id: origin,
                             byte_size: ByteCapacity(size),
                         });
 
-                        // GOSSIP VISUALIZATION (Guardian -> Guardian)
                         if self.role == NodeRole::Guardian && origin != self.network_id {
                             let _ = self.telemetry_tx.try_send(SimEvent::OffloadComplete {
                                 origin,
@@ -441,9 +457,8 @@ impl SimNode {
                             });
                         }
 
-                        // OFFLOAD LOGIC (Guardian -> Stronghold)
                         if self.role == NodeRole::Guardian {
-                            self.staged_bytes += size; // Strongly Typed AddAssign
+                            self.staged_bytes += size;
                             let threshold = ByteCapacity(4096 * 5);
 
                             if self.staged_bytes > threshold && !self.known_strongholds.is_empty() {
@@ -465,26 +480,57 @@ impl SimNode {
                         }
                     }
                     Err(e) => {
-                        // BLOCKED BY GUARDIAN GATES (e.g., Invalid Signature, Quota)
-                        let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
-                            attacker: origin,
-                            target: self.network_id,
-                            reason: format!("Vault Gating Rejected Payload: {}", e),
-                        });
+                        // 3. GUARDIAN ERROR INTERCEPTION
+                        let mapped_offense = match &e {
+                            GuardianError::InvalidSignature(_) => Some(Offense::InvalidSignature),
+                            GuardianError::ReplayDetected(_) => Some(Offense::ReplayAttack),
+                            GuardianError::QuotaExceeded(_) => Some(Offense::QuotaExceeded),
+                            _ => None,
+                        };
+
+                        if let Some(offense) = mapped_offense {
+                            self.trust_registry
+                                .record_offense(&sender_did, offense, &self.clock)
+                                .await;
+
+                            // Only emit telemetry if the configured offense threshold is breached.
+                            if self.trust_registry.is_blacklisted(&sender_did) {
+                                let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
+                                    attacker: origin,
+                                    target: self.network_id,
+                                    reason: format!("Vault Trust Threshold Breached: {}", e),
+                                });
+                            }
+                        }
                     }
                 }
             }
             Ok(None) => {
-                // BENIGN: Chunk accepted, but reassembly is ongoing (or dropped safely in Leaf Mode)
-                // Do not emit attack telemetry here.
+                // BENIGN: Chunk accepted, but reassembly is ongoing
             }
             Err(e) => {
-                // BLOCKED BY SENTINEL GATES (e.g., Peer Blacklisted, Validation Failed)
-                let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
-                    attacker: origin,
-                    target: self.network_id,
-                    reason: format!("Sentinel Gating Rejected Payload: {}", e),
-                });
+                // 3b. SENTINEL ERROR INTERCEPTION
+                let mapped_offense = match &e {
+                    ShardError::SigningError(_) => Some(Offense::InvalidSignature),
+                    ShardError::CapacityExceeded(_) => Some(Offense::QuotaExceeded),
+                    ShardError::InvalidConfiguration(_) | ShardError::Serialization(_) | ShardError::Encryption(_) => Some(Offense::MalformedPacket),
+                    _ => None,
+                };
+
+                if let Some(offense) = mapped_offense {
+                    self.trust_registry
+                        .record_offense(&sender_did, offense, &self.clock)
+                        .await;
+
+                    // Only emit telemetry if the configured offense threshold is breached.
+                    if self.trust_registry.is_blacklisted(&sender_did) {
+                        let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
+                            attacker: origin,
+                            target: self.network_id,
+                            reason: format!("Sentinel Trust Threshold Breached: {}", e),
+                        });
+                    }
+                }
             }
         }
     }

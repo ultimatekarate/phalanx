@@ -157,6 +157,7 @@ impl PhalanxEngine {
     // INGRESS PIPELINE
     // =========================================================================
     async fn handle_network_ingress(&mut self, peer_id: NetworkId, data: &[u8], local_network_id: NetworkId) {
+        tracing::info!(%peer_id, "Received raw network bytes");
         // 1. Forensic Gate: Strict ShardChunk Deserialization
         let chunk = match postcard::from_bytes::<ShardChunk>(data)
             .gate("deserialization_err", &local_network_id, "Malformed wire packet")
@@ -166,10 +167,10 @@ impl PhalanxEngine {
         };
 
         let owner_did = chunk.owner_did.clone();
-
+        tracing::info!(%owner_did, "Successfully deserialized ShardChunk");
         // 2. Preemptive Reputation Gate (Vampire Defense)
         if self.trust_registry.is_blacklisted(&owner_did) {
-            tracing::warn!(
+            tracing::info!(
                 event = "AttackAttemptBlocked",
                 attacker = %peer_id,
                 target = %local_network_id,
@@ -187,6 +188,7 @@ impl PhalanxEngine {
             &self.identity,
             local_network_id.clone(),
         );
+
 
         match sentinel_result {
             Ok(Some(envelope)) => {

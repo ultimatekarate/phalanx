@@ -170,6 +170,7 @@ impl Sentinel {
 
         // 2. Route to correct buffer based on network topic
         let is_video = topic == &config.network.video_topic;
+        
         let (buffers, capacity_limit) = if is_video {
             (&mut self.video_buffers, config.storage.max_video_buffer)
         } else {
@@ -177,10 +178,11 @@ impl Sentinel {
         };
 
         let shard_id = chunk.shard_id;
-
+        
         // 3. Capacity Gate (OOM Defense via LRU Eviction)
         buffers.enforce_capacity_limit(&shard_id, capacity_limit)?;
 
+        tracing::debug!(%shard_id, chunk_index = chunk.chunk_index, "Buffering chunk");
         let buffer = buffers
             .entry(shard_id)
             .or_insert_with(|| ReassemblyBuffer::new(chunk.total_chunks as usize));
@@ -193,7 +195,7 @@ impl Sentinel {
 
         // 5. Finalize if reassembly is complete
         if buffer.is_complete() {
-            tracing::debug!(%shard_id, "Reassembly complete. Finalizing evidence.");
+            tracing::info!(%shard_id, "Reassembly complete. Finalizing evidence.");
             let raw_data = buffer.assemble();
 
             // Immediate cleanup of the completed buffer
