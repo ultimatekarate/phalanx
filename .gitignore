@@ -38,3 +38,5 @@ ed25519_public.pem
 sim_vault/
 storage_vault/
 wal.log
+
+*.bin
