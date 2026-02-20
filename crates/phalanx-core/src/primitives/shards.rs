@@ -28,13 +28,17 @@ pub enum ShardError {
     Serialization(String),
 
     #[error("Time source error.")]
-    TimeSource(#[from] TimeError),
+    TimeSource(#[from] crate::primitives::time::TimeError),
 
     #[error("Cryptographic signing failed: {0}")]
     SigningError(String),
 
     #[error("Encryption error: {0}")]
-    Encryption(#[from] e2ee::CryptoError),
+    Encryption(#[from] crate::security::e2ee::CryptoError),
+
+    // NEW: Required for Write-Ahead Log disk operations
+    #[error("Disk I/O failed: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 pub struct ReassemblyBuffer {
