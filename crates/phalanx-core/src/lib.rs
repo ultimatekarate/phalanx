@@ -1,5 +1,4 @@
 // src/lib.rs
-
 // --- 1. BASE DOMAIN ---
 pub mod base {
     pub mod config;

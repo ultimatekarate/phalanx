@@ -1,6 +1,8 @@
 use crate::base::types::MeshTopic;
 use crate::primitives::identity::NetworkId;
 use crate::transport::events::NetworkEvent;
+use crate::transport::protocol::VolleyResponse;
+
 use async_trait::async_trait;
 
 #[async_trait]
@@ -13,4 +15,11 @@ pub trait NetworkTransport: Send + 'static {
 
     /// Drops a peer from the routing table (used by the TrustRegistry)
     async fn ban_peer(&mut self, peer: &NetworkId);
+
+    /// Fulfills a pending network retrieval request
+    async fn send_response(
+        &mut self,
+        channel_id: &str,
+        response: VolleyResponse,
+    ) -> Result<(), String>;
 }
