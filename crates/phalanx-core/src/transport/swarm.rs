@@ -253,8 +253,8 @@ fn build_behaviour(
     let dcutr = dcutr::Behaviour::new(local_peer_id);
     let autonat = autonat::Behaviour::new(local_peer_id, autonat::Config::default());
 
-    let retrieval_config = request_response::Config::default()
-        .with_request_timeout(Duration::from_secs(20));
+    let retrieval_config =
+        request_response::Config::default().with_request_timeout(Duration::from_secs(20));
 
     let retrieval = request_response::Behaviour::new(
         [(
