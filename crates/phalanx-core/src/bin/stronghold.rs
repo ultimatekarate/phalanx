@@ -212,18 +212,17 @@ impl<J: TransientJournal + 'static> StrongholdEngine<J> {
             )) => {
                 debug!("DHT Advertisement refreshed.");
             }
-            SwarmEvent::Behaviour(PhalanxEvent::Retrieval(event)) => {
-                if let request_response::Event::Message { message, .. } = event {
-                    match message {
-                        request_response::Message::Request {
-                            request, channel, ..
-                        } => {
-                            self.handle_retrieval_request(request, channel).await;
-                        }
-                        request_response::Message::Response { .. } => {}
-                    }
+            SwarmEvent::Behaviour(PhalanxEvent::Retrieval(request_response::Event::Message {
+                message,
+                ..
+            })) => match message {
+                request_response::Message::Request {
+                    request, channel, ..
+                } => {
+                    self.handle_retrieval_request(request, channel).await;
                 }
-            }
+                request_response::Message::Response { .. } => {}
+            },
             _ => {}
         }
         Ok(())
