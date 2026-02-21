@@ -27,9 +27,12 @@ pub mod storage {
 
 // --- 4. TRANSPORT ---
 pub mod transport {
+    pub mod events;
     pub mod health;
+    pub mod mock;
     pub mod protocol;
     pub mod swarm;
+    pub mod transport;
 }
 
 // --- 5. SECURITY ---
