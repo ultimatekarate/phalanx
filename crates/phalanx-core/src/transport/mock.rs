@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use crate::base::types::MeshTopic;
 use crate::primitives::identity::NetworkId;
 use crate::transport::events::NetworkEvent;
-use crate::transport::NetworkTransport;
+use crate::transport::transport::NetworkTransport;
 
 pub struct MockTransport {
     ingress_rx: mpsc::Receiver<NetworkEvent>,

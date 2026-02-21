@@ -1,6 +1,4 @@
-// crates/phalanx-dashboard/src/state.rs
-
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use phalanx_core::primitives::identity::NetworkId;
@@ -24,20 +22,21 @@ pub struct DashboardState {
     pub node_modes: HashMap<NetworkId, ChaosMode>,
     pub node_roles: HashMap<NetworkId, NodeRole>,
     pub active_vectors: Vec<ActiveVector>,
-    pub logs: Vec<String>,
+    pub logs: VecDeque<String>, // Migrated to VecDeque for O(1) front insertions
     pub metrics: DashboardMetrics,
     pub current_scenario: String,
     pub is_running: bool,
 }
 
 impl DashboardState {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             active_peers: HashMap::new(),
             node_modes: HashMap::new(),
             node_roles: HashMap::new(),
             active_vectors: Vec::new(),
-            logs: Vec::new(),
+            logs: VecDeque::with_capacity(51), // Pre-allocated to prevent reallocation
             metrics: DashboardMetrics {
                 total_bytes_processed: 0,
             },
@@ -46,58 +45,67 @@ impl DashboardState {
         }
     }
 
-    pub fn tick_maintenance(&mut self) {
-        let retention_threshold = Duration::from_secs(2);
-        self.active_vectors
-            .retain(|vector| vector.timestamp.elapsed() < retention_threshold);
+    pub fn push_log(&mut self, message: String) {
+        self.logs.push_front(message); // O(1) shift
+        if self.logs.len() > 50 {
+            self.logs.pop_back(); // O(1) prune
+        }
     }
 
-    pub fn push_log(&mut self, message: String) {
-        self.logs.insert(0, message);
-        if self.logs.len() > 50 {
-            self.logs.truncate(50);
-        }
+    pub fn tick_maintenance(&mut self) {
+        let now = Instant::now();
+
+        // Prune stale visual vectors
+        self.active_vectors
+            .retain(|v| now.duration_since(v.timestamp) < Duration::from_secs(2));
+
+        // Prune stale peer indicators
+        self.active_peers
+            .retain(|_, last_seen| now.duration_since(*last_seen) < Duration::from_secs(10));
     }
 
     pub fn ingest_telemetry(&mut self, event: SimEvent) {
         match event {
-            SimEvent::Heartbeat { origin, .. } => {
-                self.active_peers.insert(origin, Instant::now());
-            }
-            SimEvent::PeerDiscovered { peer, role, .. } => {
-                self.node_roles.insert(peer, role);
-                self.active_peers.insert(peer, Instant::now());
-            }
-            SimEvent::ShardProcessed { peer_id, byte_size } => {
-                self.metrics.total_bytes_processed += byte_size.as_u64();
-                self.active_peers.insert(peer_id, Instant::now());
-            }
             SimEvent::AttackAttemptBlocked {
                 attacker,
                 target,
                 reason,
             } => {
-                self.push_log(format!("[DEFENSE] {} -> {}: {}", attacker, target, reason));
-                self.active_vectors.push(ActiveVector {
-                    origin: attacker,
-                    target, // Use the extracted target
-                    timestamp: Instant::now(),
-                    style: VectorStyle::Attack,
-                });
+                self.push_log(format!(
+                    "[DEFENSE] {} blocked {}: {}",
+                    target, attacker, reason
+                ));
+
+                if let Some(existing) = self.active_vectors.iter_mut().find(|v| {
+                    v.origin == attacker && v.target == target && v.style == VectorStyle::Attack
+                }) {
+                    existing.timestamp = Instant::now();
+                } else {
+                    self.active_vectors.push(ActiveVector {
+                        origin: attacker,
+                        target,
+                        timestamp: Instant::now(),
+                        style: VectorStyle::Attack,
+                    });
+                }
             }
-            SimEvent::OffloadComplete {
-                origin,
-                target,
-                size,
-            } => {
+            SimEvent::ChunkIngested { origin, chunk } => {
+                let size = chunk.data.len() as u64;
+                self.metrics.total_bytes_processed += size;
+
+                // Extract target from the chunk's destination mapping (contextual based on your mesh routing)
+                // Defaulting to Guardian for UI visualization purposes
+                let target = chunk
+                    .owner_did
+                    .to_string()
+                    .parse::<NetworkId>()
+                    .unwrap_or(origin);
                 let target_role = self.node_roles.get(&target).unwrap_or(&NodeRole::Guardian);
 
                 if *target_role == NodeRole::Stronghold {
                     self.push_log(format!(
                         "[ARCHIVE] {} -> {}: {} bytes",
-                        origin,
-                        target,
-                        size.as_u64()
+                        origin, target, size
                     ));
                 }
 
@@ -114,10 +122,20 @@ impl DashboardState {
                     });
                 }
             }
-            _ => {}
+            SimEvent::PeerDiscovered { peer, role, .. } => {
+                self.active_peers.insert(peer, Instant::now());
+                self.node_roles.insert(peer, role);
+            }
+            SimEvent::Shutdown => {
+                self.push_log("Simulated Node Shutdown Detected".to_string());
+            }
+            _ => {
+                // Not everything goes in the dashboard.
+            }
         }
     }
 
+    #[must_use]
     pub fn generate_widget_vectors(&self) -> Vec<TrafficVector> {
         self.active_vectors
             .iter()

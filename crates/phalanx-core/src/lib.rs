@@ -29,6 +29,7 @@ pub mod storage {
 pub mod transport {
     pub mod events;
     pub mod health;
+    pub mod libp2p_adapter;
     pub mod mock;
     pub mod protocol;
     pub mod swarm;

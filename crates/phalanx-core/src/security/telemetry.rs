@@ -59,21 +59,18 @@ pub enum SimEvent {
         chunk: ShardChunk,
     },
 
-    // REFACTORED: Now carries structured health data instead of raw bytes
     Heartbeat {
         origin: NetworkId,
         uptime: u64,
         health: VitalityRate,
     },
 
-    // REFACTORED: Supports Gossip (Guardian->Guardian) and Archive (Guardian->Stronghold)
     OffloadComplete {
         origin: NetworkId,
         target: NetworkId,
         size: ByteCapacity,
     },
 
-    // --- Orchestration Layer Events ---
     PeerDiscovered {
         peer: NetworkId,
         role: NodeRole,
@@ -95,18 +92,14 @@ pub enum SimEvent {
         reason: String,
     },
 
-    // --- System Layer Events ---
     SystemStressUpdate(UnitInterval),
     Shutdown,
 
-    /// A command to alter a node's operating mode.
-    /// REFACTORED: Now targets a specific node ID.
     ChaosUpdate {
         target: NetworkId,
         mode: ChaosMode,
     },
 
-    // NEW: Generic broadcast for Echo/Gossip simulation
     ShardPublished {
         origin: NetworkId,
         chunk: ShardChunk,

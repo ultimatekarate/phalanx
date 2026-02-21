@@ -1,5 +1,3 @@
-// crates/phalanx-dashboard/src/main.rs
-
 mod state;
 mod ui;
 mod widgets;
@@ -34,29 +32,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut harness, mut telemetry_rx) = SimulationHarness::init_mesh(config, physics);
     let mut state = DashboardState::new();
 
-    // Node Initialization
-    let did_alpha = harness.spawn_node("Alpha", NodeRole::Guardian).await;
+    // Node Initialization - Explicitly unpack the Option<Did> returned by spawn_node
+    let did_alpha = harness
+        .spawn_node("Alpha", NodeRole::Guardian)
+        .await
+        .expect("Failed to spawn Alpha");
     let net_alpha = harness
         .resolve_did(&did_alpha)
         .await
         .expect("Resolution failed");
     state.node_roles.insert(net_alpha, NodeRole::Guardian);
 
-    let did_beta = harness.spawn_node("Beta", NodeRole::Guardian).await;
+    let did_beta = harness
+        .spawn_node("Beta", NodeRole::Guardian)
+        .await
+        .expect("Failed to spawn Beta");
     let net_beta = harness
         .resolve_did(&did_beta)
         .await
         .expect("Resolution failed");
     state.node_roles.insert(net_beta, NodeRole::Guardian);
 
-    let did_gamma = harness.spawn_node("Gamma", NodeRole::Guardian).await;
+    let did_gamma = harness
+        .spawn_node("Gamma", NodeRole::Guardian)
+        .await
+        .expect("Failed to spawn Gamma");
     let net_gamma = harness
         .resolve_did(&did_gamma)
         .await
         .expect("Resolution failed");
     state.node_roles.insert(net_gamma, NodeRole::Guardian);
 
-    let did_bastion = harness.spawn_node("Bastion", NodeRole::Stronghold).await;
+    let did_bastion = harness
+        .spawn_node("Bastion", NodeRole::Stronghold)
+        .await
+        .expect("Failed to spawn Bastion");
     let net_bastion = harness
         .resolve_did(&did_bastion)
         .await

@@ -1,37 +1,24 @@
-use crate::security::trust::TrustRegistry;
-
-use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info, span, Level};
+use tracing::{error, info, warn};
 
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
-use crate::base::types::{
-    ByteCapacity, MeshTopic, NodeMode, PowerState, TrafficGovernor, UnitInterval, VitalityRate,
-};
+use crate::base::engine::PhalanxEngine;
+use crate::base::types::MeshTopic;
 use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
-use crate::primitives::shards::ShardChunk;
-use crate::primitives::shards::ShardError;
-use crate::primitives::time::TrustedClock;
-use crate::security::e2ee::SymmetricKey;
-use crate::security::ingress::IngressOrchestrator;
-use crate::security::telemetry::{ChaosMode, DiscoverySource, NodeRole, SimEvent};
-use crate::storage::reassembler::{Reassembler, TransientJournal};
-use crate::storage::vault::Guardian;
-use crate::transport::health::HealthTracker;
-
-// INTEGRATING SECURITY GATES
-use crate::security::gate::{ForensicGate, PrivacyGate, WitnessGate};
-
-use crate::primitives::shards::{create_video_shard, Evidence, ShardId, StorageSequence, VolleyId};
+use crate::primitives::shards::{ShardChunk, ShardError};
+use crate::security::telemetry::{ChaosMode, NodeRole, SimEvent};
+use crate::storage::reassembler::TransientJournal;
+use crate::transport::events::NetworkEvent;
+use crate::transport::mock::MockTransport;
 
 // =========================================================================================
 //  POLYFILL: Simulation Journal
 // =========================================================================================
 
 pub struct SimJournal;
+
 #[async_trait::async_trait]
 impl TransientJournal for SimJournal {
     async fn record_chunk(&mut self, _chunk: &ShardChunk) -> Result<(), ShardError> {
@@ -49,16 +36,19 @@ impl TransientJournal for SimJournal {
 }
 
 // =========================================================================================
-//  INFRASTRUCTURE: The Harness
+//  INFRASTRUCTURE: The Hexagonal Simulation Harness
 // =========================================================================================
 
 pub struct SimulationHarness {
-    pub nodes: Arc<RwLock<HashMap<Did, mpsc::Sender<SimEvent>>>>,
-    pub broadcast_channel: mpsc::Sender<(Did, NetworkId, SimEvent)>,
-    pub telemetry_tx: mpsc::Sender<SimEvent>,
     pub config: PhalanxConfig,
-    pub identity_registry: Arc<RwLock<HashMap<Did, NetworkId>>>,
     pub physics: PhalanxPhysics,
+    pub telemetry_tx: mpsc::Sender<SimEvent>,
+    pub identity_registry: Arc<RwLock<HashMap<Did, NetworkId>>>,
+
+    // The routing table for the Mock Transport adapters.
+    // Driving this directly simulates incoming network sockets.
+    pub ingress_routes: Arc<RwLock<HashMap<Did, mpsc::Sender<NetworkEvent>>>>,
+    pub chaos_registry: Arc<RwLock<HashMap<Did, ChaosMode>>>,
 }
 
 impl SimulationHarness {
@@ -67,25 +57,16 @@ impl SimulationHarness {
         config: PhalanxConfig,
         physics: PhalanxPhysics,
     ) -> (Self, mpsc::Receiver<SimEvent>) {
-        let (broadcast_tx, broadcast_rx) = mpsc::channel(1024);
         let (telemetry_tx, telemetry_rx) = mpsc::channel(4096);
-        let nodes = Arc::new(RwLock::new(HashMap::new()));
 
         let harness = Self {
-            nodes: nodes.clone(),
-            identity_registry: Arc::new(RwLock::new(HashMap::new())),
-            broadcast_channel: broadcast_tx,
-            telemetry_tx: telemetry_tx.clone(),
             config,
             physics,
+            telemetry_tx,
+            identity_registry: Arc::new(RwLock::new(HashMap::new())),
+            ingress_routes: Arc::new(RwLock::new(HashMap::new())),
+            chaos_registry: Arc::new(RwLock::new(HashMap::new())),
         };
-
-        let nodes_ref = nodes;
-        let telemetry_tap = telemetry_tx;
-
-        tokio::spawn(async move {
-            Self::run_mesh_relay(nodes_ref, broadcast_rx, telemetry_tap).await;
-        });
 
         (harness, telemetry_rx)
     }
@@ -95,454 +76,121 @@ impl SimulationHarness {
     }
 
     pub async fn inject_chaos(&self, target_did: &Did, mode: ChaosMode) {
-        let target_network_id_opt = self.resolve_did(target_did).await;
-
-        if let Some(target_network_id) = target_network_id_opt {
-            if let Some(tx) = self.nodes.read().await.get(target_did) {
-                info!(target: "phalanx::chaos", node=%target_did, ?mode, "Injecting Chaos Event");
-                let event = SimEvent::ChaosUpdate {
-                    target: target_network_id,
-                    mode,
-                };
-                let _ = tx.send(event).await;
-            }
-        } else {
-            error!(target: "phalanx::chaos", node=%target_did, "Failed to resolve DID to NetworkId for Chaos injection.");
-        }
+        let mut registry = self.chaos_registry.write().await;
+        registry.insert(target_did.clone(), mode);
+        info!(target: "phalanx::chaos", node=%target_did, ?mode, "Chaos parameters updated for node traffic");
     }
 
-    pub async fn spawn_node(&mut self, name: &str, role: NodeRole) -> Did {
-        let (identity, _) = match PhalanxIdentity::generate() {
+    /// Spawns an actual PhalanxEngine backed by the MockTransport adapter.
+    pub async fn spawn_node(&mut self, name: &str, _role: NodeRole) -> Option<Did> {
+        // 1. Establish Domain Identity
+        let identity_result = PhalanxIdentity::generate();
+        let (identity, _) = match identity_result {
             Ok(res) => res,
             Err(e) => {
-                error!(
-                    node = %name,
-                    error = %e,
-                    "CRITICAL: Failed to generate node identity. Aborting spawn."
-                );
-                return Did::default();
+                error!(node = %name, error = %e, "Failed to generate node identity.");
+                return None;
             }
         };
+
         let node_did = identity.did.clone();
-        let network_id = NetworkId::random();
+        let network_id = identity.to_network_id();
 
-        let (node_tx, node_rx) = mpsc::channel::<SimEvent>(100);
+        self.identity_registry
+            .write()
+            .await
+            .insert(node_did.clone(), network_id);
 
-        {
-            self.identity_registry
-                .write()
-                .await
-                .insert(node_did.clone(), network_id);
-            self.nodes.write().await.insert(node_did.clone(), node_tx);
-        }
+        info!(node = %name, %network_id, "Initializing Production Engine on Mock Adapter");
 
-        info!(node = %name, ?role, "Initializing Node Actor");
+        // 2. Establish Mock Transport Port (The Adapter)
+        let (ingress_tx, ingress_rx) = mpsc::channel::<NetworkEvent>(4096);
+        let (egress_tx, mut egress_rx) = mpsc::channel::<(MeshTopic, Vec<u8>)>(4096);
+        let transport = MockTransport::new(ingress_rx, Some(egress_tx));
 
-        let _ = self
-            .broadcast_channel
-            .send((
-                node_did.clone(),
-                network_id,
-                SimEvent::PeerDiscovered {
-                    peer: network_id,
-                    role,
-                    source: DiscoverySource::Bootstrap,
-                },
-            ))
-            .await;
+        self.ingress_routes
+            .write()
+            .await
+            .insert(node_did.clone(), ingress_tx);
 
-        let sim_config = SimConfig {
-            name: name.to_string(),
-            identity,
-            network_id,
-            role,
-            config: self.config.clone(),
-            physics: self.physics,
+        // 3. Initialize the Actual Production Engine
+        let engine_result =
+            PhalanxEngine::new(self.config.clone(), identity, transport, SimJournal);
+
+        let mut engine = match engine_result {
+            Ok(e) => e,
+            Err(err) => {
+                error!(error = %err, "Critical: PhalanxEngine failed to initialize.");
+                return None;
+            }
         };
 
-        let actor = SimNode::new(
-            sim_config,
-            self.broadcast_channel.clone(),
-            self.telemetry_tx.clone(),
-        )
-        .await;
-
+        // 4. Detach Engine Execution
         tokio::spawn(async move {
-            actor.run(node_rx).await;
+            if let Err(e) = engine.run().await {
+                error!(error = %e, "Simulation node engine terminated unexpectedly.");
+            }
         });
 
-        node_did
-    }
+        // 5. Wire Mesh Routing (Egress -> Ingress)
+        let routing_table = Arc::clone(&self.ingress_routes);
+        let source_did = node_did.clone();
+        let source_network_id = network_id;
+        let chaos_registry = Arc::clone(&self.chaos_registry);
 
-    async fn run_mesh_relay(
-        nodes: Arc<RwLock<HashMap<Did, mpsc::Sender<SimEvent>>>>,
-        mut relay_rx: mpsc::Receiver<(Did, NetworkId, SimEvent)>,
-        telemetry_tx: mpsc::Sender<SimEvent>,
-    ) {
-        while let Some((_sender_did, _sender_peer, event)) = relay_rx.recv().await {
-            let _ = telemetry_tx.try_send(event.clone());
+        tokio::spawn(async move {
+            while let Some((topic, data)) = egress_rx.recv().await {
+                let current_chaos = chaos_registry
+                    .read()
+                    .await
+                    .get(&source_did)
+                    .cloned()
+                    .unwrap_or(ChaosMode::Stable);
 
-            let current_nodes = nodes.read().await;
-            for node_tx in current_nodes.values() {
-                let _ = node_tx.send(event.clone()).await;
-            }
-        }
-    }
-
-    pub async fn broadcast(&self, sender_did: &Did, event: SimEvent) {
-        let network_id = self
-            .resolve_did(sender_did)
-            .await
-            .unwrap_or_else(NetworkId::random);
-
-        let _ = self
-            .broadcast_channel
-            .send((sender_did.clone(), network_id, event))
-            .await;
-    }
-}
-
-// =========================================================================================
-//  LOGIC: The Node Actor
-// =========================================================================================
-
-pub struct SimConfig {
-    pub name: String,
-    pub identity: PhalanxIdentity,
-    pub network_id: NetworkId,
-    pub role: NodeRole,
-    pub config: PhalanxConfig,
-    pub physics: PhalanxPhysics,
-}
-
-struct SimNode {
-    name: String,
-    identity: PhalanxIdentity,
-    network_id: NetworkId,
-    role: NodeRole,
-
-    reassembler: Reassembler,
-    storage: Guardian,
-    config: PhalanxConfig,
-    physics: PhalanxPhysics,
-    health_tracker: HealthTracker,
-    governor: TrafficGovernor,
-    mode: NodeMode,
-
-    chaos_mode: ChaosMode,
-    known_strongholds: Vec<NetworkId>,
-
-    seq_counter: StorageSequence,
-    staged_bytes: ByteCapacity,
-    start_time: std::time::Instant,
-
-    broadcast_tx: mpsc::Sender<(Did, NetworkId, SimEvent)>,
-    telemetry_tx: mpsc::Sender<SimEvent>,
-
-    network_key: SymmetricKey,
-    trust_registry: TrustRegistry,
-    clock: TrustedClock,
-}
-
-impl SimNode {
-    async fn new(
-        sim_config: SimConfig,
-        broadcast_tx: mpsc::Sender<(Did, NetworkId, SimEvent)>,
-        telemetry_tx: mpsc::Sender<SimEvent>,
-    ) -> Self {
-        let reassembler = Reassembler::new();
-
-        let vault_path = format!("sim_vault/{}", sim_config.name);
-        let storage = Guardian::new(
-            &vault_path,
-            &sim_config.config,
-            sim_config.identity.did.clone(),
-        );
-
-        let mut trust_config = PhalanxConfig::default();
-        trust_config.storage.vault_path = vault_path.to_string();
-        let trust_registry = TrustRegistry::build(&trust_config).await;
-
-        let clock = TrustedClock::new();
-
-        Self {
-            name: sim_config.name,
-            identity: sim_config.identity,
-            network_id: sim_config.network_id,
-            role: sim_config.role,
-            config: sim_config.config,
-            physics: sim_config.physics,
-            reassembler,
-            storage,
-            health_tracker: HealthTracker::new(),
-            governor: TrafficGovernor::new(),
-            mode: NodeMode::Standard,
-            chaos_mode: ChaosMode::Stable,
-            known_strongholds: Vec::new(),
-            seq_counter: StorageSequence::default(),
-            staged_bytes: ByteCapacity::default(),
-            start_time: std::time::Instant::now(),
-            broadcast_tx,
-            telemetry_tx,
-            network_key: SymmetricKey([0x42; 32]),
-            trust_registry,
-            clock,
-        }
-    }
-
-    async fn run(mut self, mut rx: mpsc::Receiver<SimEvent>) {
-        let span = span!(Level::INFO, "sim_node", node = %self.name, network_id = %self.network_id);
-        let _enter = span.enter();
-        info!("Actor Loop Started");
-
-        let mut cleanup_tick = tokio::time::interval(self.physics.shard_timeout());
-        let mut data_tick = tokio::time::interval(Duration::from_millis(100));
-        let mut physics_tick = tokio::time::interval(Duration::from_millis(500));
-
-        loop {
-            tokio::select! {
-                _ = physics_tick.tick() => {
-                    self.step_physics().await;
-                }
-                _ = data_tick.tick() => {
-                    if self.role != NodeRole::Stronghold {
-                        self.step_traffic().await;
+                // Network Chaos Emulation: Packet Loss
+                if let ChaosMode::PacketLoss(prob) = current_chaos {
+                    // Quick probabilistic drop logic without importing rand directly here
+                    let drop = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                        % 100
+                        < (prob * 100.0) as u32;
+                    if drop {
+                        warn!(%source_network_id, "Packet dropped due to chaos emulation");
+                        continue;
                     }
                 }
-                _ = cleanup_tick.tick() => {
-                    // Legacy manual state pruning logic removed.
-                    // Crucible flush protocols manage state transitions inherently.
-                }
-                Some(event) = rx.recv() => {
-                    self.handle_event(event).await;
-                }
-            }
-        }
-    }
 
-    async fn step_physics(&mut self) {
-        if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
-            self.physics.apply_system_load(UnitInterval::new(0.95));
-        } else {
-            self.physics.apply_system_load(UnitInterval::new(0.10));
-        }
+                // Emulate Network Discovery/Gossip Propagation
+                let payload_event = NetworkEvent::DataReceived {
+                    origin: source_network_id,
+                    topic,
+                    data,
+                };
 
-        let vitality =
-            VitalityRate::calculate(&self.physics, PowerState::Normal, UnitInterval::new(0.10));
-
-        if let ChaosMode::PacketLoss(prob) = self.chaos_mode {
-            if rand::rng().random_range(0.0..1.0) < prob {
-                return;
-            }
-        }
-
-        let event = SimEvent::Heartbeat {
-            origin: self.network_id,
-            uptime: self.start_time.elapsed().as_secs(),
-            health: vitality,
-        };
-
-        let _ = self
-            .broadcast_tx
-            .send((self.identity.did.clone(), self.network_id, event))
-            .await;
-    }
-
-    async fn step_traffic(&mut self) {
-        let spawn_chance = if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
-            0.9
-        } else {
-            0.3
-        };
-
-        if rand::rng().random_range(0.0..1.0) < spawn_chance {
-            self.seq_counter += 1;
-            let frames = vec![vec![1; 512]];
-            let shard_id = ShardId(self.seq_counter.0);
-
-            let shard_result =
-                create_video_shard(frames, self.seq_counter, 30, VolleyId::new("sim_volley")).gate(
-                    "sim_gen_err",
-                    &self.network_id,
-                    "Video generation failed",
-                );
-
-            if let Ok(shard) = shard_result {
-                let chunks_result = Evidence::Video(shard)
-                    .safeguard(&self.network_key)
-                    .and_then(|ev| ev.seal(&self.identity, self.network_id))
-                    .map(|mut envelope| {
-                        if matches!(self.chaos_mode, ChaosMode::Hyperactive) {
-                            if let Evidence::Video(ref mut v) = envelope.evidence {
-                                v.fps = 145;
-                            }
-                        }
-                        envelope
-                    })
-                    .and_then(|env| {
-                        env.chunkify(shard_id).gate(
-                            "sim_chunk_err",
-                            &self.network_id,
-                            "Discretization failed",
-                        )
-                    });
-
-                if let Ok(chunks) = chunks_result {
-                    if let Some(first_chunk) = chunks.first() {
-                        let event = SimEvent::ShardPublished {
-                            origin: self.network_id,
-                            chunk: first_chunk.clone(),
-                        };
-
-                        let _ = self
-                            .broadcast_tx
-                            .send((self.identity.did.clone(), self.network_id, event))
-                            .await;
-                    }
-                }
-            }
-        }
-    }
-
-    async fn handle_event(&mut self, event: SimEvent) {
-        if let ChaosMode::HighLatency(ms) = self.chaos_mode {
-            tokio::time::sleep(Duration::from_millis(ms)).await;
-        }
-
-        match event {
-            SimEvent::Shutdown => std::process::exit(0),
-
-            SimEvent::ChaosUpdate { target, mode } => {
-                if target == self.network_id {
-                    self.chaos_mode = mode;
-                }
-            }
-
-            SimEvent::ShardPublished { origin, chunk }
-            | SimEvent::ChunkIngested { origin, chunk } => {
-                if origin != self.network_id {
-                    self.process_inbound_chunk(origin, chunk).await;
-                }
-            }
-
-            SimEvent::PeerDiscovered { peer, role, .. } => {
-                if peer != self.network_id
-                    && role == NodeRole::Stronghold
-                    && !self.known_strongholds.contains(&peer)
-                {
-                    self.known_strongholds.push(peer);
-                    debug!("Registered Stronghold: {}", peer);
-                }
-            }
-
-            SimEvent::SystemStressUpdate(interval) => {
-                self.physics.apply_system_load(interval);
-            }
-
-            _ => {}
-        }
-    }
-
-    async fn process_inbound_chunk(
-        &mut self,
-        origin: NetworkId,
-        chunk: crate::primitives::shards::ShardChunk,
-    ) {
-        let size = chunk.data.len() as u64;
-        let topic = MeshTopic::new("sim_topic");
-        let sender_did = chunk.owner_did.clone();
-
-        // 1. Allocate Parameter Objects
-        let ctx = crate::security::ingress::IngressContext {
-            config: &self.config,
-            identity: &self.identity,
-            network_id: self.network_id,
-            clock: &self.clock,
-            governor: &self.governor,
-            mode: self.mode,
-        };
-
-        let mut journal = SimJournal;
-
-        let mut pipeline = crate::security::ingress::SecurityPipeline {
-            reassembler: &mut self.reassembler,
-            guardian: &mut self.storage,
-            trust_registry: &mut self.trust_registry,
-            health_tracker: &mut self.health_tracker,
-            journal: &mut journal,
-        };
-
-        // 2. Execute Shared Orchestration
-        let orchestration_result =
-            IngressOrchestrator::process_chunk(chunk, &topic, &ctx, &mut pipeline).await;
-
-        // 3. Handle Simulation-Specific Telemetry
-        match orchestration_result {
-            Ok(Some(_finalized_size)) => {
-                let _ = self.telemetry_tx.try_send(SimEvent::ShardProcessed {
-                    peer_id: origin,
-                    byte_size: ByteCapacity(size),
-                });
-
-                if self.role == NodeRole::Guardian && origin != self.network_id {
-                    let _ = self.telemetry_tx.try_send(SimEvent::OffloadComplete {
-                        origin,
-                        target: self.network_id,
-                        size: ByteCapacity(size),
-                    });
-                }
-
-                if self.role == NodeRole::Guardian {
-                    self.staged_bytes += size;
-                    let threshold = ByteCapacity(4096 * 5);
-
-                    if self.staged_bytes > threshold && !self.known_strongholds.is_empty() {
-                        let target_idx = rand::rng().random_range(0..self.known_strongholds.len());
-                        if let Some(target) = self.known_strongholds.get(target_idx).cloned() {
-                            let _ = self.telemetry_tx.try_send(SimEvent::OffloadComplete {
-                                origin: self.network_id,
-                                target,
-                                size: self.staged_bytes,
-                            });
-                            self.staged_bytes = ByteCapacity::default();
+                let routes = routing_table.read().await;
+                for (target_did, target_tx) in routes.iter() {
+                    // Prevent echoing to self
+                    if target_did != &source_did {
+                        if let Err(err) = target_tx.send(payload_event.clone()).await {
+                            error!(error = %err, %target_did, "Mesh routing failure in harness");
                         }
                     }
                 }
             }
-            Ok(None) => {}
-            Err(crate::security::ingress::IngressError::Blacklisted(_)) => {
-                let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
-                    attacker: origin,
-                    target: self.network_id,
-                    reason: "Preemptive Gate: Peer is blacklisted".to_string(),
-                });
-            }
-            Err(e) => {
-                self.trust_registry
-                    .record_offense(
-                        &sender_did,
-                        crate::security::trust::Offense::ReplayAttack,
-                        &self.clock,
-                    )
-                    .await;
+        });
 
-                let send_result = self
-                    .telemetry_tx
-                    .send(SimEvent::AttackAttemptBlocked {
-                        attacker: origin,
-                        target: self.network_id,
-                        reason: format!("Trust Threshold Breached: {}", e),
-                    })
-                    .await;
+        Some(node_did)
+    }
 
-                if let Err(err) = send_result {
-                    tracing::error!(
-                        target: "phalanx::telemetry",
-                        "CRITICAL: Failed to emit AttackAttemptBlocked event. Telemetry receiver dropped: {}",
-                        err
-                    );
-                }
-            }
+    /// Facilitates direct event injection (e.g., Byzantine attack tests)
+    pub async fn inject_event(&self, target: &Did, event: NetworkEvent) -> Result<(), String> {
+        let routes = self.ingress_routes.read().await;
+        if let Some(tx) = routes.get(target) {
+            tx.send(event).await.map_err(|e| e.to_string())
+        } else {
+            Err("Target node not found in simulation routing table".into())
         }
     }
 }

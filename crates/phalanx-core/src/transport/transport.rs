@@ -1,16 +1,10 @@
-pub mod events;
-pub mod mock;
-// pub mod libp2p_adapter; // We'll add this next
-
-use self::events::NetworkEvent;
 use crate::base::types::MeshTopic;
 use crate::primitives::identity::NetworkId;
-use async_trait::async_trait;
-
+use crate::transport::events::NetworkEvent;
 use async_trait::async_trait;
 
 #[async_trait]
-pub trait NetworkTransport: Send + Sync {
+pub trait NetworkTransport: Send + 'static {
     /// Pushes a payload out to the mesh
     async fn publish(&mut self, topic: &MeshTopic, data: Vec<u8>) -> Result<(), String>;
 

@@ -1,8 +1,8 @@
 use tokio::time::Duration;
-use tracing::info;
 
 // Import from the public API
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
+use phalanx_core::base::types::MeshTopic;
 use phalanx_core::primitives::identity::{NetworkId, PhalanxIdentity};
 use phalanx_core::primitives::shards::{
     self, create_video_shard, ChunkType, DataPayload, Evidence, StorageSequence, WitnessEnvelope,
@@ -10,6 +10,7 @@ use phalanx_core::primitives::shards::{
 use phalanx_core::security::telemetry::{init_observability, NodeRole, SimEvent};
 use phalanx_core::simulation::SimulationHarness;
 use phalanx_core::storage::vault::Guardian;
+use phalanx_core::transport::events::NetworkEvent;
 
 // Helper to init logging for tests
 fn init_tracing() {
@@ -22,18 +23,21 @@ fn init_tracing() {
 async fn test_salvage_on_node_death() {
     init_observability();
 
-    //let _ = std::fs::remove_dir_all("sim_vault/VictimDevice");
-    //let _ = std::fs::remove_dir_all("sim_vault/GuardianDevice");
-
     let config = PhalanxConfig::test_salvage_on_node_death();
     let physics = PhalanxPhysics::test_profile();
 
     let (mut harness, _telemetry_rx) = SimulationHarness::init_mesh(config.clone(), physics);
 
-    let victim_device_did = harness.spawn_node("VictimDevice", NodeRole::Guardian).await;
+    // spawn_node now returns Option<Did>, requiring unwrap
+    let victim_device_did = harness
+        .spawn_node("VictimDevice", NodeRole::Guardian)
+        .await
+        .expect("Failed to spawn VictimDevice");
+
     let guardian_device_did = harness
         .spawn_node("GuardianDevice", NodeRole::Guardian)
-        .await;
+        .await
+        .expect("Failed to spawn GuardianDevice");
 
     tracing::info!("Initializing mesh nodes... waiting for DHT settling");
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -55,11 +59,10 @@ async fn test_salvage_on_node_death() {
     let real_shard = create_video_shard(frames, StorageSequence(999), 10, "volley_test_999".into())
         .expect("Failed to generate attack shard");
 
-    // The signature must match the ID of the node *sending* the data over Kademlia/Gossip
     let envelope = WitnessEnvelope::new(
         Evidence::Video(real_shard),
         &victim_identity,
-        remote_network_id.clone(), // FIX: Sign with the simulated sender's ID, not the victim's
+        remote_network_id.clone(),
     )
     .expect("Failed to sign attack envelope");
 
@@ -98,45 +101,51 @@ async fn test_salvage_on_node_death() {
         "Beginning simulated broadcast sequence"
     );
 
+    let topic = MeshTopic::new("phalanx/video/1.0.0");
+
     for (i, chunk) in chunks.into_iter().enumerate() {
-        tracing::debug!(target: "phalanx::test", chunk_index = i, "Broadcasting chunk to VictimDevice");
+        tracing::debug!(target: "phalanx::test", chunk_index = i, "Broadcasting chunk to GuardianDevice");
+
+        // Serialize the chunk payload just as it would be over the network
+        let chunk_bytes = postcard::to_stdvec(&chunk).expect("Failed to serialize chunk");
+
         harness
-            .broadcast(
+            .inject_event(
                 &guardian_device_did,
-                SimEvent::ChunkIngested {
-                    origin: victim_device_network_id, // Route via simulated remote node
-                    chunk,
+                NetworkEvent::DataReceived {
+                    origin: victim_device_network_id,
+                    topic: topic.clone(),
+                    data: chunk_bytes,
                 },
             )
-            .await;
+            .await
+            .expect("Harness routing failure");
     }
 
     // 1. MESH DISCOVERY: Inform the Victim that the Guardian is available for offloading
     let guardian_net_id = harness.resolve_did(&guardian_device_did).await.unwrap();
     harness
-        .broadcast(
+        .inject_event(
             &victim_device_did,
-            SimEvent::PeerDiscovered {
-                peer: guardian_net_id,
-                role: NodeRole::Guardian,
-                source: phalanx_core::security::telemetry::DiscoverySource::Mdns,
-            },
+            NetworkEvent::PeerDiscovered(guardian_net_id),
         )
-        .await;
+        .await
+        .expect("Harness routing failure");
 
     // Give the routing table a moment to update
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // 2. SIMULATE NODE DEATH: This triggers the graceful shutdown/salvage protocol.
-    // The SimNode will flush its transient memory and push an OffloadComplete event to the Guardian.
     tracing::info!(target: "phalanx::test", "Simulating VictimDevice crash/shutdown to trigger salvage");
     harness
-        .broadcast(&victim_device_did, SimEvent::Shutdown)
-        .await;
+        .inject_event(&victim_device_did, NetworkEvent::Shutdown)
+        .await
+        .expect("Harness routing failure");
 
     // 3. PROPAGATION DELAY: Allow the simulated network to transfer the bytes and Guardian to write to disk.
     tracing::info!(target: "phalanx::test", "Waiting for salvage sequence to write to disk...");
     tokio::time::sleep(Duration::from_millis(2000)).await;
+
     // Check GuardianDevice vault
     let victim_safe_did = victim_did.to_safe_name();
     let evidence_dir = std::path::PathBuf::from("sim_vault")
@@ -170,6 +179,7 @@ async fn test_salvage_on_node_death() {
         "Salvage failed: .phlx file not found in correct DID folder. Check log output for dropped chunks."
     );
 }
+
 #[tokio::test]
 async fn test_out_of_sequence_salvage_on_node_death() {
     let (identity, _) = PhalanxIdentity::generate().unwrap();
@@ -377,8 +387,12 @@ async fn test_vampire_attack_defense() -> Result<(), Box<dyn std::error::Error>>
     // 1. Init Mesh
     let (mut harness, mut telemetry_rx) = SimulationHarness::init_mesh(config.clone(), physics);
 
-    // FIX 1: Capture the victim's identity for explicit routing
-    let victim_did = harness.spawn_node("Victim", NodeRole::Guardian).await;
+    // FIX 1: Capture the victim's identity for explicit routing.
+    // spawn_node now returns Option<Did>, so we must unwrap it.
+    let victim_did = harness
+        .spawn_node("Victim", NodeRole::Guardian)
+        .await
+        .expect("Failed to spawn Victim");
 
     // 2. Setup Attacker
     let (attacker_identity, _) = PhalanxIdentity::generate()?;
@@ -386,6 +400,8 @@ async fn test_vampire_attack_defense() -> Result<(), Box<dyn std::error::Error>>
     let attacker_net_id = attacker_identity.to_network_id();
 
     // 3. Launch Attack
+    let topic = MeshTopic::new("phalanx/video/1.0.0");
+
     for i in 0..10 {
         // Strict evaluation pipeline
         let shard = create_video_shard(vec![vec![1]], StorageSequence(i), 30, "vampire".into())?;
@@ -414,17 +430,22 @@ async fn test_vampire_attack_defense() -> Result<(), Box<dyn std::error::Error>>
             ChunkType::Witnessed,
         )?;
 
-        // FIX 2: Route attack strictly to the Victim Guardian
+        // FIX 2: Route attack strictly to the Victim Guardian via the MockTransport Port
         if let Some(first_chunk) = chunks.first() {
+            // Serialize the chunk to simulate actual network I/O bytes
+            let chunk_bytes = postcard::to_stdvec(first_chunk)?;
+
             harness
-                .broadcast(
+                .inject_event(
                     &victim_did,
-                    SimEvent::ChunkIngested {
+                    NetworkEvent::DataReceived {
                         origin: attacker_net_id.clone(),
-                        chunk: first_chunk.clone(),
+                        topic: topic.clone(),
+                        data: chunk_bytes,
                     },
                 )
-                .await;
+                .await
+                .expect("Harness routing failure");
         }
     }
 

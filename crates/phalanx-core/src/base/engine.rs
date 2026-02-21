@@ -1,13 +1,11 @@
-use futures::StreamExt;
-use libp2p::swarm::{Swarm, SwarmEvent};
 use std::error::Error;
 use std::io;
 use tokio::sync::mpsc;
 use tracing::info;
 
-use crate::base::config::{PhalanxConfig, PhalanxPhysics};
-use crate::base::types::{NodeMode, TrafficGovernor};
-use crate::primitives::identity::{init_identity, Did, IdentityError, NetworkId, PhalanxIdentity};
+use crate::base::config::PhalanxConfig;
+use crate::base::types::{MeshTopic, NodeMode, TrafficGovernor};
+use crate::primitives::identity::{init_identity, IdentityError, NetworkId, PhalanxIdentity};
 use crate::primitives::shards::{Evidence, ShardChunk, ShardError, ShardId};
 use crate::primitives::time::{TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
@@ -16,13 +14,13 @@ use crate::security::ingress::{
 };
 use crate::security::trust::TrustRegistry;
 use crate::storage::reassembler::{Reassembler, TransientJournal};
+use crate::storage::vault::Guardian;
+use crate::transport::events::NetworkEvent;
 use crate::transport::health::HealthTracker;
+use crate::transport::transport::NetworkTransport;
 
 // IMPORT ALL GATES
 use crate::security::gate::{ForensicGate, PrivacyGate, WitnessGate};
-
-use crate::storage::vault::Guardian;
-use crate::PhalanxEvent;
 
 pub use libp2p::pnet::PreSharedKey;
 
@@ -53,13 +51,12 @@ impl TransientJournal for NoOpJournal {
     async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
         Ok(vec![])
     }
-
     async fn clear(&mut self) -> Result<(), ShardError> {
         Ok(())
     }
 }
 
-pub struct PhalanxEngine<J: TransientJournal> {
+pub struct PhalanxEngine<T: NetworkTransport, J: TransientJournal> {
     pub reassembler: Reassembler,
     pub guardian: Guardian,
     pub trust_registry: TrustRegistry,
@@ -69,27 +66,23 @@ pub struct PhalanxEngine<J: TransientJournal> {
     pub config: PhalanxConfig,
     pub identity: PhalanxIdentity,
     pub clock: TrustedClock,
-    pub swarm: Swarm<crate::transport::swarm::PhalanxBehaviour>,
+    pub network: T, // Adapter injected here. Swarm is gone.
     pub video_rx: mpsc::Receiver<crate::primitives::shards::VideoShard>,
     pub audio_rx: mpsc::Receiver<crate::primitives::shards::AudioShard>,
     pub seq_counter: u64,
     pub network_key: SymmetricKey,
-    pub journal: J, // Injected Transient WAL
+    pub journal: J,
 }
 
-impl<J: TransientJournal + Send + 'static> PhalanxEngine<J> {
+impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T, J> {
     #[allow(clippy::missing_errors_doc)]
     pub fn new(
         config: PhalanxConfig,
         identity: PhalanxIdentity,
-        physics: PhalanxPhysics,
-        psk: Option<PreSharedKey>,
+        network: T, // Swarm networking parameters offloaded to calling binary
         journal: J,
     ) -> Result<Self, Box<dyn Error>> {
-        let network_keypair = identity.to_libp2p_keypair();
-
-        let local_peer_id = network_keypair.public().to_peer_id();
-        let local_did = Did::from(local_peer_id.to_string());
+        let local_did = identity.did.clone();
 
         // Data boundaries
         let reassembler = Reassembler::new();
@@ -99,10 +92,6 @@ impl<J: TransientJournal + Send + 'static> PhalanxEngine<J> {
         let health_tracker = HealthTracker::new();
         let governor = TrafficGovernor::new();
         let mode = NodeMode::Standard;
-
-        // Network
-        let swarm =
-            crate::transport::swarm::setup_phalanx_swarm(network_keypair, &config, &physics, psk)?;
 
         // Media Channels
         let (_video_tx, video_rx) = mpsc::channel(config.storage.max_video_buffer);
@@ -127,7 +116,7 @@ impl<J: TransientJournal + Send + 'static> PhalanxEngine<J> {
             config,
             identity,
             clock,
-            swarm,
+            network,
             reassembler,
             guardian,
             trust_registry,
@@ -137,43 +126,44 @@ impl<J: TransientJournal + Send + 'static> PhalanxEngine<J> {
             video_rx,
             audio_rx,
             seq_counter: 0,
-            network_key: SymmetricKey([0x42; 32]), // Default/Placeholder Key
+            network_key: SymmetricKey([0x42; 32]),
             journal,
         })
     }
 
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
-        let local_peer_id = *self.swarm.local_peer_id();
-        let local_network_id = NetworkId::from(local_peer_id);
+        let local_network_id = self.identity.to_network_id();
 
         info!(
             "Phalanx Engine: Active and Gated. PeerID: {}",
-            local_peer_id
+            local_network_id
         );
 
         loop {
             tokio::select! {
-                // Pipeline 1: Network Ingress -> Reassembler -> Guardian
-                event = self.swarm.select_next_some() => {
-                    if let SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(
-                        libp2p::gossipsub::Event::Message { propagation_source: peer, message, .. }
-                    )) = event {
-                        let topic = crate::base::types::MeshTopic::new(message.topic.as_str());
-                        self.handle_network_ingress(peer, &message.data, topic).await;
+                // Pipeline 1: Abstracted Network Ingress
+                Some(event) = self.network.next_event() => {
+                    match event {
+                        NetworkEvent::DataReceived { origin, topic, data } => {
+                            self.handle_network_ingress(origin, &data, topic).await;
+                        }
+                        NetworkEvent::Shutdown => break,
+                        _ => {}
                     }
                 }
 
                 // Pipeline 2: Video Sensor Egress -> Network
                 Some(shard) = self.video_rx.recv() => {
-                    self.process_media_egress(Evidence::Video(shard), local_network_id);
+                    self.process_media_egress(Evidence::Video(shard), local_network_id).await;
                 }
 
                 // Pipeline 3: Audio Sensor Egress -> Network
                 Some(shard) = self.audio_rx.recv() => {
-                    self.process_media_egress(Evidence::Audio(shard), local_network_id);
+                    self.process_media_egress(Evidence::Audio(shard), local_network_id).await;
                 }
             }
         }
+        Ok(())
     }
 
     // =========================================================================
@@ -181,9 +171,9 @@ impl<J: TransientJournal + Send + 'static> PhalanxEngine<J> {
     // =========================================================================
     async fn handle_network_ingress(
         &mut self,
-        peer_id: libp2p::PeerId,
+        peer_id: NetworkId,
         chunk_bytes: &[u8],
-        topic: crate::base::types::MeshTopic,
+        topic: MeshTopic,
     ) {
         let chunk: ShardChunk = match postcard::from_bytes(chunk_bytes) {
             Ok(c) => c,
@@ -194,9 +184,8 @@ impl<J: TransientJournal + Send + 'static> PhalanxEngine<J> {
         };
 
         let sender_did = chunk.owner_did.clone();
-        let local_network_id = NetworkId::from(*self.swarm.local_peer_id());
+        let local_network_id = self.identity.to_network_id();
 
-        // 1. Allocate Parameter Objects
         let ctx = IngressContext {
             config: &self.config,
             identity: &self.identity,
@@ -214,24 +203,20 @@ impl<J: TransientJournal + Send + 'static> PhalanxEngine<J> {
             journal: &mut self.journal,
         };
 
-        // 2. Execute Shared Orchestration
         let orchestration_result =
             IngressOrchestrator::process_chunk(chunk, &topic, &ctx, &mut pipeline).await;
 
-        // 3. Handle Production-Specific Physical Actions
         match orchestration_result {
-            Ok(Some(_size)) => {
-                // Future integration point for physical node metrics mapping
-            }
+            Ok(Some(_size)) => {}
             Ok(None) => {}
             Err(IngressError::Blacklisted(did)) => {
-                let _ = self.swarm.disconnect_peer_id(peer_id);
+                self.network.ban_peer(&peer_id).await;
                 tracing::warn!(%did, "Dropped connection from blacklisted peer.");
             }
             Err(e) => {
                 let trust_level = self.trust_registry.check_trust(&sender_did);
                 if matches!(trust_level, crate::security::trust::TrustLevel::Blocked) {
-                    let _ = self.swarm.disconnect_peer_id(peer_id);
+                    self.network.ban_peer(&peer_id).await;
                     tracing::warn!(%sender_did, error = %e, "Peer blacklisted due to protocol offense.");
                 } else {
                     tracing::debug!(error = %e, "Ingress rejected.");
@@ -243,8 +228,8 @@ impl<J: TransientJournal + Send + 'static> PhalanxEngine<J> {
     // =========================================================================
     // EGRESS PIPELINE
     // =========================================================================
-    fn process_media_egress(&mut self, evidence: Evidence, local_network_id: NetworkId) {
-        let topic = libp2p::gossipsub::IdentTopic::new("phalanx/1.0.0");
+    async fn process_media_egress(&mut self, evidence: Evidence, local_network_id: NetworkId) {
+        let topic = MeshTopic::new("phalanx/1.0.0");
         let shard_id = ShardId(self.seq_counter as u32);
 
         let chunks_result = evidence
@@ -260,11 +245,7 @@ impl<J: TransientJournal + Send + 'static> PhalanxEngine<J> {
         if let Ok(chunks) = chunks_result {
             for chunk in chunks {
                 if let Ok(data) = postcard::to_stdvec(&chunk) {
-                    let _ = self
-                        .swarm
-                        .behaviour_mut()
-                        .gossipsub
-                        .publish(topic.clone(), data);
+                    let _ = self.network.publish(&topic, data).await;
                 }
             }
             self.seq_counter += 1;
@@ -272,27 +253,37 @@ impl<J: TransientJournal + Send + 'static> PhalanxEngine<J> {
     }
 }
 
-impl PhalanxEngine<NoOpJournal> {
-    pub fn new_at_path(path: &str) -> Result<Self, Box<dyn Error>> {
+// Fixed generic trait missing
+impl<T: NetworkTransport> PhalanxEngine<T, NoOpJournal> {
+    pub fn new_at_path(path: &str, network: T) -> Result<Self, Box<dyn Error>> {
         let mut config = PhalanxConfig::default();
         config.storage.vault_path = path.to_string();
 
-        let physics = PhalanxPhysics::default();
         let identity_path = std::path::Path::new(path).join("identity.pem");
         let identity = init_identity(&identity_path).unwrap_or_default();
 
-        Self::new(config, identity, physics, None, NoOpJournal)
+        Self::new(config, identity, network, NoOpJournal)
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::base::config::PhalanxConfig;
+    use crate::base::types::MeshTopic;
     use crate::primitives::identity::PhalanxIdentity;
+    use crate::transport::events::NetworkEvent;
+    use crate::transport::mock::MockTransport;
     use tempfile::TempDir;
+    use tokio::sync::mpsc;
 
-    fn setup_test_env() -> (PhalanxConfig, PhalanxPhysics, TempDir) {
+    /// Helper to generate a dummy adapter for pure unit tests
+    fn create_mock_transport() -> MockTransport {
+        let (_, ingress_rx) = mpsc::channel::<NetworkEvent>(10);
+        let (egress_tx, _) = mpsc::channel::<(MeshTopic, Vec<u8>)>(10);
+        MockTransport::new(ingress_rx, Some(egress_tx))
+    }
+
+    fn setup_test_env() -> (PhalanxConfig, TempDir) {
         let temp_dir = tempfile::tempdir().expect("Failed to create ephemeral test directory");
 
         let config = PhalanxConfig {
@@ -302,16 +293,17 @@ mod tests {
             },
             ..Default::default()
         };
-        let physics = PhalanxPhysics::default();
-        (config, physics, temp_dir)
+        // Physics removed, as it is now strictly a production adapter concern
+        (config, temp_dir)
     }
 
     #[test]
     fn test_engine_initialization() {
-        let (config, physics, _temp_dir) = setup_test_env();
+        let (config, _temp_dir) = setup_test_env();
         let identity = PhalanxIdentity::new();
+        let network = create_mock_transport();
 
-        let engine = PhalanxEngine::new(config, identity, physics, None, NoOpJournal);
+        let engine = PhalanxEngine::new(config, identity, network, NoOpJournal);
         assert!(engine.is_ok(), "Engine should initialize with valid inputs");
     }
 
@@ -319,8 +311,9 @@ mod tests {
     fn test_new_at_path_ephemeral_fallback() {
         let temp_dir = tempfile::tempdir().expect("Failed to create ephemeral test directory");
         let path = temp_dir.path().to_string_lossy().into_owned();
+        let network = create_mock_transport();
 
-        let engine_result = PhalanxEngine::new_at_path(&path);
+        let engine_result = PhalanxEngine::new_at_path(&path, network);
 
         assert!(
             engine_result.is_ok(),
@@ -334,9 +327,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipeline_gates_active() {
-        let (config, physics, _temp_dir) = setup_test_env();
+        let (config, _temp_dir) = setup_test_env();
         let identity = PhalanxIdentity::new();
-        let engine = PhalanxEngine::new(config, identity, physics, None, NoOpJournal).unwrap();
+        let network = create_mock_transport();
+
+        let engine = PhalanxEngine::new(config, identity, network, NoOpJournal).unwrap();
 
         assert!(engine.video_rx.capacity() > 0);
         assert!(engine.audio_rx.capacity() > 0);
