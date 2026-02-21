@@ -69,10 +69,7 @@ impl Guardian {
         let sequence = envelope.evidence.sequence_id();
 
         // 2. Promotion to Active Volley
-        let user_vault = self
-            .active_volleys
-            .entry(owner)
-            .or_default();
+        let user_vault = self.active_volleys.entry(owner).or_default();
 
         user_vault.insert(sequence, envelope.clone());
 
