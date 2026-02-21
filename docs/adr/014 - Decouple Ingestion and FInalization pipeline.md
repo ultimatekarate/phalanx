@@ -1,6 +1,6 @@
 # Architecture Decision Record (ADR)
 
-## Title: ADR-005: Decoupling of Ingestion and Finalization Pipelines via Sentinel/Guardian Split
+## Title: ADR-014: Decoupling of Ingestion and Finalization Pipelines via Sentinel/Guardian Split
 
 **Status:** Accepted and Implemented (Phase 4)
 **Date:** February 20, 2026

@@ -77,7 +77,8 @@ features = [
     "tokio",
     "relay",
     "dcutr",
-    "autonat"
+    "autonat",
+    "request-response"
 ]
 
 [features]

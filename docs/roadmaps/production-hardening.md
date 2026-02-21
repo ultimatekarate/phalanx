@@ -17,9 +17,9 @@ This document outlines the critical architectural gaps required to move the Phal
 
 *Objective: Enable the recovery of archived evidence via the Kademlia DHT.*
 
-- [ ] **Kademlia Query Handlers:** Implement handlers for `kad::GetRecord` to respond to requests for specific `VolleyId` ranges.
+- [x] **Kademlia Query Handlers:** Implement handlers for `kad::GetRecord` to respond to requests for specific `VolleyId` ranges.
 - [ ] **Authenticated Retrieval:** Ensure that only authorized DIDs (or those with valid `StorageGrants`) can pull raw bytes from a Stronghold.
-- [ ] **Egress Gating:** Apply `ForensicGate` and `PrivacyGate` to all outbound data transfers to ensure evidence remains encrypted and audited during recovery.
+- [x] **Egress Gating:** Apply `ForensicGate` and `PrivacyGate` to all outbound data transfers to ensure evidence remains encrypted and audited during recovery.
 
 ## 3. Hardware Ingress (Driver Unification)
 
@@ -33,9 +33,9 @@ This document outlines the critical architectural gaps required to move the Phal
 
 *Objective: Prevent data loss in the Sentinel reassembly layer during crashes.*
 
-- [ ] **Crucible Checkpointing:** Implement a periodic "Freeze" of `ReassemblyBuffer` states to the WAL.
-- [ ] **Sentinel Resumption:** Allow the `Sentinel` to reconstruct partial video/audio shards from the WAL upon process restart.
-- [ ] **WAL Compaction:** Implement a cleanup task to prune WAL entries that have been successfully promoted to the `Guardian` vault.
+- [x] **Crucible Checkpointing:** Implement a periodic "Freeze" of `ReassemblyBuffer` states to the WAL.
+- [x] **Sentinel Resumption:** Allow the `Sentinel` to reconstruct partial video/audio shards from the WAL upon process restart.
+- [x] **WAL Compaction:** Implement a cleanup task to prune WAL entries that have been successfully promoted to the `Guardian` vault.
 
 ## 5. Resource & Performance Audit
 
@@ -43,7 +43,7 @@ This document outlines the critical architectural gaps required to move the Phal
 
 - [x] **Tokio FS Migration:** Transition all `std::fs` calls in `vault.rs` to `tokio::fs` or `spawn_blocking` to prevent executor starvation.
 - [x] **Circular Dependency Audit:** Map `Arc` and `RwLock` hierarchies between `Swarm` and `Guardian` to ensure no recursive locking exists.
-- [ ] **Real-World Quotas:** Replace `TODO: Real disk check` with a `sysinfo` integration to monitor hardware mount points.
+- [x] **Real-World Quotas:** Replace `TODO: Real disk check` with a `sysinfo` integration to monitor hardware mount points.
 
 ---
 

@@ -2,11 +2,15 @@ use phalanx_core::storage::reassembler::TransientJournal;
 use std::error::Error;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, RwLock};
 use tokio::time::Sleep;
 
-use libp2p::{futures::StreamExt, gossipsub, identify, kad, mdns, swarm::SwarmEvent, Swarm};
+use libp2p::{
+    futures::StreamExt, gossipsub, identify, kad, mdns, request_response, swarm::SwarmEvent, Swarm,
+};
 use tracing::{debug, info, warn};
 
 use phalanx_core::{
@@ -15,18 +19,14 @@ use phalanx_core::{
         types::{MeshTopic, PowerState, UnitInterval, VitalityRate},
     },
     primitives::identity::{NetworkId, PhalanxIdentity},
-    primitives::shards::{ShardChunk, ShardError},
+    primitives::shards::{ShardChunk, ShardError, WitnessEnvelope},
     security::{gate::ForensicGate, telemetry},
     storage::{journal::FileJournal, reassembler::Reassembler, vault::Guardian},
     transport::health::{ControlMessage, HealthTracker},
+    transport::protocol::{VolleyRequest, VolleyResponse},
     transport::swarm::{get_storage_key, load_swarm_key, setup_phalanx_swarm},
     PhalanxEvent,
 };
-
-use tokio::sync::mpsc;
-
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 /// The Dedicated Storage Node.
 ///
@@ -44,6 +44,7 @@ pub struct StrongholdEngine<J: TransientJournal> {
     health_tracker: HealthTracker,
     power_state: PowerState,
     storage_load: Arc<AtomicUsize>,
+    storage: Arc<RwLock<Guardian>>,
     _journal_phantom: std::marker::PhantomData<J>,
 }
 
@@ -52,13 +53,9 @@ impl<J: TransientJournal + 'static> StrongholdEngine<J> {
     ///
     /// Loads configuration, generates/loads identity, establishes the Vault,
     /// and performs the cryptographic handshake to join the Swarm.
-    ///
-    /// # Errors
-    ///
     pub async fn new(config_path: &str, journal: J) -> Result<Self, Box<dyn Error>> {
         let config = PhalanxConfig::load(config_path)?;
         let (identity, _) = PhalanxIdentity::generate().map_err(|e| {
-            // FORENSIC GATE: Report the entropy failure to telemetry
             tracing::error!(
                 target: "phalanx::forensics",
                 event_code = "config_load_err",
@@ -68,21 +65,21 @@ impl<J: TransientJournal + 'static> StrongholdEngine<J> {
             e
         })?;
 
-        // Physics Profile: WAN (High Latency Tolerance)
-        // Strongholds are usually servers, but they deal with mobile peers.
         let physics = PhalanxPhysics::default_wan();
+        let local_peer_id = identity.to_network_id();
 
         // 1. Storage & Security Init
-        let (chunk_tx, chunk_rx) = mpsc::channel(1024); // Back pressure limit
-
-        let local_peer_id = identity.to_network_id();
+        let (chunk_tx, chunk_rx) = mpsc::channel(1024);
 
         let storage_load = Arc::new(AtomicUsize::new(0));
         let actor_load_metric = Arc::clone(&storage_load);
 
+        let guardian = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
+        let shared_storage = Arc::new(RwLock::new(guardian));
+
         let storage_actor = StorageActor {
             reassembler: Reassembler::new(),
-            storage: Guardian::new(&config.storage.vault_path, &config, identity.did.clone()),
+            storage: Arc::clone(&shared_storage),
             journal,
             config: config.clone(),
             identity: identity.clone(),
@@ -92,7 +89,6 @@ impl<J: TransientJournal + 'static> StrongholdEngine<J> {
             local_peer_id,
         };
 
-        // Spawn the Storage Actor onto the Tokio runtime independently
         tokio::spawn(async move {
             storage_actor.run().await;
         });
@@ -139,40 +135,21 @@ impl<J: TransientJournal + 'static> StrongholdEngine<J> {
             health_tracker: HealthTracker::new(),
             power_state: PowerState::Normal,
             storage_load,
+            storage: shared_storage,
         })
     }
 
-    /// The Main Reactor Loop.
-    ///
-    /// Multiplexes three temporal domains:
-    /// 1. **Network Time:** Responding to asynchronous Swarm events.
-    /// 2. **Maintenance Time:** Fixed interval pruning of stale data.
-    /// 3. **Vitality Time:** Dynamic heartbeat pulsing based on system load.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// * The network swarm fails to poll (Critical Transport Failure).
-    /// * Inbound gossip messages contain unrecoverable malformations during the dispatch phase.
-    /// * Vitality calculations encounter a system-level clock error.
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
         info!(id = %self.identity.did, "Stronghold Engine active.");
 
-        // 1. ANNOUNCE ROLE (Updated for new signature)
-        // We capture the authoritative local ID once to pass into the forensic gates.
         let local_id = NetworkId(*self.swarm.local_peer_id());
 
-        // The announce_stronghold method now uses the Forensic Gate internally.
-        // It returns Option<QueryId> and handles its own forensic logging.
         if let Some(query_id) = self.swarm.behaviour_mut().announce_stronghold(&local_id) {
             info!(?query_id, "Stronghold role successfully announced to DHT.");
         } else {
-            // If the gate returned None, it already logged the forensic reason (e.g., dht_announce_fail).
-            // We can add high-level context here if needed.
             warn!("Stronghold role announcement bypassed by Forensic Gate.");
         }
 
-        // 2. ANNOUNCE SERVICE (The Generic Method)
         let storage_key = get_storage_key();
         if let Err(e) = self
             .swarm
@@ -190,12 +167,9 @@ impl<J: TransientJournal + 'static> StrongholdEngine<J> {
 
         loop {
             tokio::select! {
-                // --- DOMAIN A: Network I/O ---
                 event = self.swarm.select_next_some() => {
                     self.handle_swarm_event(event).await?;
                 }
-
-                // --- DOMAIN B: Vitality (The "Pulse") ---
                 () = &mut heartbeat_timer => {
                     let next_interval = self.pulse_vitality();
                     heartbeat_timer.as_mut().reset((Instant::now() + next_interval).into());
@@ -204,9 +178,6 @@ impl<J: TransientJournal + 'static> StrongholdEngine<J> {
         }
     }
 
-    /// Routes disparate libp2p events to their specific subsystems:
-    /// * **Gossipsub:** Data shards -> Vault (Salvage).
-    /// * **Mdns/Identify:** Peer Discovery -> Kademlia (Routing Table).
     async fn handle_swarm_event(
         &mut self,
         event: SwarmEvent<PhalanxEvent>,
@@ -215,7 +186,6 @@ impl<J: TransientJournal + 'static> StrongholdEngine<J> {
             SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(event)) => {
                 self.handle_gossip(event);
             }
-
             SwarmEvent::Behaviour(PhalanxEvent::Mdns(mdns::Event::Discovered(list))) => {
                 for (peer_id, multiaddr) in list {
                     self.swarm
@@ -224,7 +194,6 @@ impl<J: TransientJournal + 'static> StrongholdEngine<J> {
                         .add_address(&peer_id, multiaddr);
                 }
             }
-
             SwarmEvent::Behaviour(PhalanxEvent::Identify(boxed_event)) => {
                 if let identify::Event::Received { peer_id, info, .. } = *boxed_event {
                     for addr in info.listen_addrs {
@@ -235,7 +204,6 @@ impl<J: TransientJournal + 'static> StrongholdEngine<J> {
                     }
                 }
             }
-
             SwarmEvent::Behaviour(PhalanxEvent::Kademlia(
                 kad::Event::OutboundQueryProgressed {
                     result: kad::QueryResult::StartProviding(Ok(_)),
@@ -244,19 +212,70 @@ impl<J: TransientJournal + 'static> StrongholdEngine<J> {
             )) => {
                 debug!("DHT Advertisement refreshed.");
             }
-
-            _ => {} // Ignore connection events, etc.
+            SwarmEvent::Behaviour(PhalanxEvent::Retrieval(event)) => {
+                if let request_response::Event::Message { message, .. } = event {
+                    match message {
+                        request_response::Message::Request {
+                            request, channel, ..
+                        } => {
+                            self.handle_retrieval_request(request, channel).await;
+                        }
+                        request_response::Message::Response { .. } => {}
+                    }
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
 
-    /// Processes high-velocity `GossipSub` messages.
-    ///
-    /// Distinction:
-    /// * **Control Signals:** Updates the internal "Reputation Table" synchronously.
-    /// * **Data Shards:** Dispatched asynchronously to the StorageActor via mpsc channel.
+    async fn handle_retrieval_request(
+        &mut self,
+        request: VolleyRequest,
+        channel: request_response::ResponseChannel<VolleyResponse>,
+    ) {
+        let volley_id = request.volley_id;
+        let author_did = request.locator.author.clone();
+
+        info!(
+            target: "phalanx::egress",
+            %volley_id,
+            %author_did,
+            "Processing mesh retrieval request"
+        );
+
+        let guardian = self.storage.read().await;
+
+        let response = match guardian.get_active_volley_shards(&author_did) {
+            Some(data) => {
+                let filtered: Vec<WitnessEnvelope> = data
+                    .values()
+                    .filter(|e| e.evidence.volley_id() == &volley_id)
+                    .cloned()
+                    .collect();
+
+                if filtered.is_empty() {
+                    warn!(%volley_id, "Target volley found in index but contains no artifacts");
+                    VolleyResponse::NotFound
+                } else {
+                    info!(%volley_id, count = filtered.len(), "Serving evidence unit to peer");
+                    VolleyResponse::Success(filtered)
+                }
+            }
+            None => {
+                debug!(%author_did, "No records found for requested author");
+                VolleyResponse::NotFound
+            }
+        };
+
+        let _ = self
+            .swarm
+            .behaviour_mut()
+            .retrieval
+            .send_response(channel, response);
+    }
+
     fn handle_gossip(&mut self, event: gossipsub::Event) {
-        // 1. Extract the message or exit immediately
         let gossipsub::Event::Message { message, .. } = event else {
             return;
         };
@@ -264,27 +283,17 @@ impl<J: TransientJournal + 'static> StrongholdEngine<J> {
         let topic: MeshTopic = message.topic.as_str().into();
         let local_peer = NetworkId(*self.swarm.local_peer_id());
 
-        // ------------------------------------------------------------------
-        // BRANCH A: CONTROL PLANE (Heartbeats)
-        // ------------------------------------------------------------------
         if topic == self.config.network.control_topic {
             if let Ok(msg) = postcard::from_bytes::<ControlMessage>(&message.data).gate(
                 "ctrl_parse_fail",
                 &local_peer,
                 "Malformed heartbeat",
             ) {
-                // NOTE: If Reassembler was moved to StorageActor, update this to `self.health_tracker`
                 self.health_tracker.register_activity(msg);
             }
-
             return;
         }
 
-        // ------------------------------------------------------------------
-        // BRANCH B: DATA PLANE (Evidence Shards)
-        // ------------------------------------------------------------------
-
-        // 1. Parsing Boundary
         let chunk = match postcard::from_bytes::<phalanx_core::primitives::shards::ShardChunk>(
             &message.data,
         )
@@ -294,9 +303,6 @@ impl<J: TransientJournal + 'static> StrongholdEngine<J> {
             Err(_) => return,
         };
 
-        // 2. Storage Actor Boundary (Non-Blocking Dispatch)
-        // Replaces the asynchronous Reassembler and Guardian processing, routing the data
-        // to the dedicated disk I/O Tokio task.
         if let Err(err) = self.chunk_tx.try_send((chunk, topic, local_peer)) {
             tracing::error!(
                 error = %err,
@@ -305,40 +311,29 @@ impl<J: TransientJournal + 'static> StrongholdEngine<J> {
         }
     }
 
-    /// Calculates the Node's "Vitality Rate" and broadcasts a heartbeat.
-    ///
-    /// **The Physics:**
-    /// A Stronghold under heavy storage load (high I/O) beats slower.
-    /// A Stronghold doing nothing beats fast.
-    /// This allows the network to route data away from stressed nodes naturally.
     fn pulse_vitality(&mut self) -> Duration {
-        // 1. Measure Stress
         let active_storage_tasks = self.storage_load.load(Ordering::Relaxed) as f32;
         let max_capacity = self.config.storage.max_peers as f32;
         let load = UnitInterval::new(active_storage_tasks / max_capacity);
 
-        // 2. Calculate Rate
         let vitality = VitalityRate::calculate(&self.physics, PowerState::Normal, load);
         let interval = vitality.as_duration();
         let sender_id = NetworkId(*self.swarm.local_peer_id());
 
-        // 3. Construct Proof
         let heartbeat_msg = ControlMessage {
             sender: sender_id,
             load_factor: load.as_f32(),
-            storage_remaining_mb: 10240, // TODO: Real disk check
+            storage_remaining_mb: 10240,
             heartbeat_ms: vitality.as_u64(),
             is_leaf: self.power_state == PowerState::Leaf,
         };
 
-        // 4. Broadcast
         if let Ok(data) = postcard::to_stdvec(&heartbeat_msg).gate(
             "heartbeat_enc_fail",
             &sender_id,
             "Failed to encode heartbeat",
         ) {
             let topic = gossipsub::IdentTopic::new(self.config.network.control_topic.to_string());
-
             let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, data);
         }
 
@@ -348,7 +343,7 @@ impl<J: TransientJournal + 'static> StrongholdEngine<J> {
 
 pub struct StorageActor<J: TransientJournal> {
     pub reassembler: Reassembler,
-    pub storage: Guardian,
+    pub storage: Arc<RwLock<Guardian>>,
     pub journal: J,
     pub config: PhalanxConfig,
     pub identity: PhalanxIdentity,
@@ -360,7 +355,6 @@ pub struct StorageActor<J: TransientJournal> {
 
 impl<J: TransientJournal> StorageActor<J> {
     pub async fn run(mut self) {
-        // BOOT SEQUENCE: Utilize the decoupled Reassembler protocol
         if let Err(err) = self.restore_state().await {
             tracing::error!(error = %err, "Failed to restore Crucible state from disk.");
         }
@@ -381,18 +375,20 @@ impl<J: TransientJournal> StorageActor<J> {
 
                     match envelope_opt {
                         Ok(Some(envelope)) => {
-                            if let Err(err) = self.storage.ingest_envelope(envelope) {
+                            let mut guardian_guard = self.storage.write().await;
+                            if let Err(err) = guardian_guard.ingest_envelope(envelope) {
                                 tracing::error!(error = %err, "Vault rejected envelope");
                             }
                         }
-                        Ok(None) => {}, // Partial assembly
+                        Ok(None) => {},
                         Err(err) => {
                             tracing::warn!(error = %err, "Reassembler rejected data chunk");
                         }
                     }
 
+                    let volleys_count = self.storage.read().await.active_volleys.len();
                     self.active_tasks_metric.store(
-                        self.storage.active_volleys.len(),
+                        volleys_count,
                         Ordering::Relaxed
                     );
                 }
@@ -417,8 +413,9 @@ impl<J: TransientJournal> StorageActor<J> {
             )
             .await?;
 
+        let mut guardian_guard = self.storage.write().await;
         for envelope in recovered_envelopes {
-            let _ = self.storage.ingest_envelope(envelope);
+            let _ = guardian_guard.ingest_envelope(envelope);
         }
 
         info!("Crucible WAL replay complete.");
@@ -453,22 +450,16 @@ mod stronghold_initialization_tests {
     use super::*;
     use phalanx_core::transport::swarm::DiscoveryError;
 
-    // This mock simulates the behavior failure to verify the match arm in run()
     #[tokio::test]
     async fn test_discovery_failure_is_non_fatal() {
-        // In a real scenario, this would be tested via a SimulationHarness.
-        // Here we demonstrate the structural expectation of the error handler.
-
         let discovery_result: Result<kad::QueryId, DiscoveryError> =
             Err(DiscoveryError::StorageError);
 
-        // Verification logic: The engine must log the error and move to the next phase
-        // rather than returning an early Err().
         let is_fatal = match discovery_result {
             Ok(_) => false,
             Err(e) => {
                 tracing::error!(error = %e, "Simulated discovery failure");
-                false // Error is trapped, not propagated as fatal
+                false
             }
         };
 
@@ -482,13 +473,17 @@ mod stronghold_initialization_tests {
 #[cfg(test)]
 mod actor_tests {
     use super::*;
-    use phalanx_core::primitives::shards::{ChunkType, ShardId};
+    use phalanx_core::primitives::shards::{
+        ChunkType, DataPayload, Evidence, ShardId, StorageSequence, VideoShard, VolleyId,
+    };
+    use phalanx_core::primitives::time::PhalanxTimestamp;
+    use phalanx_core::security::gate::WitnessGate;
+    use phalanx_core::security::telemetry::init_observability;
     use phalanx_core::storage::journal::FileJournal;
-    use std::sync::atomic::Ordering;
-    use std::time::Duration;
 
     #[tokio::test]
     async fn test_storage_actor_metric_pipeline() {
+        init_observability();
         let config = PhalanxConfig::default();
         let (identity, _) = PhalanxIdentity::generate().unwrap();
         let local_peer = identity.to_network_id();
@@ -499,9 +494,12 @@ mod actor_tests {
             .await
             .expect("Failed to initialize test FileJournal");
 
+        let guardian = Guardian::new("test_vault_metrics", &config, identity.did.clone());
+        let shared_storage = Arc::new(RwLock::new(guardian));
+
         let storage_actor = StorageActor {
             reassembler: Reassembler::new(),
-            storage: Guardian::new("test_vault_metrics", &config, identity.did.clone()),
+            storage: shared_storage,
             config: config.clone(),
             identity: identity.clone(),
             chunk_rx,
@@ -511,51 +509,48 @@ mod actor_tests {
             journal,
         };
 
-        // Spawn actor in background
         let actor_handle = tokio::spawn(async move {
             storage_actor.run().await;
         });
 
-        // Ensure metric starts at 0
         assert_eq!(storage_load.load(Ordering::Relaxed), 0);
 
-        // Send a dummy chunk down the pipeline (simulating handle_gossip)
+        let video_shard = VideoShard {
+            timestamp: PhalanxTimestamp::now(),
+            sequence_id: StorageSequence(1),
+            fps: 30,
+            volley_id: VolleyId::new("v1"),
+            payload: DataPayload::Clear(vec![0xBA, 0xAD, 0xF0, 0x0D]),
+        };
+
+        let evidence = Evidence::Video(video_shard);
+
+        let envelope = evidence
+            .seal(&identity, local_peer.clone())
+            .expect("Failed to seal evidence");
+
+        let valid_data = postcard::to_stdvec(&envelope).expect("Serialization failed");
+
         let chunk = ShardChunk {
             shard_id: ShardId(101),
             chunk_index: 0,
-            total_chunks: 1, // 1 chunk = immediate assembly and vault insertion
-            data: vec![0xBA, 0xAD, 0xF0, 0x0D],
+            total_chunks: 1,
+            data: valid_data,
             owner_did: identity.did.clone(),
             chunk_type: ChunkType::Witnessed,
         };
 
         let topic = MeshTopic::from("phalanx/video/1.0.0");
 
-        // Non-blocking dispatch
         chunk_tx.send((chunk, topic, local_peer)).await.unwrap();
 
-        // Yield to allow actor to process the chunk and update the atomic metric
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // The Reassembler should have processed it, passed it to Guardian, and updated the metric.
-        // Even if Guardian rejects a malformed payload, the actor run loop should have advanced
-        // and called `store` on the atomic variable.
-
-        // Note: The exact expected value depends on whether your Guardian persists tasks
-        // into `micro_layer` instantly. Assuming it does:
         let load = storage_load.load(Ordering::Relaxed);
 
-        // Clean up actor
         actor_handle.abort();
-
-        // Cleanup test vault
         let _ = std::fs::remove_dir_all("test_vault_metrics");
 
-        assert!(
-            // Either 0 (if Guardian rejected it quickly) or >0 (if it's processing)
-            // The key is that the pipeline didn't panic and the atomic was accessible
-            load > 0,
-            "Lock-free metric pipeline failed."
-        );
+        assert!(load > 0, "Lock-free metric pipeline failed.");
     }
 }

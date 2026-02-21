@@ -18,6 +18,9 @@ use crate::primitives::identity::NetworkId;
 use crate::security::gate::ForensicGate;
 use crate::storage::kademlia::RedbStore;
 
+use crate::transport::protocol::{PhalanxRetrievalProtocol, VolleyRequest, VolleyResponse};
+use libp2p::request_response::{self, ProtocolSupport};
+
 // --- CONSTANTS ---
 pub type PhalanxKadStore = RedbStore;
 pub const SERVICE_STORAGE: &[u8] = b"phalanx/service/storage/v1";
@@ -48,6 +51,7 @@ pub struct PhalanxBehaviour {
     pub relay_client: relay::client::Behaviour,
     pub dcutr: dcutr::Behaviour,
     pub autonat: autonat::Behaviour,
+    pub retrieval: request_response::Behaviour<PhalanxRetrievalProtocol>,
 }
 
 impl PhalanxBehaviour {
@@ -98,6 +102,7 @@ pub enum PhalanxEvent {
     RelayClient(relay::client::Event),
     Dcutr(dcutr::Event),
     Autonat(autonat::Event),
+    Retrieval(request_response::Event<VolleyRequest, VolleyResponse>),
 }
 
 impl From<gossipsub::Event> for PhalanxEvent {
@@ -138,6 +143,12 @@ impl From<dcutr::Event> for PhalanxEvent {
 impl From<autonat::Event> for PhalanxEvent {
     fn from(v: autonat::Event) -> Self {
         Self::Autonat(v)
+    }
+}
+
+impl From<request_response::Event<VolleyRequest, VolleyResponse>> for PhalanxEvent {
+    fn from(event: request_response::Event<VolleyRequest, VolleyResponse>) -> Self {
+        PhalanxEvent::Retrieval(event)
     }
 }
 
@@ -242,6 +253,17 @@ fn build_behaviour(
     let dcutr = dcutr::Behaviour::new(local_peer_id);
     let autonat = autonat::Behaviour::new(local_peer_id, autonat::Config::default());
 
+    let retrieval_config = request_response::Config::default()
+        .with_request_timeout(Duration::from_secs(20));
+
+    let retrieval = request_response::Behaviour::new(
+        [(
+            StreamProtocol::new("/phalanx/retrieval/1.0.0"),
+            ProtocolSupport::Full,
+        )],
+        retrieval_config,
+    );
+
     Ok(PhalanxBehaviour {
         gossipsub,
         mdns,
@@ -251,6 +273,7 @@ fn build_behaviour(
         relay_client,
         dcutr,
         autonat,
+        retrieval,
     })
 }
 
@@ -329,6 +352,22 @@ pub fn setup_phalanx_swarm(
 
     let transport = build_base_transport(&local_key, psk)?;
     let behaviour = build_behaviour(&local_key, config, physics, relay_client, kademlia)?;
+
+    let retrieval_config =
+        request_response::Config::default().with_request_timeout(Duration::from_secs(20));
+
+    let protocols = [(
+        StreamProtocol::new("/phalanx/retrieval/1.0.0"),
+        ProtocolSupport::Full,
+    )];
+
+    // Use with_codec instead of new to supply the PhalanxRetrievalProtocol explicitly
+    let _retrieval: request_response::Behaviour<PhalanxRetrievalProtocol> =
+        request_response::Behaviour::with_codec(
+            PhalanxRetrievalProtocol, // Arg 1: The Codec
+            protocols,                // Arg 2: The Protocols
+            retrieval_config,         // Arg 3: The Config
+        );
 
     let swarm = SwarmBuilder::with_existing_identity(local_key.clone())
         .with_tokio()

@@ -260,7 +260,7 @@ impl SimNode {
         );
 
         let mut trust_config = PhalanxConfig::default();
-        trust_config.storage.vault_path = format!("{}_trust", vault_path);
+        trust_config.storage.vault_path = vault_path.to_string();
         let trust_registry = TrustRegistry::build(&trust_config).await;
 
         let clock = TrustedClock::new();
@@ -518,15 +518,29 @@ impl SimNode {
                 });
             }
             Err(e) => {
-                if matches!(
-                    self.trust_registry.check_trust(&sender_did),
-                    crate::security::trust::TrustLevel::Blocked
-                ) {
-                    let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
+                self.trust_registry
+                    .record_offense(
+                        &sender_did,
+                        crate::security::trust::Offense::ReplayAttack,
+                        &self.clock,
+                    )
+                    .await;
+
+                let send_result = self
+                    .telemetry_tx
+                    .send(SimEvent::AttackAttemptBlocked {
                         attacker: origin,
                         target: self.network_id,
                         reason: format!("Trust Threshold Breached: {}", e),
-                    });
+                    })
+                    .await;
+
+                if let Err(err) = send_result {
+                    tracing::error!(
+                        target: "phalanx::telemetry",
+                        "CRITICAL: Failed to emit AttackAttemptBlocked event. Telemetry receiver dropped: {}",
+                        err
+                    );
                 }
             }
         }

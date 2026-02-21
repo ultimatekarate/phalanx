@@ -28,6 +28,7 @@ pub mod storage {
 // --- 4. TRANSPORT ---
 pub mod transport {
     pub mod health;
+    pub mod protocol;
     pub mod swarm;
 }
 
@@ -38,7 +39,7 @@ pub mod security {
     pub mod grant;
     pub mod ingress;
     pub mod locator;
-
+    pub mod retrieval;
     pub mod telemetry;
     pub mod trust;
 }

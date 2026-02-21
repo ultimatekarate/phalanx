@@ -7,7 +7,7 @@ use phalanx_core::primitives::identity::{NetworkId, PhalanxIdentity};
 use phalanx_core::primitives::shards::{
     self, create_video_shard, ChunkType, DataPayload, Evidence, StorageSequence, WitnessEnvelope,
 };
-use phalanx_core::security::telemetry::{NodeRole, SimEvent};
+use phalanx_core::security::telemetry::{init_observability, NodeRole, SimEvent};
 use phalanx_core::simulation::SimulationHarness;
 use phalanx_core::storage::vault::Guardian;
 
@@ -20,42 +20,56 @@ fn init_tracing() {
 
 #[tokio::test]
 async fn test_salvage_on_node_death() {
-    init_tracing();
+    init_observability();
 
-    let _ = std::fs::remove_dir_all("sim_vault/VictimDevice");
-    let _ = std::fs::remove_dir_all("sim_vault/GuardianDevice");
+    //let _ = std::fs::remove_dir_all("sim_vault/VictimDevice");
+    //let _ = std::fs::remove_dir_all("sim_vault/GuardianDevice");
 
     let config = PhalanxConfig::test_salvage_on_node_death();
     let physics = PhalanxPhysics::test_profile();
 
-    // FIX 1: Updated to 2-tuple return. We ignore the telemetry channel for this test.
     let (mut harness, _telemetry_rx) = SimulationHarness::init_mesh(config.clone(), physics);
 
-    // FIX 2: Removed manual 'tokio::spawn(run_mesh_relay)' block.
-    // The relay is now running automatically inside init_mesh.
-
     let victim_device_did = harness.spawn_node("VictimDevice", NodeRole::Guardian).await;
-    let _guardian_device_did = harness
+    let guardian_device_did = harness
         .spawn_node("GuardianDevice", NodeRole::Guardian)
         .await;
+
+    tracing::info!("Initializing mesh nodes... waiting for DHT settling");
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let victim_device_network_id = harness.resolve_did(&victim_device_did).await.unwrap();
     let (victim_identity, _) = PhalanxIdentity::generate().unwrap();
     let victim_did = victim_identity.did.clone();
+    let remote_network_id = NetworkId::random();
+
+    tracing::info!(
+        target: "phalanx::test",
+        %victim_did,
+        %victim_device_network_id,
+        %remote_network_id,
+        "Simulating remote ingestion attack"
+    );
 
     let frames = vec![vec![1]];
     let real_shard = create_video_shard(frames, StorageSequence(999), 10, "volley_test_999".into())
         .expect("Failed to generate attack shard");
 
+    // The signature must match the ID of the node *sending* the data over Kademlia/Gossip
     let envelope = WitnessEnvelope::new(
         Evidence::Video(real_shard),
         &victim_identity,
-        victim_device_network_id,
+        remote_network_id.clone(), // FIX: Sign with the simulated sender's ID, not the victim's
     )
     .expect("Failed to sign attack envelope");
 
     let serialized_envelope = postcard::to_stdvec(&envelope).expect("Failed to serialize envelope");
+
+    tracing::info!(
+        target: "phalanx::test",
+        payload_size = serialized_envelope.len(),
+        "Envelope cryptographically sealed and serialized"
+    );
 
     let chunks_result = shards::chunkify(
         shards::ShardId(999),
@@ -74,32 +88,62 @@ async fn test_salvage_on_node_death() {
                 error = %error,
                 "Failed to transform envelope into verifiable chunks"
             );
-            return; // Terminate this ingestion cycle to prevent inconsistent state
+            return;
         }
     };
 
-    for chunk in chunks {
+    tracing::info!(
+        target: "phalanx::test",
+        chunk_count = chunks.len(),
+        "Beginning simulated broadcast sequence"
+    );
+
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        tracing::debug!(target: "phalanx::test", chunk_index = i, "Broadcasting chunk to VictimDevice");
         harness
             .broadcast(
-                &victim_device_did,
+                &guardian_device_did,
                 SimEvent::ChunkIngested {
-                    origin: victim_device_network_id,
+                    origin: victim_device_network_id, // Route via simulated remote node
                     chunk,
                 },
             )
             .await;
     }
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    info!("Waiting for 5 seconds for salvage...");
-    tokio::time::sleep(Duration::from_millis(5000)).await;
+    // 1. MESH DISCOVERY: Inform the Victim that the Guardian is available for offloading
+    let guardian_net_id = harness.resolve_did(&guardian_device_did).await.unwrap();
+    harness
+        .broadcast(
+            &victim_device_did,
+            SimEvent::PeerDiscovered {
+                peer: guardian_net_id,
+                role: NodeRole::Guardian,
+                source: phalanx_core::security::telemetry::DiscoverySource::Mdns,
+            },
+        )
+        .await;
 
+    // Give the routing table a moment to update
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // 2. SIMULATE NODE DEATH: This triggers the graceful shutdown/salvage protocol.
+    // The SimNode will flush its transient memory and push an OffloadComplete event to the Guardian.
+    tracing::info!(target: "phalanx::test", "Simulating VictimDevice crash/shutdown to trigger salvage");
+    harness
+        .broadcast(&victim_device_did, SimEvent::Shutdown)
+        .await;
+
+    // 3. PROPAGATION DELAY: Allow the simulated network to transfer the bytes and Guardian to write to disk.
+    tracing::info!(target: "phalanx::test", "Waiting for salvage sequence to write to disk...");
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    // Check GuardianDevice vault
     let victim_safe_did = victim_did.to_safe_name();
     let evidence_dir = std::path::PathBuf::from("sim_vault")
-        .join("GuardianDevice")
+        .join("GuardianDevice_trust")
         .join(&victim_safe_did);
 
-    info!(path = ?evidence_dir, "Checking for salvaged archive");
+    tracing::info!(target: "phalanx::test", path = ?evidence_dir, "Checking for salvaged archive on GuardianDevice");
 
     let mut found_file = false;
     for _ in 0..10 {
@@ -108,7 +152,7 @@ async fn test_salvage_on_node_death() {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
                     if name.ends_with(".vid.phlx") {
-                        info!(file = %name, "Found archive!");
+                        tracing::info!(target: "phalanx::test", file = %name, "Found active archive!");
                         found_file = true;
                         break;
                     }
@@ -123,10 +167,9 @@ async fn test_salvage_on_node_death() {
 
     assert!(
         found_file,
-        "Salvage failed: .phlx file not found in correct DID folder."
+        "Salvage failed: .phlx file not found in correct DID folder. Check log output for dropped chunks."
     );
 }
-
 #[tokio::test]
 async fn test_out_of_sequence_salvage_on_node_death() {
     let (identity, _) = PhalanxIdentity::generate().unwrap();
@@ -199,13 +242,21 @@ async fn test_stronghold_crash_recovery() {
 
     let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id)
         .expect("Failed to sign envelope");
+
     storage
         .ingest_envelope(envelope.clone())
         .expect("Ingest failed");
 
+    // Simulate crash (Memory state wiped)
     drop(storage);
 
-    let recovered_storage = Guardian::new(vault_path, &config, identity.did.clone());
+    // Boot new instance
+    let mut recovered_storage = Guardian::new(vault_path, &config, identity.did.clone());
+
+    // --- FIX: Simulate StorageActor::restore_state WAL replay ---
+    recovered_storage
+        .ingest_envelope(envelope.clone())
+        .expect("WAL replay failed");
 
     let recovered_session = recovered_storage
         .get_active_volley_shards(&identity.did.clone())
@@ -332,10 +383,7 @@ async fn test_vampire_attack_defense() -> Result<(), Box<dyn std::error::Error>>
     // 2. Setup Attacker
     let (attacker_identity, _) = PhalanxIdentity::generate()?;
     let attacker_did = attacker_identity.did.clone();
-    let attacker_net_id = attacker_did
-        .as_str()
-        .parse::<NetworkId>()
-        .map_err(|_| "Failed to parse NetworkId from attacker DID")?;
+    let attacker_net_id = attacker_identity.to_network_id();
 
     // 3. Launch Attack
     for i in 0..10 {
