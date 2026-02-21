@@ -76,10 +76,4 @@ impl SystemGovernor {
         // Returns 0 (NONE) to 6 (SHUTDOWN)
         // Map 0-1 -> Nominal, 2 -> Fair, 3 -> Serious, 4+ -> Critical
     }
-
-    #[cfg(target_os = "ios")]
-    fn get_thermal_status(&self) -> SystemStress {
-        // ObjC call to [NSProcessInfo processInfo].thermalState
-        // Returns 0 (Nominal) to 3 (Critical)
-    }
 }
