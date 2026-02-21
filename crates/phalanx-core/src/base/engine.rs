@@ -17,7 +17,7 @@ use crate::storage::reassembler::{Reassembler, TransientJournal};
 use crate::storage::vault::Guardian;
 use crate::transport::events::NetworkEvent;
 use crate::transport::health::HealthTracker;
-use crate::transport::transport::NetworkTransport;
+use crate::transport::network_transport::NetworkTransport;
 
 // IMPORT ALL GATES
 use crate::security::gate::{ForensicGate, PrivacyGate, WitnessGate};

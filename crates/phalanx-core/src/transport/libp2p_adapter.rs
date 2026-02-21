@@ -5,7 +5,7 @@ use libp2p::swarm::{Swarm, SwarmEvent};
 use crate::base::types::MeshTopic;
 use crate::primitives::identity::NetworkId;
 use crate::transport::events::NetworkEvent;
-use crate::transport::transport::NetworkTransport;
+use crate::transport::network_transport::NetworkTransport;
 use crate::PhalanxEvent;
 
 pub struct Libp2pAdapter {

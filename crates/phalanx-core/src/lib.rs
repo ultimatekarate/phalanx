@@ -31,9 +31,9 @@ pub mod transport {
     pub mod health;
     pub mod libp2p_adapter;
     pub mod mock;
+    pub mod network_transport;
     pub mod protocol;
     pub mod swarm;
-    pub mod transport;
 }
 
 // --- 5. SECURITY ---
