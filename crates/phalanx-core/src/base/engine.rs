@@ -6,21 +6,23 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
+use crate::base::types::{NodeMode, TrafficGovernor};
 use crate::primitives::identity::{init_identity, Did, IdentityError, NetworkId, PhalanxIdentity};
-use crate::primitives::shards::{AudioShard, Evidence, ShardChunk, ShardId, VideoShard};
+use crate::primitives::shards::{Evidence, ShardChunk, ShardError, ShardId};
 use crate::primitives::time::{TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
 use crate::security::ingress::{
     IngressContext, IngressError, IngressOrchestrator, SecurityPipeline,
 };
-use crate::security::sentinel::Sentinel;
-use crate::security::trust::ReputationGate;
+use crate::security::trust::TrustRegistry;
+use crate::storage::reassembler::{Reassembler, TransientJournal};
+use crate::transport::health::HealthTracker;
 
 // IMPORT ALL GATES
 use crate::security::gate::{ForensicGate, PrivacyGate, WitnessGate};
-use crate::storage::strategies::ShardAmalgam;
+
 use crate::storage::vault::Guardian;
-use crate::{PhalanxBehaviour, PhalanxEvent};
+use crate::PhalanxEvent;
 
 pub use libp2p::pnet::PreSharedKey;
 
@@ -38,32 +40,51 @@ pub enum EngineError {
     Simulation(String),
 }
 
-pub struct PhalanxEngine {
-    #[allow(dead_code)]
-    config: PhalanxConfig,
-    identity: PhalanxIdentity,
-    clock: TrustedClock,
-    swarm: Swarm<PhalanxBehaviour>,
-    #[allow(dead_code)]
-    crucible: crate::storage::crucible::Crucible<ShardAmalgam>,
-    sentinel: Sentinel,
-    guardian: Guardian,
-    trust_registry: crate::security::trust::TrustRegistry,
-    video_rx: mpsc::Receiver<VideoShard>,
-    audio_rx: mpsc::Receiver<AudioShard>,
+// POLYFILL: Required until Phase 5 (Mobile Binary Integration) is complete
+pub struct NoOpJournal;
+#[async_trait::async_trait]
+impl TransientJournal for NoOpJournal {
+    async fn record_chunk(&mut self, _chunk: &ShardChunk) -> Result<(), ShardError> {
+        Ok(())
+    }
+    async fn sync(&mut self) -> Result<(), ShardError> {
+        Ok(())
+    }
+    async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
+        Ok(vec![])
+    }
 
-    seq_counter: u64,
-    // TODO: Rotate this via KeyStore in production
-    network_key: SymmetricKey,
+    async fn clear(&mut self) -> Result<(), ShardError> {
+        Ok(())
+    }
 }
 
-impl PhalanxEngine {
+pub struct PhalanxEngine<J: TransientJournal> {
+    pub reassembler: Reassembler,
+    pub guardian: Guardian,
+    pub trust_registry: TrustRegistry,
+    pub health_tracker: HealthTracker,
+    pub governor: TrafficGovernor,
+    pub mode: NodeMode,
+    pub config: PhalanxConfig,
+    pub identity: PhalanxIdentity,
+    pub clock: TrustedClock,
+    pub swarm: Swarm<crate::transport::swarm::PhalanxBehaviour>,
+    pub video_rx: mpsc::Receiver<crate::primitives::shards::VideoShard>,
+    pub audio_rx: mpsc::Receiver<crate::primitives::shards::AudioShard>,
+    pub seq_counter: u64,
+    pub network_key: SymmetricKey,
+    pub journal: J, // Injected Transient WAL
+}
+
+impl<J: TransientJournal + Send + 'static> PhalanxEngine<J> {
     #[allow(clippy::missing_errors_doc)]
     pub fn new(
         config: PhalanxConfig,
         identity: PhalanxIdentity,
         physics: PhalanxPhysics,
         psk: Option<PreSharedKey>,
+        journal: J,
     ) -> Result<Self, Box<dyn Error>> {
         let network_keypair = identity.to_libp2p_keypair();
 
@@ -71,8 +92,13 @@ impl PhalanxEngine {
         let local_did = Did::from(local_peer_id.to_string());
 
         // Data boundaries
-        let sentinel = Sentinel::new(&config);
+        let reassembler = Reassembler::new();
         let guardian = Guardian::new(&config.storage.vault_path, &config, local_did);
+
+        // Orchestration state
+        let health_tracker = HealthTracker::new();
+        let governor = TrafficGovernor::new();
+        let mode = NodeMode::Standard;
 
         // Network
         let swarm =
@@ -102,26 +128,18 @@ impl PhalanxEngine {
             identity,
             clock,
             swarm,
-            crucible: crate::storage::crucible::Crucible::new(),
-            sentinel,
+            reassembler,
             guardian,
             trust_registry,
+            health_tracker,
+            governor,
+            mode,
             video_rx,
             audio_rx,
             seq_counter: 0,
             network_key: SymmetricKey([0x42; 32]), // Default/Placeholder Key
+            journal,
         })
-    }
-
-    pub fn new_at_path(path: &str) -> Result<Self, Box<dyn Error>> {
-        let mut config = PhalanxConfig::default();
-        config.storage.vault_path = path.to_string();
-
-        let physics = PhalanxPhysics::default();
-        let identity_path = std::path::Path::new(path).join("identity.pem");
-        let identity = init_identity(&identity_path).unwrap_or_default();
-
-        Self::new(config, identity, physics, None)
     }
 
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
@@ -135,7 +153,7 @@ impl PhalanxEngine {
 
         loop {
             tokio::select! {
-                // Pipeline 1: Network Ingress -> Sentinel -> Guardian
+                // Pipeline 1: Network Ingress -> Reassembler -> Guardian
                 event = self.swarm.select_next_some() => {
                     if let SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(
                         libp2p::gossipsub::Event::Message { propagation_source: peer, message, .. }
@@ -184,12 +202,16 @@ impl PhalanxEngine {
             identity: &self.identity,
             network_id: local_network_id,
             clock: &self.clock,
+            governor: &self.governor,
+            mode: self.mode,
         };
 
         let mut pipeline = SecurityPipeline {
-            sentinel: &mut self.sentinel,
+            reassembler: &mut self.reassembler,
             guardian: &mut self.guardian,
             trust_registry: &mut self.trust_registry,
+            health_tracker: &mut self.health_tracker,
+            journal: &mut self.journal,
         };
 
         // 2. Execute Shared Orchestration
@@ -207,7 +229,8 @@ impl PhalanxEngine {
                 tracing::warn!(%did, "Dropped connection from blacklisted peer.");
             }
             Err(e) => {
-                if self.trust_registry.is_blacklisted(&sender_did) {
+                let trust_level = self.trust_registry.check_trust(&sender_did);
+                if matches!(trust_level, crate::security::trust::TrustLevel::Blocked) {
                     let _ = self.swarm.disconnect_peer_id(peer_id);
                     tracing::warn!(%sender_did, error = %e, "Peer blacklisted due to protocol offense.");
                 } else {
@@ -249,6 +272,19 @@ impl PhalanxEngine {
     }
 }
 
+impl PhalanxEngine<NoOpJournal> {
+    pub fn new_at_path(path: &str) -> Result<Self, Box<dyn Error>> {
+        let mut config = PhalanxConfig::default();
+        config.storage.vault_path = path.to_string();
+
+        let physics = PhalanxPhysics::default();
+        let identity_path = std::path::Path::new(path).join("identity.pem");
+        let identity = init_identity(&identity_path).unwrap_or_default();
+
+        Self::new(config, identity, physics, None, NoOpJournal)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,7 +311,7 @@ mod tests {
         let (config, physics, _temp_dir) = setup_test_env();
         let identity = PhalanxIdentity::new();
 
-        let engine = PhalanxEngine::new(config, identity, physics, None);
+        let engine = PhalanxEngine::new(config, identity, physics, None, NoOpJournal);
         assert!(engine.is_ok(), "Engine should initialize with valid inputs");
     }
 
@@ -300,7 +336,7 @@ mod tests {
     async fn test_pipeline_gates_active() {
         let (config, physics, _temp_dir) = setup_test_env();
         let identity = PhalanxIdentity::new();
-        let engine = PhalanxEngine::new(config, identity, physics, None).unwrap();
+        let engine = PhalanxEngine::new(config, identity, physics, None, NoOpJournal).unwrap();
 
         assert!(engine.video_rx.capacity() > 0);
         assert!(engine.audio_rx.capacity() > 0);

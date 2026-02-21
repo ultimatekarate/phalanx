@@ -18,13 +18,16 @@ pub mod primitives {
 // --- 3. STORAGE ---
 pub mod storage {
     pub mod crucible;
+    pub mod journal;
     pub mod kademlia;
+    pub mod reassembler;
     pub mod strategies;
     pub mod vault;
 }
 
 // --- 4. TRANSPORT ---
 pub mod transport {
+    pub mod health;
     pub mod swarm;
 }
 
@@ -35,7 +38,7 @@ pub mod security {
     pub mod grant;
     pub mod ingress;
     pub mod locator;
-    pub mod sentinel;
+
     pub mod telemetry;
     pub mod trust;
 }

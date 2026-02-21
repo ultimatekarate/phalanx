@@ -1,5 +1,3 @@
-// This binary should probably be renamed to 'Witness' or something like that.
-
 use std::error::Error;
 use std::path::Path;
 use tracing::info;
@@ -10,6 +8,7 @@ use phalanx_core::base::engine::PhalanxEngine;
 // Corrected naming: network.rs likely defines load_swarm_key
 use phalanx_core::primitives::identity::init_identity;
 use phalanx_core::security::telemetry;
+use phalanx_core::storage::journal::FileJournal;
 use phalanx_core::transport::swarm::load_swarm_key;
 
 /// The entry point for the Phalanx Stronghold binary.
@@ -41,9 +40,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         info!("Joining Public Swarm (No PSK).");
     }
 
+    tracing::info!("Initializing Transient WAL");
+    let journal = FileJournal::new("sentinel_transient_wal.bin").await?;
+
     // 4. Engine Initialization
     // Consumes the identity and config to build the background Swarm
-    let mut engine = PhalanxEngine::new(config, my_identity, physics, psk)?;
+    let mut engine = PhalanxEngine::new(config, my_identity, physics, psk, journal)?;
 
     println!("--- PHALANX SENSOR: ONLINE (WAN + LAN) ---");
 

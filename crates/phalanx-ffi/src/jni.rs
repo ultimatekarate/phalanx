@@ -1,8 +1,10 @@
 use jni::objects::{JClass, JString};
 use jni::sys::jlong;
 use jni::JNIEnv;
-use phalanx_core::engine::PhalanxEngine;
+use phalanx_core::engine::{NoOpJournal, PhalanxEngine};
 use std::ptr;
+
+// Use *mut PhalanxEngine<NoOpJournal> if you ever point at PhalanxEngine.
 
 #[no_mangle]
 pub extern "system" fn Java_com_phalanx_bridge_PhalanxBridge_createEngine(

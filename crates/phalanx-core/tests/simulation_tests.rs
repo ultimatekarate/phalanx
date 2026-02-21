@@ -5,13 +5,11 @@ use tracing::info;
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
 use phalanx_core::primitives::identity::{NetworkId, PhalanxIdentity};
 use phalanx_core::primitives::shards::{
-    self, create_video_shard, ChunkType, DataPayload, Evidence, ShardError, StorageSequence,
-    WitnessEnvelope,
+    self, create_video_shard, ChunkType, DataPayload, Evidence, StorageSequence, WitnessEnvelope,
 };
-use phalanx_core::security::gate::ForensicGate;
 use phalanx_core::security::telemetry::{NodeRole, SimEvent};
 use phalanx_core::simulation::SimulationHarness;
-use phalanx_core::storage::vault::{Guardian, NodeMode};
+use phalanx_core::storage::vault::Guardian;
 
 // Helper to init logging for tests
 fn init_tracing() {
@@ -227,80 +225,95 @@ async fn test_stronghold_crash_recovery() {
 
 #[tokio::test]
 async fn test_leaf_mode_isolation() {
-    use tracing::{error, warn};
+    use phalanx_core::base::config::PhalanxConfig;
+    use phalanx_core::base::types::{MeshTopic, NodeMode, TrafficGovernor};
+    use phalanx_core::primitives::identity::{NetworkId, PhalanxIdentity};
+    use phalanx_core::primitives::shards::{ChunkType, ShardChunk, ShardId};
+    use phalanx_core::primitives::time::TrustedClock;
+    use phalanx_core::security::ingress::{IngressContext, IngressOrchestrator, SecurityPipeline};
+    use phalanx_core::security::trust::TrustRegistry;
+    use phalanx_core::simulation::SimJournal;
+    use phalanx_core::storage::reassembler::Reassembler;
+    use phalanx_core::storage::vault::Guardian;
+    use phalanx_core::transport::health::HealthTracker; // Assuming SimJournal is available in scope
 
-    // Harness Setup
-    let (me, _) = match PhalanxIdentity::generate() {
-        Ok(id) => id,
-        Err(e) => panic!("Failed to generate local identity: {}", e),
-    };
-
-    let (stranger, _) = match PhalanxIdentity::generate() {
-        Ok(id) => id,
-        Err(e) => panic!("Failed to generate foreign identity: {}", e),
-    };
+    // 1. Identity Provisioning
+    let (local_identity, _) =
+        PhalanxIdentity::generate().expect("Failed to generate local identity");
+    let (foreign_identity, _) =
+        PhalanxIdentity::generate().expect("Failed to generate foreign identity");
 
     let config = PhalanxConfig::default();
-    let mut storage = Guardian::new("sim_vault/leaf_test", &config, me.did.clone());
-    let net_id = NetworkId::random();
+    let local_network_id = NetworkId::random();
 
-    // 1. Generation Gate: Resolve the Shard payload
-    let shard = match create_video_shard(vec![vec![1]], StorageSequence(1), 30, "v1".into()).gate(
-        "shard_generation_failure",
-        &net_id,
-        "Failed to generate video shard",
-    ) {
-        Ok(s) => s,
-        Err(e) => panic!("Test setup failed at generation: {}", e),
+    // 2. Decoupled Pipeline Allocation
+    let mut reassembler = Reassembler::new();
+    let mut guardian = Guardian::new("sim_vault/leaf_test", &config, local_identity.did.clone());
+    let mut trust_registry = TrustRegistry::build(&config).await;
+    let mut health_tracker = HealthTracker::new();
+    let governor = TrafficGovernor::new();
+    let clock = TrustedClock::new();
+    let mut transient_journal = SimJournal;
+
+    // 3. Construct a Foreign Payload
+    // In the decoupled architecture, the Orchestrator inspects metadata prior
+    // to deserialization overhead, so we can mock the payload directly.
+    let foreign_chunk = ShardChunk {
+        shard_id: ShardId(1),
+        chunk_index: 0,
+        total_chunks: 1,
+        data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        owner_did: foreign_identity.did.clone(),
+        chunk_type: ChunkType::Witnessed,
+    };
+    let ingest_topic = MeshTopic::new("phalanx/video");
+
+    // 4. Perimeter Context Definition (Enforcing Leaf Mode)
+    let ingress_ctx = IngressContext {
+        config: &config,
+        identity: &local_identity,
+        network_id: local_network_id,
+        clock: &clock,
+        governor: &governor,
+        mode: NodeMode::Leaf, // <-- The core isolation toggle
     };
 
-    // 2. Serialization Gate: Serialize the unwrapped Shard and resolve the bytes
-    let serialized_shard = match postcard::to_stdvec(&shard)
-        .map_err(|e| ShardError::Serialization(e.to_string()))
-        .gate(
-            "serialization_failure",
-            &net_id,
-            "Failed to serialize shard for chunking",
-        ) {
-        Ok(bytes) => bytes,
-        Err(e) => panic!("Test setup failed at serialization: {}", e),
+    let mut security_pipeline = SecurityPipeline {
+        reassembler: &mut reassembler,
+        journal: &mut transient_journal,
+        guardian: &mut guardian,
+        trust_registry: &mut trust_registry,
+        health_tracker: &mut health_tracker,
     };
 
-    // 3. Discretization Phase: Utilize the unwrapped bytes
-    let chunks = match shards::chunkify(
-        shards::ShardId(1),
-        serialized_shard,
-        100,
-        stranger.did.clone(),
-        ChunkType::Witnessed,
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            error!(
-                event = "discretization_failure",
-                error = %e,
-                node = %stranger.did,
-                "Chunkify operation failed capacity or logic bounds"
-            );
-            return;
-        }
-    };
+    // 5. Execution: Route through Orchestrator
+    let ingress_result = IngressOrchestrator::process_chunk(
+        foreign_chunk,
+        &ingest_topic,
+        &ingress_ctx,
+        &mut security_pipeline,
+    )
+    .await;
 
-    if let Some(first_chunk) = chunks.first() {
-        storage.ingest_chunk(first_chunk.clone(), NodeMode::Leaf);
-    } else {
-        warn!(
-            event = "empty_chunk_set",
-            node = %stranger.did,
-            "Discretization produced zero chunks for provided data"
-        );
-    }
-
-    // Verification
+    // 6. Forensic Verification
+    assert!(
+        ingress_result.is_ok(),
+        "Orchestrator should not return an Err for dropped topology traffic"
+    );
     assert_eq!(
-        storage.micro_layer.len(),
-        0,
-        "Guardian stored foreign data while in Leaf Mode!"
+        ingress_result.unwrap(),
+        None,
+        "Orchestrator should return Ok(None) to represent silently dropped traffic"
+    );
+
+    // Verify the downstream data factories and storage layers remain unpolluted
+    assert!(
+        reassembler.video_buffers.is_empty(),
+        "Reassembler leaked foreign data into transient memory while in Leaf Mode!"
+    );
+    assert!(
+        guardian.active_volleys.is_empty(),
+        "Guardian bypassed orchestration and archived foreign data while in Leaf Mode!"
     );
 }
 
