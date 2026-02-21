@@ -1,11 +1,10 @@
+use phalanx_core::storage::reassembler::TransientJournal;
 use std::error::Error;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
 use tokio::time::Sleep;
-
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use libp2p::{futures::StreamExt, gossipsub, identify, kad, mdns, swarm::SwarmEvent, Swarm};
 use tracing::{debug, info, warn};
@@ -18,10 +17,8 @@ use phalanx_core::{
     primitives::identity::{NetworkId, PhalanxIdentity},
     primitives::shards::{ShardChunk, ShardError},
     security::{gate::ForensicGate, telemetry},
-    storage::{
-        reassembler::{ControlMessage, HealthTracker, Reassembler},
-        vault::Guardian,
-    },
+    storage::{journal::FileJournal, reassembler::Reassembler, vault::Guardian},
+    transport::health::{ControlMessage, HealthTracker},
     transport::swarm::{get_storage_key, load_swarm_key, setup_phalanx_swarm},
     PhalanxEvent,
 };
@@ -38,20 +35,19 @@ use std::sync::Arc;
 /// 1. **Salvage:** Ingest shards from the Swarm and persist them to the Vault.
 /// 2. **Serve:** Respond to Kademlia DHT queries for data recovery.
 /// 3. **Pulse:** Broadcast Vitality proofs to avoid the "Vampire Stake".
-pub struct StrongholdEngine {
+pub struct StrongholdEngine<J: TransientJournal> {
     config: PhalanxConfig,
     identity: PhalanxIdentity,
     physics: PhalanxPhysics,
-    /// The libp2p network stack.
     swarm: Swarm<phalanx_core::PhalanxBehaviour>,
-    // Channel for the storage actor
     chunk_tx: mpsc::Sender<(ShardChunk, MeshTopic, NetworkId)>,
     health_tracker: HealthTracker,
     power_state: PowerState,
     storage_load: Arc<AtomicUsize>,
+    _journal_phantom: std::marker::PhantomData<J>,
 }
 
-impl StrongholdEngine {
+impl<J: TransientJournal + 'static> StrongholdEngine<J> {
     /// Bootstraps the Stronghold.
     ///
     /// Loads configuration, generates/loads identity, establishes the Vault,
@@ -59,7 +55,7 @@ impl StrongholdEngine {
     ///
     /// # Errors
     ///
-    pub async fn new(config_path: &str) -> Result<Self, Box<dyn Error>> {
+    pub async fn new(config_path: &str, journal: J) -> Result<Self, Box<dyn Error>> {
         let config = PhalanxConfig::load(config_path)?;
         let (identity, _) = PhalanxIdentity::generate().map_err(|e| {
             // FORENSIC GATE: Report the entropy failure to telemetry
@@ -85,8 +81,9 @@ impl StrongholdEngine {
         let actor_load_metric = Arc::clone(&storage_load);
 
         let storage_actor = StorageActor {
-            reassembler: Reassembler::new(&config),
+            reassembler: Reassembler::new(),
             storage: Guardian::new(&config.storage.vault_path, &config, identity.did.clone()),
+            journal,
             config: config.clone(),
             identity: identity.clone(),
             chunk_rx,
@@ -136,6 +133,7 @@ impl StrongholdEngine {
             config,
             identity,
             physics,
+            _journal_phantom: std::marker::PhantomData,
             swarm,
             chunk_tx,
             health_tracker: HealthTracker::new(),
@@ -348,9 +346,10 @@ impl StrongholdEngine {
     }
 }
 
-pub struct StorageActor {
+pub struct StorageActor<J: TransientJournal> {
     pub reassembler: Reassembler,
     pub storage: Guardian,
+    pub journal: J,
     pub config: PhalanxConfig,
     pub identity: PhalanxIdentity,
     pub chunk_rx: mpsc::Receiver<(ShardChunk, MeshTopic, NetworkId)>,
@@ -359,57 +358,46 @@ pub struct StorageActor {
     pub local_peer_id: NetworkId,
 }
 
-impl StorageActor {
+impl<J: TransientJournal> StorageActor<J> {
     pub async fn run(mut self) {
-        // BOOT SEQUENCE
+        // BOOT SEQUENCE: Utilize the decoupled Reassembler protocol
         if let Err(err) = self.restore_state().await {
             tracing::error!(error = %err, "Failed to restore Crucible state from disk.");
         }
 
-        // Run maintenance every 10 seconds
-        let mut maintenance_timer = tokio::time::interval(std::time::Duration::from_secs(10));
+        let mut maintenance_timer = tokio::time::interval(Duration::from_secs(10));
 
         loop {
             tokio::select! {
-                // --- EVENT: INCOMING DATA SHARD ---
                 Some((chunk, topic, peer_id)) = self.chunk_rx.recv() => {
-                    let envelope_opt = match self.reassembler.process_chunk(
+                    let envelope_opt = self.reassembler.ingest_chunk(
                         chunk,
+                        &mut self.journal,
                         &topic,
                         &self.config,
                         &self.identity,
                         peer_id,
-                    ).await {
-                        Ok(env) => env,
+                    ).await;
+
+                    match envelope_opt {
+                        Ok(Some(envelope)) => {
+                            if let Err(err) = self.storage.ingest_envelope(envelope) {
+                                tracing::error!(error = %err, "Vault rejected envelope");
+                            }
+                        }
+                        Ok(None) => {}, // Partial assembly
                         Err(err) => {
                             tracing::warn!(error = %err, "Reassembler rejected data chunk");
-                            continue;
-                        }
-                    };
-
-                    if let Some(envelope) = envelope_opt {
-                        if let Err(err) = self.storage.ingest_envelope(envelope) {
-                            tracing::error!(error = %err, "Vault rejected envelope");
                         }
                     }
 
                     self.active_tasks_metric.store(
-                        self.storage.micro_layer.len(),
+                        self.storage.active_volleys.len(),
                         Ordering::Relaxed
                     );
                 }
 
-                // --- EVENT: PERIODIC MAINTENANCE ---
                 _ = maintenance_timer.tick() => {
-                    // 1. Prune partial reassembly buffers that timed out
-                    self.reassembler.prune_stale_buffers(&self.config, &self.physics);
-
-                    // 2. Archive completed sessions from WAL to Cold Storage
-                    self.storage.archive_stale_sessions(
-                        std::time::Duration::from_secs(self.config.storage.stale_session_threshold)
-                    );
-
-                    // WAL FREEZE PROTOCOL
                     if let Err(err) = self.snapshot_state().await {
                         tracing::error!(error = %err, "Freeze Protocol failed.");
                     }
@@ -418,90 +406,34 @@ impl StorageActor {
         }
     }
 
-    /// Executes the Boot-Time Replay Sequence.
     pub async fn restore_state(&mut self) -> Result<(), ShardError> {
-        // 1. Snapshot Restoration (Omitted for brevity; load crucible_state.bin and map to self.reassembler.buffers if utilized)
-        // If crucible_state.bin exists, read bytes, deserialize, and assign to Reassembler.
+        let recovered_envelopes = self
+            .reassembler
+            .recover_from_journal(
+                &mut self.journal,
+                &self.config,
+                &self.identity,
+                self.local_peer_id,
+            )
+            .await?;
 
-        // 2. WAL Replay
-        let mut wal_file = match tokio::fs::File::open("crucible_wal.bin").await {
-            Ok(file) => file,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(ShardError::Io(e)),
-        };
-
-        let mut recovered_chunks = 0;
-
-        loop {
-            let mut len_buf = [0u8; 4];
-            if wal_file.read_exact(&mut len_buf).await.is_err() {
-                break; // EOF reached deterministically
-            }
-
-            let payload_len = u32::from_le_bytes(len_buf);
-            let mut payload = vec![0u8; payload_len as usize];
-
-            if wal_file.read_exact(&mut payload).await.is_err() {
-                tracing::warn!(
-                    "WAL corruption detected: Incomplete payload. Truncating remainder."
-                );
-                break;
-            }
-
-            if let Ok(chunk) = postcard::from_bytes::<ShardChunk>(&payload) {
-                // CORRECTED: Use the injected local_peer_id
-                if let Ok(Some(envelope)) = self.reassembler.replay_chunk(
-                    chunk,
-                    &self.config,
-                    &self.identity,
-                    self.local_peer_id,
-                ) {
-                    let _ = self.storage.ingest_envelope(envelope);
-                }
-                recovered_chunks += 1;
-            }
+        for envelope in recovered_envelopes {
+            let _ = self.storage.ingest_envelope(envelope);
         }
 
-        tracing::info!(recovered_chunks, "Crucible WAL replay complete.");
+        info!("Crucible WAL replay complete.");
         Ok(())
     }
 
-    /// Executes the Freeze Protocol.
     pub async fn snapshot_state(&mut self) -> Result<(), ShardError> {
-        // 1. Serialize State
-        // (Assuming you define a wrapper struct for the buffers or serialize them individually)
-        // let state_bytes = postcard::to_allocvec(&self.reassembler.get_serializable_state())?;
+        let is_idle =
+            self.reassembler.video_buffers.is_empty() && self.reassembler.audio_buffers.is_empty();
 
-        // Example atomic write placeholder
-        let state_bytes: Vec<u8> = vec![]; // Replace with actual buffer serialization
+        if is_idle {
+            self.journal.clear().await?;
+            tracing::debug!("Crucible state frozen and WAL compacted.");
+        }
 
-        let mut tmp_file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open("crucible_state.bin.tmp")
-            .await
-            .map_err(ShardError::Io)?;
-
-        tmp_file
-            .write_all(&state_bytes)
-            .await
-            .map_err(ShardError::Io)?;
-        tmp_file.sync_data().await.map_err(ShardError::Io)?;
-
-        tokio::fs::rename("crucible_state.bin.tmp", "crucible_state.bin")
-            .await
-            .map_err(ShardError::Io)?;
-
-        // 2. WAL Compaction
-        tokio::fs::OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open("crucible_wal.bin")
-            .await
-            .map_err(ShardError::Io)?;
-
-        tracing::debug!("Crucible state frozen and WAL compacted.");
         Ok(())
     }
 }
@@ -511,7 +443,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let _guard = telemetry::init_observability();
 
     info!("Initializing PHALANX STRONGHOLD...");
-    let mut engine = StrongholdEngine::new("phalanx.toml").await?;
+    let journal = FileJournal::new("crucible_wal.bin").await?;
+    let mut engine = StrongholdEngine::new("phalanx.toml", journal).await?;
     engine.run().await
 }
 
@@ -550,6 +483,7 @@ mod stronghold_initialization_tests {
 mod actor_tests {
     use super::*;
     use phalanx_core::primitives::shards::{ChunkType, ShardId};
+    use phalanx_core::storage::journal::FileJournal;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
@@ -558,13 +492,15 @@ mod actor_tests {
         let config = PhalanxConfig::default();
         let (identity, _) = PhalanxIdentity::generate().unwrap();
         let local_peer = identity.to_network_id();
-
         let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel(10);
         let storage_load = Arc::new(AtomicUsize::new(0));
         let actor_load_metric = Arc::clone(&storage_load);
+        let journal = FileJournal::new("test_transient_wal.bin")
+            .await
+            .expect("Failed to initialize test FileJournal");
 
         let storage_actor = StorageActor {
-            reassembler: Reassembler::new(&config),
+            reassembler: Reassembler::new(),
             storage: Guardian::new("test_vault_metrics", &config, identity.did.clone()),
             config: config.clone(),
             identity: identity.clone(),
@@ -572,6 +508,7 @@ mod actor_tests {
             active_tasks_metric: actor_load_metric,
             physics: PhalanxPhysics::default_wan(),
             local_peer_id: local_peer.clone(),
+            journal,
         };
 
         // Spawn actor in background

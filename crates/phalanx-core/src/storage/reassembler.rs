@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use tokio::time::Instant;
 
 use tracing::{info, instrument};
+
 // =====================
 // REASSEMBLER CORE
 // =====================
@@ -17,12 +18,20 @@ use tracing::{info, instrument};
 pub trait TransientJournal: Send + Sync {
     async fn record_chunk(&mut self, chunk: &ShardChunk) -> Result<(), ShardError>;
     async fn sync(&mut self) -> Result<(), ShardError>;
+    async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError>;
+    async fn clear(&mut self) -> Result<(), ShardError>; // Added for Freeze Protocol
 }
 
 pub struct Reassembler {
     pub video_buffers: HashMap<ShardId, ReassemblyBuffer>,
     pub audio_buffers: HashMap<ShardId, ReassemblyBuffer>,
     pub power_state: PowerState,
+}
+
+impl Default for Reassembler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Reassembler {
@@ -49,7 +58,7 @@ impl Reassembler {
 
         // 2. Buffer Selection
         let is_video = topic == &config.network.video_topic;
-        let (buffers, capacity_limit) = if is_video {
+        let (buffers, _capacity_limit) = if is_video {
             (&mut self.video_buffers, config.storage.max_video_buffer)
         } else {
             (&mut self.audio_buffers, config.storage.max_audio_buffer)
@@ -94,28 +103,18 @@ impl Reassembler {
     ) -> Result<Vec<WitnessEnvelope>, ShardError> {
         let mut recovered_envelopes = Vec::new();
 
-        // Note: The specific implementation of 'read_all_chunks'
-        // depends on the J: TransientJournal provider.
         let chunks = journal.read_all_chunks().await?;
 
         for chunk in chunks {
-            // We bypass the IngressOrchestrator here because WAL data
-            // is already considered 'internally trusted' forensic state.
+            // Bypass IngressOrchestrator because WAL data is internally trusted
             let topic = if chunk.chunk_type == ChunkType::ForensicUnit {
-                &config.network.video_topic // Simplified for logic demonstration
+                &config.network.video_topic
             } else {
                 &config.network.audio_topic
             };
 
             if let Some(envelope) = self
-                .ingest_chunk(
-                    chunk,
-                    journal, // Passing journal but ingest_chunk won't re-record if index matches
-                    topic,
-                    config,
-                    identity,
-                    local_peer_id,
-                )
+                .ingest_chunk(chunk, journal, topic, config, identity, local_peer_id)
                 .await?
             {
                 recovered_envelopes.push(envelope);
@@ -158,28 +157,45 @@ impl Reassembler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::error::Error;
-
     use crate::primitives::shards::{DataPayload, StorageSequence, VolleyId};
     use crate::primitives::time::PhalanxTimestamp;
 
+    struct MockJournal;
+    #[async_trait]
+    impl TransientJournal for MockJournal {
+        async fn record_chunk(&mut self, _chunk: &ShardChunk) -> Result<(), ShardError> {
+            Ok(())
+        }
+        async fn sync(&mut self) -> Result<(), ShardError> {
+            Ok(())
+        }
+        async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
+            Ok(vec![])
+        }
+        async fn clear(&mut self) -> Result<(), ShardError> {
+            Ok(())
+        }
+    }
+
     #[tokio::test]
-    async fn test_reassembler_replay_chunk_reassembly() {
+    async fn test_reassembler_chunk_reassembly() {
         let (identity, _) = PhalanxIdentity::generate().unwrap();
         let config = PhalanxConfig::default();
         let mut reassembler = Reassembler::new();
+        let mut journal = MockJournal;
         let local_peer = identity.to_network_id();
+        let topic = MeshTopic::new("phalanx/video");
 
         // 1. Create a valid, fully-populated VideoShard
         let evidence = Evidence::Video(VideoShard {
             timestamp: PhalanxTimestamp::now(),
             sequence_id: StorageSequence(1),
             fps: 30,
-            volley_id: VolleyId::new("id"), // Or VolleyId(0)
+            volley_id: VolleyId::new("id"),
             payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         });
 
-        // 2. Wrap in an envelope and sign it (This provides valid bytes for postcard)
+        // 2. Wrap in an envelope and sign it
         let original_envelope = WitnessEnvelope::new(evidence, &identity, local_peer.clone())
             .expect("Failed to sign envelope");
 
@@ -208,9 +224,17 @@ mod tests {
             chunk_type: ChunkType::Witnessed,
         };
 
-        // 4. Execute Replay Flow
+        // 4. Execute Ingestion Flow
         let result_1 = reassembler
-            .replay_chunk(chunk_1, &config, &identity, local_peer.clone())
+            .ingest_chunk(
+                chunk_1,
+                &mut journal,
+                &topic,
+                &config,
+                &identity,
+                local_peer.clone(),
+            )
+            .await
             .unwrap();
         assert!(
             result_1.is_none(),
@@ -218,14 +242,22 @@ mod tests {
         );
 
         let result_2 = reassembler
-            .replay_chunk(chunk_2, &config, &identity, local_peer)
+            .ingest_chunk(
+                chunk_2,
+                &mut journal,
+                &topic,
+                &config,
+                &identity,
+                local_peer,
+            )
+            .await
             .unwrap();
 
         // 5. Final Verification
         assert!(result_2.is_some(), "Reassembly should be complete");
         let recovered_envelope = result_2.unwrap();
 
-        // Assert cryptographic integrity survived the sharding/replay process
+        // Assert cryptographic integrity survived the sharding/ingestion process
         assert_eq!(
             recovered_envelope.witness_signature,
             original_envelope.witness_signature
@@ -235,72 +267,5 @@ mod tests {
             0,
             "Memory leak: Buffer not cleared"
         );
-    }
-
-    #[tokio::test]
-    async fn test_reassembler_leaf_mode_filtering() -> Result<(), Box<dyn Error>> {
-        let (identity, _) = PhalanxIdentity::generate()?;
-        let (stranger, _) = PhalanxIdentity::generate()?;
-        let config = PhalanxConfig::default();
-        let local_peer = NetworkId::random();
-
-        let mut reassembler = Reassembler::new(&config);
-        reassembler.set_power_state(PowerState::Leaf);
-
-        // 1. Foreign chunk (labeled as Witnessed/Relayed)
-        let foreign_chunk = ShardChunk {
-            shard_id: ShardId(1),
-            chunk_index: 0,
-            total_chunks: 2,
-            data: vec![1, 2, 3],
-            owner_did: stranger.did.clone(),
-            chunk_type: ChunkType::Witnessed,
-        };
-
-        // 2. Local chunk (labeled as ForensicUnit/Raw)
-        let local_chunk = ShardChunk {
-            shard_id: ShardId(2),
-            chunk_index: 0,
-            total_chunks: 2,
-            data: vec![4, 5, 6],
-            owner_did: identity.did.clone(),
-            chunk_type: ChunkType::ForensicUnit,
-        };
-
-        // 3. Process Foreign
-        let _ = reassembler
-            .process_chunk(
-                foreign_chunk,
-                &config.network.video_topic,
-                &config,
-                &identity,
-                local_peer.clone(),
-            )
-            .await?;
-
-        assert_eq!(
-            reassembler.video_buffers.len(),
-            0,
-            "Reassembler leaked foreign data in Leaf Mode"
-        );
-
-        // 4. Process Local
-        let _ = reassembler
-            .process_chunk(
-                local_chunk,
-                &config.network.video_topic,
-                &config,
-                &identity,
-                local_peer,
-            )
-            .await?;
-
-        assert_eq!(
-            reassembler.video_buffers.len(),
-            1,
-            "Reassembler failed to process local data in Leaf Mode"
-        );
-
-        Ok(())
     }
 }

@@ -28,7 +28,7 @@ pub enum IdentityError {
     Corruption(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 /// A strong type for Decentralized Identifiers (DIDs).
 ///

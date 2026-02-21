@@ -1,4 +1,3 @@
-use crate::security::trust::ReputationGate;
 use crate::security::trust::TrustRegistry;
 
 use rand::Rng;
@@ -9,19 +8,45 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, span, Level};
 
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
-use crate::base::types::{ByteCapacity, MeshTopic, PowerState, UnitInterval, VitalityRate};
+use crate::base::types::{
+    ByteCapacity, MeshTopic, NodeMode, PowerState, TrafficGovernor, UnitInterval, VitalityRate,
+};
 use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
+use crate::primitives::shards::ShardChunk;
+use crate::primitives::shards::ShardError;
 use crate::primitives::time::TrustedClock;
 use crate::security::e2ee::SymmetricKey;
 use crate::security::ingress::IngressOrchestrator;
 use crate::security::telemetry::{ChaosMode, DiscoverySource, NodeRole, SimEvent};
-use crate::storage::reassembler::Reassembler;
+use crate::storage::reassembler::{Reassembler, TransientJournal};
 use crate::storage::vault::Guardian;
+use crate::transport::health::HealthTracker;
 
 // INTEGRATING SECURITY GATES
 use crate::security::gate::{ForensicGate, PrivacyGate, WitnessGate};
 
 use crate::primitives::shards::{create_video_shard, Evidence, ShardId, StorageSequence, VolleyId};
+
+// =========================================================================================
+//  POLYFILL: Simulation Journal
+// =========================================================================================
+
+pub struct SimJournal;
+#[async_trait::async_trait]
+impl TransientJournal for SimJournal {
+    async fn record_chunk(&mut self, _chunk: &ShardChunk) -> Result<(), ShardError> {
+        Ok(())
+    }
+    async fn sync(&mut self) -> Result<(), ShardError> {
+        Ok(())
+    }
+    async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
+        Ok(vec![])
+    }
+    async fn clear(&mut self) -> Result<(), ShardError> {
+        Ok(())
+    }
+}
 
 // =========================================================================================
 //  INFRASTRUCTURE: The Harness
@@ -159,8 +184,6 @@ impl SimulationHarness {
 
             let current_nodes = nodes.read().await;
             for node_tx in current_nodes.values() {
-                // Modified to strictly map relay events to all node actors.
-                // The actors inherently evaluate source bounds via origin matching.
                 let _ = node_tx.send(event.clone()).await;
             }
         }
@@ -202,11 +225,13 @@ struct SimNode {
     storage: Guardian,
     config: PhalanxConfig,
     physics: PhalanxPhysics,
+    health_tracker: HealthTracker,
+    governor: TrafficGovernor,
+    mode: NodeMode,
 
     chaos_mode: ChaosMode,
     known_strongholds: Vec<NetworkId>,
 
-    // STRONGLY TYPED STATE
     seq_counter: StorageSequence,
     staged_bytes: ByteCapacity,
     start_time: std::time::Instant,
@@ -225,7 +250,7 @@ impl SimNode {
         broadcast_tx: mpsc::Sender<(Did, NetworkId, SimEvent)>,
         telemetry_tx: mpsc::Sender<SimEvent>,
     ) -> Self {
-        let reassembler = Reassembler::new(&sim_config.config);
+        let reassembler = Reassembler::new();
 
         let vault_path = format!("sim_vault/{}", sim_config.name);
         let storage = Guardian::new(
@@ -249,6 +274,9 @@ impl SimNode {
             physics: sim_config.physics,
             reassembler,
             storage,
+            health_tracker: HealthTracker::new(),
+            governor: TrafficGovernor::new(),
+            mode: NodeMode::Standard,
             chaos_mode: ChaosMode::Stable,
             known_strongholds: Vec::new(),
             seq_counter: StorageSequence::default(),
@@ -282,8 +310,8 @@ impl SimNode {
                     }
                 }
                 _ = cleanup_tick.tick() => {
-                    self.reassembler.prune_stale_buffers(&self.config, &self.physics);
-                    self.storage.archive_stale_sessions(self.physics.shard_timeout());
+                    // Legacy manual state pruning logic removed.
+                    // Crucible flush protocols manage state transitions inherently.
                 }
                 Some(event) = rx.recv() => {
                     self.handle_event(event).await;
@@ -430,12 +458,18 @@ impl SimNode {
             identity: &self.identity,
             network_id: self.network_id,
             clock: &self.clock,
+            governor: &self.governor,
+            mode: self.mode,
         };
+
+        let mut journal = SimJournal;
 
         let mut pipeline = crate::security::ingress::SecurityPipeline {
             reassembler: &mut self.reassembler,
             guardian: &mut self.storage,
             trust_registry: &mut self.trust_registry,
+            health_tracker: &mut self.health_tracker,
+            journal: &mut journal,
         };
 
         // 2. Execute Shared Orchestration
@@ -484,7 +518,10 @@ impl SimNode {
                 });
             }
             Err(e) => {
-                if self.trust_registry.is_blacklisted(&sender_did) {
+                if matches!(
+                    self.trust_registry.check_trust(&sender_did),
+                    crate::security::trust::TrustLevel::Blocked
+                ) {
                     let _ = self.telemetry_tx.try_send(SimEvent::AttackAttemptBlocked {
                         attacker: origin,
                         target: self.network_id,

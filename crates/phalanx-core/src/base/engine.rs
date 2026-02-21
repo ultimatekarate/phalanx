@@ -17,6 +17,7 @@ use crate::security::ingress::{
 use crate::security::trust::TrustRegistry;
 use crate::storage::reassembler::{Reassembler, TransientJournal};
 use crate::transport::health::HealthTracker;
+
 // IMPORT ALL GATES
 use crate::security::gate::{ForensicGate, PrivacyGate, WitnessGate};
 
@@ -49,9 +50,16 @@ impl TransientJournal for NoOpJournal {
     async fn sync(&mut self) -> Result<(), ShardError> {
         Ok(())
     }
+    async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
+        Ok(vec![])
+    }
+
+    async fn clear(&mut self) -> Result<(), ShardError> {
+        Ok(())
+    }
 }
 
-pub struct PhalanxEngine {
+pub struct PhalanxEngine<J: TransientJournal> {
     pub reassembler: Reassembler,
     pub guardian: Guardian,
     pub trust_registry: TrustRegistry,
@@ -66,15 +74,17 @@ pub struct PhalanxEngine {
     pub audio_rx: mpsc::Receiver<crate::primitives::shards::AudioShard>,
     pub seq_counter: u64,
     pub network_key: SymmetricKey,
+    pub journal: J, // Injected Transient WAL
 }
 
-impl PhalanxEngine {
+impl<J: TransientJournal + Send + 'static> PhalanxEngine<J> {
     #[allow(clippy::missing_errors_doc)]
     pub fn new(
         config: PhalanxConfig,
         identity: PhalanxIdentity,
         physics: PhalanxPhysics,
         psk: Option<PreSharedKey>,
+        journal: J,
     ) -> Result<Self, Box<dyn Error>> {
         let network_keypair = identity.to_libp2p_keypair();
 
@@ -128,18 +138,8 @@ impl PhalanxEngine {
             audio_rx,
             seq_counter: 0,
             network_key: SymmetricKey([0x42; 32]), // Default/Placeholder Key
+            journal,
         })
-    }
-
-    pub fn new_at_path(path: &str) -> Result<Self, Box<dyn Error>> {
-        let mut config = PhalanxConfig::default();
-        config.storage.vault_path = path.to_string();
-
-        let physics = PhalanxPhysics::default();
-        let identity_path = std::path::Path::new(path).join("identity.pem");
-        let identity = init_identity(&identity_path).unwrap_or_default();
-
-        Self::new(config, identity, physics, None)
     }
 
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
@@ -206,14 +206,12 @@ impl PhalanxEngine {
             mode: self.mode,
         };
 
-        let mut journal = NoOpJournal;
-
         let mut pipeline = SecurityPipeline {
             reassembler: &mut self.reassembler,
             guardian: &mut self.guardian,
             trust_registry: &mut self.trust_registry,
             health_tracker: &mut self.health_tracker,
-            journal: &mut journal,
+            journal: &mut self.journal,
         };
 
         // 2. Execute Shared Orchestration
@@ -274,6 +272,19 @@ impl PhalanxEngine {
     }
 }
 
+impl PhalanxEngine<NoOpJournal> {
+    pub fn new_at_path(path: &str) -> Result<Self, Box<dyn Error>> {
+        let mut config = PhalanxConfig::default();
+        config.storage.vault_path = path.to_string();
+
+        let physics = PhalanxPhysics::default();
+        let identity_path = std::path::Path::new(path).join("identity.pem");
+        let identity = init_identity(&identity_path).unwrap_or_default();
+
+        Self::new(config, identity, physics, None, NoOpJournal)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,7 +311,7 @@ mod tests {
         let (config, physics, _temp_dir) = setup_test_env();
         let identity = PhalanxIdentity::new();
 
-        let engine = PhalanxEngine::new(config, identity, physics, None);
+        let engine = PhalanxEngine::new(config, identity, physics, None, NoOpJournal);
         assert!(engine.is_ok(), "Engine should initialize with valid inputs");
     }
 
@@ -325,7 +336,7 @@ mod tests {
     async fn test_pipeline_gates_active() {
         let (config, physics, _temp_dir) = setup_test_env();
         let identity = PhalanxIdentity::new();
-        let engine = PhalanxEngine::new(config, identity, physics, None).unwrap();
+        let engine = PhalanxEngine::new(config, identity, physics, None, NoOpJournal).unwrap();
 
         assert!(engine.video_rx.capacity() > 0);
         assert!(engine.audio_rx.capacity() > 0);

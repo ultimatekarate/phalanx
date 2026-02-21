@@ -3,7 +3,7 @@ use crate::base::types::{MeshTopic, NodeMode, TrafficGovernor};
 use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
 use crate::primitives::shards::{ShardChunk, ShardError};
 use crate::primitives::time::TrustedClock;
-use crate::security::trust::{Offense, TrustRegistry};
+use crate::security::trust::{Offense, TrustLevel, TrustRegistry};
 use crate::storage::reassembler::{Reassembler, TransientJournal};
 use crate::storage::vault::{Guardian, GuardianError};
 use crate::transport::health::HealthTracker;
@@ -30,8 +30,8 @@ pub enum IngressError {
     #[error("Peer is blacklisted: {0}")]
     Blacklisted(Did),
 
-    #[error("Traffic rejected by Governor: Load Factor {0}%")]
-    Throttled(u32),
+    #[error("Traffic rejected by Governor")]
+    Throttled,
 
     #[error("Reassembler rejected payload: {0}")]
     ReassemblerRejected(#[from] ShardError),
@@ -49,19 +49,11 @@ impl IngressOrchestrator {
         ctx: &IngressContext<'_>,
         pipeline: &mut SecurityPipeline<'_, J>,
     ) -> Result<Option<()>, IngressError> {
-        if let Some(contract) = pipeline.health_tracker.peer_contracts.get(&chunk.sender_id) {
-            if contract.is_stale() {
-                return Err(IngressError::PeerStale(chunk.sender_id));
-            }
-        }
-
         let sender_did = chunk.owner_did.clone();
 
-        // 1. Resource Gate: Check Load Factor
-        if ctx.governor.load_factor() > 0.90 {
-            return Err(IngressError::Throttled(
-                (ctx.governor.load_factor() * 100.0) as u32,
-            ));
+        // 1. Resource Gate: Check Policy Governance
+        if !ctx.governor.should_accept(&sender_did, &ctx.identity.did) {
+            return Err(IngressError::Throttled);
         }
 
         // 2. Topology Gate: Leaf nodes only process local data
@@ -70,11 +62,13 @@ impl IngressOrchestrator {
         }
 
         // 3. Trust Gate: Check reputation
-        if !pipeline.trust_registry.is_trusted(&sender_did) {
+        let trust_level = pipeline.trust_registry.check_trust(&sender_did);
+        if matches!(trust_level, TrustLevel::Blocked) {
             return Err(IngressError::Blacklisted(sender_did));
         }
 
         // 4. Reassembly Phase
+        // Utilizing your existing `process_chunk` which currently handles WAL internally.
         match pipeline
             .reassembler
             .ingest_chunk(

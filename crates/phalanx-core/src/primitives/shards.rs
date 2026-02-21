@@ -39,6 +39,9 @@ pub enum ShardError {
     // NEW: Required for Write-Ahead Log disk operations
     #[error("Disk I/O failed: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("Decompression Error: {0}")]
+    DecompressionFailure(String),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReassemblyBuffer {
