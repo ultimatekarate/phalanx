@@ -3,13 +3,10 @@ use tracing::info;
 
 // Import from the public API
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
-use phalanx_core::base::types::NodeMode;
 use phalanx_core::primitives::identity::{NetworkId, PhalanxIdentity};
 use phalanx_core::primitives::shards::{
-    self, create_video_shard, ChunkType, DataPayload, Evidence, ShardError, StorageSequence,
-    WitnessEnvelope,
+    self, create_video_shard, ChunkType, DataPayload, Evidence, StorageSequence, WitnessEnvelope,
 };
-use phalanx_core::security::gate::ForensicGate;
 use phalanx_core::security::telemetry::{NodeRole, SimEvent};
 use phalanx_core::simulation::SimulationHarness;
 use phalanx_core::storage::vault::Guardian;
@@ -228,17 +225,17 @@ async fn test_stronghold_crash_recovery() {
 
 #[tokio::test]
 async fn test_leaf_mode_isolation() {
-    use crate::base::config::PhalanxConfig;
-    use crate::base::types::{MeshTopic, NodeMode, TrafficGovernor};
-    use crate::primitives::identity::{NetworkId, PhalanxIdentity};
-    use crate::primitives::shards::{ChunkType, ShardChunk, ShardId};
-    use crate::primitives::time::TrustedClock;
-    use crate::security::ingress::{IngressContext, IngressOrchestrator, SecurityPipeline};
-    use crate::security::trust::TrustRegistry;
-    use crate::simulation::SimJournal;
-    use crate::storage::reassembler::Reassembler;
-    use crate::storage::vault::Guardian;
-    use crate::transport::health::HealthTracker; // Assuming SimJournal is available in scope
+    use phalanx_core::base::config::PhalanxConfig;
+    use phalanx_core::base::types::{MeshTopic, NodeMode, TrafficGovernor};
+    use phalanx_core::primitives::identity::{NetworkId, PhalanxIdentity};
+    use phalanx_core::primitives::shards::{ChunkType, ShardChunk, ShardId};
+    use phalanx_core::primitives::time::TrustedClock;
+    use phalanx_core::security::ingress::{IngressContext, IngressOrchestrator, SecurityPipeline};
+    use phalanx_core::security::trust::TrustRegistry;
+    use phalanx_core::simulation::SimJournal;
+    use phalanx_core::storage::reassembler::Reassembler;
+    use phalanx_core::storage::vault::Guardian;
+    use phalanx_core::transport::health::HealthTracker; // Assuming SimJournal is available in scope
 
     // 1. Identity Provisioning
     let (local_identity, _) =

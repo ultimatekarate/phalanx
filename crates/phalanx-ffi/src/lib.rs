@@ -1,4 +1,4 @@
-use phalanx_core::base::engine::PhalanxEngine;
+use phalanx_core::base::engine::{NoOpJournal, PhalanxEngine};
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr;
@@ -12,7 +12,9 @@ pub mod jni;
 /// The caller must ensure `storage_path` is a valid, null-terminated C-string
 /// pointer. Passing a null or dangling pointer will cause Undefined Behavior.
 #[no_mangle]
-pub unsafe extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut PhalanxEngine {
+pub unsafe extern "C" fn phalanx_engine_new(
+    storage_path: *const c_char,
+) -> *mut PhalanxEngine<NoOpJournal> {
     if storage_path.is_null() {
         return ptr::null_mut();
     }
@@ -44,7 +46,7 @@ pub unsafe extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut
 /// * `ptr` must not be null (though the implementation handles nulls gracefully, the contract stands).
 /// * This function must strictly be called only once per pointer to prevent Double Free errors.
 #[no_mangle]
-pub unsafe extern "C" fn phalanx_engine_free(ptr: *mut PhalanxEngine) {
+pub unsafe extern "C" fn phalanx_engine_free(ptr: *mut PhalanxEngine<NoOpJournal>) {
     if !ptr.is_null() {
         // SAFETY: We explicitly trust the caller to pass a valid pointer
         // derived from phalanx_init or similar constructors.
