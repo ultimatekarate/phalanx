@@ -81,7 +81,7 @@ impl<J: TransientJournal> StorageActor<J> {
                         }
                         None => {
                             warn!("Ingress channel closed. Initiating emergency salvage.");
-                            let _ = self.guardian.force_salvage_all();
+                            let _ = self.guardian.force_salvage_all().await;
                             return;
                         }
                     }
