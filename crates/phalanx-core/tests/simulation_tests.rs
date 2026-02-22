@@ -12,13 +12,6 @@ use phalanx_core::simulation::SimulationHarness;
 use phalanx_core::storage::vault::Guardian;
 use phalanx_core::transport::events::NetworkEvent;
 
-// Helper to init logging for tests
-fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("phalanx=info,warn,error")
-        .try_init();
-}
-
 #[tokio::test]
 async fn test_salvage_on_node_death() {
     init_observability();
@@ -380,31 +373,45 @@ async fn test_leaf_mode_isolation() {
 
 #[tokio::test]
 async fn test_vampire_attack_defense() -> Result<(), Box<dyn std::error::Error>> {
-    init_tracing();
+    init_observability();
+    tracing::info!("Initializing Vampire Attack simulation context");
+
     let config = PhalanxConfig::test_defaults();
     let physics = PhalanxPhysics::test_profile();
 
     // 1. Init Mesh
     let (mut harness, mut telemetry_rx) = SimulationHarness::init_mesh(config.clone(), physics);
 
-    // FIX 1: Capture the victim's identity for explicit routing.
-    // spawn_node now returns Option<Did>, so we must unwrap it.
     let victim_did = harness
         .spawn_node("Victim", NodeRole::Guardian)
         .await
         .expect("Failed to spawn Victim");
+
+    tracing::info!(victim_id = %victim_did, "Victim node provisioned");
 
     // 2. Setup Attacker
     let (attacker_identity, _) = PhalanxIdentity::generate()?;
     let attacker_did = attacker_identity.did.clone();
     let attacker_net_id = attacker_identity.to_network_id();
 
+    tracing::info!(attacker_id = %attacker_did, attacker_net = %attacker_net_id, "Attacker node provisioned");
+
     // 3. Launch Attack
     let topic = MeshTopic::new("phalanx/video/1.0.0");
 
-    for i in 0..10 {
+    for attack_iteration in 0..10 {
+        tracing::debug!(
+            iteration = attack_iteration,
+            "Constructing malicious payload"
+        );
+
         // Strict evaluation pipeline
-        let shard = create_video_shard(vec![vec![1]], StorageSequence(i), 30, "vampire".into())?;
+        let shard = create_video_shard(
+            vec![vec![1]],
+            StorageSequence(attack_iteration),
+            30,
+            "vampire".into(),
+        )?;
 
         let mut envelope = WitnessEnvelope::new(
             Evidence::Video(shard),
@@ -412,9 +419,10 @@ async fn test_vampire_attack_defense() -> Result<(), Box<dyn std::error::Error>>
             attacker_net_id.clone(),
         )?;
 
-        // POISON: Invalidate signature post-sealing
+        // POISON: Invalidate signature post-sealing to simulate cryptographic offense
         if let Evidence::Video(ref mut v) = envelope.evidence {
             v.fps = 145;
+            tracing::trace!(iteration = attack_iteration, "Payload signature poisoned");
         }
 
         // Serialization boundary
@@ -423,17 +431,21 @@ async fn test_vampire_attack_defense() -> Result<(), Box<dyn std::error::Error>>
 
         // Discretization boundary
         let chunks = shards::chunkify(
-            shards::ShardId(i as u32),
+            shards::ShardId(attack_iteration as u32),
             serialized_envelope,
             4096,
             attacker_did.clone(),
             ChunkType::Witnessed,
         )?;
 
-        // FIX 2: Route attack strictly to the Victim Guardian via the MockTransport Port
         if let Some(first_chunk) = chunks.first() {
-            // Serialize the chunk to simulate actual network I/O bytes
             let chunk_bytes = postcard::to_stdvec(first_chunk)?;
+
+            tracing::debug!(
+                iteration = attack_iteration,
+                bytes_len = chunk_bytes.len(),
+                "Injecting malformed chunk into ingress port"
+            );
 
             harness
                 .inject_event(
@@ -449,34 +461,50 @@ async fn test_vampire_attack_defense() -> Result<(), Box<dyn std::error::Error>>
         }
     }
 
+    tracing::info!("Attack payload injection complete. Transitioning to event monitoring phase.");
+
     // 4. Verify Defense
-    let mut detected = false;
+    let mut is_defense_successful = false;
     let timeout = tokio::time::sleep(std::time::Duration::from_millis(2000));
     tokio::pin!(timeout);
 
     loop {
         tokio::select! {
-            Some(event) = telemetry_rx.recv() => {
-                if let SimEvent::AttackAttemptBlocked { attacker, target, reason } = event {
-                    if attacker == attacker_net_id {
-                        tracing::info!(
-                            "Defense Success: {} Blocked {} due to '{}'",
-                            target,
-                            attacker,
-                            reason
-                        );
-                        detected = true;
+            event_option = telemetry_rx.recv() => {
+                match event_option {
+                    Some(event) => {
+                        // FORENSIC CAPTURE: Log every single event emitted by the mesh
+                        tracing::debug!(captured_event = ?event, "Observed mesh telemetry event");
+
+                        if let SimEvent::AttackAttemptBlocked { attacker, target, reason } = event {
+                            if attacker == attacker_net_id {
+                                tracing::info!(
+                                    target_node = %target,
+                                    attacker_node = %attacker,
+                                    block_reason = %reason,
+                                    "Defense Success: Verification pipeline actively blocked payload"
+                                );
+                                is_defense_successful = true;
+                                break;
+                            }
+                        }
+                    },
+                    None => {
+                        tracing::error!("Telemetry channel dropped unexpectedly during monitoring phase");
                         break;
                     }
                 }
             }
-            _ = &mut timeout => break,
+            _ = &mut timeout => {
+                tracing::warn!("Monitoring phase timed out after 2000ms. Insufficient events emitted.");
+                break;
+            }
         }
     }
 
     assert!(
-        detected,
-        "Vampire defense failed: Victim node did not trigger AttackAttemptBlocked telemetry"
+        is_defense_successful,
+        "Vampire defense failed: Victim node did not trigger AttackAttemptBlocked telemetry. Review standard output for captured mesh events."
     );
 
     Ok(())

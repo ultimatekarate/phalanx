@@ -1,8 +1,7 @@
 // crates/phalanx-core/src/security/telemetry.rs
 
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 use tracing::Level;
-use tracing_appender::rolling;
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::{fmt, prelude::*};
 
@@ -111,43 +110,33 @@ pub struct TelemetryHub {
     _tx: broadcast::Sender<SimEvent>,
 }
 
+static TELEMETRY_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 static INIT: Once = Once::new();
 
-/// Initializes the telemetry system (Console + File).
-/// Returns a `WorkerGuard` that MUST be held by main() to ensure logs flush on shutdown.
-pub fn init_observability() -> Option<tracing_appender::non_blocking::WorkerGuard> {
-    let mut guard = None;
-
+pub fn init_observability() {
     INIT.call_once(|| {
-        // 1. Setup File Logging (The Flight Recorder)
-        // Rotates daily. Stores in "logs/guardian.log.YYYY-MM-DD"
-        let file_appender = rolling::daily("logs", "guardian.log");
+        let file_appender = tracing_appender::rolling::daily("logs", "guardian.log");
         let (non_blocking_file, file_guard) = tracing_appender::non_blocking(file_appender);
 
-        // Save the guard so we can return it (crucial for flushing buffers on crash)
-        guard = Some(file_guard);
+        // Store guard globally to prevent dropping
+        let _ = TELEMETRY_GUARD.set(file_guard);
 
-        // 2. Define the Filters
-        // "info" by default, but "debug" for our code (phalanx)
         let filter = Targets::new()
             .with_target("phalanx", Level::DEBUG)
             .with_target("phalanx_core", Level::DEBUG)
             .with_default(Level::INFO);
 
-        // 3. Register Layers
-        tracing_subscriber::registry()
+        let registry = tracing_subscriber::registry()
             .with(filter)
-            // Layer A: Console (Stdout) - For you watching the terminal
             .with(fmt::layer().with_target(false).with_thread_ids(true))
-            // Layer B: File (JSON) - Machine readable for later analysis
             .with(
                 fmt::layer()
                     .with_writer(non_blocking_file)
-                    .json() // structured JSON logs are better for parsing later
+                    .json()
                     .with_target(true),
-            )
-            .init();
-    });
+            );
 
-    guard
+        // Use try_init to prevent panics in multi-threaded test environments
+        let _ = registry.try_init();
+    });
 }

@@ -60,23 +60,24 @@ impl NetworkTransport for Libp2pAdapter {
                     return Some(NetworkEvent::PeerDiscovered(NetworkId(peer_id)));
                 }
                 SwarmEvent::Behaviour(PhalanxEvent::Retrieval(
-                    libp2p::request_response::Event::Message { message, .. },
+                    libp2p::request_response::Event::Message {
+                        message:
+                            libp2p::request_response::Message::Request {
+                                request, channel, ..
+                            },
+                        ..
+                    },
                 )) => {
-                    if let libp2p::request_response::Message::Request {
-                        request, channel, ..
-                    } = message
-                    {
-                        self.request_counter += 1;
-                        let channel_id = format!("req-{}", self.request_counter);
+                    self.request_counter += 1;
+                    let channel_id = format!("req-{}", self.request_counter);
 
-                        // Store the one-shot channel token
-                        self.pending_responses.insert(channel_id.clone(), channel);
+                    // Store the one-shot channel token
+                    self.pending_responses.insert(channel_id.clone(), channel);
 
-                        return Some(NetworkEvent::RetrievalRequested {
-                            request,
-                            channel_id,
-                        });
-                    }
+                    return Some(NetworkEvent::RetrievalRequested {
+                        request,
+                        channel_id,
+                    });
                 }
                 _ => continue,
             }

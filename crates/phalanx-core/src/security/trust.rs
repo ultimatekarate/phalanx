@@ -15,6 +15,8 @@ use tracing::{info, warn};
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PeerReputation {
     pub invalid_sigs: u32,
+    #[serde(default)]
+    pub quota_violations: u32,
     pub total_shards_sent: u64,
     pub active_buffers: usize,
     pub last_seen_load: f32,
@@ -327,7 +329,19 @@ impl TrustRegistry {
                     needs_save = true;
                     tracing::warn!(%did, "PEER BLACKLISTED: Replay attack detected.");
                 }
-                Offense::QuotaExceeded | Offense::MalformedPacket => {
+                Offense::QuotaExceeded => {
+                    record.reputation.quota_violations =
+                        record.reputation.quota_violations.saturating_add(1);
+
+                    if record.reputation.quota_violations >= 5 {
+                        record.reputation.is_blacklisted = true;
+                        needs_save = true;
+                        tracing::warn!(%did, "PEER BLACKLISTED: Quota failure threshold exceeded (Vampire Attack).");
+                    } else {
+                        tracing::debug!(%did, ?offense, "Peer quota offense recorded.");
+                    }
+                }
+                Offense::MalformedPacket => {
                     tracing::debug!(%did, ?offense, "Minor peer offense recorded.");
                 }
             }
