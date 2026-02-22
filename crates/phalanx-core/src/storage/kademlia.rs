@@ -153,10 +153,21 @@ pub struct PersistentProvider {
     pub expires_at_unix: Option<u64>,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct DhtProviderSet(Vec<PersistentProvider>);
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProviderEntry {
+    pub peer_id: NetworkId,
+    pub expiration: u64,
+    pub reputation_score: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DhtProviderSet {
+    pub providers: Vec<ProviderEntry>,
+}
 
 impl DhtProviderSet {
+    pub const MAX_PROVIDERS: usize = 20;
+
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         if bytes.is_empty() {
             return Ok(Self(Vec::new()));
@@ -168,7 +179,7 @@ impl DhtProviderSet {
         postcard::to_stdvec(self).unwrap_or_default()
     }
 
-    pub fn try_insert(&mut self, provider: PeerId, expires: Option<Instant>) -> Result<()> {
+    pub fn try_insert(&mut self, provider: NetworkId, expires: Option<Instant>) -> Result<()> {
         // Temporal Decay: Lazy cleanup of expired providers before evaluating capacity
         self.0.retain(|p| !is_expired(p.expires_at_unix));
 
@@ -208,6 +219,55 @@ impl DhtProviderSet {
             })
             .collect()
     }
+
+    /// Attempts to insert a provider using reputation-weighted eviction.
+    pub fn try_insert_weighted(
+        &mut self,
+        new_peer: PeerId,
+        expiration: u64,
+        reputation: f32,
+    ) -> bool {
+        // 1. Deduplication: Update existing entry if present
+        if let Some(existing) = self.providers.iter_mut().find(|p| p.peer_id == new_peer) {
+            existing.expiration = expiration;
+            existing.reputation_score = reputation;
+            return true;
+        }
+
+        let new_entry = ProviderEntry {
+            peer_id: new_peer,
+            expiration,
+            reputation_score: reputation,
+        };
+
+        // 2. Capacity Check
+        if self.providers.len() < Self::MAX_PROVIDERS {
+            self.providers.push(new_entry);
+            return true;
+        }
+
+        // 3. Eviction Logic: Find the lowest reputation peer
+        let (min_index, min_score) = self
+            .providers
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.reputation_score.partial_cmp(&b.reputation_score).unwrap())
+            .map(|(idx, entry)| (idx, entry.reputation_score))
+            .unwrap();
+
+        // Only evict if the new provider has a strictly higher reputation
+        if reputation > min_score {
+            tracing::info!(
+                evicted = %self.providers[min_index].peer_id,
+                replaced_by = %new_peer,
+                "DHT: Executing reputation-weighted provider eviction"
+            );
+            self.providers[min_index] = new_entry;
+            return true;
+        }
+
+        false
+    }
 }
 
 // =====================
@@ -239,16 +299,28 @@ impl RedbStore {
     /// Zero-Trust Cryptographic Gate
     /// Assumes payload is a signed Phalanx envelope. Returns false if invalid.
     fn verify_record_signature(&self, record: &Record) -> bool {
-        // Implementation delegates to the identity module to verify the signature
-        // against the record's embedded public key or derived PeerId.
-        // For standard DHT operations, libp2p provides a validation pipeline,
-        // but explicit storage-layer gating prevents application-layer bypasses.
         if record.value.is_empty() {
             return false;
         }
 
-        // Placeholder for strict verification logic
-        true
+        // 1. Extract the expected Owner DID from the RecordKey
+        // Phalanx Shard Keys follow the format: did_hash:shard_id
+        let key_str = String::from_utf8_lossy(record.key.as_ref());
+        let expected_owner_prefix = match key_str.split(':').next() {
+            Some(prefix) => prefix,
+            None => return false,
+        };
+
+        // 2. Decode Payload to access the embedded signature
+        let payload: DhtPayload = match postcard::from_bytes(&record.value) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+
+        // 3. Cryptographic Verification
+        // Implementation utilizes the identity module to verify the specific payload hash
+        // against the embedded signature and the claimed DID.
+        payload.verify_ownership(expected_owner_prefix)
     }
 
     fn persist_record_safely(&self, key: DhtRecordKey, payload_bytes: &[u8]) -> Result<()> {
@@ -405,36 +477,53 @@ impl RecordStore for RedbStore {
         }
     }
 
-    fn add_provider(&mut self, record: ProviderRecord) -> Result<()> {
-        // Prevent malicious peers from constantly reflecting our own ID back to us
-        // to exhaust disk I/O.
-        if record.provider == self.local_peer_id {
-            tracing::debug!("Discarding self-referential provider record injection.");
-            return Ok(());
+    #[instrument(skip(self, key, provider_record, trust), level = "debug")]
+    fn add_provider(
+        &mut self,
+        key: &RecordKey,
+        provider_record: ProviderRecord,
+        trust: &crate::security::trust::TrustRegistry,
+    ) -> Result<()> {
+        let typed_key = DhtRecordKey::new(key);
+        let peer_id = provider_record.provider;
+
+        // 1. Fetch current reputation from the TrustRegistry
+        // We utilize the NetworkId mapping to resolve the peer's current standing
+        let reputation = trust.get_reputation_by_peer_id(&peer_id);
+
+        if reputation.is_blacklisted {
+            tracing::warn!(peer = %peer_id, "DHT: Rejecting provider record from blacklisted peer");
+            return Err(Error::MaxStorage);
         }
 
-        let typed_key = DhtRecordKey::new(&record.key);
-        let write_txn = self.db.begin_write().map_err(|_| Error::MaxProvidedKeys)?;
-
+        let write_txn = self.db.begin_write()?;
         {
-            let mut table = write_txn
-                .open_table(DHT_PROVIDERS_TABLE)
-                .map_err(|_| Error::MaxProvidedKeys)?;
-            let existing_bytes = table
-                .get(typed_key.as_bytes())
-                .map_err(|_| Error::MaxProvidedKeys)?
-                .map(|access| access.value().to_vec())
-                .unwrap_or_default();
+            let mut table = write_txn.open_table(DHT_PROVIDERS_TABLE)?;
+            let mut existing_bytes = Vec::new();
 
-            let mut provider_set = DhtProviderSet::decode(&existing_bytes)?;
-            provider_set.try_insert(record.provider, record.expires)?;
+            if let Some(access) = table.get(typed_key.as_bytes())? {
+                existing_bytes = access.value().to_vec();
+            }
 
-            table
-                .insert(typed_key.as_bytes(), provider_set.encode().as_slice())
-                .map_err(|_| Error::MaxProvidedKeys)?;
+            let mut provider_set =
+                DhtProviderSet::decode(&existing_bytes).unwrap_or_else(|_| DhtProviderSet {
+                    providers: Vec::new(),
+                });
+
+            // 2. Execute weighted insertion
+            let expiration = provider_record
+                .expires
+                .and_then(|t| t.duration_since(SystemTime::now()).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(86400); // Default 24h
+
+            if provider_set.try_insert_weighted(peer_id, expiration, reputation.score()) {
+                table.insert(typed_key.as_bytes(), provider_set.encode().as_slice())?;
+            } else {
+                return Err(Error::MaxStorage);
+            }
         }
-
-        write_txn.commit().map_err(|_| Error::MaxProvidedKeys)?;
+        write_txn.commit()?;
         Ok(())
     }
 
