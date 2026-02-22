@@ -170,7 +170,7 @@ impl Mold for VolleyAmalgam {
 
         Some(Volley {
             id: acc.volley_id,
-            owner_did: acc.owner_did.to_string(),
+            owner_did: acc.owner_did,
             artifacts: sorted_artifacts,
             gaps,
             is_complete: true,

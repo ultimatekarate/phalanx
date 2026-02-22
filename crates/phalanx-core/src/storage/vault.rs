@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
-use tracing::{instrument, warn};
+use std::path::PathBuf;
+use std::time::Duration;
+use tracing::{info, instrument};
 
 use crate::base::config::PhalanxConfig;
 use crate::base::types::ByteCapacity;
 use crate::primitives::identity::Did;
-use crate::primitives::shards::{StorageSequence, WitnessEnvelope};
+use crate::primitives::shards::{StorageSequence, Volley, WitnessEnvelope};
 use crate::primitives::time::TimeError;
 use crate::storage::crucible::Crucible;
 use crate::storage::strategies::VolleyAmalgam;
@@ -41,21 +43,20 @@ pub enum GuardianError {
 
 pub struct Guardian {
     pub crucible: Crucible<VolleyAmalgam>,
-    pub active_volleys: BTreeMap<Did, BTreeMap<StorageSequence, WitnessEnvelope>>,
+    pub vault_path: String,
     pub local_did: Did,
 }
 
 impl Guardian {
-    pub fn new(_vault_path: &str, _config: &PhalanxConfig, local_did: Did) -> Self {
+    pub fn new(vault_path: &str, _config: &PhalanxConfig, local_did: Did) -> Self {
         Self {
             crucible: Crucible::new(),
-            active_volleys: BTreeMap::new(),
+            vault_path: vault_path.to_string(),
             local_did,
         }
     }
 
     /// The sole entry point for data promotion into the permanent archive.
-    /// This enforces the Sentinel/Guardian split by requiring matured envelopes.
     #[instrument(skip(self, envelope), fields(owner = %envelope.did))]
     pub fn ingest_envelope(&mut self, envelope: WitnessEnvelope) -> Result<(), GuardianError> {
         // 1. Mandatory Forensic Validation
@@ -65,22 +66,54 @@ impl Guardian {
             ));
         }
 
-        let owner = envelope.did.clone();
-        let sequence = envelope.evidence.sequence_id();
+        // 2. Promotion to Active Volley via Crucible
+        if let Some(volley) = self.crucible.process(envelope) {
+            self.commit_volley_to_disk(&volley)?;
+        }
 
-        // 2. Promotion to Active Volley
-        let user_vault = self.active_volleys.entry(owner).or_default();
-
-        user_vault.insert(sequence, envelope.clone());
-
-        // 3. Optional: Trigger Crucible Commit
-        self.check_and_finalize_volley(&envelope.did)?;
+        // 3. Trigger standard TTL evaluation
+        self.check_and_finalize_volley()?;
 
         Ok(())
     }
 
-    fn check_and_finalize_volley(&mut self, _did: &Did) -> Result<(), GuardianError> {
-        // Implementation for batch-committing envelopes to long-term storage
+    /// Evaluates active working contexts for TTL expiration.
+    pub fn check_and_finalize_volley(&mut self) -> Result<(), GuardianError> {
+        // Utilize the predefined threshold from strategies.rs logic
+        let stale_volleys = self.crucible.flush_stale(Duration::from_secs(1));
+        for volley in stale_volleys {
+            self.commit_volley_to_disk(&volley)?;
+        }
+        Ok(())
+    }
+
+    /// Explicit salvage command for node termination sequences.
+    pub fn force_salvage_all(&mut self) -> Result<(), GuardianError> {
+        let active_volleys = self.crucible.flush_all();
+        for volley in active_volleys {
+            self.commit_volley_to_disk(&volley)?;
+        }
+        Ok(())
+    }
+
+    fn commit_volley_to_disk(&self, volley: &Volley) -> Result<(), GuardianError> {
+        let serialized_volley = postcard::to_stdvec(volley)
+            .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
+
+        let mut path = PathBuf::from(&self.vault_path);
+        path.push(volley.owner_did.to_safe_name());
+
+        std::fs::create_dir_all(&path).map_err(|e| {
+            GuardianError::WalWriteFailed(format!("Directory creation failed: {}", e))
+        })?;
+
+        path.push(format!("{}.phlx", volley.id.as_str()));
+
+        std::fs::write(&path, serialized_volley).map_err(|e| {
+            GuardianError::WalWriteFailed(format!("Archive disk write failed: {}", e))
+        })?;
+
+        info!(path = ?path, "Volley archived successfully");
         Ok(())
     }
 
@@ -88,7 +121,9 @@ impl Guardian {
         &self,
         did: &Did,
     ) -> Option<&BTreeMap<StorageSequence, WitnessEnvelope>> {
-        self.active_volleys.get(did)
+        self.crucible
+            .get(&did.to_string())
+            .map(|buffer| &buffer.artifacts)
     }
 }
 
@@ -116,7 +151,18 @@ mod tests {
         let envelope =
             WitnessEnvelope::new(Evidence::Video(shard), &identity, NetworkId::random()).unwrap();
 
+        // 1. Verify successful ingestion routing
         assert!(guardian.ingest_envelope(envelope).is_ok());
-        assert!(guardian.active_volleys.contains_key(&identity.did));
+
+        // 2. Verify Crucible state mutation via public API
+        let active_shards = guardian.get_active_volley_shards(&identity.did);
+        assert!(
+            active_shards.is_some(),
+            "Crucible should contain an active volley buffer for this DID"
+        );
+        assert!(
+            active_shards.unwrap().contains_key(&StorageSequence(1)),
+            "Volley buffer should contain the ingested sequence ID"
+        );
     }
 }

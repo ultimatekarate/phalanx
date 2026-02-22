@@ -265,7 +265,7 @@ impl From<&str> for VolleyId {
 #[derive(Serialize, Deserialize)]
 pub struct Volley {
     pub id: VolleyId,
-    pub owner_did: String,
+    pub owner_did: Did,
     pub artifacts: Vec<WitnessEnvelope>,
     pub gaps: Vec<ForensicGap>,
     pub is_complete: bool,

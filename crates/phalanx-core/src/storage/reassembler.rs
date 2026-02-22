@@ -1,14 +1,10 @@
 use crate::base::config::PhalanxConfig;
 use crate::base::types::{MeshTopic, PowerState};
 use crate::primitives::identity::{NetworkId, PhalanxIdentity};
-use crate::primitives::shards::{
-    AudioShard, ChunkType, Evidence, ReassemblyBuffer, ShardChunk, ShardError, ShardId, VideoShard,
-    WitnessEnvelope,
-};
+use crate::primitives::shards::{ChunkType, ShardChunk, ShardError, WitnessEnvelope};
+use crate::storage::crucible::Crucible;
+use crate::storage::strategies::ShardAmalgam;
 use async_trait::async_trait;
-use std::collections::HashMap;
-use tokio::time::Instant;
-
 use tracing::{info, instrument};
 
 // =====================
@@ -19,12 +15,11 @@ pub trait TransientJournal: Send + Sync {
     async fn record_chunk(&mut self, chunk: &ShardChunk) -> Result<(), ShardError>;
     async fn sync(&mut self) -> Result<(), ShardError>;
     async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError>;
-    async fn clear(&mut self) -> Result<(), ShardError>; // Added for Freeze Protocol
+    async fn clear(&mut self) -> Result<(), ShardError>;
 }
 
 pub struct Reassembler {
-    pub video_buffers: HashMap<ShardId, ReassemblyBuffer>,
-    pub audio_buffers: HashMap<ShardId, ReassemblyBuffer>,
+    pub crucible: Crucible<ShardAmalgam>,
     pub power_state: PowerState,
 }
 
@@ -37,60 +32,44 @@ impl Default for Reassembler {
 impl Reassembler {
     pub fn new() -> Self {
         Self {
-            video_buffers: HashMap::new(),
-            audio_buffers: HashMap::new(),
+            crucible: Crucible::new(),
             power_state: PowerState::Normal,
         }
+    }
+
+    /// Proactive maintenance tick to flush stale shards.
+    /// This prevents memory leaks from incomplete network broadcasts.
+    pub fn check_and_finalize_shards(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Vec<WitnessEnvelope> {
+        let salvaged_envelopes = self.crucible.flush_stale(timeout);
+
+        if !salvaged_envelopes.is_empty() {
+            tracing::info!(
+                count = salvaged_envelopes.len(),
+                "Salvaged incomplete envelopes from reassembler workbench"
+            );
+        }
+
+        salvaged_envelopes
     }
 
     pub async fn ingest_chunk<J: TransientJournal>(
         &mut self,
         chunk: ShardChunk,
         journal: &mut J,
-        topic: &MeshTopic,
-        config: &PhalanxConfig,
-        identity: &PhalanxIdentity,
-        local_peer_id: NetworkId,
+        _topic: &MeshTopic,
+        _config: &PhalanxConfig,
+        _identity: &PhalanxIdentity,
+        _local_peer_id: NetworkId,
     ) -> Result<Option<WitnessEnvelope>, ShardError> {
         // 1. Forensic Persistence (WAL)
         journal.record_chunk(&chunk).await?;
         journal.sync().await?;
 
-        // 2. Buffer Selection
-        let is_video = topic == &config.network.video_topic;
-        let (buffers, _capacity_limit) = if is_video {
-            (&mut self.video_buffers, config.storage.max_video_buffer)
-        } else {
-            (&mut self.audio_buffers, config.storage.max_audio_buffer)
-        };
-
-        let shard_id = chunk.shard_id;
-
-        // 3. Aggregation Logic
-        let buffer = buffers
-            .entry(shard_id)
-            .or_insert_with(|| ReassemblyBuffer::new(chunk.total_chunks as usize));
-
-        buffer.last_activity = Instant::now();
-        if chunk.chunk_index < chunk.total_chunks {
-            buffer.chunks[chunk.chunk_index as usize] = Some(chunk.data);
-        }
-
-        // 4. Finalization
-        if buffer.is_complete() {
-            let reassembled_raw_data = buffer.assemble();
-            buffers.remove(&shard_id);
-
-            self.finalize_envelope(
-                reassembled_raw_data,
-                chunk.chunk_type,
-                is_video,
-                identity,
-                local_peer_id,
-            )
-        } else {
-            Ok(None)
-        }
+        // 2. Crucible Aggregation
+        Ok(self.crucible.process(chunk))
     }
 
     #[instrument(skip(self, journal, config, identity))]
@@ -102,11 +81,9 @@ impl Reassembler {
         local_peer_id: NetworkId,
     ) -> Result<Vec<WitnessEnvelope>, ShardError> {
         let mut recovered_envelopes = Vec::new();
-
         let chunks = journal.read_all_chunks().await?;
 
         for chunk in chunks {
-            // Bypass IngressOrchestrator because WAL data is internally trusted
             let topic = if chunk.chunk_type == ChunkType::ForensicUnit {
                 &config.network.video_topic
             } else {
@@ -114,12 +91,23 @@ impl Reassembler {
             };
 
             if let Some(envelope) = self
-                .ingest_chunk(chunk, journal, topic, config, identity, local_peer_id)
+                .ingest_chunk(
+                    chunk,
+                    journal,
+                    topic,
+                    config,
+                    identity,
+                    local_peer_id,
+                )
                 .await?
             {
                 recovered_envelopes.push(envelope);
             }
         }
+
+        // Apply salvage protocols to transient states post-recovery
+        let salvaged_envelopes = self.crucible.flush_all();
+        recovered_envelopes.extend(salvaged_envelopes);
 
         info!(
             recovered_count = recovered_envelopes.len(),
@@ -127,39 +115,14 @@ impl Reassembler {
         );
         Ok(recovered_envelopes)
     }
-
-    fn finalize_envelope(
-        &self,
-        data: Vec<u8>,
-        chunk_type: ChunkType,
-        is_video: bool,
-        identity: &PhalanxIdentity,
-        peer_id: NetworkId,
-    ) -> Result<Option<WitnessEnvelope>, ShardError> {
-        match chunk_type {
-            ChunkType::Witnessed => postcard::from_bytes::<WitnessEnvelope>(&data)
-                .map(Some)
-                .map_err(|e| ShardError::Serialization(e.to_string())),
-            ChunkType::ForensicUnit => {
-                let evidence = if is_video {
-                    postcard::from_bytes::<VideoShard>(&data).map(Evidence::Video)
-                } else {
-                    postcard::from_bytes::<AudioShard>(&data).map(Evidence::Audio)
-                }
-                .map_err(|e| ShardError::Serialization(e.to_string()))?;
-
-                WitnessEnvelope::new(evidence, identity, peer_id).map(Some)
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::primitives::shards::{DataPayload, StorageSequence, VolleyId};
+    use crate::primitives::shards::{Evidence, ShardId, VideoShard};
     use crate::primitives::time::PhalanxTimestamp;
-
     struct MockJournal;
     #[async_trait]
     impl TransientJournal for MockJournal {
@@ -263,7 +226,7 @@ mod tests {
             original_envelope.witness_signature
         );
         assert_eq!(
-            reassembler.video_buffers.len(),
+            reassembler.crucible.contexts.len(),
             0,
             "Memory leak: Buffer not cleared"
         );

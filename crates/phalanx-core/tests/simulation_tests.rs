@@ -362,11 +362,11 @@ async fn test_leaf_mode_isolation() {
 
     // Verify the downstream data factories and storage layers remain unpolluted
     assert!(
-        reassembler.video_buffers.is_empty(),
+        reassembler.crucible.contexts.is_empty(),
         "Reassembler leaked foreign data into transient memory while in Leaf Mode!"
     );
     assert!(
-        guardian.active_volleys.is_empty(),
+        guardian.crucible.contexts.is_empty(),
         "Guardian bypassed orchestration and archived foreign data while in Leaf Mode!"
     );
 }
