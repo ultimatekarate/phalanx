@@ -9,6 +9,7 @@ use crate::primitives::shards::{StorageSequence, Volley, WitnessEnvelope};
 use crate::primitives::time::TimeError;
 use crate::storage::crucible::Crucible;
 use crate::storage::strategies::VolleyAmalgam;
+use tokio::fs;
 
 use tracing;
 
@@ -59,8 +60,10 @@ impl Guardian {
 
     /// The sole entry point for data promotion into the permanent archive.
     #[instrument(skip(self, envelope), fields(owner = %envelope.did))]
-    pub fn ingest_envelope(&mut self, envelope: WitnessEnvelope) -> Result<(), GuardianError> {
-        // FORENSIC LOG: Entry
+    pub async fn ingest_envelope(
+        &mut self,
+        envelope: WitnessEnvelope,
+    ) -> Result<(), GuardianError> {
         tracing::debug!("Guardian: Received envelope for ingestion. Verifying...");
 
         if !envelope.verify() {
@@ -72,37 +75,38 @@ impl Guardian {
 
         if let Some(volley) = self.crucible.process(envelope) {
             tracing::info!(volley_id = %volley.id, "Crucible: Volley threshold met. Promoting to disk.");
-            self.commit_volley_to_disk(&volley)?;
+            self.commit_volley_to_disk(&volley).await?;
         } else {
             tracing::debug!(
                 "Crucible: Envelope buffered in workbench. Waiting for more data or TTL."
             );
         }
 
-        self.check_and_finalize_volley()?;
+        self.check_and_finalize_volley().await?;
         Ok(())
     }
 
     /// Evaluates active working contexts for TTL expiration.
-    pub fn check_and_finalize_volley(&mut self) -> Result<(), GuardianError> {
+    pub async fn check_and_finalize_volley(&mut self) -> Result<(), GuardianError> {
         // Utilize the predefined threshold from strategies.rs logic
         let stale_volleys = self.crucible.flush_stale(Duration::from_secs(1));
         for volley in stale_volleys {
-            self.commit_volley_to_disk(&volley)?;
+            self.commit_volley_to_disk(&volley).await?;
         }
         Ok(())
     }
 
     /// Explicit salvage command for node termination sequences.
-    pub fn force_salvage_all(&mut self) -> Result<(), GuardianError> {
+    pub async fn force_salvage_all(&mut self) -> Result<(), GuardianError> {
         let active_volleys = self.crucible.flush_all();
         for volley in active_volleys {
-            self.commit_volley_to_disk(&volley)?;
+            self.commit_volley_to_disk(&volley).await?;
         }
         Ok(())
     }
 
-    fn commit_volley_to_disk(&self, volley: &Volley) -> Result<(), GuardianError> {
+    /// Non-blocking Disk Persistence
+    async fn commit_volley_to_disk(&self, volley: &Volley) -> Result<(), GuardianError> {
         let mut path = std::path::PathBuf::from(&self.vault_path);
 
         // FORENSIC PROTOCOL: Use sanitized safe names for filesystem compatibility
@@ -116,7 +120,7 @@ impl Guardian {
 
         tracing::info!(target: "phalanx::forensics", resolved_path = ?path, "DISK_COMMIT_START");
 
-        if let Err(e) = std::fs::create_dir_all(&path) {
+        if let Err(e) = fs::create_dir_all(&path).await {
             tracing::error!(target: "phalanx::forensics", error = %e, "DIR_CREATION_FAILED");
             return Err(GuardianError::WalWriteFailed(e.to_string()));
         }
@@ -127,7 +131,8 @@ impl Guardian {
         let bytes = postcard::to_stdvec(volley)
             .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
 
-        std::fs::write(&path, &bytes).map_err(|e| {
+        // Perform non-blocking write
+        fs::write(&path, &bytes).await.map_err(|e| {
             tracing::error!(target: "phalanx::forensics", error = %e, "WRITE_FAILED");
             GuardianError::WalWriteFailed(e.to_string())
         })?;
@@ -152,12 +157,17 @@ mod tests {
     use crate::primitives::identity::{NetworkId, PhalanxIdentity};
     use crate::primitives::shards::{DataPayload, Evidence, StorageSequence, VideoShard, VolleyId};
     use crate::primitives::time::PhalanxTimestamp;
+    use tempfile::tempdir;
 
-    #[test]
-    fn test_ingest_envelope_valid() {
+    #[tokio::test]
+    async fn test_ingest_envelope_valid() {
+        // 1. Setup ephemeral test environment
+        let temp_dir = tempdir().expect("Failed to create temporary directory");
+        let vault_path = temp_dir.path().to_string_lossy().to_string();
+
         let (identity, _) = PhalanxIdentity::generate().unwrap();
         let config = PhalanxConfig::default();
-        let mut guardian = Guardian::new("test_vault", &config, identity.did.clone());
+        let mut guardian = Guardian::new(&vault_path, &config, identity.did.clone());
 
         let shard = VideoShard {
             timestamp: PhalanxTimestamp::now(),
@@ -167,20 +177,25 @@ mod tests {
             payload: DataPayload::Clear(vec![1, 2, 3]),
         };
 
-        let envelope =
-            WitnessEnvelope::new(Evidence::Video(shard), &identity, NetworkId::random()).unwrap();
+        let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, NetworkId::random())
+            .expect("WitnessEnvelope construction failed");
 
-        // 1. Verify successful ingestion routing
-        assert!(guardian.ingest_envelope(envelope).is_ok());
+        // 2. Verify successful asynchronous ingestion routing
+        // Corrected: Must be async fn to use .await
+        let result = guardian.ingest_envelope(envelope).await;
+        assert!(result.is_ok(), "Ingestion failed: {:?}", result.err());
 
-        // 2. Verify Crucible state mutation via public API
+        // 3. Verify Crucible state mutation via public API
         let active_shards = guardian.get_active_volley_shards(&identity.did);
+
         assert!(
             active_shards.is_some(),
             "Crucible should contain an active volley buffer for this DID"
         );
+
+        let shards_map = active_shards.unwrap();
         assert!(
-            active_shards.unwrap().contains_key(&StorageSequence(1)),
+            shards_map.contains_key(&StorageSequence(1)),
             "Volley buffer should contain the ingested sequence ID"
         );
     }
