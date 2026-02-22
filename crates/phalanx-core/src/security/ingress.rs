@@ -73,7 +73,7 @@ impl IngressOrchestrator {
         {
             Ok(Some(envelope)) => {
                 // 5. Finalization Phase (Archival)
-                match pipeline.guardian.ingest_envelope(envelope) {
+                match pipeline.guardian.ingest_envelope(envelope).await {
                     Ok(_) => Ok(Some(())),
                     Err(guardian_error) => {
                         Self::report_offense(&sender_did, &guardian_error, ctx, pipeline).await;

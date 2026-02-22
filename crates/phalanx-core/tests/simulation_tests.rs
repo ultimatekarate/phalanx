@@ -192,18 +192,23 @@ async fn test_out_of_sequence_salvage_on_node_death() {
 
     storage
         .ingest_envelope(captured_envelopes[0].clone())
+        .await
         .expect("Ingest failed");
     storage
         .ingest_envelope(captured_envelopes[2].clone())
+        .await
         .expect("Ingest failed");
     storage
         .ingest_envelope(captured_envelopes[4].clone())
+        .await
         .expect("Ingest failed");
     storage
         .ingest_envelope(captured_envelopes[1].clone())
+        .await
         .expect("Ingest failed");
     storage
         .ingest_envelope(captured_envelopes[3].clone())
+        .await
         .expect("Ingest failed");
 
     let session = storage
@@ -246,6 +251,7 @@ async fn test_stronghold_crash_recovery() {
 
     storage
         .ingest_envelope(envelope.clone())
+        .await
         .expect("Ingest failed");
 
     // Simulate crash (Memory state wiped)
@@ -257,6 +263,7 @@ async fn test_stronghold_crash_recovery() {
     // --- FIX: Simulate StorageActor::restore_state WAL replay ---
     recovered_storage
         .ingest_envelope(envelope.clone())
+        .await
         .expect("WAL replay failed");
 
     let recovered_session = recovered_storage

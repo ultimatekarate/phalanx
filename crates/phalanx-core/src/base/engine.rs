@@ -88,7 +88,7 @@ impl<J: TransientJournal> StorageActor<J> {
                 }
                 _ = maintenance_timer.tick() => {
                     tracing::info!(target: "phalanx::forensics", "MAINTENANCE_TICK_START");
-                    if let Err(err) = self.guardian.check_and_finalize_volley() {
+                    if let Err(err) = self.guardian.check_and_finalize_volley().await {
                         tracing::error!(target: "phalanx::forensics", error = %err, "Maintenance flush failed");
                     }
                 }
@@ -118,7 +118,7 @@ impl<J: TransientJournal> StorageActor<J> {
 
         match envelope_opt {
             Ok(Some(envelope)) => {
-                if let Err(err) = self.guardian.ingest_envelope(envelope) {
+                if let Err(err) = self.guardian.ingest_envelope(envelope).await {
                     tracing::error!(error = %err, "Vault rejected envelope");
                     let _ = self.forensic_tx.try_send((peer_id, chunk_owner_did, err));
                 }
