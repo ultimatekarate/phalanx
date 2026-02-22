@@ -4,6 +4,7 @@ use tokio::sync::mpsc;
 
 use crate::base::types::MeshTopic;
 use crate::primitives::identity::NetworkId;
+use crate::security::telemetry::SimEvent;
 use crate::transport::events::NetworkEvent;
 use crate::transport::network_transport::NetworkTransport;
 use crate::transport::protocol::VolleyResponse;
@@ -11,6 +12,8 @@ use crate::transport::protocol::VolleyResponse;
 pub struct MockTransport {
     ingress_rx: mpsc::Receiver<NetworkEvent>,
     egress_tx: Option<mpsc::Sender<(MeshTopic, Vec<u8>)>>,
+    telemetry_tx: Option<mpsc::Sender<SimEvent>>,
+    local_id: NetworkId,
     pub captured_responses: Vec<(String, VolleyResponse)>,
     banned_peers: HashSet<NetworkId>,
 }
@@ -23,9 +26,22 @@ impl MockTransport {
         Self {
             ingress_rx,
             egress_tx,
+            telemetry_tx: None,
+            local_id: NetworkId::random(), // Ephemeral default for pure unit tests
             captured_responses: Vec::new(),
             banned_peers: HashSet::new(),
         }
+    }
+
+    /// Injects the simulation telemetry bus into the mock adapter.
+    pub fn with_telemetry(
+        mut self,
+        local_id: NetworkId,
+        telemetry_tx: mpsc::Sender<SimEvent>,
+    ) -> Self {
+        self.local_id = local_id;
+        self.telemetry_tx = Some(telemetry_tx);
+        self
     }
 
     pub fn is_banned(&self, peer: &NetworkId) -> bool {
@@ -50,6 +66,18 @@ impl NetworkTransport for MockTransport {
 
     async fn ban_peer(&mut self, peer: &NetworkId) {
         self.banned_peers.insert(*peer);
+
+        // Synthesize the telemetry event for the Simulation Harness
+        if let Some(tx) = &self.telemetry_tx {
+            let event = SimEvent::AttackAttemptBlocked {
+                attacker: *peer,
+                target: self.local_id,
+                reason: "Peer blacklisted by MockTransport policy".to_string(),
+            };
+
+            // Fire and forget; do not block the transport layer on telemetry back pressure
+            let _ = tx.send(event).await;
+        }
     }
 
     async fn send_response(
@@ -57,7 +85,6 @@ impl NetworkTransport for MockTransport {
         channel_id: &str,
         response: VolleyResponse,
     ) -> Result<(), String> {
-        // In the simulation harness, we simply log the response for deterministic test verification.
         self.captured_responses
             .push((channel_id.to_string(), response));
         Ok(())

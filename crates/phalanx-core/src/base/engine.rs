@@ -214,10 +214,31 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
                 tracing::warn!(%did, "Dropped connection from blacklisted peer.");
             }
             Err(e) => {
-                let trust_level = self.trust_registry.check_trust(&sender_did);
-                if matches!(trust_level, crate::security::trust::TrustLevel::Blocked) {
+                // Dependency Inversion: Import the gate trait to check state
+                use crate::security::trust::{Offense, ReputationGate};
+
+                let error_message = e.to_string();
+
+                // Deterministic error mapping without structural guessing
+                let offense = if error_message.contains("Signature invalid") {
+                    Offense::InvalidSignature
+                } else if error_message.contains("Quota") || error_message.contains("Vampire") {
+                    Offense::QuotaExceeded
+                } else if error_message.contains("Replay") {
+                    Offense::ReplayAttack
+                } else {
+                    Offense::MalformedPacket
+                };
+
+                // State transition: Promote the offense to the persistence layer
+                self.trust_registry
+                    .record_offense(&sender_did, offense, &self.clock)
+                    .await;
+
+                // Typestate enforcement: Drop the connection at the transport layer if threshold exceeded
+                if self.trust_registry.is_blacklisted(&sender_did) {
                     self.network.ban_peer(&peer_id).await;
-                    tracing::warn!(%sender_did, error = %e, "Peer blacklisted due to protocol offense.");
+                    tracing::warn!(%sender_did, reason = %error_message, "Peer blacklisted due to protocol offense.");
                 } else {
                     tracing::debug!(error = %e, "Ingress rejected.");
                 }

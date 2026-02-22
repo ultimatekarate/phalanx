@@ -103,11 +103,10 @@ impl<J: TransientJournal> StorageActor<J> {
 
     pub async fn snapshot_state(&mut self) -> Result<(), ShardError> {
         if self.reassembler.video_buffers.is_empty() && self.reassembler.audio_buffers.is_empty() {
-            self.journal.clear().await.map_err(|e| {
-                ShardError::Io(std::io::Error::other(
-                    e.to_string(),
-                ))
-            })?;
+            self.journal
+                .clear()
+                .await
+                .map_err(|e| ShardError::Io(std::io::Error::other(e.to_string())))?;
             debug!("Crucible state frozen and WAL compacted.");
         }
         Ok(())
@@ -155,7 +154,7 @@ impl<T: NetworkTransport, J: TransientJournal + 'static> StrongholdEngine<T, J> 
             identity: identity.clone(),
             chunk_rx,
             active_tasks_metric: Arc::clone(&storage_load),
-            physics: physics,
+            physics,
             local_peer_id,
         };
 

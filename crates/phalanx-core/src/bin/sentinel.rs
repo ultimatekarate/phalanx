@@ -18,7 +18,7 @@ use phalanx_core::transport::swarm::{load_swarm_key, setup_phalanx_swarm};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // 1. Telemetry & Initialization
-    let _guard = telemetry::init_observability();
+    telemetry::init_observability();
     setup_shutdown_handler();
 
     // 2. Configuration Loading
