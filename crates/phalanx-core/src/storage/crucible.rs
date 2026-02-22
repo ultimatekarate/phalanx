@@ -160,36 +160,40 @@ impl<S: Mold> Crucible<S> {
     /// archived rather than leaked during peer disconnection.
     pub fn flush_stale(&mut self, ttl: Duration) -> Vec<S::Output> {
         let mut ready_keys = Vec::new();
-
         let active_count = self.contexts.len();
+        let now = Instant::now(); // FORENSIC: Capture reference time
+
         if active_count > 0 {
             info!(
+                target: "phalanx::forensics",
                 count = active_count,
                 ttl_ms = ttl.as_millis(),
-                "Crucible checking for stale sessions..."
+                "CRUCIBLE_FLUSH_START"
             );
         }
 
         for (key, ctx) in &self.contexts {
-            let age = ctx.created_at.elapsed();
-            if age >= ttl {
-                warn!(
-                    ?key,
-                    age_ms = age.as_millis(),
-                    "Crucible: FOUND STALE SESSION. Flushing."
-                );
+            let age = now.duration_since(ctx.created_at);
+            let is_stale = age >= ttl;
+
+            info!(
+                target: "phalanx::forensics",
+                ?key,
+                age_ms = age.as_millis(),
+                ttl_ms = ttl.as_millis(),
+                stale = is_stale,
+                "CRUCIBLE_STALE_CHECK"
+            );
+
+            if is_stale {
                 ready_keys.push(key.clone());
-            } else {
-                debug!(
-                    ?key,
-                    age_ms = age.as_millis(),
-                    "Crucible: Session active (not stale yet)."
-                );
             }
         }
+
         let mut results = Vec::new();
         for key in ready_keys {
             if let Some(ctx) = self.contexts.remove(&key) {
+                info!(target: "phalanx::forensics", ?key, "CRUCIBLE_EJECTING_STALE_KEY");
                 if let Some(out) = S::assemble(key, ctx.accumulator) {
                     results.push(out);
                 }

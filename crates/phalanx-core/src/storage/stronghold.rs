@@ -30,46 +30,30 @@ pub struct StorageActor<J: TransientJournal> {
 
 impl<J: TransientJournal> StorageActor<J> {
     pub async fn run(mut self) {
-        if let Err(err) = self.restore_state().await {
-            tracing::error!(error = %err, "Failed to restore Crucible state from disk.");
-        }
-
+        // Heartbeat matches the VOLLEY_TIME_THRESHOLD (1s)
         let mut maintenance_timer = tokio::time::interval(Duration::from_secs(1));
-        maintenance_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
-                // Handle incoming data
-                chunk_payload = self.chunk_rx.recv() => {
-                    match chunk_payload {
-                        Some((chunk, topic, peer_id)) => {
-                            info!("processing incoming chunk");
-                            self.process_incoming_chunk(chunk, topic, peer_id).await;
-                        }
+                res = self.chunk_rx.recv() => {
+                    match res {
+                        Some((chunk, topic, peer_id)) => self.process_incoming_chunk(chunk, topic, peer_id).await,
                         None => {
-                            // Channel closed: Trigger emergency salvage before actor death
-                            info!("Chunk receiver closed. Commencing emergency salvage...");
+                            tracing::warn!("Channel closed. Performing emergency force-salvage.");
                             let mut guardian = self.storage.write().await;
                             let _ = guardian.force_salvage_all();
                             return;
                         }
                     }
                 }
-
-                // Periodic maintenance
                 _ = maintenance_timer.tick() => {
-                    // 1. Flush stale volleys from the Crucible workbench
+                    tracing::info!(target: "phalanx::forensics", "MAINTENANCE_TICK_START");
                     let mut guardian = self.storage.write().await;
-                    if let Err(err) = guardian.check_and_finalize_volley() {
-                        tracing::error!(error = %err, "Periodic finalization failed");
-                    }
-                    drop(guardian);
 
-                    // 2. Periodic WAL snapshotting and metrics
-                    if let Err(err) = self.snapshot_state().await {
-                        tracing::error!(error = %err, "Freeze Protocol failed.");
+                    // PROACTIVE: Force evaluation of stale sessions
+                    if let Err(err) = guardian.check_and_finalize_volley() {
+                        tracing::error!(target: "phalanx::forensics", error = %err, "Maintenance flush failed");
                     }
-                    self.update_metrics().await;
                 }
             }
         }

@@ -91,14 +91,7 @@ impl Reassembler {
             };
 
             if let Some(envelope) = self
-                .ingest_chunk(
-                    chunk,
-                    journal,
-                    topic,
-                    config,
-                    identity,
-                    local_peer_id,
-                )
+                .ingest_chunk(chunk, journal, topic, config, identity, local_peer_id)
                 .await?
             {
                 recovered_envelopes.push(envelope);

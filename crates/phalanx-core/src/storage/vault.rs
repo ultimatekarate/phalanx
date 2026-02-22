@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::time::Duration;
-use tracing::{info, instrument};
+use tracing::instrument;
 
 use crate::base::config::PhalanxConfig;
 use crate::base::types::ByteCapacity;
@@ -10,6 +9,8 @@ use crate::primitives::shards::{StorageSequence, Volley, WitnessEnvelope};
 use crate::primitives::time::TimeError;
 use crate::storage::crucible::Crucible;
 use crate::storage::strategies::VolleyAmalgam;
+
+use tracing;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GuardianError {
@@ -59,21 +60,26 @@ impl Guardian {
     /// The sole entry point for data promotion into the permanent archive.
     #[instrument(skip(self, envelope), fields(owner = %envelope.did))]
     pub fn ingest_envelope(&mut self, envelope: WitnessEnvelope) -> Result<(), GuardianError> {
-        // 1. Mandatory Forensic Validation
+        // FORENSIC LOG: Entry
+        tracing::debug!("Guardian: Received envelope for ingestion. Verifying...");
+
         if !envelope.verify() {
+            tracing::error!("FORENSIC FAILURE: Cryptographic signature mismatch on envelope");
             return Err(GuardianError::VerificationFailed(
                 "Signature invalid".into(),
             ));
         }
 
-        // 2. Promotion to Active Volley via Crucible
         if let Some(volley) = self.crucible.process(envelope) {
+            tracing::info!(volley_id = %volley.id, "Crucible: Volley threshold met. Promoting to disk.");
             self.commit_volley_to_disk(&volley)?;
+        } else {
+            tracing::debug!(
+                "Crucible: Envelope buffered in workbench. Waiting for more data or TTL."
+            );
         }
 
-        // 3. Trigger standard TTL evaluation
         self.check_and_finalize_volley()?;
-
         Ok(())
     }
 
@@ -97,23 +103,30 @@ impl Guardian {
     }
 
     fn commit_volley_to_disk(&self, volley: &Volley) -> Result<(), GuardianError> {
-        let serialized_volley = postcard::to_stdvec(volley)
+        let mut path = std::path::PathBuf::from(&self.vault_path);
+
+        // Use the raw DID string to match simulation expectations
+        let owner_did_str = volley.owner_did.to_string();
+        path.push(&owner_did_str);
+
+        tracing::info!(target: "phalanx::forensics", resolved_path = ?path, "DISK_COMMIT_START");
+
+        if let Err(e) = std::fs::create_dir_all(&path) {
+            tracing::error!(target: "phalanx::forensics", error = %e, "DIR_CREATION_FAILED");
+            return Err(GuardianError::WalWriteFailed(e.to_string()));
+        }
+
+        path.push(format!("{}.vid.phlx", volley.id.as_str()));
+
+        let bytes = postcard::to_stdvec(volley)
             .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
 
-        let mut path = PathBuf::from(&self.vault_path);
-        path.push(volley.owner_did.to_safe_name());
-
-        std::fs::create_dir_all(&path).map_err(|e| {
-            GuardianError::WalWriteFailed(format!("Directory creation failed: {}", e))
+        std::fs::write(&path, &bytes).map_err(|e| {
+            tracing::error!(target: "phalanx::forensics", error = %e, "WRITE_FAILED");
+            GuardianError::WalWriteFailed(e.to_string())
         })?;
 
-        path.push(format!("{}.phlx", volley.id.as_str()));
-
-        std::fs::write(&path, serialized_volley).map_err(|e| {
-            GuardianError::WalWriteFailed(format!("Archive disk write failed: {}", e))
-        })?;
-
-        info!(path = ?path, "Volley archived successfully");
+        tracing::info!(target: "phalanx::forensics", file = ?path, "DISK_WRITE_SUCCESS");
         Ok(())
     }
 
