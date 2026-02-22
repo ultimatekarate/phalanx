@@ -18,10 +18,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let network = phalanx_core::transport::libp2p_adapter::Libp2pAdapter::new(swarm);
     let journal = phalanx_core::storage::journal::FileJournal::new("crucible_wal.bin").await?;
 
-    let mut engine = phalanx_core::storage::stronghold::StrongholdEngine::new(
-        config, identity, physics, network, journal,
-    )
-    .await?;
+    let mut engine =
+        phalanx_core::base::engine::PhalanxEngine::new(config, identity, physics, network, journal)
+            .await?;
 
     engine.run().await
 }

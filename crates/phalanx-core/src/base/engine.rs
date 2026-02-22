@@ -1,7 +1,9 @@
 use std::error::Error;
 use std::io;
+use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::info;
+use tokio::task::JoinHandle;
+use tracing::{info, warn};
 
 use crate::base::config::PhalanxConfig;
 use crate::base::types::{MeshTopic, NodeMode, TrafficGovernor};
@@ -9,10 +11,7 @@ use crate::primitives::identity::{init_identity, IdentityError, NetworkId, Phala
 use crate::primitives::shards::{Evidence, ShardChunk, ShardError, ShardId};
 use crate::primitives::time::{TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
-use crate::security::ingress::{
-    IngressContext, IngressError, IngressOrchestrator, SecurityPipeline,
-};
-use crate::security::trust::TrustRegistry;
+use crate::security::trust::{TrustLevel, TrustRegistry};
 use crate::storage::reassembler::{Reassembler, TransientJournal};
 use crate::storage::vault::Guardian;
 use crate::transport::events::NetworkEvent;
@@ -56,9 +55,82 @@ impl TransientJournal for NoOpJournal {
     }
 }
 
-pub struct PhalanxEngine<T: NetworkTransport, J: TransientJournal> {
+// =========================================================================
+// UNIFIED STORAGE ACTOR
+// =========================================================================
+pub struct StorageActor<J: TransientJournal> {
     pub reassembler: Reassembler,
     pub guardian: Guardian,
+    pub journal: J,
+    pub config: PhalanxConfig,
+    pub identity: PhalanxIdentity,
+    pub chunk_rx: mpsc::Receiver<(ShardChunk, MeshTopic, NetworkId)>,
+    pub local_peer_id: NetworkId,
+}
+
+impl<J: TransientJournal> StorageActor<J> {
+    pub async fn run(mut self) {
+        // Deterministic Salvage Protocol heartbeat (1000ms)
+        let mut maintenance_timer = tokio::time::interval(Duration::from_millis(1000));
+
+        loop {
+            tokio::select! {
+                res = self.chunk_rx.recv() => {
+                    match res {
+                        Some((chunk, topic, peer_id)) => {
+                            self.process_incoming_chunk(chunk, topic, peer_id).await;
+                        }
+                        None => {
+                            warn!("Ingress channel closed. Initiating emergency salvage.");
+                            let _ = self.guardian.force_salvage_all();
+                            return;
+                        }
+                    }
+                }
+                _ = maintenance_timer.tick() => {
+                    tracing::info!(target: "phalanx::forensics", "MAINTENANCE_TICK_START");
+                    if let Err(err) = self.guardian.check_and_finalize_volley() {
+                        tracing::error!(target: "phalanx::forensics", error = %err, "Maintenance flush failed");
+                    }
+                }
+            }
+        }
+    }
+
+    async fn process_incoming_chunk(
+        &mut self,
+        chunk: ShardChunk,
+        topic: MeshTopic,
+        peer_id: NetworkId,
+    ) {
+        let envelope_opt = self
+            .reassembler
+            .ingest_chunk(
+                chunk,
+                &mut self.journal,
+                &topic,
+                &self.config,
+                &self.identity,
+                peer_id,
+            )
+            .await;
+
+        match envelope_opt {
+            Ok(Some(envelope)) => {
+                if let Err(err) = self.guardian.ingest_envelope(envelope) {
+                    tracing::error!(error = %err, "Vault rejected envelope");
+                }
+            }
+            Ok(None) => {}
+            Err(err) => tracing::warn!(error = %err, "Reassembler rejected data chunk"),
+        }
+    }
+}
+
+// =========================================================================
+// PHALANX ENGINE
+// =========================================================================
+pub struct PhalanxEngine<T: NetworkTransport, J: TransientJournal> {
     pub trust_registry: TrustRegistry,
     pub health_tracker: HealthTracker,
     pub governor: TrafficGovernor,
@@ -66,12 +138,14 @@ pub struct PhalanxEngine<T: NetworkTransport, J: TransientJournal> {
     pub config: PhalanxConfig,
     pub identity: PhalanxIdentity,
     pub clock: TrustedClock,
-    pub network: T, // Adapter injected here. Swarm is gone.
+    pub network: T,
     pub video_rx: mpsc::Receiver<crate::primitives::shards::VideoShard>,
     pub audio_rx: mpsc::Receiver<crate::primitives::shards::AudioShard>,
     pub seq_counter: u64,
     pub network_key: SymmetricKey,
-    pub journal: J,
+    pub chunk_tx: mpsc::Sender<(ShardChunk, MeshTopic, NetworkId)>,
+    pub storage_task: JoinHandle<()>,
+    pub _journal_phantom: std::marker::PhantomData<J>,
 }
 
 impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T, J> {
@@ -79,27 +153,25 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
     pub fn new(
         config: PhalanxConfig,
         identity: PhalanxIdentity,
-        network: T, // Swarm networking parameters offloaded to calling binary
+        network: T,
         journal: J,
     ) -> Result<Self, Box<dyn Error>> {
         let local_did = identity.did.clone();
+        let local_network_id = identity.to_network_id();
 
-        // Data boundaries
         let reassembler = Reassembler::new();
         let guardian = Guardian::new(&config.storage.vault_path, &config, local_did);
 
-        // Orchestration state
         let health_tracker = HealthTracker::new();
         let governor = TrafficGovernor::new();
         let mode = NodeMode::Standard;
 
-        // Media Channels
         let (_video_tx, video_rx) = mpsc::channel(config.storage.max_video_buffer);
         let (_audio_tx, audio_rx) = mpsc::channel(config.storage.max_audio_buffer);
+        let (chunk_tx, chunk_rx) = mpsc::channel(1024);
 
         let clock = TrustedClock::new();
 
-        // Isolate async execution context for synchronous builder
         let config_clone = config.clone();
         let trust_registry = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -112,13 +184,26 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
         .join()
         .expect("TrustRegistry initialization thread panicked");
 
+        let storage_actor = StorageActor {
+            reassembler,
+            guardian,
+            journal,
+            config: config.clone(),
+            identity: identity.clone(),
+            chunk_rx,
+            local_peer_id: local_network_id,
+        };
+
+        // Checklist 4: Store Actor Handle
+        let storage_task = tokio::spawn(async move {
+            storage_actor.run().await;
+        });
+
         Ok(Self {
             config,
             identity,
             clock,
             network,
-            reassembler,
-            guardian,
             trust_registry,
             health_tracker,
             governor,
@@ -127,7 +212,9 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
             audio_rx,
             seq_counter: 0,
             network_key: SymmetricKey([0x42; 32]),
-            journal,
+            chunk_tx,
+            storage_task,
+            _journal_phantom: std::marker::PhantomData,
         })
     }
 
@@ -141,7 +228,6 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
 
         loop {
             tokio::select! {
-                // Pipeline 1: Abstracted Network Ingress
                 Some(event) = self.network.next_event() => {
                     match event {
                         NetworkEvent::DataReceived { origin, topic, data } => {
@@ -151,13 +237,9 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
                         _ => {}
                     }
                 }
-
-                // Pipeline 2: Video Sensor Egress -> Network
                 Some(shard) = self.video_rx.recv() => {
                     self.process_media_egress(Evidence::Video(shard), local_network_id).await;
                 }
-
-                // Pipeline 3: Audio Sensor Egress -> Network
                 Some(shard) = self.audio_rx.recv() => {
                     self.process_media_egress(Evidence::Audio(shard), local_network_id).await;
                 }
@@ -167,7 +249,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
     }
 
     // =========================================================================
-    // INGRESS PIPELINE
+    // INGRESS PIPELINE (TRAFFIC COP)
     // =========================================================================
     async fn handle_network_ingress(
         &mut self,
@@ -184,65 +266,24 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
         };
 
         let sender_did = chunk.owner_did.clone();
-        let local_network_id = self.identity.to_network_id();
 
-        let ctx = IngressContext {
-            config: &self.config,
-            identity: &self.identity,
-            network_id: local_network_id,
-            clock: &self.clock,
-            governor: &self.governor,
-            mode: self.mode,
-        };
+        if !self.governor.should_accept(&sender_did, &self.identity.did) {
+            return;
+        }
 
-        let mut pipeline = SecurityPipeline {
-            reassembler: &mut self.reassembler,
-            guardian: &mut self.guardian,
-            trust_registry: &mut self.trust_registry,
-            health_tracker: &mut self.health_tracker,
-            journal: &mut self.journal,
-        };
+        if self.mode == NodeMode::Leaf && sender_did != self.identity.did {
+            return;
+        }
 
-        let orchestration_result =
-            IngressOrchestrator::process_chunk(chunk, &topic, &ctx, &mut pipeline).await;
+        let trust_level = self.trust_registry.check_trust(&sender_did);
+        if matches!(trust_level, TrustLevel::Blocked) {
+            self.network.ban_peer(&peer_id).await;
+            tracing::warn!(%sender_did, "Dropped connection from blacklisted peer.");
+            return;
+        }
 
-        match orchestration_result {
-            Ok(Some(_size)) => {}
-            Ok(None) => {}
-            Err(IngressError::Blacklisted(did)) => {
-                self.network.ban_peer(&peer_id).await;
-                tracing::warn!(%did, "Dropped connection from blacklisted peer.");
-            }
-            Err(e) => {
-                // Dependency Inversion: Import the gate trait to check state
-                use crate::security::trust::{Offense, ReputationGate};
-
-                let error_message = e.to_string();
-
-                // Deterministic error mapping without structural guessing
-                let offense = if error_message.contains("Signature invalid") {
-                    Offense::InvalidSignature
-                } else if error_message.contains("Quota") || error_message.contains("Vampire") {
-                    Offense::QuotaExceeded
-                } else if error_message.contains("Replay") {
-                    Offense::ReplayAttack
-                } else {
-                    Offense::MalformedPacket
-                };
-
-                // State transition: Promote the offense to the persistence layer
-                self.trust_registry
-                    .record_offense(&sender_did, offense, &self.clock)
-                    .await;
-
-                // Typestate enforcement: Drop the connection at the transport layer if threshold exceeded
-                if self.trust_registry.is_blacklisted(&sender_did) {
-                    self.network.ban_peer(&peer_id).await;
-                    tracing::warn!(%sender_did, reason = %error_message, "Peer blacklisted due to protocol offense.");
-                } else {
-                    tracing::debug!(error = %e, "Ingress rejected.");
-                }
-            }
+        if self.chunk_tx.try_send((chunk, topic, peer_id)).is_err() {
+            tracing::warn!("Storage layer channel saturated. Dropping ingress chunk.");
         }
     }
 
@@ -254,9 +295,9 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
         let shard_id = ShardId(self.seq_counter as u32);
 
         let chunks_result = evidence
-            .safeguard(&self.network_key) // 1. Privacy Gate
-            .and_then(|ev| ev.seal(&self.identity, local_network_id)) // 2. Witness Gate
-            .and_then(|env| env.chunkify(shard_id)) // 3. Discretization
+            .safeguard(&self.network_key)
+            .and_then(|ev| ev.seal(&self.identity, local_network_id))
+            .and_then(|env| env.chunkify(shard_id))
             .gate(
                 "evidence_pipeline_failure",
                 &local_network_id,
@@ -274,7 +315,6 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
     }
 }
 
-// Fixed generic trait missing
 impl<T: NetworkTransport> PhalanxEngine<T, NoOpJournal> {
     pub fn new_at_path(path: &str, network: T) -> Result<Self, Box<dyn Error>> {
         let mut config = PhalanxConfig::default();
@@ -286,6 +326,7 @@ impl<T: NetworkTransport> PhalanxEngine<T, NoOpJournal> {
         Self::new(config, identity, network, NoOpJournal)
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

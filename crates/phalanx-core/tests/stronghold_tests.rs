@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, RwLock};
 
 // Library Imports
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
+use phalanx_core::base::engine::StorageActor; // Imported from library
 use phalanx_core::base::types::MeshTopic;
 use phalanx_core::primitives::identity::PhalanxIdentity;
 use phalanx_core::primitives::shards::{
@@ -15,7 +16,6 @@ use phalanx_core::security::gate::WitnessGate;
 use phalanx_core::security::telemetry::init_observability;
 use phalanx_core::storage::journal::FileJournal;
 use phalanx_core::storage::reassembler::Reassembler;
-use phalanx_core::storage::stronghold::StorageActor; // Imported from library
 use phalanx_core::storage::vault::Guardian;
 
 use phalanx_core::security::telemetry::NodeRole;
