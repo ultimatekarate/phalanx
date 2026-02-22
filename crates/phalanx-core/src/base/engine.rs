@@ -11,7 +11,6 @@ use crate::primitives::identity::{init_identity, Did, IdentityError, NetworkId, 
 use crate::primitives::shards::{Evidence, ShardChunk, ShardError, ShardId};
 use crate::primitives::time::{TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
-use crate::security::telemetry::SimEvent;
 use crate::security::trust::{Offense, TrustLevel, TrustRegistry};
 use crate::storage::reassembler::{Reassembler, TransientJournal};
 use crate::storage::vault::{Guardian, GuardianError};
@@ -260,16 +259,10 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
                     if let Some(offense_type) = offense {
                         self.trust_registry.record_offense(&owner_did, offense_type, &self.clock).await;
 
-                        if self.trust_registry.check_trust(&owner_did) == TrustLevel::Blocked {
-                            let event_telemetry = SimEvent::AttackAttemptBlocked {
-                                attacker: peer_id,
-                                target: local_network_id,
-                                reason: err.to_string(),
-                            };
-
-                            if let Ok(json) = serde_json::to_string(&event_telemetry) {
-                                println!("{}", json);
-                            }
+                        if matches!(self.trust_registry.check_trust(&owner_did), TrustLevel::Blocked) {
+                            // Immediately enforce the ban at the network transport layer.
+                            // The MockTransport will intercept this and emit SimEvent::AttackAttemptBlocked.
+                            self.network.ban_peer(&peer_id).await;
                         }
                     }
                 }

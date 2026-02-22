@@ -397,7 +397,7 @@ async fn test_vampire_attack_defense() -> Result<(), Box<dyn std::error::Error>>
     // 3. Launch Attack
     let topic = MeshTopic::new("phalanx/video/1.0.0");
 
-    for attack_iteration in 0..10 {
+    for attack_iteration in 0..11 {
         tracing::debug!(
             iteration = attack_iteration,
             "Constructing malicious payload"
