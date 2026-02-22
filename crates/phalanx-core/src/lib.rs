@@ -21,6 +21,7 @@ pub mod storage {
     pub mod kademlia;
     pub mod reassembler;
     pub mod strategies;
+    pub mod stronghold;
     pub mod vault;
 }
 
