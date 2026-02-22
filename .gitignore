@@ -35,8 +35,8 @@ ed25519_secret.pem
 ed25519_public.pem
 
 # Simulation Vaults
-# sim_vault/
-# storage_vault/
+sim_vault/
+storage_vault/
 wal.log
 
 *.bin
