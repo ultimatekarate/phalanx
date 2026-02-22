@@ -332,13 +332,13 @@ impl TrafficGovernor {
     #[must_use]
     pub fn should_accept(
         &self,
-        chunk_owner: &crate::primitives::identity::Did,
-        local_did: &crate::primitives::identity::Did,
+        peer_id: &crate::primitives::identity::NetworkId,
+        local_peer_id: &crate::primitives::identity::NetworkId,
     ) -> bool {
         match self.power_state {
             PowerState::Normal => true,
-            // The Logic is still centralized here, satisfying the audit.
-            PowerState::Leaf => chunk_owner == local_did,
+            // Pre-allocation check: only allow loopback traffic when in survival mode
+            PowerState::Leaf => peer_id == local_peer_id,
         }
     }
 

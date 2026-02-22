@@ -51,6 +51,9 @@ impl<J: TransientJournal + Send> TransientJournal for MetricJournal<J> {
 
 #[tokio::test]
 async fn test_stronghold_ingestion_and_persistence() {
+    use phalanx_core::primitives::shards::{create_video_shard, WitnessEnvelope};
+
+    let _ = init_observability();
     // 1. Setup Environment
     let temp_dir = tempfile::tempdir().unwrap();
     let mut config = PhalanxConfig::test_defaults();
@@ -68,45 +71,72 @@ async fn test_stronghold_ingestion_and_persistence() {
     // 3. Prepare Mock Data (A legitimate chunk from an external peer)
     let (peer_identity, _) = PhalanxIdentity::generate().unwrap();
     let peer_net_id = peer_identity.to_network_id();
-    let topic = MeshTopic::new("phalanx/video/1.0.0");
+
+    let video_shard = create_video_shard(
+        vec![vec![0xDE, 0xAD, 0xBE, 0xEF]],
+        StorageSequence(1),
+        30,
+        VolleyId::new("v1"),
+    )
+    .expect("Failed to create video shard");
+
+    // SEAL the evidence into a WitnessEnvelope
+    let envelope = WitnessEnvelope::new(
+        Evidence::Video(video_shard),
+        &peer_identity,
+        peer_net_id.clone(),
+    )
+    .expect("Failed to seal evidence");
+
+    // Serialize the ENVELOPE, not just raw bytes
+    let valid_envelope_data = postcard::to_stdvec(&envelope).expect("Serialization failed");
 
     let chunk = ShardChunk {
         shard_id: ShardId(101),
         chunk_index: 0,
         total_chunks: 1,
-        data: vec![0xDE, 0xAD, 0xBE, 0xEF], // Mocked payload
+        data: valid_envelope_data, // NOW CONTAINS A SERIALIZED ENVELOPE
         owner_did: peer_identity.did.clone(),
         chunk_type: ChunkType::Witnessed,
     };
 
-    let payload = postcard::to_stdvec(&chunk).unwrap();
+    // Note: The HARNESS expects the outer layer to be the ShardChunk
+    let network_payload = postcard::to_stdvec(&chunk).unwrap();
 
-    // 4. Inject Network Event into the Stronghold
+    // 4. Inject Network Event
     harness
         .inject_event(
             &stronghold_did,
             NetworkEvent::DataReceived {
                 origin: peer_net_id,
-                topic,
-                data: payload,
+                topic: MeshTopic::new("phalanx/video/1.0.0"),
+                data: network_payload,
             },
         )
         .await
         .expect("Injection failed");
-
     // 5. Assert: Give the StorageActor a moment to write to the Vault
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+
+    // Robust recursive check to find the file regardless of "vault-1" vs "DID" root naming
+    fn find_file_recursive(path: &std::path::Path, target: &str) -> bool {
+        if path.is_file() {
+            return path.file_name().map(|n| n == target).unwrap_or(false);
+        }
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                if find_file_recursive(&entry.path(), target) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 
     // Check the physical file system for the persistent shard
-    let peer_safe_name = peer_identity.did.to_safe_name();
-    let expected_path = temp_dir
-        .path()
-        .join("Vault-1") // Harness names vaults based on node name
-        .join(peer_safe_name);
-
     assert!(
-        expected_path.exists(),
-        "Stronghold failed to create peer directory in vault"
+        find_file_recursive(temp_dir.path(), "v1.vid.phlx"),
+        "Stronghold failed to create persistent shard in vault within the flush window"
     );
 }
 

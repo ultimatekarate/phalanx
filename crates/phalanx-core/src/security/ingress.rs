@@ -51,16 +51,6 @@ impl IngressOrchestrator {
     ) -> Result<Option<()>, IngressError> {
         let sender_did = chunk.owner_did.clone();
 
-        // 1. Resource Gate: Check Policy Governance
-        if !ctx.governor.should_accept(&sender_did, &ctx.identity.did) {
-            return Err(IngressError::Throttled);
-        }
-
-        // 2. Topology Gate: Leaf nodes only process local data
-        if ctx.mode == NodeMode::Leaf && sender_did != ctx.identity.did {
-            return Ok(None); // Silently drop foreign traffic in Leaf mode
-        }
-
         // 3. Trust Gate: Check reputation
         let trust_level = pipeline.trust_registry.check_trust(&sender_did);
         if matches!(trust_level, TrustLevel::Blocked) {

@@ -11,7 +11,7 @@ use crate::primitives::identity::{init_identity, Did, IdentityError, NetworkId, 
 use crate::primitives::shards::{Evidence, ShardChunk, ShardError, ShardId};
 use crate::primitives::time::{TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
-use crate::security::trust::{Offense, TrustLevel, TrustRegistry};
+use crate::security::trust::{Offense, ReputationGate, TrustLevel, TrustRegistry};
 use crate::storage::reassembler::{Reassembler, TransientJournal};
 use crate::storage::vault::{Guardian, GuardianError};
 use crate::transport::events::NetworkEvent;
@@ -259,9 +259,8 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
                     if let Some(offense_type) = offense {
                         self.trust_registry.record_offense(&owner_did, offense_type, &self.clock).await;
 
-                        if matches!(self.trust_registry.check_trust(&owner_did), TrustLevel::Blocked) {
+                        if self.trust_registry.is_blacklisted(&owner_did) {
                             // Immediately enforce the ban at the network transport layer.
-                            // The MockTransport will intercept this and emit SimEvent::AttackAttemptBlocked.
                             self.network.ban_peer(&peer_id).await;
                         }
                     }
@@ -278,6 +277,14 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
         chunk_bytes: &[u8],
         topic: MeshTopic,
     ) {
+        let local_network_id = self.identity.to_network_id();
+
+        // 1. PRE-ALLOCATION FIREWALL: Filter strictly by transport-layer NetworkId
+        if !self.governor.should_accept(&peer_id, &local_network_id) {
+            return;
+        }
+
+        // 2. DESERIALIZATION BOUNDARY: Allocate memory for the payload
         let chunk: ShardChunk = match postcard::from_bytes(chunk_bytes) {
             Ok(c) => c,
             Err(e) => {
@@ -288,21 +295,17 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
 
         let sender_did = chunk.owner_did.clone();
 
-        if !self.governor.should_accept(&sender_did, &self.identity.did) {
-            return;
-        }
-
-        if self.mode == NodeMode::Leaf && sender_did != self.identity.did {
-            return;
-        }
-
-        let trust_level = self.trust_registry.check_trust(&sender_did);
-        if matches!(trust_level, TrustLevel::Blocked) {
+        // 3. APPLICATION-LAYER FORENSICS: Verify reputation of the embedded Did
+        let explicit_trust = self.trust_registry.check_trust(&sender_did);
+        if matches!(explicit_trust, TrustLevel::Blocked)
+            || self.trust_registry.is_blacklisted(&sender_did)
+        {
             self.network.ban_peer(&peer_id).await;
             tracing::warn!(%sender_did, "Dropped connection from blacklisted peer.");
             return;
         }
 
+        // 4. STORAGE ESCALATION
         if self.chunk_tx.try_send((chunk, topic, peer_id)).is_err() {
             tracing::warn!("Storage layer channel saturated. Dropping ingress chunk.");
         }

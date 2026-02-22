@@ -105,9 +105,14 @@ impl Guardian {
     fn commit_volley_to_disk(&self, volley: &Volley) -> Result<(), GuardianError> {
         let mut path = std::path::PathBuf::from(&self.vault_path);
 
-        // Use the raw DID string to match simulation expectations
-        let owner_did_str = volley.owner_did.to_string();
-        path.push(&owner_did_str);
+        // FORENSIC PROTOCOL: Use sanitized safe names for filesystem compatibility
+        let peer_dir_name = volley.owner_did.to_safe_name();
+
+        // Idempotency check: If the vault_path already ends with the peer's directory,
+        // do not append it again. This handles harness-injected paths.
+        if !path.ends_with(&peer_dir_name) {
+            path.push(&peer_dir_name);
+        }
 
         tracing::info!(target: "phalanx::forensics", resolved_path = ?path, "DISK_COMMIT_START");
 
@@ -116,7 +121,8 @@ impl Guardian {
             return Err(GuardianError::WalWriteFailed(e.to_string()));
         }
 
-        path.push(format!("{}.vid.phlx", volley.id.as_str()));
+        let file_name = format!("{}.vid.phlx", volley.id.as_str());
+        path.push(file_name);
 
         let bytes = postcard::to_stdvec(volley)
             .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
