@@ -106,7 +106,8 @@ impl SimulationHarness {
         // 2. Establish Mock Transport Port (The Adapter)
         let (ingress_tx, ingress_rx) = mpsc::channel::<NetworkEvent>(4096);
         let (egress_tx, mut egress_rx) = mpsc::channel::<(MeshTopic, Vec<u8>)>(4096);
-        let transport = MockTransport::new(ingress_rx, Some(egress_tx));
+        let transport = MockTransport::new(ingress_rx, Some(egress_tx))
+            .with_telemetry(network_id, self.telemetry_tx.clone());
 
         self.ingress_routes
             .write()
