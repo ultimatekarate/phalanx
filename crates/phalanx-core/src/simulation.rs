@@ -194,4 +194,19 @@ impl SimulationHarness {
             Err("Target node not found in simulation routing table".into())
         }
     }
+
+    pub async fn advance_mesh_time(&self, duration: std::time::Duration) {
+        tracing::info!(
+            target: "phalanx::simulation",
+            dilation_ms = duration.as_millis(),
+            "Advancing virtual mesh clock to trigger actor heartbeats"
+        );
+
+        // Advance the internal timer wheel
+        tokio::time::advance(duration).await;
+
+        // Force the executor to poll the waking background tasks,
+        // ensuring the StorageActor's `select!` macro processes the tick.
+        tokio::task::yield_now().await;
+    }
 }

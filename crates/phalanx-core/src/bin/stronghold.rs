@@ -1,6 +1,7 @@
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     phalanx_core::security::telemetry::init_observability();
+
     let config = phalanx_core::base::config::PhalanxConfig::load("phalanx.toml")?;
     let (identity, _) = phalanx_core::primitives::identity::PhalanxIdentity::generate()?;
     let physics = phalanx_core::base::config::PhalanxPhysics::default_wan();
@@ -18,9 +19,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let network = phalanx_core::transport::libp2p_adapter::Libp2pAdapter::new(swarm);
     let journal = phalanx_core::storage::journal::FileJournal::new("crucible_wal.bin").await?;
 
+    // Instantiate the unified engine (Synchronous initialization, physics encapsulated)
     let mut engine =
-        phalanx_core::base::engine::PhalanxEngine::new(config, identity, physics, network, journal)
-            .await?;
+        phalanx_core::base::engine::PhalanxEngine::new(config, identity, network, journal)?;
 
     engine.run().await
 }

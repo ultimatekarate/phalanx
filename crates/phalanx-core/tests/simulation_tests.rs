@@ -141,9 +141,7 @@ async fn test_salvage_on_node_death() {
 
     // Check GuardianDevice vault
     let victim_safe_did = victim_did.to_safe_name();
-    let evidence_dir = std::path::PathBuf::from("sim_vault")
-        .join("GuardianDevice_trust")
-        .join(&victim_safe_did);
+    let evidence_dir = std::path::PathBuf::from("sim_vault").join(&victim_safe_did);
 
     tracing::info!(target: "phalanx::test", path = ?evidence_dir, "Checking for salvaged archive on GuardianDevice");
 

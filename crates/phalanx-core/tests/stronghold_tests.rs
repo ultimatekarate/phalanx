@@ -1,26 +1,53 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 
 // Library Imports
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
 use phalanx_core::base::engine::StorageActor; // Imported from library
 use phalanx_core::base::types::MeshTopic;
-use phalanx_core::primitives::identity::PhalanxIdentity;
+use phalanx_core::primitives::identity::{Did, NetworkId, PhalanxIdentity};
+use phalanx_core::primitives::shards::ShardError;
 use phalanx_core::primitives::shards::{
     ChunkType, DataPayload, Evidence, ShardChunk, ShardId, StorageSequence, VideoShard, VolleyId,
 };
 use phalanx_core::primitives::time::PhalanxTimestamp;
 use phalanx_core::security::gate::WitnessGate;
 use phalanx_core::security::telemetry::init_observability;
-use phalanx_core::storage::journal::FileJournal;
-use phalanx_core::storage::reassembler::Reassembler;
-use phalanx_core::storage::vault::Guardian;
-
 use phalanx_core::security::telemetry::NodeRole;
 use phalanx_core::simulation::SimulationHarness;
+use phalanx_core::storage::reassembler::Reassembler;
+use phalanx_core::storage::reassembler::TransientJournal;
+use phalanx_core::storage::vault::{Guardian, GuardianError};
 use phalanx_core::transport::events::NetworkEvent;
+
+use phalanx_core::base::engine::NoOpJournal;
+
+/// A decorator for the Journal to track ingestion metrics via dependency inversion.
+struct MetricJournal<J: TransientJournal> {
+    inner: J,
+    counter: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl<J: TransientJournal + Send> TransientJournal for MetricJournal<J> {
+    async fn record_chunk(&mut self, chunk: &ShardChunk) -> Result<(), ShardError> {
+        self.inner.record_chunk(chunk).await?;
+        self.counter.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn sync(&mut self) -> Result<(), ShardError> {
+        self.inner.sync().await
+    }
+    async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
+        self.inner.read_all_chunks().await
+    }
+    async fn clear(&mut self) -> Result<(), ShardError> {
+        self.inner.clear().await
+    }
+}
 
 #[tokio::test]
 async fn test_stronghold_ingestion_and_persistence() {
@@ -74,7 +101,7 @@ async fn test_stronghold_ingestion_and_persistence() {
     let peer_safe_name = peer_identity.did.to_safe_name();
     let expected_path = temp_dir
         .path()
-        .join("Vault-1_trust") // Harness names vaults based on node name
+        .join("Vault-1") // Harness names vaults based on node name
         .join(peer_safe_name);
 
     assert!(
@@ -90,31 +117,32 @@ async fn test_storage_actor_metric_pipeline() {
     // 1. Setup Component Dependencies
     let config = PhalanxConfig::default();
     let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let local_peer = identity.to_network_id();
+    let local_peer_id = identity.to_network_id();
 
     let (chunk_tx, chunk_rx) = mpsc::channel(10);
+    // Initialize the forensic escalation channel required by the actor
+    let (forensic_tx, mut _forensic_rx) = mpsc::channel::<(NetworkId, Did, GuardianError)>(10);
+
     let storage_load = Arc::new(AtomicUsize::new(0));
-    let actor_load_metric = Arc::clone(&storage_load);
 
-    // Use an ephemeral WAL for the test
-    let journal = FileJournal::new("test_actor_metrics_wal.bin")
-        .await
-        .expect("Failed to initialize test FileJournal");
+    // 2. Initialize the Persistent Layer with Metric Tracking
+    let base_journal = NoOpJournal; // Or FileJournal if available
+    let journal = MetricJournal {
+        inner: base_journal,
+        counter: Arc::clone(&storage_load),
+    };
 
-    let guardian = Guardian::new("test_vault_metrics", &config, identity.did.clone());
-    let shared_storage = Arc::new(RwLock::new(guardian));
+    let guardian = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
 
-    // 2. Instantiate the Actor directly from the Library
     let storage_actor = StorageActor {
         reassembler: Reassembler::new(),
-        storage: shared_storage,
+        guardian,
+        journal,
         config: config.clone(),
         identity: identity.clone(),
         chunk_rx,
-        active_tasks_metric: actor_load_metric,
-        physics: PhalanxPhysics::default_wan(),
-        local_peer_id: local_peer.clone(),
-        journal,
+        forensic_tx,
+        local_peer_id: local_peer_id.clone(),
     };
 
     // 3. Start the Actor in a background task
@@ -122,7 +150,6 @@ async fn test_storage_actor_metric_pipeline() {
         storage_actor.run().await;
     });
 
-    // Verify initial state
     assert_eq!(storage_load.load(Ordering::Relaxed), 0);
 
     // 4. Generate and Sign Test Evidence
@@ -134,16 +161,12 @@ async fn test_storage_actor_metric_pipeline() {
         payload: DataPayload::Clear(vec![0xBA, 0xAD, 0xF0, 0x0D]),
     };
 
-    let evidence = Evidence::Video(video_shard);
-
-    // Seal evidence into a WitnessEnvelope
-    let envelope = evidence
-        .seal(&identity, local_peer.clone())
+    let envelope = Evidence::Video(video_shard)
+        .seal(&identity, local_peer_id.clone())
         .expect("Failed to seal evidence");
 
     let valid_data = postcard::to_stdvec(&envelope).expect("Serialization failed");
 
-    // Create a chunk that the Reassembler will recognize
     let chunk = ShardChunk {
         shard_id: ShardId(101),
         chunk_index: 0,
@@ -155,22 +178,22 @@ async fn test_storage_actor_metric_pipeline() {
 
     let topic = MeshTopic::new("phalanx/video/1.0.0");
 
-    // 5. Inject the chunk directly into the Actor's channel
-    chunk_tx.send((chunk, topic, local_peer)).await.unwrap();
+    // 5. Inject the chunk
+    chunk_tx.send((chunk, topic, local_peer_id)).await.unwrap();
 
-    // 6. Verification: Allow the actor to process the reassembly
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // 6. Verification: Wait for reassembly and journal commit
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
-    let load = storage_load.load(Ordering::Relaxed);
+    let final_load = storage_load.load(Ordering::SeqCst);
 
     // Cleanup
     actor_handle.abort();
-    let _ = std::fs::remove_dir_all("test_vault_metrics");
-    let _ = std::fs::remove_file("test_actor_metrics_wal.bin");
 
-    // 7. Assert that the metric updated, proving the reassembly pipeline completed
+    // 7. Assert metric update
+    // The counter increments when the actor calls journal.record_chunk()
     assert!(
-        load > 0,
-        "StorageActor failed to update lock-free metric after ingestion."
+        final_load > 0,
+        "StorageActor failed to update metric via the Journal conduit. Load: {}",
+        final_load
     );
 }

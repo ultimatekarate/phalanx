@@ -10,6 +10,7 @@ use tracing::{info, instrument};
 // =====================
 // REASSEMBLER CORE
 // =====================
+
 #[async_trait]
 pub trait TransientJournal: Send + Sync {
     async fn record_chunk(&mut self, chunk: &ShardChunk) -> Result<(), ShardError>;
