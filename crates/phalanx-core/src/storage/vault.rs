@@ -12,7 +12,7 @@ use crate::storage::crucible::Crucible;
 use crate::storage::strategies::VolleyAmalgam;
 use tokio::fs;
 
-use tracing;
+use tracing::info;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GuardianError {
@@ -42,6 +42,9 @@ pub enum GuardianError {
 
     #[error("Crucible commit failed: {0}")]
     CrucibleError(String),
+
+    #[error("Storage error: {0}")]
+    StorageFailure(String),
 }
 
 pub struct Guardian {
@@ -126,6 +129,11 @@ impl Guardian {
     /// Explicit salvage command for node termination sequences.
     pub async fn force_salvage_all(&mut self) -> Result<(), GuardianError> {
         let active_volleys = self.crucible.flush_all();
+
+        if active_volleys.is_empty() {
+            return Ok(());
+        }
+
         for volley in active_volleys {
             self.commit_volley_to_disk(&volley).await?;
         }
@@ -133,38 +141,28 @@ impl Guardian {
     }
 
     /// Non-blocking Disk Persistence
-    async fn commit_volley_to_disk(&self, volley: &Volley) -> Result<(), GuardianError> {
-        let mut path = std::path::PathBuf::from(&self.vault_path);
+    pub async fn commit_volley_to_disk(&self, volley: &Volley) -> Result<(), GuardianError> {
+        // FIX: Standardize on .volley extension across the entire crate
+        let file_name = format!("{}.volley", volley.id);
+        let path = std::path::PathBuf::from(&self.vault_path)
+            .join(volley.owner_did.to_safe_name())
+            .join(file_name);
 
-        // FORENSIC PROTOCOL: Use sanitized safe names for filesystem compatibility
-        let peer_dir_name = volley.owner_did.to_safe_name();
-
-        // Idempotency check: If the vault_path already ends with the peer's directory,
-        // do not append it again. This handles harness-injected paths.
-        if !path.ends_with(&peer_dir_name) {
-            path.push(&peer_dir_name);
+        // Ensure directory exists
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| GuardianError::StorageFailure(e.to_string()))?;
         }
 
-        tracing::info!(target: "phalanx::forensics", resolved_path = ?path, "DISK_COMMIT_START");
-
-        if let Err(e) = fs::create_dir_all(&path).await {
-            tracing::error!(target: "phalanx::forensics", error = %e, "DIR_CREATION_FAILED");
-            return Err(GuardianError::WalWriteFailed(e.to_string()));
-        }
-
-        let file_name = format!("{}.vid.phlx", volley.id.as_str());
-        path.push(file_name);
-
-        let bytes = postcard::to_stdvec(volley)
+        let data = postcard::to_stdvec(&volley)
             .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
 
-        // Perform non-blocking write
-        fs::write(&path, &bytes).await.map_err(|e| {
-            tracing::error!(target: "phalanx::forensics", error = %e, "WRITE_FAILED");
-            GuardianError::WalWriteFailed(e.to_string())
-        })?;
+        fs::write(&path, data)
+            .await
+            .map_err(|e| GuardianError::WalWriteFailed(e.to_string()))?;
 
-        tracing::info!(target: "phalanx::forensics", file = ?path, "DISK_WRITE_SUCCESS");
+        info!(path = ?path, "DISK_WRITE_SUCCESS: Volley committed");
         Ok(())
     }
 

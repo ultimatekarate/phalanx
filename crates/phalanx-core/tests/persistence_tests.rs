@@ -59,7 +59,7 @@ async fn test_forensic_gate_tamper_detection_v3() {
 
     // 6. ASSERTION: Must fail with a verification/signature error
     assert!(
-        verification_result,
+        !verification_result,
         "INTEGRITY BREACH: WitnessEnvelope::verify() accepted modified evidence!"
     );
 
