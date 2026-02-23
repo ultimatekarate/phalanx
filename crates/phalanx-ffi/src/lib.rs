@@ -1,12 +1,14 @@
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
-use phalanx_core::base::engine::{NoOpJournal, PhalanxEngine};
+use phalanx_core::base::engine::{NoOpJournal, PhalanxEngine, SyncReputationCache};
 use phalanx_core::primitives::identity::init_identity;
+use phalanx_core::security::trust::TrustRegistry;
 use phalanx_core::transport::libp2p_adapter::Libp2pAdapter;
 use phalanx_core::transport::swarm::setup_phalanx_swarm;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::path::Path;
 use std::ptr;
+use std::sync::Arc;
 
 #[cfg(target_os = "android")]
 pub mod jni;
@@ -41,8 +43,33 @@ pub unsafe extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut
     let identity = init_identity(identity_path_str).unwrap_or_default();
     let network_keypair = identity.to_libp2p_keypair();
 
+    // --- ZERO-TRUST DEPENDENCY GRAPH ---
+    // Isolate ownership for the synchronous initialization thread
+    let registry_config = config.clone();
+
+    // The FFI boundary is synchronous. We must spawn a temporary async reactor
+    // to build the TrustRegistry from disk, ensuring it blocks until complete.
+    let trust_registry = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to initialize transient async reactor for JNI TrustRegistry");
+
+        rt.block_on(TrustRegistry::build(&registry_config))
+    })
+    .join()
+    .expect("JNI TrustRegistry initialization thread panicked");
+
+    let reputation_cache = Arc::new(SyncReputationCache::default());
+
     // 2. Instantiate the Production Network Adapter
-    let swarm = match setup_phalanx_swarm(network_keypair, &config, &physics, None) {
+    let swarm = match setup_phalanx_swarm(
+        network_keypair,
+        &config,
+        &physics,
+        None,
+        reputation_cache.clone(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to initialize mobile swarm: {e}");
@@ -52,8 +79,15 @@ pub unsafe extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut
 
     let network_adapter = Libp2pAdapter::new(swarm);
 
-    // 3. Initialize the engine synchronously with the injected adapter
-    match PhalanxEngine::new_at_path(path_str, network_adapter) {
+    // 3. Initialize the engine synchronously with the injected dependencies
+    match PhalanxEngine::new(
+        config,
+        identity,
+        network_adapter,
+        NoOpJournal,
+        trust_registry,
+        reputation_cache,
+    ) {
         Ok(engine) => {
             // Success: Move engine to heap and return raw pointer
             Box::into_raw(Box::new(engine))

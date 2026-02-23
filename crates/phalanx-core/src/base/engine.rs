@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::error::Error;
 use std::io;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -20,6 +22,7 @@ use crate::transport::network_transport::NetworkTransport;
 
 // IMPORT ALL GATES
 use crate::security::gate::{ForensicGate, PrivacyGate, WitnessGate};
+use crate::storage::kademlia::PeerEvaluator;
 
 pub use libp2p::pnet::PreSharedKey;
 
@@ -51,6 +54,23 @@ impl TransientJournal for NoOpJournal {
     }
     async fn clear(&mut self) -> Result<(), ShardError> {
         Ok(())
+    }
+}
+
+// =========================================================================
+// PEER EVALUATOR CACHE BOUNDARY
+// =========================================================================
+
+/// A thread-safe, synchronous cache that bridges the asynchronous TrustRegistry
+/// with the synchronous libp2p Kademlia storage layer.
+#[derive(Clone, Default)]
+pub struct SyncReputationCache {
+    pub scores: Arc<RwLock<HashMap<NetworkId, f32>>>,
+}
+
+impl PeerEvaluator for SyncReputationCache {
+    fn evaluate_reputation(&self, peer_id: &NetworkId) -> f32 {
+        *self.scores.read().unwrap().get(peer_id).unwrap_or(&1.0)
     }
 }
 
@@ -134,6 +154,7 @@ impl<J: TransientJournal> StorageActor<J> {
 // =========================================================================
 pub struct PhalanxEngine<T: NetworkTransport, J: TransientJournal> {
     pub trust_registry: TrustRegistry,
+    pub reputation_cache: Arc<SyncReputationCache>,
     pub health_tracker: HealthTracker,
     pub governor: TrafficGovernor,
     pub mode: NodeMode,
@@ -158,6 +179,8 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
         identity: PhalanxIdentity,
         network: T,
         journal: J,
+        trust_registry: TrustRegistry,
+        reputation_cache: Arc<SyncReputationCache>,
     ) -> Result<Self, Box<dyn Error>> {
         let local_did = identity.did.clone();
         let local_network_id = identity.to_network_id();
@@ -175,18 +198,6 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
         let (forensic_tx, forensic_rx) = mpsc::channel(100);
 
         let clock = TrustedClock::new();
-
-        let config_clone = config.clone();
-        let trust_registry = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("Failed to initialize transient async reactor for TrustRegistry");
-
-            rt.block_on(crate::security::trust::TrustRegistry::build(&config_clone))
-        })
-        .join()
-        .expect("TrustRegistry initialization thread panicked");
 
         let storage_actor = StorageActor {
             reassembler,
@@ -209,6 +220,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
             clock,
             network,
             trust_registry,
+            reputation_cache,
             health_tracker,
             governor,
             mode,
@@ -259,6 +271,10 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
                     if let Some(offense_type) = offense {
                         self.trust_registry.record_offense(&owner_did, offense_type, &self.clock).await;
 
+                        // Synchronize the Kademlia cache with the newly calculated reputation score
+                        let updated_score = self.trust_registry.evaluate_reputation(&peer_id);
+                        self.reputation_cache.scores.write().unwrap().insert(peer_id, updated_score);
+
                         if self.trust_registry.is_blacklisted(&owner_did) {
                             // Immediately enforce the ban at the network transport layer.
                             self.network.ban_peer(&peer_id).await;
@@ -270,7 +286,6 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
         Ok(())
     }
 
-    // [handle_network_ingress and process_media_egress remain unchanged]
     async fn handle_network_ingress(
         &mut self,
         peer_id: NetworkId,
@@ -279,12 +294,10 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
     ) {
         let local_network_id = self.identity.to_network_id();
 
-        // 1. PRE-ALLOCATION FIREWALL: Filter strictly by transport-layer NetworkId
         if !self.governor.should_accept(&peer_id, &local_network_id) {
             return;
         }
 
-        // 2. DESERIALIZATION BOUNDARY: Allocate memory for the payload
         let chunk: ShardChunk = match postcard::from_bytes(chunk_bytes) {
             Ok(c) => c,
             Err(e) => {
@@ -295,7 +308,6 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
 
         let sender_did = chunk.owner_did.clone();
 
-        // 3. APPLICATION-LAYER FORENSICS: Verify reputation of the embedded Did
         let explicit_trust = self.trust_registry.check_trust(&sender_did);
         if matches!(explicit_trust, TrustLevel::Blocked)
             || self.trust_registry.is_blacklisted(&sender_did)
@@ -305,7 +317,6 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
             return;
         }
 
-        // 4. STORAGE ESCALATION
         if self.chunk_tx.try_send((chunk, topic, peer_id)).is_err() {
             tracing::warn!("Storage layer channel saturated. Dropping ingress chunk.");
         }
@@ -344,7 +355,32 @@ impl<T: NetworkTransport> PhalanxEngine<T, NoOpJournal> {
         let identity_path = std::path::Path::new(path).join("identity.pem");
         let identity = init_identity(&identity_path).unwrap_or_default();
 
-        Self::new(config, identity, network, NoOpJournal)
+        let registry_config = config.clone();
+
+        // For ephemeral testing setups, build the registry synchronously
+        let trust_registry = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to initialize transient async reactor for TrustRegistry");
+
+            rt.block_on(crate::security::trust::TrustRegistry::build(
+                &registry_config,
+            ))
+        })
+        .join()
+        .expect("TrustRegistry initialization thread panicked");
+
+        let reputation_cache = Arc::new(SyncReputationCache::default());
+
+        Self::new(
+            config,
+            identity,
+            network,
+            NoOpJournal,
+            trust_registry,
+            reputation_cache,
+        )
     }
 }
 
@@ -359,7 +395,6 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::mpsc;
 
-    /// Helper to generate a dummy adapter for pure unit tests
     fn create_mock_transport() -> MockTransport {
         let (_, ingress_rx) = mpsc::channel::<NetworkEvent>(10);
         let (egress_tx, _) = mpsc::channel::<(MeshTopic, Vec<u8>)>(10);
@@ -376,7 +411,6 @@ mod tests {
             },
             ..Default::default()
         };
-        // Physics removed, as it is now strictly a production adapter concern
         (config, temp_dir)
     }
 
@@ -386,7 +420,17 @@ mod tests {
         let identity = PhalanxIdentity::new();
         let network = create_mock_transport();
 
-        let engine = PhalanxEngine::new(config, identity, network, NoOpJournal);
+        let trust_registry = TrustRegistry::build(&config).await;
+        let reputation_cache = Arc::new(SyncReputationCache::default());
+
+        let engine = PhalanxEngine::new(
+            config,
+            identity,
+            network,
+            NoOpJournal,
+            trust_registry,
+            reputation_cache,
+        );
         assert!(engine.is_ok(), "Engine should initialize with valid inputs");
     }
 
@@ -414,7 +458,18 @@ mod tests {
         let identity = PhalanxIdentity::new();
         let network = create_mock_transport();
 
-        let engine = PhalanxEngine::new(config, identity, network, NoOpJournal).unwrap();
+        let trust_registry = TrustRegistry::build(&config).await;
+        let reputation_cache = Arc::new(SyncReputationCache::default());
+
+        let engine = PhalanxEngine::new(
+            config,
+            identity,
+            network,
+            NoOpJournal,
+            trust_registry,
+            reputation_cache,
+        )
+        .unwrap();
 
         assert!(engine.video_rx.capacity() > 0);
         assert!(engine.audio_rx.capacity() > 0);

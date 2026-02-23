@@ -4,11 +4,12 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 
 use crate::base::config::{PhalanxConfig, PhalanxPhysics};
-use crate::base::engine::PhalanxEngine;
+use crate::base::engine::{PhalanxEngine, SyncReputationCache};
 use crate::base::types::MeshTopic;
 use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
 use crate::primitives::shards::{ShardChunk, ShardError};
 use crate::security::telemetry::{ChaosMode, NodeRole, SimEvent};
+use crate::security::trust::TrustRegistry;
 use crate::storage::reassembler::TransientJournal;
 use crate::transport::events::NetworkEvent;
 use crate::transport::mock::MockTransport;
@@ -115,8 +116,19 @@ impl SimulationHarness {
             .insert(node_did.clone(), ingress_tx);
 
         // 3. Initialize the Actual Production Engine
-        let engine_result =
-            PhalanxEngine::new(self.config.clone(), identity, transport, SimJournal);
+        let registry_config = self.config.clone();
+
+        let trust_registry = TrustRegistry::build(&registry_config).await;
+        let reputation_cache = std::sync::Arc::new(SyncReputationCache::default());
+
+        let engine_result = PhalanxEngine::new(
+            self.config.clone(),
+            identity,
+            transport,
+            SimJournal,
+            trust_registry,
+            reputation_cache,
+        );
 
         let mut engine = match engine_result {
             Ok(e) => e,

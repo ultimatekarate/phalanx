@@ -529,8 +529,13 @@ impl RecordStore for RedbStore {
         let peer_id = provider_record.provider;
         let network_id = NetworkId::from(peer_id);
 
-        // Execute reputation evaluation via dependency injection
-        let reputation_score = self.evaluator.evaluate_reputation(&network_id);
+        // ARCHITECTURAL UPDATE: Read `self.local_peer_id` to bypass reputation gate
+        // for self-published provider records.
+        let reputation_score = if network_id == self.local_peer_id {
+            1.0 // Maximum baseline trust for the local node
+        } else {
+            self.evaluator.evaluate_reputation(&network_id)
+        };
 
         // Execute weighted insertion
         let expiration = provider_record

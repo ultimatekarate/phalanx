@@ -1,12 +1,14 @@
 use std::error::Error;
 use std::path::Path;
+use std::sync::Arc;
 use tracing::info;
 
 // Internal Modules from Workspace
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
-use phalanx_core::base::engine::PhalanxEngine;
+use phalanx_core::base::engine::{PhalanxEngine, SyncReputationCache};
 use phalanx_core::primitives::identity::init_identity;
 use phalanx_core::security::telemetry;
+use phalanx_core::security::trust::TrustRegistry;
 use phalanx_core::storage::journal::FileJournal;
 use phalanx_core::transport::libp2p_adapter::Libp2pAdapter;
 use phalanx_core::transport::swarm::{load_swarm_key, setup_phalanx_swarm};
@@ -39,16 +41,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("Initializing Transient WAL");
     let journal = FileJournal::new("sentinel_transient_wal.bin").await?;
 
+    // --- ZERO-TRUST DEPENDENCY GRAPH ---
+    // Initialize the asynchronous trust registry and the synchronous cache boundary.
+    let trust_registry = TrustRegistry::build(&config).await;
+    let reputation_cache = Arc::new(SyncReputationCache::default());
+
     // 4. Production Network Adapter Setup (Hexagonal Port Injection)
     let network_keypair = my_identity.to_libp2p_keypair();
-    let swarm = setup_phalanx_swarm(network_keypair, &config, &physics, psk)?;
+    let swarm = setup_phalanx_swarm(
+        network_keypair,
+        &config,
+        &physics,
+        psk,
+        reputation_cache.clone(),
+    )?;
 
     // Wrap the standard library/libp2p I/O inside the domain-compliant adapter
     let network_adapter = Libp2pAdapter::new(swarm);
 
     // 5. Engine Initialization
     // The engine is now completely agnostic to libp2p and simply consumes the NetworkTransport trait
-    let mut engine = PhalanxEngine::new(config, my_identity, network_adapter, journal)?;
+    let mut engine = PhalanxEngine::new(
+        config,
+        my_identity,
+        network_adapter,
+        journal,
+        trust_registry,
+        reputation_cache,
+    )?;
 
     println!("--- PHALANX SENSOR: ONLINE (WAN + LAN) ---");
 
