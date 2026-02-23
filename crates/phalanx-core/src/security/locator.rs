@@ -195,4 +195,50 @@ mod tests {
 
         info!("Privacy Gate confirmed: Blocked unauthorized retrieval from identity mismatch.");
     }
+
+    #[test]
+    fn test_replay_attack_prevention() {
+        // 1. Setup Identities
+        let (author, _) = PhalanxIdentity::generate().unwrap();
+        let (investigator, _) = PhalanxIdentity::generate().unwrap();
+
+        // 2. Define two distinct forensic events
+        let volley_a = VolleyId::new("video-evidence-alpha");
+        let volley_b = VolleyId::new("video-evidence-beta");
+
+        // 3. Investigator creates a valid signature for Volley A
+        let signature_a = investigator.sign(volley_a.as_str().as_bytes());
+
+        // 4. Create a locator for Volley B (the target of the replay attack)
+        let locator_b = PhalanxLocator {
+            id: volley_b.clone(),
+            secret: "key-beta".to_string(),
+            author: author.did.clone(),
+            recipient_did: investigator.did.clone(),
+        };
+
+        // 5. ATTACK: Construct a request for Volley B using the signature from Volley A
+        let replayed_request = crate::transport::protocol::VolleyRequest {
+            target_did: author.did.clone(),
+            volley_id: volley_b.clone(), // Requesting Beta...
+            locator: locator_b,
+            signature: signature_a.to_bytes().to_vec(), // ...but using Alpha's signature
+        };
+
+        // 6. ASSERTION: The Identity Gate MUST reject the replayed signature
+        // The 'challenge' in verify_retrieval_auth is bound to request.volley_id.
+        let result = author.verify_retrieval_auth(&replayed_request);
+
+        assert!(
+            result.is_err(),
+            "Security Failure: The engine accepted a replayed signature for a different VolleyId."
+        );
+
+        if let Err(e) = result {
+            info!(
+                "Replay Protection Active: Blocked reused signature. Error: {}",
+                e
+            );
+        }
+    }
 }

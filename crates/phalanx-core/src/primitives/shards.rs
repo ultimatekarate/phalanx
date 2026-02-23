@@ -163,7 +163,7 @@ impl fmt::Display for ShardId {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VideoShard {
     pub timestamp: PhalanxTimestamp,
     pub sequence_id: StorageSequence,
@@ -178,7 +178,7 @@ impl VideoShard {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AudioShard {
     pub timestamp: PhalanxTimestamp,
     pub sequence_id: StorageSequence,
@@ -218,7 +218,7 @@ pub struct ForensicGap {
     pub detected_at: PhalanxTimestamp,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct VolleyId(String);
 
 impl VolleyId {

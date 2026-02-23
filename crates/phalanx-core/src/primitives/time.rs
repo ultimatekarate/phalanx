@@ -29,7 +29,7 @@ pub type TimeResult<T> = Result<T, TimeError>;
 /// PhalanxTimestamp is meant to enforce a strict boundary between forensic layer and transient layer.
 /// If a process interacts with the forensic layer it MUST use this type.
 /// Transient layer always uses system time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(transparent)]
 pub struct PhalanxTimestamp(u64);
 
