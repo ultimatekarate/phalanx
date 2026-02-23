@@ -544,16 +544,16 @@ impl RecordStore for RedbStore {
             .map(|d| d.as_secs())
             .unwrap_or(86400); // Default 24h
 
-        let write_txn = self.db.begin_write().map_err(|_| Error::MaxRecords)?;
+        let write_txn = self.db.begin_write().map_err(|_| Error::ValueTooLarge)?;
         {
             let mut table = write_txn
                 .open_table(DHT_PROVIDERS_TABLE)
-                .map_err(|_| Error::MaxRecords)?;
+                .map_err(|_| Error::ValueTooLarge)?;
             let mut existing_bytes = Vec::new();
 
             if let Some(access) = table
                 .get(typed_key.as_bytes())
-                .map_err(|_| Error::MaxRecords)?
+                .map_err(|_| Error::ValueTooLarge)?
             {
                 existing_bytes = access.value().to_vec();
             }
@@ -566,12 +566,12 @@ impl RecordStore for RedbStore {
             if provider_set.try_insert_weighted(peer_id, expiration, reputation_score) {
                 table
                     .insert(typed_key.as_bytes(), provider_set.encode().as_slice())
-                    .map_err(|_| Error::MaxRecords)?;
+                    .map_err(|_| Error::ValueTooLarge)?;
             } else {
-                return Err(Error::MaxRecords);
+                return Err(Error::MaxProvidedKeys);
             }
         }
-        write_txn.commit().map_err(|_| Error::MaxRecords)?;
+        write_txn.commit().map_err(|_| Error::ValueTooLarge)?;
 
         Ok(())
     }

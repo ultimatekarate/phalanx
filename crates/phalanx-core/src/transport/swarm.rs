@@ -393,12 +393,6 @@ pub fn setup_phalanx_swarm(
     Ok(swarm)
 }
 
-struct MockEvaluator;
-impl PeerEvaluator for MockEvaluator {
-    fn evaluate_reputation(&self, _peer_id: &NetworkId) -> f32 {
-        1.0 // Baseline neutral for tests
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,6 +401,13 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use tempfile::tempdir;
+    struct MockEvaluator;
+
+    impl PeerEvaluator for MockEvaluator {
+        fn evaluate_reputation(&self, _peer_id: &NetworkId) -> f32 {
+            1.0 // Baseline neutral for tests
+        }
+    }
 
     fn get_test_config() -> (PhalanxConfig, PhalanxPhysics) {
         let config = PhalanxConfig::default();
