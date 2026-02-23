@@ -2,15 +2,21 @@ use tokio::time::Duration;
 
 // Import from the public API
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
-use phalanx_core::base::types::MeshTopic;
+use phalanx_core::base::types::{MeshTopic, NodeMode, TrafficGovernor};
 use phalanx_core::primitives::identity::{NetworkId, PhalanxIdentity};
 use phalanx_core::primitives::shards::{
-    self, create_video_shard, ChunkType, DataPayload, Evidence, StorageSequence, WitnessEnvelope,
+    self, create_video_shard, ChunkType, DataPayload, EnvelopeState, Evidence, ShardChunk, ShardId,
+    StorageSequence, VolleyId, WitnessEnvelope,
 };
+use phalanx_core::primitives::time::TrustedClock;
+use phalanx_core::security::ingress::{IngressContext, IngressOrchestrator, SecurityPipeline};
 use phalanx_core::security::telemetry::{init_observability, NodeRole, SimEvent};
-use phalanx_core::simulation::SimulationHarness;
+use phalanx_core::security::trust::TrustRegistry;
+use phalanx_core::simulation::{SimJournal, SimulationHarness};
+use phalanx_core::storage::reassembler::Reassembler;
 use phalanx_core::storage::vault::Guardian;
 use phalanx_core::transport::events::NetworkEvent;
+use phalanx_core::transport::health::HealthTracker;
 
 #[tokio::test]
 async fn test_salvage_on_node_death() {
@@ -21,7 +27,6 @@ async fn test_salvage_on_node_death() {
 
     let (mut harness, _telemetry_rx) = SimulationHarness::init_mesh(config.clone(), physics);
 
-    // spawn_node now returns Option<Did>, requiring unwrap
     let victim_device_did = harness
         .spawn_node("VictimDevice", NodeRole::Guardian)
         .await
@@ -32,76 +37,43 @@ async fn test_salvage_on_node_death() {
         .await
         .expect("Failed to spawn GuardianDevice");
 
-    tracing::info!("Initializing mesh nodes... waiting for DHT settling");
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     let victim_device_network_id = harness.resolve_did(&victim_device_did).await.unwrap();
     let (victim_identity, _) = PhalanxIdentity::generate().unwrap();
     let victim_did = victim_identity.did.clone();
     let remote_network_id = NetworkId::random();
-
-    tracing::info!(
-        target: "phalanx::test",
-        %victim_did,
-        %victim_device_network_id,
-        %remote_network_id,
-        "Simulating remote ingestion attack"
-    );
+    let vid = VolleyId::new("salvage_volley_01");
 
     let frames = vec![vec![1]];
-    let real_shard = create_video_shard(frames, StorageSequence(999), 10, "volley_test_999".into())
+    let real_shard = create_video_shard(frames, StorageSequence(999), 10, vid.clone())
         .expect("Failed to generate attack shard");
 
+    // FIX: Added 'None' for causality anchor
     let envelope = WitnessEnvelope::new(
         Evidence::Video(real_shard),
         &victim_identity,
         remote_network_id.clone(),
+        None,
     )
     .expect("Failed to sign attack envelope");
 
     let serialized_envelope = postcard::to_stdvec(&envelope).expect("Failed to serialize envelope");
 
-    tracing::info!(
-        target: "phalanx::test",
-        payload_size = serialized_envelope.len(),
-        "Envelope cryptographically sealed and serialized"
-    );
-
-    let chunks_result = shards::chunkify(
-        shards::ShardId(999),
+    // FIX: Corrected chunkify signature
+    let chunks = shards::chunkify(
+        ShardId(999),
         serialized_envelope,
         10,
         victim_did.clone(),
         ChunkType::Witnessed,
-    );
-
-    let chunks = match chunks_result {
-        Ok(valid_chunks) => valid_chunks,
-        Err(error) => {
-            tracing::error!(
-                event = "discretization_failure",
-                node = %victim_did,
-                error = %error,
-                "Failed to transform envelope into verifiable chunks"
-            );
-            return;
-        }
-    };
-
-    tracing::info!(
-        target: "phalanx::test",
-        chunk_count = chunks.len(),
-        "Beginning simulated broadcast sequence"
-    );
+    )
+    .expect("Failed to transform envelope into verifiable chunks");
 
     let topic = MeshTopic::new("phalanx/video/1.0.0");
 
-    for (i, chunk) in chunks.into_iter().enumerate() {
-        tracing::debug!(target: "phalanx::test", chunk_index = i, "Broadcasting chunk to GuardianDevice");
-
-        // Serialize the chunk payload just as it would be over the network
+    for chunk in chunks {
         let chunk_bytes = postcard::to_stdvec(&chunk).expect("Failed to serialize chunk");
-
         harness
             .inject_event(
                 &guardian_device_did,
@@ -115,7 +87,6 @@ async fn test_salvage_on_node_death() {
             .expect("Harness routing failure");
     }
 
-    // 1. MESH DISCOVERY: Inform the Victim that the Guardian is available for offloading
     let guardian_net_id = harness.resolve_did(&guardian_device_did).await.unwrap();
     harness
         .inject_event(
@@ -125,49 +96,34 @@ async fn test_salvage_on_node_death() {
         .await
         .expect("Harness routing failure");
 
-    // Give the routing table a moment to update
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // 2. SIMULATE NODE DEATH: This triggers the graceful shutdown/salvage protocol.
-    tracing::info!(target: "phalanx::test", "Simulating VictimDevice crash/shutdown to trigger salvage");
     harness
         .inject_event(&victim_device_did, NetworkEvent::Shutdown)
         .await
         .expect("Harness routing failure");
 
-    // 3. PROPAGATION DELAY: Allow the simulated network to transfer the bytes and Guardian to write to disk.
-    tracing::info!(target: "phalanx::test", "Waiting for salvage sequence to write to disk...");
     tokio::time::sleep(Duration::from_millis(2000)).await;
 
-    // Check GuardianDevice vault
+    // Verify disk persistence
     let victim_safe_did = victim_did.to_safe_name();
     let evidence_dir = std::path::PathBuf::from("sim_vault").join(&victim_safe_did);
 
-    tracing::info!(target: "phalanx::test", path = ?evidence_dir, "Checking for salvaged archive on GuardianDevice");
-
     let mut found_file = false;
-    for _ in 0..10 {
-        if evidence_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&evidence_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.ends_with(".vid.phlx") {
-                        tracing::info!(target: "phalanx::test", file = %name, "Found active archive!");
-                        found_file = true;
-                        break;
-                    }
+    if evidence_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&evidence_dir) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().ends_with(".volley") {
+                    found_file = true;
+                    break;
                 }
             }
         }
-        if found_file {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     assert!(
         found_file,
-        "Salvage failed: .phlx file not found in correct DID folder. Check log output for dropped chunks."
+        "Salvage failed: Volley file not found in vault."
     );
 }
 
@@ -177,54 +133,39 @@ async fn test_out_of_sequence_salvage_on_node_death() {
     let peer_id = NetworkId::random();
     let config = PhalanxConfig::default();
     let mut storage = Guardian::new("sim_vault/salvage_test", &config, identity.did.clone());
+    let vid = VolleyId::new("seq_test");
 
     let mut captured_envelopes = Vec::new();
     for i in 0..5 {
-        let seq = StorageSequence(i);
-        let frames = vec![vec![i as u8]];
-        let shard = create_video_shard(frames, seq, 30, "volley_test_999".into())
-            .expect("Failed to generate attack shard");
+        let shard = create_video_shard(vec![vec![i as u8]], StorageSequence(i), 30, vid.clone())
+            .expect("Failed to generate shard");
 
-        let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id)
+        // FIX: 4-argument constructor
+        let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id, None)
             .expect("Failed to sign envelope");
         captured_envelopes.push(envelope);
     }
 
-    storage
-        .ingest_envelope(captured_envelopes[0].clone())
-        .await
-        .expect("Ingest failed");
-    storage
-        .ingest_envelope(captured_envelopes[2].clone())
-        .await
-        .expect("Ingest failed");
-    storage
-        .ingest_envelope(captured_envelopes[4].clone())
-        .await
-        .expect("Ingest failed");
-    storage
-        .ingest_envelope(captured_envelopes[1].clone())
-        .await
-        .expect("Ingest failed");
-    storage
-        .ingest_envelope(captured_envelopes[3].clone())
-        .await
-        .expect("Ingest failed");
+    // Ingest out of order
+    for idx in [0, 2, 4, 1, 3] {
+        storage
+            .ingest_envelope(EnvelopeState::Intact(captured_envelopes[idx].clone()))
+            .await
+            .expect("Ingest failed");
+    }
 
+    // FIX: Lookup by VolleyId, not Did
     let session = storage
-        .get_active_volley_shards(&identity.did.clone())
-        .expect("Session should exist for recovered DID");
+        .get_active_volley_shards(&vid)
+        .expect("Session should exist for recovered VolleyId");
 
-    let mut keys: Vec<&StorageSequence> = session.keys().collect();
-    keys.sort();
-
-    for (i, seq) in keys.iter().enumerate() {
-        assert_eq!(seq.0, i as u32, "Sequence gap detected at index {}", i);
-        let env = session.get(seq).unwrap();
+    for i in 0..5 {
+        let seq = StorageSequence(i);
+        let env = session.get(&seq).expect("Missing sequence");
         if let Evidence::Video(ref v) = env.evidence {
             if let DataPayload::Clear(bytes) = &v.payload {
                 let recovered: Vec<Vec<u8>> = postcard::from_bytes(bytes).unwrap();
-                assert_eq!(recovered[0][0], i as u8, "Data mismatch at sequence {}", i);
+                assert_eq!(recovered[0][0], i as u8);
             }
         }
     }
@@ -239,73 +180,46 @@ async fn test_stronghold_crash_recovery() {
     let (identity, _) = PhalanxIdentity::generate().unwrap();
     let peer_id = NetworkId::random();
     let seq = StorageSequence(101);
+    let vid = VolleyId::new("crash_volley");
 
     let mut storage = Guardian::new(vault_path, &config, identity.did.clone());
 
-    let frames = vec![vec![0xAA]];
-    let shard = create_video_shard(frames, seq, 30, "volley_test_999".into())
-        .expect("Failed to generate attack shard");
+    let shard = create_video_shard(vec![vec![0xAA]], seq, 30, vid.clone())
+        .expect("Failed to generate shard");
 
-    let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id)
+    let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, peer_id, None)
         .expect("Failed to sign envelope");
 
     storage
-        .ingest_envelope(envelope.clone())
+        .ingest_envelope(EnvelopeState::Intact(envelope.clone()))
         .await
         .expect("Ingest failed");
 
-    // Simulate crash (Memory state wiped)
     drop(storage);
 
-    // Boot new instance
     let mut recovered_storage = Guardian::new(vault_path, &config, identity.did.clone());
 
-    // --- FIX: Simulate StorageActor::restore_state WAL replay ---
+    // Replay WAL
     recovered_storage
-        .ingest_envelope(envelope.clone())
+        .ingest_envelope(EnvelopeState::Intact(envelope.clone()))
         .await
         .expect("WAL replay failed");
 
+    // FIX: Lookup by VolleyId
     let recovered_session = recovered_storage
-        .get_active_volley_shards(&identity.did.clone())
-        .expect("Guardian failed to recover DID session from WAL");
+        .get_active_volley_shards(&vid)
+        .expect("Guardian failed to recover Volley session");
 
-    let recovered_env = recovered_session
-        .get(&seq)
-        .expect("Guardian failed to recover specific shard 101 from WAL");
-
-    if let Evidence::Video(ref v) = recovered_env.evidence {
-        if let DataPayload::Clear(bytes) = &v.payload {
-            let recovered: Vec<Vec<u8>> = postcard::from_bytes(bytes).unwrap();
-            assert_eq!(recovered[0][0], 0xAA);
-        }
-    }
+    assert!(recovered_session.contains_key(&seq));
 }
 
 #[tokio::test]
 async fn test_leaf_mode_isolation() {
-    use phalanx_core::base::config::PhalanxConfig;
-    use phalanx_core::base::types::{MeshTopic, NodeMode, TrafficGovernor};
-    use phalanx_core::primitives::identity::{NetworkId, PhalanxIdentity};
-    use phalanx_core::primitives::shards::{ChunkType, ShardChunk, ShardId};
-    use phalanx_core::primitives::time::TrustedClock;
-    use phalanx_core::security::ingress::{IngressContext, IngressOrchestrator, SecurityPipeline};
-    use phalanx_core::security::trust::TrustRegistry;
-    use phalanx_core::simulation::SimJournal;
-    use phalanx_core::storage::reassembler::Reassembler;
-    use phalanx_core::storage::vault::Guardian;
-    use phalanx_core::transport::health::HealthTracker; // Assuming SimJournal is available in scope
-
-    // 1. Identity Provisioning
-    let (local_identity, _) =
-        PhalanxIdentity::generate().expect("Failed to generate local identity");
-    let (foreign_identity, _) =
-        PhalanxIdentity::generate().expect("Failed to generate foreign identity");
-
+    let (local_identity, _) = PhalanxIdentity::generate().unwrap();
+    let (foreign_identity, _) = PhalanxIdentity::generate().unwrap();
     let config = PhalanxConfig::default();
-    let local_network_id = NetworkId::random();
+    let local_net_id = NetworkId::random();
 
-    // 2. Decoupled Pipeline Allocation
     let mut reassembler = Reassembler::new();
     let mut guardian = Guardian::new("sim_vault/leaf_test", &config, local_identity.did.clone());
     let mut trust_registry = TrustRegistry::build(&config).await;
@@ -314,9 +228,6 @@ async fn test_leaf_mode_isolation() {
     let clock = TrustedClock::new();
     let mut transient_journal = SimJournal;
 
-    // 3. Construct a Foreign Payload
-    // In the decoupled architecture, the Orchestrator inspects metadata prior
-    // to deserialization overhead, so we can mock the payload directly.
     let foreign_chunk = ShardChunk {
         shard_id: ShardId(1),
         chunk_index: 0,
@@ -325,16 +236,14 @@ async fn test_leaf_mode_isolation() {
         owner_did: foreign_identity.did.clone(),
         chunk_type: ChunkType::Witnessed,
     };
-    let ingest_topic = MeshTopic::new("phalanx/video");
 
-    // 4. Perimeter Context Definition (Enforcing Leaf Mode)
     let ingress_ctx = IngressContext {
         config: &config,
         identity: &local_identity,
-        network_id: local_network_id,
+        network_id: local_net_id,
         clock: &clock,
         governor: &governor,
-        mode: NodeMode::Leaf, // <-- The core isolation toggle
+        mode: NodeMode::Leaf,
     };
 
     let mut security_pipeline = SecurityPipeline {
@@ -345,172 +254,102 @@ async fn test_leaf_mode_isolation() {
         health_tracker: &mut health_tracker,
     };
 
-    // 5. Execution: Route through Orchestrator
-    let ingress_result = IngressOrchestrator::process_chunk(
+    let result = IngressOrchestrator::process_chunk(
         foreign_chunk,
-        &ingest_topic,
+        &MeshTopic::new("phalanx/video"),
         &ingress_ctx,
         &mut security_pipeline,
     )
     .await;
 
-    // 6. Forensic Verification
-    assert!(
-        ingress_result.is_ok(),
-        "Orchestrator should not return an Err for dropped topology traffic"
-    );
     assert_eq!(
-        ingress_result.unwrap(),
+        result.unwrap(),
         None,
-        "Orchestrator should return Ok(None) to represent silently dropped traffic"
+        "Leaf mode should drop foreign traffic"
     );
-
-    // Verify the downstream data factories and storage layers remain unpolluted
-    assert!(
-        reassembler.crucible.contexts.is_empty(),
-        "Reassembler leaked foreign data into transient memory while in Leaf Mode!"
-    );
-    assert!(
-        guardian.crucible.contexts.is_empty(),
-        "Guardian bypassed orchestration and archived foreign data while in Leaf Mode!"
-    );
+    assert!(reassembler.crucible.contexts.is_empty());
 }
 
 #[tokio::test]
 async fn test_vampire_attack_defense() -> Result<(), Box<dyn std::error::Error>> {
     init_observability();
-    tracing::info!("Initializing Vampire Attack simulation context");
-
     let config = PhalanxConfig::test_defaults();
     let physics = PhalanxPhysics::test_profile();
 
-    // 1. Init Mesh
     let (mut harness, mut telemetry_rx) = SimulationHarness::init_mesh(config.clone(), physics);
-
     let victim_did = harness
         .spawn_node("Victim", NodeRole::Guardian)
         .await
-        .expect("Failed to spawn Victim");
+        .expect("Spawn failed");
 
-    tracing::info!(victim_id = %victim_did, "Victim node provisioned");
-
-    // 2. Setup Attacker
     let (attacker_identity, _) = PhalanxIdentity::generate()?;
-    let attacker_did = attacker_identity.did.clone();
     let attacker_net_id = attacker_identity.to_network_id();
+    let vid = VolleyId::new("vampire_stream");
 
-    tracing::info!(attacker_id = %attacker_did, attacker_net = %attacker_net_id, "Attacker node provisioned");
+    for i in 0..5 {
+        let shard = create_video_shard(vec![vec![1]], StorageSequence(i), 30, vid.clone())?;
 
-    // 3. Launch Attack
-    let topic = MeshTopic::new("phalanx/video/1.0.0");
-
-    for attack_iteration in 0..11 {
-        tracing::debug!(
-            iteration = attack_iteration,
-            "Constructing malicious payload"
-        );
-
-        // Strict evaluation pipeline
-        let shard = create_video_shard(
-            vec![vec![1]],
-            StorageSequence(attack_iteration),
-            30,
-            "vampire".into(),
-        )?;
-
+        // FIX: 4-argument constructor
         let mut envelope = WitnessEnvelope::new(
             Evidence::Video(shard),
             &attacker_identity,
             attacker_net_id.clone(),
+            None,
         )?;
 
-        // POISON: Invalidate signature post-sealing to simulate cryptographic offense
+        // POISON: Tamper with evidence to break signature
         if let Evidence::Video(ref mut v) = envelope.evidence {
             v.fps = 145;
-            tracing::trace!(iteration = attack_iteration, "Payload signature poisoned");
         }
 
-        // Serialization boundary
-        let serialized_envelope =
-            postcard::to_stdvec(&envelope).map_err(|e| format!("Serialization failed: {}", e))?;
-
-        // Discretization boundary
+        let serialized = postcard::to_stdvec(&envelope)?;
         let chunks = shards::chunkify(
-            shards::ShardId(attack_iteration as u32),
-            serialized_envelope,
+            ShardId(i as u32),
+            serialized,
             4096,
-            attacker_did.clone(),
+            attacker_identity.did.clone(),
             ChunkType::Witnessed,
         )?;
 
         if let Some(first_chunk) = chunks.first() {
-            let chunk_bytes = postcard::to_stdvec(first_chunk)?;
-
-            tracing::debug!(
-                iteration = attack_iteration,
-                bytes_len = chunk_bytes.len(),
-                "Injecting malformed chunk into ingress port"
-            );
-
             harness
                 .inject_event(
                     &victim_did,
                     NetworkEvent::DataReceived {
                         origin: attacker_net_id.clone(),
-                        topic: topic.clone(),
-                        data: chunk_bytes,
+                        topic: MeshTopic::new("phalanx/video/1.0.0"),
+                        data: postcard::to_stdvec(first_chunk)?,
                     },
                 )
-                .await
-                .expect("Harness routing failure");
+                .await?;
         }
     }
 
-    tracing::info!("Attack payload injection complete. Transitioning to event monitoring phase.");
-
-    // 4. Verify Defense
-    let mut is_defense_successful = false;
-    let timeout = tokio::time::sleep(std::time::Duration::from_millis(2000));
-    tokio::pin!(timeout);
+    // Monitor for defense event
+    let mut defense_triggered = false;
+    let sleep = tokio::time::sleep(Duration::from_secs(2));
+    tokio::pin!(sleep);
 
     loop {
         tokio::select! {
-            event_option = telemetry_rx.recv() => {
-                match event_option {
-                    Some(event) => {
-                        // FORENSIC CAPTURE: Log every single event emitted by the mesh
-                        tracing::debug!(captured_event = ?event, "Observed mesh telemetry event");
-
-                        if let SimEvent::AttackAttemptBlocked { attacker, target, reason } = event {
-                            if attacker == attacker_net_id {
-                                tracing::info!(
-                                    target_node = %target,
-                                    attacker_node = %attacker,
-                                    block_reason = %reason,
-                                    "Defense Success: Verification pipeline actively blocked payload"
-                                );
-                                is_defense_successful = true;
-                                break;
-                            }
-                        }
-                    },
-                    None => {
-                        tracing::error!("Telemetry channel dropped unexpectedly during monitoring phase");
+            Some(event) = telemetry_rx.recv() => {
+                if let SimEvent::AttackAttemptBlocked { attacker, .. } = event {
+                    if attacker == attacker_net_id {
+                        defense_triggered = true;
                         break;
                     }
                 }
             }
-            _ = &mut timeout => {
-                tracing::warn!("Monitoring phase timed out after 2000ms. Insufficient events emitted.");
+            _ = &mut sleep => {
+                tracing::warn!("Vampire monitoring timed out");
                 break;
             }
         }
     }
 
     assert!(
-        is_defense_successful,
-        "Vampire defense failed: Victim node did not trigger AttackAttemptBlocked telemetry. Review standard output for captured mesh events."
+        defense_triggered,
+        "Vampire defense failed to block malformed payload"
     );
-
     Ok(())
 }

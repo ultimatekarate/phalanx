@@ -351,7 +351,7 @@ impl CausalitySession {
     /// Automatically updates the internal hash chain.
     pub fn seal_evidence(&mut self, evidence: Evidence) -> Result<WitnessEnvelope, ShardError> {
         let envelope =
-            WitnessEnvelope::new(evidence, &*self.identity, self.peer_id, self.last_hash)?;
+            WitnessEnvelope::new(evidence, &self.identity, self.peer_id, self.last_hash)?;
 
         // Update the state for the NEXT call
         self.last_hash = Some(envelope.signature_hash());

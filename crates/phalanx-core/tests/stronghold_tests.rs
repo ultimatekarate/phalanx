@@ -85,6 +85,7 @@ async fn test_stronghold_ingestion_and_persistence() {
         Evidence::Video(video_shard),
         &peer_identity,
         peer_net_id.clone(),
+        None,
     )
     .expect("Failed to seal evidence");
 
@@ -194,7 +195,7 @@ async fn test_storage_actor_metric_pipeline() {
     };
 
     let envelope = Evidence::Video(video_shard)
-        .seal(&identity, local_peer_id.clone())
+        .seal(&identity, local_peer_id.clone(), None)
         .expect("Failed to seal evidence");
 
     let valid_data = postcard::to_stdvec(&envelope).expect("Serialization failed");
