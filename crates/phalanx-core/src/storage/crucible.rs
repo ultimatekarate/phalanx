@@ -21,14 +21,21 @@ pub trait Mold {
     type Input;
     type Output;
     // ENFORCEMENT: Keys must be serializable to reconstruct the BTreeMap
-    type Key: Ord + Clone + std::fmt::Debug + Serialize + DeserializeOwned;
+    type Key: Ord
+        + Clone
+        + std::fmt::Debug
+        + Serialize
+        + DeserializeOwned
+        + std::hash::Hash
+        + Eq
+        + std::fmt::Display;
     // ENFORCEMENT: Accumulators must serialize their internal byte states
     type Accumulator: Serialize + DeserializeOwned;
 
     fn get_key(item: &Self::Input) -> Self::Key;
     fn init_accumulator(item: &Self::Input) -> Self::Accumulator;
-    fn ingest(acc: &mut Self::Accumulator, item: Self::Input);
 
+    fn ingest(acc: &mut Self::Accumulator, item: Self::Input);
     fn is_ready(acc: &Self::Accumulator, elapsed: Duration) -> bool;
     fn assemble(key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output>;
 }

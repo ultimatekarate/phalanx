@@ -13,7 +13,7 @@ pub trait WitnessGate {
         self,
         identity: &PhalanxIdentity,
         peer_id: NetworkId,
-        prev_hash: Option<SignatureHash>, // NEW: Alignment with shards.rs
+        prev_hash: Option<SignatureHash>,
     ) -> Result<WitnessEnvelope, ShardError>;
 }
 

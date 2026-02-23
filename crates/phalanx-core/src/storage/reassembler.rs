@@ -153,7 +153,7 @@ mod tests {
         });
 
         // 2. Wrap in an envelope and sign it
-        let original_envelope = WitnessEnvelope::new(evidence, &identity, local_peer.clone())
+        let original_envelope = WitnessEnvelope::new(evidence, &identity, local_peer.clone(), None)
             .expect("Failed to sign envelope");
 
         let serialized_envelope =

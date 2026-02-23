@@ -4,7 +4,7 @@ const VOLLEY_TIME_THRESHOLD: Duration = Duration::from_secs(1);
 use crate::primitives::identity::Did;
 use crate::primitives::shards::{
     EnvelopeState, ForensicGap, FragmentedEnvelope, ShardChunk, ShardGapReport, ShardId,
-    StorageSequence, Volley, VolleyId, WitnessEnvelope,
+    SignatureHash, StorageSequence, Volley, VolleyId, WitnessEnvelope,
 };
 use crate::primitives::time::TrustedClock;
 use crate::security::gate::ChronosGate;
@@ -123,11 +123,11 @@ pub struct VolleyAmalgam;
 impl Mold for VolleyAmalgam {
     type Input = WitnessEnvelope;
     type Output = Volley;
-    type Key = String; // Peer DID
+    type Key = VolleyId;
     type Accumulator = VolleyBuffer;
 
     fn get_key(item: &Self::Input) -> Self::Key {
-        item.did.to_string()
+        item.evidence.volley_id().clone()
     }
 
     fn init_accumulator(item: &Self::Input) -> Self::Accumulator {
@@ -150,55 +150,75 @@ impl Mold for VolleyAmalgam {
         acc.artifacts.len() >= VOLLEY_SIZE_THRESHOLD || elapsed > VOLLEY_TIME_THRESHOLD
     }
 
-    fn assemble(key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output> {
-        info!(key = %key, count = %acc.artifacts.len(), "VolleyAmalgam: Assembling volley...");
-
+    fn assemble(key: VolleyId, acc: Self::Accumulator) -> Option<Self::Output> {
         if acc.artifacts.is_empty() {
-            warn!(key = %key, "VolleyAmalgam: Artifacts empty. Aborting.");
             return None;
         }
 
-        let mut sorted_artifacts: Vec<WitnessEnvelope> = Vec::with_capacity(acc.artifacts.len());
+        let mut sorted_envelopes: Vec<WitnessEnvelope> = Vec::with_capacity(acc.artifacts.len());
         let mut gaps = Vec::new();
         let clock = TrustedClock::new();
+        let now = clock.forensic_now().ok()?;
 
-        // Explicit error handling for the forensic clock to ensure reliability
-        let now = match clock.forensic_now() {
-            Ok(timestamp) => timestamp,
-            Err(err) => {
-                error!(key = %key, error = %err, "VolleyAmalgam: Failed to acquire forensic timestamp");
-                return None;
-            }
-        };
+        let mut expected_seq: Option<StorageSequence> = None;
+        let mut last_signature_hash: Option<SignatureHash> = None;
 
-        let mut expected_seq: Option<u32> = None;
-
-        // Logic assumes acc.artifacts is sorted by sequence number
+        // BTreeMap guarantees we iterate by StorageSequence order
         for (seq, env) in acc.artifacts {
-            let current_seq = seq.0;
+            let current_seq: StorageSequence = seq;
 
+            // 1. SEQUENCE CONTINUITY CHECK
             if let Some(expected) = expected_seq {
                 if current_seq > expected {
-                    // Gap detected: sequence numbers are non-contiguous
+                    // Detected a sequence gap - create an attributed ForensicGap
                     gaps.push(ForensicGap {
+                        volley_id: key.clone(), // FIX: Every gap belongs to the Volley
                         start_seq: expected,
                         end_seq: current_seq - 1,
                         detected_at: now,
                     });
+
+                    // Note: A gap breaks the hash-link by definition.
+                    // In a 'Healable' timeline, we reset the link anchor here.
+                    last_signature_hash = None;
                 }
             }
+
+            // 2. CAUSALITY (HASH-LINK) VERIFICATION
+            // Only verify link if there wasn't just a gap or if it's not the first unit
+            if let (Some(expected_hash), Some(actual_link)) = (last_signature_hash, env.prev_hash) {
+                if expected_hash != actual_link {
+                    error!(
+                        volley_id = %key,
+                        seq = %current_seq,
+                        "VolleyAmalgam: CAUSALITY BREACH - Hash link mismatch detected"
+                    );
+                    // In Zero-Trust, a breach means we discard the assembly to prevent corruption
+                    return None;
+                }
+            }
+
+            // Update state for next iteration
             expected_seq = Some(current_seq + 1);
-            sorted_artifacts.push(env);
+            last_signature_hash = Some(env.signature_hash());
+            sorted_envelopes.push(env);
         }
 
-        info!(id = %acc.volley_id, "VolleyAmalgam: Assembly SUCCESS");
+        info!(
+            volley_id = %key,
+            artifacts = %sorted_envelopes.len(),
+            gaps = %gaps.len(),
+            "VolleyAmalgam: Finalized chain with verified causality"
+        );
+
+        let gaps_2 = gaps.clone();
 
         Some(Volley {
-            id: acc.volley_id,
+            id: key.clone(),
             owner_did: acc.owner_did,
-            artifacts: sorted_artifacts,
+            artifacts: sorted_envelopes,
             gaps,
-            is_complete: true,
+            is_complete: gaps_2.is_empty(),
         })
     }
 }

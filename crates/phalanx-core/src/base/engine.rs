@@ -10,7 +10,9 @@ use tracing::{error, info, warn};
 use crate::base::config::PhalanxConfig;
 use crate::base::types::{MeshTopic, NodeMode, TrafficGovernor};
 use crate::primitives::identity::{init_identity, Did, IdentityError, NetworkId, PhalanxIdentity};
-use crate::primitives::shards::{Evidence, ShardChunk, ShardError, ShardId, WitnessEnvelope};
+use crate::primitives::shards::{
+    CausalitySession, Evidence, ShardChunk, ShardError, ShardId, VolleyId, WitnessEnvelope,
+};
 use crate::primitives::time::{TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
 use crate::security::retrieval::RetrievalOrchestrator;
@@ -23,7 +25,7 @@ use crate::transport::network_transport::NetworkTransport;
 use crate::transport::protocol::VolleyResponse;
 
 // IMPORT ALL GATES
-use crate::security::gate::{ForensicGate, PrivacyGate, WitnessGate};
+use crate::security::gate::{ForensicGate, PrivacyGate};
 use crate::storage::kademlia::PeerEvaluator;
 
 pub use libp2p::pnet::PreSharedKey;
@@ -40,6 +42,10 @@ pub enum EngineError {
     Time(#[from] TimeError),
     #[error("Fatal simulator state: {0}")]
     Simulation(String),
+    #[error("Security breach: {0}")]
+    SecurityBreach(String),
+    #[error("Critical storage failure: {0}")]
+    StorageFailure(String),
 }
 
 pub struct NoOpJournal;
@@ -61,7 +67,7 @@ impl TransientJournal for NoOpJournal {
 
 /// Encapsulates a one-time request for forensic data extraction sent to the StorageActor.
 pub struct RetrievalQuery {
-    pub target_did: Did,
+    pub volley_id: VolleyId,
     pub reply_to: oneshot::Sender<Result<Vec<WitnessEnvelope>, GuardianError>>,
 }
 
@@ -126,7 +132,7 @@ impl<J: TransientJournal> StorageActor<J> {
     }
 
     async fn handle_retrieval_query(&self, query: RetrievalQuery) {
-        let result = match self.guardian.get_active_volley_shards(&query.target_did) {
+        let result = match self.guardian.get_active_volley_shards(&query.volley_id) {
             Some(shard_map) => {
                 let envelopes: Vec<WitnessEnvelope> = shard_map.values().cloned().collect();
                 Ok(envelopes)
@@ -179,7 +185,7 @@ pub struct PhalanxEngine<T: NetworkTransport, J: TransientJournal> {
     pub governor: TrafficGovernor,
     pub mode: NodeMode,
     pub config: PhalanxConfig,
-    pub identity: PhalanxIdentity,
+    pub identity: Arc<PhalanxIdentity>,
     pub clock: TrustedClock,
     pub network: T,
     pub video_rx: mpsc::Receiver<crate::primitives::shards::VideoShard>,
@@ -191,6 +197,7 @@ pub struct PhalanxEngine<T: NetworkTransport, J: TransientJournal> {
     pub storage_task: JoinHandle<()>,
     pub _journal_phantom: std::marker::PhantomData<J>,
     pub query_tx: mpsc::Sender<RetrievalQuery>,
+    pub session: CausalitySession,
 }
 
 impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T, J> {
@@ -230,9 +237,12 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
             storage_actor.run().await;
         });
 
+        let arc_identity = Arc::new(identity).clone();
+        let session = CausalitySession::new(arc_identity.clone(), local_network_id);
+
         Ok(Self {
             config,
-            identity,
+            identity: arc_identity.clone(),
             clock: TrustedClock::new(),
             network,
             trust_registry,
@@ -249,6 +259,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
             storage_task,
             _journal_phantom: std::marker::PhantomData,
             query_tx,
+            session,
         })
     }
 
@@ -348,6 +359,38 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
         Ok(())
     }
 
+    async fn promote_evidence(&mut self, evidence: Evidence) -> Result<(), EngineError> {
+        let local_network_id = self.identity.to_network_id();
+        let topic = MeshTopic::new("phalanx/1.0.0"); // Standard forensic topic
+
+        // 1. Seal via Session (Updates causality)
+        let envelope = self
+            .session
+            .seal_evidence(evidence)
+            .map_err(|e| EngineError::SecurityBreach(e.to_string()))?;
+
+        // 2. Fragment
+        let shard_id = ShardId(self.seq_counter as u32);
+        let chunks = envelope
+            .chunkify(shard_id)
+            .map_err(|e| EngineError::SecurityBreach(e.to_string()))?;
+
+        // 3. FIX: Send as a tuple to satisfy the Ingress pipeline
+        for chunk in chunks {
+            if let Err(e) = self
+                .chunk_tx
+                .send((chunk, topic.clone(), local_network_id))
+                .await
+            {
+                error!("Engine: Loopback channel failed: {}", e);
+                return Err(EngineError::StorageFailure(e.to_string()));
+            }
+        }
+
+        self.seq_counter += 1;
+        Ok(())
+    }
+
     async fn handle_forensic_violation(
         &mut self,
         peer_id: NetworkId,
@@ -409,7 +452,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
 
         let chunks_result = evidence
             .safeguard(&self.network_key)
-            .and_then(|ev| ev.seal(&self.identity, local_network_id))
+            .and_then(|ev| self.session.seal_evidence(ev))
             .and_then(|env| env.chunkify(shard_id))
             .gate(
                 "egress_gate_failure",

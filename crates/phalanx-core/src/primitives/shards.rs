@@ -13,6 +13,7 @@ use crate::security::e2ee::{decrypt_bytes, encrypt_bytes, CryptoError, Symmetric
 use crate::security::gate::ChronosGate;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 // =====================
 // DATA STRUCTURES
@@ -331,14 +332,14 @@ pub struct Volley {
 }
 
 /// A stateful session that maintains the causality chain for a specific timeline.
-pub struct CausalitySession<'a> {
-    identity: &'a PhalanxIdentity,
+pub struct CausalitySession {
+    identity: Arc<PhalanxIdentity>,
     peer_id: NetworkId,
     last_hash: Option<SignatureHash>,
 }
 
-impl<'a> CausalitySession<'a> {
-    pub fn new(identity: &'a PhalanxIdentity, peer_id: NetworkId) -> Self {
+impl CausalitySession {
+    pub fn new(identity: Arc<PhalanxIdentity>, peer_id: NetworkId) -> Self {
         Self {
             identity,
             peer_id,
@@ -349,7 +350,8 @@ impl<'a> CausalitySession<'a> {
     /// The ONLY way to produce a sealed envelope.
     /// Automatically updates the internal hash chain.
     pub fn seal_evidence(&mut self, evidence: Evidence) -> Result<WitnessEnvelope, ShardError> {
-        let envelope = WitnessEnvelope::new(evidence, self.identity, self.peer_id, self.last_hash)?;
+        let envelope =
+            WitnessEnvelope::new(evidence, &*self.identity, self.peer_id, self.last_hash)?;
 
         // Update the state for the NEXT call
         self.last_hash = Some(envelope.signature_hash());

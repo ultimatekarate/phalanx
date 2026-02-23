@@ -5,7 +5,7 @@ use crate::base::config::PhalanxConfig;
 use crate::base::types::ByteCapacity;
 use crate::primitives::identity::Did;
 use crate::primitives::shards::{
-    EnvelopeState, FragmentedEnvelope, StorageSequence, Volley, WitnessEnvelope,
+    EnvelopeState, FragmentedEnvelope, StorageSequence, Volley, VolleyId, WitnessEnvelope,
 };
 use crate::primitives::time::TimeError;
 use crate::storage::crucible::Crucible;
@@ -170,11 +170,12 @@ impl Guardian {
 
     pub fn get_active_volley_shards(
         &self,
-        did: &Did,
+        volley_id: &VolleyId, // 1. FIX: Use the specific stream ID, not the person
     ) -> Option<&BTreeMap<StorageSequence, WitnessEnvelope>> {
         self.crucible
-            .get(&did.to_string())
-            .map(|buffer| &buffer.artifacts)
+            .contexts // 2. FIX: Crucible doesn't have .get(), its BTreeMap is 'contexts'
+            .get(volley_id) // 3. FIX: No more .to_string()!
+            .map(|ctx| &ctx.accumulator.artifacts) // 4. FIX: Access through WorkContext wrapper
     }
 }
 
@@ -204,8 +205,9 @@ mod tests {
             payload: DataPayload::Clear(vec![1, 2, 3]),
         };
 
-        let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, NetworkId::random())
-            .expect("WitnessEnvelope construction failed");
+        let envelope =
+            WitnessEnvelope::new(Evidence::Video(shard), &identity, NetworkId::random(), None)
+                .expect("WitnessEnvelope construction failed");
 
         let result = guardian
             .ingest_envelope(EnvelopeState::Intact(envelope))
@@ -225,5 +227,37 @@ mod tests {
             shards_map.contains_key(&StorageSequence(1)),
             "Volley buffer should contain the ingested sequence ID"
         );
+    }
+
+    async fn test_guardian_ingestion_cycle() {
+        let temp_dir = tempdir().expect("Failed to create temporary directory");
+        let vault_path = temp_dir.path().to_string_lossy().to_string();
+
+        let (identity, _) = PhalanxIdentity::generate().unwrap();
+        let config = PhalanxConfig::default();
+        let mut guardian = Guardian::new(&vault_path, &config, identity.did.clone());
+
+        let shard = VideoShard {
+            timestamp: PhalanxTimestamp::now(),
+            sequence_id: StorageSequence(1),
+            fps: 30,
+            volley_id: VolleyId::new("v1"),
+            payload: DataPayload::Clear(vec![1, 2, 3]),
+        };
+
+        // FIX: Add 'None' as the 4th argument (the causality link)
+        let envelope = WitnessEnvelope::new(
+            Evidence::Video(shard),
+            &identity,
+            NetworkId::random(),
+            None, // Start of causality chain
+        )
+        .expect("WitnessEnvelope construction failed");
+
+        let result = guardian
+            .ingest_envelope(EnvelopeState::Intact(envelope))
+            .await;
+
+        assert!(result.is_ok());
     }
 }
