@@ -11,6 +11,7 @@ pub enum NetworkEvent {
     },
     PeerDiscovered(NetworkId),
     RetrievalRequested {
+        origin: NetworkId,
         request: VolleyRequest,
         channel_id: String,
     },

@@ -163,6 +163,7 @@ async fn test_storage_actor_metric_pipeline() {
     };
 
     let guardian = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
+    let (_query_tx, query_rx) = tokio::sync::mpsc::channel(100);
 
     let storage_actor = StorageActor {
         reassembler: Reassembler::new(),
@@ -173,6 +174,7 @@ async fn test_storage_actor_metric_pipeline() {
         chunk_rx,
         forensic_tx,
         local_peer_id: local_peer_id.clone(),
+        query_rx,
     };
 
     // 3. Start the Actor in a background task

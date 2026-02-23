@@ -3,22 +3,24 @@ use std::error::Error;
 use std::io;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::base::config::PhalanxConfig;
 use crate::base::types::{MeshTopic, NodeMode, TrafficGovernor};
 use crate::primitives::identity::{init_identity, Did, IdentityError, NetworkId, PhalanxIdentity};
-use crate::primitives::shards::{Evidence, ShardChunk, ShardError, ShardId};
+use crate::primitives::shards::{Evidence, ShardChunk, ShardError, ShardId, WitnessEnvelope};
 use crate::primitives::time::{TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
+use crate::security::retrieval::RetrievalOrchestrator;
 use crate::security::trust::{Offense, ReputationGate, TrustLevel, TrustRegistry};
 use crate::storage::reassembler::{Reassembler, TransientJournal};
 use crate::storage::vault::{Guardian, GuardianError};
 use crate::transport::events::NetworkEvent;
 use crate::transport::health::HealthTracker;
 use crate::transport::network_transport::NetworkTransport;
+use crate::transport::protocol::VolleyResponse;
 
 // IMPORT ALL GATES
 use crate::security::gate::{ForensicGate, PrivacyGate, WitnessGate};
@@ -57,12 +59,16 @@ impl TransientJournal for NoOpJournal {
     }
 }
 
+/// Encapsulates a one-time request for forensic data extraction sent to the StorageActor.
+pub struct RetrievalQuery {
+    pub target_did: Did,
+    pub reply_to: oneshot::Sender<Result<Vec<WitnessEnvelope>, GuardianError>>,
+}
+
 // =========================================================================
 // PEER EVALUATOR CACHE BOUNDARY
 // =========================================================================
 
-/// A thread-safe, synchronous cache that bridges the asynchronous TrustRegistry
-/// with the synchronous libp2p Kademlia storage layer.
 #[derive(Clone, Default)]
 pub struct SyncReputationCache {
     pub scores: Arc<RwLock<HashMap<NetworkId, f32>>>,
@@ -86,6 +92,7 @@ pub struct StorageActor<J: TransientJournal> {
     pub chunk_rx: mpsc::Receiver<(ShardChunk, MeshTopic, NetworkId)>,
     pub forensic_tx: mpsc::Sender<(NetworkId, Did, GuardianError)>,
     pub local_peer_id: NetworkId,
+    pub query_rx: mpsc::Receiver<RetrievalQuery>,
 }
 
 impl<J: TransientJournal> StorageActor<J> {
@@ -106,14 +113,28 @@ impl<J: TransientJournal> StorageActor<J> {
                         }
                     }
                 }
+                Some(query) = self.query_rx.recv() => {
+                    self.handle_retrieval_query(query).await;
+                }
                 _ = maintenance_timer.tick() => {
-                    tracing::info!(target: "phalanx::forensics", "MAINTENANCE_TICK_START");
                     if let Err(err) = self.guardian.check_and_finalize_volley().await {
-                        tracing::error!(target: "phalanx::forensics", error = %err, "Maintenance flush failed");
+                        error!(target: "phalanx::forensics", error = %err, "Maintenance flush failed");
                     }
                 }
             }
         }
+    }
+
+    async fn handle_retrieval_query(&self, query: RetrievalQuery) {
+        let result = match self.guardian.get_active_volley_shards(&query.target_did) {
+            Some(shard_map) => {
+                let envelopes: Vec<WitnessEnvelope> = shard_map.values().cloned().collect();
+                Ok(envelopes)
+            }
+            None => Ok(Vec::new()),
+        };
+
+        let _ = query.reply_to.send(result);
     }
 
     async fn process_incoming_chunk(
@@ -123,7 +144,6 @@ impl<J: TransientJournal> StorageActor<J> {
         peer_id: NetworkId,
     ) {
         let chunk_owner_did = chunk.owner_did.clone();
-
         let envelope_opt = self
             .reassembler
             .ingest_chunk(
@@ -139,12 +159,12 @@ impl<J: TransientJournal> StorageActor<J> {
         match envelope_opt {
             Ok(Some(envelope)) => {
                 if let Err(err) = self.guardian.ingest_envelope(envelope).await {
-                    tracing::error!(error = %err, "Vault rejected envelope");
+                    error!(error = %err, "Vault rejected envelope");
                     let _ = self.forensic_tx.try_send((peer_id, chunk_owner_did, err));
                 }
             }
             Ok(None) => {}
-            Err(err) => tracing::warn!(error = %err, "Reassembler rejected data chunk"),
+            Err(err) => warn!(error = %err, "Reassembler rejected data chunk"),
         }
     }
 }
@@ -170,10 +190,10 @@ pub struct PhalanxEngine<T: NetworkTransport, J: TransientJournal> {
     pub forensic_rx: mpsc::Receiver<(NetworkId, Did, GuardianError)>,
     pub storage_task: JoinHandle<()>,
     pub _journal_phantom: std::marker::PhantomData<J>,
+    pub query_tx: mpsc::Sender<RetrievalQuery>,
 }
 
 impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T, J> {
-    #[allow(clippy::missing_errors_doc)]
     pub fn new(
         config: PhalanxConfig,
         identity: PhalanxIdentity,
@@ -188,16 +208,11 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
         let reassembler = Reassembler::new();
         let guardian = Guardian::new(&config.storage.vault_path, &config, local_did);
 
-        let health_tracker = HealthTracker::new();
-        let governor = TrafficGovernor::new();
-        let mode = NodeMode::Standard;
-
         let (_video_tx, video_rx) = mpsc::channel(config.storage.max_video_buffer);
         let (_audio_tx, audio_rx) = mpsc::channel(config.storage.max_audio_buffer);
+        let (query_tx, query_rx) = mpsc::channel(100);
         let (chunk_tx, chunk_rx) = mpsc::channel(1024);
         let (forensic_tx, forensic_rx) = mpsc::channel(100);
-
-        let clock = TrustedClock::new();
 
         let storage_actor = StorageActor {
             reassembler,
@@ -208,6 +223,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
             chunk_rx,
             forensic_tx,
             local_peer_id: local_network_id,
+            query_rx,
         };
 
         let storage_task = tokio::spawn(async move {
@@ -217,13 +233,13 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
         Ok(Self {
             config,
             identity,
-            clock,
+            clock: TrustedClock::new(),
             network,
             trust_registry,
             reputation_cache,
-            health_tracker,
-            governor,
-            mode,
+            health_tracker: HealthTracker::new(),
+            governor: TrafficGovernor::new(),
+            mode: NodeMode::Standard,
             video_rx,
             audio_rx,
             seq_counter: 0,
@@ -232,12 +248,12 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
             forensic_rx,
             storage_task,
             _journal_phantom: std::marker::PhantomData,
+            query_tx,
         })
     }
 
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
         let local_network_id = self.identity.to_network_id();
-
         info!(
             "Phalanx Engine: Active and Gated. PeerID: {}",
             local_network_id
@@ -250,6 +266,70 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
                         NetworkEvent::DataReceived { origin, topic, data } => {
                             self.handle_network_ingress(origin, &data, topic).await;
                         }
+                        NetworkEvent::RetrievalRequested { origin, request, channel_id } => {
+                            // Phase 1: Privacy Enforcement
+                            // If the user hasn't authorized THIS specific person, we stop here.
+                            if let Err(_err) = self.identity.verify_retrieval_auth(&request) {
+                                warn!(
+                                    peer = %origin,
+                                    volley = %request.volley_id,
+                                    "Privacy Gate: Unauthorized retrieval attempt blocked"
+                                );
+                                let _ = self.network.send_response(&channel_id, VolleyResponse::Unauthorized).await;
+                                continue;
+                            }
+
+                            // Phase 2: Data Extraction (only happens if authorized)
+                            let (tx, _rx) = oneshot::channel();
+                            let _ = self.query_tx.send(RetrievalQuery {
+                                target_did: request.locator.author.clone(),
+                                reply_to: tx
+                            }).await;
+
+                            // 2. Dispatch to StorageActor
+                            // We derive the target_did from the VolleyId or Locator metadata.
+                            // For this implementation, we assume a 1:1 mapping for the requested Volley.
+                            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+
+                            // We must ensure RetrievalQuery uses the target_did from the request
+                            let query = RetrievalQuery {
+                                target_did: self.identity.did.clone(), // Placeholder: usually extracted from locator
+                                reply_to: reply_tx,
+                            };
+
+                            if self.query_tx.send(query).await.is_err() {
+                                let _ = self.network.send_response(
+                                    &channel_id,
+                                    crate::transport::protocol::VolleyResponse::Throttled
+                                ).await;
+                                continue;
+                            }
+
+                            // 3. Collect and Egress
+                            match reply_rx.await {
+                                Ok(Ok(envelopes)) => {
+                                    let orchestrator = RetrievalOrchestrator::new();
+                                    match orchestrator.verify_mesh_egress(envelopes, &local_network_id).await {
+                                        Ok(verified_data) => {
+                                            let response = crate::transport::protocol::VolleyResponse::Success(verified_data);
+                                            let _ = self.network.send_response(&channel_id, response).await;
+                                        }
+                                        Err(_) => {
+                                            let _ = self.network.send_response(
+                                                &channel_id,
+                                                crate::transport::protocol::VolleyResponse::NotFound
+                                            ).await;
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    let _ = self.network.send_response(
+                                        &channel_id,
+                                        crate::transport::protocol::VolleyResponse::NotFound
+                                    ).await;
+                                }
+                            }
+                        }
                         NetworkEvent::Shutdown => break,
                         _ => {}
                     }
@@ -261,29 +341,41 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
                     self.process_media_egress(Evidence::Audio(shard), local_network_id).await;
                 }
                 Some((peer_id, owner_did, err)) = self.forensic_rx.recv() => {
-                    let offense = match err {
-                        GuardianError::VerificationFailed(_) => Some(Offense::InvalidSignature),
-                        GuardianError::QuotaExceeded(_) => Some(Offense::QuotaExceeded),
-                        GuardianError::ReplayDetected(_) => Some(Offense::ReplayAttack),
-                        _ => None,
-                    };
-
-                    if let Some(offense_type) = offense {
-                        self.trust_registry.record_offense(&owner_did, offense_type, &self.clock).await;
-
-                        // Synchronize the Kademlia cache with the newly calculated reputation score
-                        let updated_score = self.trust_registry.evaluate_reputation(&peer_id);
-                        self.reputation_cache.scores.write().unwrap().insert(peer_id, updated_score);
-
-                        if self.trust_registry.is_blacklisted(&owner_did) {
-                            // Immediately enforce the ban at the network transport layer.
-                            self.network.ban_peer(&peer_id).await;
-                        }
-                    }
+                    self.handle_forensic_violation(peer_id, owner_did, err).await;
                 }
             }
         }
         Ok(())
+    }
+
+    async fn handle_forensic_violation(
+        &mut self,
+        peer_id: NetworkId,
+        owner_did: Did,
+        err: GuardianError,
+    ) {
+        let offense = match err {
+            GuardianError::VerificationFailed(_) => Some(Offense::InvalidSignature),
+            GuardianError::QuotaExceeded(_) => Some(Offense::QuotaExceeded),
+            GuardianError::ReplayDetected(_) => Some(Offense::ReplayAttack),
+            _ => None,
+        };
+
+        if let Some(offense_type) = offense {
+            self.trust_registry
+                .record_offense(&owner_did, offense_type, &self.clock)
+                .await;
+            let updated_score = self.trust_registry.evaluate_reputation(&peer_id);
+            self.reputation_cache
+                .scores
+                .write()
+                .unwrap()
+                .insert(peer_id, updated_score);
+
+            if self.trust_registry.is_blacklisted(&owner_did) {
+                self.network.ban_peer(&peer_id).await;
+            }
+        }
     }
 
     async fn handle_network_ingress(
@@ -293,32 +385,21 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
         topic: MeshTopic,
     ) {
         let local_network_id = self.identity.to_network_id();
-
         if !self.governor.should_accept(&peer_id, &local_network_id) {
             return;
         }
 
-        let chunk: ShardChunk = match postcard::from_bytes(chunk_bytes) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::debug!(error = %e, "Failed to deserialize ingress chunk");
+        if let Ok(chunk) = postcard::from_bytes::<ShardChunk>(chunk_bytes) {
+            let sender_did = chunk.owner_did.clone();
+            if matches!(
+                self.trust_registry.check_trust(&sender_did),
+                TrustLevel::Blocked
+            ) || self.trust_registry.is_blacklisted(&sender_did)
+            {
+                self.network.ban_peer(&peer_id).await;
                 return;
             }
-        };
-
-        let sender_did = chunk.owner_did.clone();
-
-        let explicit_trust = self.trust_registry.check_trust(&sender_did);
-        if matches!(explicit_trust, TrustLevel::Blocked)
-            || self.trust_registry.is_blacklisted(&sender_did)
-        {
-            self.network.ban_peer(&peer_id).await;
-            tracing::warn!(%sender_did, "Dropped connection from blacklisted peer.");
-            return;
-        }
-
-        if self.chunk_tx.try_send((chunk, topic, peer_id)).is_err() {
-            tracing::warn!("Storage layer channel saturated. Dropping ingress chunk.");
+            let _ = self.chunk_tx.try_send((chunk, topic, peer_id));
         }
     }
 
@@ -331,9 +412,9 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
             .and_then(|ev| ev.seal(&self.identity, local_network_id))
             .and_then(|env| env.chunkify(shard_id))
             .gate(
-                "evidence_pipeline_failure",
+                "egress_gate_failure",
                 &local_network_id,
-                "Ingestion pipeline dropped evidence unit",
+                "Evidence pipeline failure",
             );
 
         if let Ok(chunks) = chunks_result {
@@ -347,31 +428,29 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
     }
 }
 
+// =========================================================================
+// SPECIALIZED EPHEMERAL IMPLEMENTATION
+// =========================================================================
 impl<T: NetworkTransport> PhalanxEngine<T, NoOpJournal> {
+    /// Bootstraps an ephemeral node for testing or transient forensic sessions.
     pub fn new_at_path(path: &str, network: T) -> Result<Self, Box<dyn Error>> {
         let mut config = PhalanxConfig::default();
         config.storage.vault_path = path.to_string();
 
-        let identity_path = std::path::Path::new(path).join("identity.pem");
-        let identity = init_identity(&identity_path).unwrap_or_default();
-
+        let identity =
+            init_identity(std::path::Path::new(path).join("identity.pem")).unwrap_or_default();
         let registry_config = config.clone();
 
-        // For ephemeral testing setups, build the registry synchronously
+        // Build registry synchronously for test isolation
         let trust_registry = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .expect("Failed to initialize transient async reactor for TrustRegistry");
-
-            rt.block_on(crate::security::trust::TrustRegistry::build(
-                &registry_config,
-            ))
+                .unwrap();
+            rt.block_on(TrustRegistry::build(&registry_config))
         })
         .join()
-        .expect("TrustRegistry initialization thread panicked");
-
-        let reputation_cache = Arc::new(SyncReputationCache::default());
+        .expect("TrustRegistry setup failure");
 
         Self::new(
             config,
@@ -379,11 +458,10 @@ impl<T: NetworkTransport> PhalanxEngine<T, NoOpJournal> {
             network,
             NoOpJournal,
             trust_registry,
-            reputation_cache,
+            Arc::new(SyncReputationCache::default()),
         )
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

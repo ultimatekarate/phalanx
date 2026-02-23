@@ -389,6 +389,34 @@ impl PhalanxIdentity {
         let libp2p_key = self.to_libp2p_keypair();
         NetworkId(libp2p_key.public().to_peer_id())
     }
+
+    pub fn verify_retrieval_auth(
+        &self,
+        request: &crate::transport::protocol::VolleyRequest,
+    ) -> Result<(), IdentityError> {
+        // 1. Identify the intended recipient from the locator (The "Who")
+        // We assume the locator has been extended to include the target recipient.
+        let recipient_did = &request.locator.recipient_did;
+
+        // 2. Prevent "Locator Theft"
+        // Even if an attacker has the locator, they cannot produce this signature.
+        let challenge = request.volley_id.as_str().as_bytes();
+
+        // 3. Perform the cryptographic check
+        if !Self::verify(recipient_did.0.as_bytes(), challenge, &request.signature) {
+            error!("Privacy Gate Violation: Requester is not the authorized recipient.");
+            return Err(IdentityError::CryptoError(
+                "Identity mismatch in retrieval grant".into(),
+            ));
+        }
+
+        info!(
+            volley = %request.volley_id,
+            recipient = %recipient_did,
+            "Privacy Gate: Authorized access granted by author."
+        );
+        Ok(())
+    }
 }
 
 impl Default for PhalanxIdentity {

@@ -73,8 +73,9 @@ impl NetworkTransport for Libp2pAdapter {
 
                     // Store the one-shot channel token
                     self.pending_responses.insert(channel_id.clone(), channel);
-
+                    let origin = NetworkId::random(); // TODO: This is temporary.
                     return Some(NetworkEvent::RetrievalRequested {
+                        origin,
                         request,
                         channel_id,
                     });

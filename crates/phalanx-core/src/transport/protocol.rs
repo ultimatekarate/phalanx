@@ -1,3 +1,4 @@
+use crate::primitives::identity::Did;
 use crate::primitives::shards::{VolleyId, WitnessEnvelope};
 use crate::security::grant::SealedLocator;
 use serde::{Deserialize, Serialize};
@@ -15,8 +16,10 @@ use crate::security::locator::PhalanxLocator;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolleyRequest {
+    pub target_did: Did,
     pub volley_id: VolleyId,
     pub locator: PhalanxLocator,
+    pub signature: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,8 +128,10 @@ where
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetrievalRequest {
-    pub volley_id: VolleyId,
-    pub locator: SealedLocator, // Forensic proof of access
+    pub target_did: crate::primitives::identity::Did, // The owner of the forensic data
+    pub volley_id: VolleyId,                          // Specific collection identifier
+    pub locator: SealedLocator,                       // Forensic grant
+    pub signature: Vec<u8>,                           // Proof of requester identity
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
