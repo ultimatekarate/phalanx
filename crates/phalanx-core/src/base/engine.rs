@@ -291,28 +291,14 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
                             }
 
                             // Phase 2: Data Extraction (only happens if authorized)
-                            let (tx, _rx) = oneshot::channel();
-                            let _ = self.query_tx.send(RetrievalQuery {
-                                target_did: request.locator.author.clone(),
-                                reply_to: tx
-                            }).await;
-
-                            // 2. Dispatch to StorageActor
-                            // We derive the target_did from the VolleyId or Locator metadata.
-                            // For this implementation, we assume a 1:1 mapping for the requested Volley.
-                            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-
-                            // We must ensure RetrievalQuery uses the target_did from the request
+                            let (reply_tx, reply_rx) = oneshot::channel();
                             let query = RetrievalQuery {
-                                target_did: self.identity.did.clone(), // Placeholder: usually extracted from locator
+                                volley_id: request.volley_id.clone(), // Use the VolleyId from the protocol
                                 reply_to: reply_tx,
                             };
 
                             if self.query_tx.send(query).await.is_err() {
-                                let _ = self.network.send_response(
-                                    &channel_id,
-                                    crate::transport::protocol::VolleyResponse::Throttled
-                                ).await;
+                                let _ = self.network.send_response(&channel_id, VolleyResponse::Throttled).await;
                                 continue;
                             }
 
@@ -359,7 +345,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
         Ok(())
     }
 
-    async fn promote_evidence(&mut self, evidence: Evidence) -> Result<(), EngineError> {
+    async fn _promote_evidence(&mut self, evidence: Evidence) -> Result<(), EngineError> {
         let local_network_id = self.identity.to_network_id();
         let topic = MeshTopic::new("phalanx/1.0.0"); // Standard forensic topic
 

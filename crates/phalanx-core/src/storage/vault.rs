@@ -197,14 +197,18 @@ mod tests {
         let config = PhalanxConfig::default();
         let mut guardian = Guardian::new(&vault_path, &config, identity.did.clone());
 
+        // Define a specific VolleyId for this stream
+        let vid = VolleyId::new("v1");
+
         let shard = VideoShard {
             timestamp: PhalanxTimestamp::now(),
             sequence_id: StorageSequence(1),
             fps: 30,
-            volley_id: VolleyId::new("v1"),
+            volley_id: vid.clone(), // Use the VolleyId here
             payload: DataPayload::Clear(vec![1, 2, 3]),
         };
 
+        // 2. Seal the unit (The 4th argument is None for the start of the chain)
         let envelope =
             WitnessEnvelope::new(Evidence::Video(shard), &identity, NetworkId::random(), None)
                 .expect("WitnessEnvelope construction failed");
@@ -214,12 +218,12 @@ mod tests {
             .await;
         assert!(result.is_ok(), "Ingestion failed: {:?}", result.err());
 
-        // 3. Verify Crucible state mutation via public API
-        let active_shards = guardian.get_active_volley_shards(&identity.did);
+        // 3. FIX: Verify Crucible state mutation using the VolleyId, NOT the Did
+        let active_shards = guardian.get_active_volley_shards(&vid);
 
         assert!(
             active_shards.is_some(),
-            "Crucible should contain an active volley buffer for this DID"
+            "Crucible should contain an active volley buffer for this VolleyId"
         );
 
         let shards_map = active_shards.unwrap();
@@ -229,6 +233,7 @@ mod tests {
         );
     }
 
+    #[tokio::test]
     async fn test_guardian_ingestion_cycle() {
         let temp_dir = tempdir().expect("Failed to create temporary directory");
         let vault_path = temp_dir.path().to_string_lossy().to_string();
