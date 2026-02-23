@@ -7,6 +7,8 @@ use libp2p::{
     SwarmBuilder, Transport,
 };
 
+use std::sync::Arc;
+
 use std::error::Error;
 use std::fs;
 use std::path::Path;
@@ -16,8 +18,7 @@ use crate::base::config::{PhalanxConfig, PhalanxPhysics};
 use crate::base::types::{PowerState, UnitInterval, VitalityRate};
 use crate::primitives::identity::NetworkId;
 use crate::security::gate::ForensicGate;
-use crate::storage::kademlia::RedbStore;
-
+use crate::storage::kademlia::{PeerEvaluator, RedbStore};
 use crate::transport::protocol::{PhalanxRetrievalProtocol, VolleyRequest, VolleyResponse};
 use libp2p::request_response::{self, ProtocolSupport};
 
@@ -330,13 +331,18 @@ pub fn setup_phalanx_swarm(
     config: &PhalanxConfig,
     physics: &PhalanxPhysics,
     psk: Option<PreSharedKey>,
+    evaluator: Arc<dyn PeerEvaluator>,
 ) -> Result<Swarm<PhalanxBehaviour>, Box<dyn Error>> {
     let local_peer_id = local_key.public().to_peer_id();
     tracing::info!(peer_id=%local_peer_id, "Initializing Network Stack...");
 
     // 1. Initialize Persistent Kademlia Store
     let dht_db_path = Path::new(&config.storage.vault_path).join("dht_store.redb");
-    let persistent_store = RedbStore::new(&dht_db_path, local_peer_id)?;
+
+    // Type conversion required by the refactored RedbStore signature
+    let local_network_id = NetworkId::from(local_peer_id);
+
+    let persistent_store = RedbStore::new(&dht_db_path, local_network_id, evaluator)?;
 
     let protocol_str = format!("/phalanx/kad/{}", config.network.protocol_version);
 
@@ -361,12 +367,11 @@ pub fn setup_phalanx_swarm(
         ProtocolSupport::Full,
     )];
 
-    // Use with_codec instead of new to supply the PhalanxRetrievalProtocol explicitly
     let _retrieval: request_response::Behaviour<PhalanxRetrievalProtocol> =
         request_response::Behaviour::with_codec(
-            PhalanxRetrievalProtocol, // Arg 1: The Codec
-            protocols,                // Arg 2: The Protocols
-            retrieval_config,         // Arg 3: The Config
+            PhalanxRetrievalProtocol,
+            protocols,
+            retrieval_config,
         );
 
     let swarm = SwarmBuilder::with_existing_identity(local_key.clone())
@@ -388,6 +393,12 @@ pub fn setup_phalanx_swarm(
     Ok(swarm)
 }
 
+struct MockEvaluator;
+impl PeerEvaluator for MockEvaluator {
+    fn evaluate_reputation(&self, _peer_id: &NetworkId) -> f32 {
+        1.0 // Baseline neutral for tests
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,7 +453,9 @@ mod tests {
         // Setup ephemeral RedbStore for testing
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test_dht.redb");
-        let store = RedbStore::new(&db_path, local_peer_id).unwrap();
+        let local_network_id = NetworkId::from(local_peer_id);
+        let store = RedbStore::new(&db_path, local_network_id, Arc::new(MockEvaluator)).unwrap();
+
         let kademlia = kad::Behaviour::with_config(local_peer_id, store, kad::Config::default());
 
         let (_, relay_client_behaviour) = relay::client::new(local_peer_id);
@@ -470,7 +483,9 @@ mod tests {
         let network_id = NetworkId::from(local_peer_id); // Explicit ID
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test_dht.redb");
-        let store = RedbStore::new(&db_path, local_peer_id).unwrap();
+        let local_network_id = NetworkId::from(local_peer_id);
+        let store = RedbStore::new(&db_path, local_network_id, Arc::new(MockEvaluator)).unwrap();
+
         let kademlia = kad::Behaviour::with_config(local_peer_id, store, kad::Config::default());
 
         let (_, relay_client_behaviour) = relay::client::new(local_peer_id);

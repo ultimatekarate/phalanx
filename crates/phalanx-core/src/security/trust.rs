@@ -1,6 +1,9 @@
 use crate::base::config::PhalanxConfig;
 use crate::primitives::identity::Did;
+use crate::primitives::identity::NetworkId;
 use crate::primitives::time::{PhalanxTimestamp, TimeError, TrustedClock};
+use crate::storage::kademlia::PeerEvaluator;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -377,6 +380,37 @@ impl TrustRegistry {
         self.contacts
             .get_mut(did)
             .map(|record| &mut record.reputation)
+    }
+}
+
+impl PeerEvaluator for TrustRegistry {
+    fn evaluate_reputation(&self, peer_id: &NetworkId) -> f32 {
+        // Deterministic Identity Resolution
+        // Converts the base58 PeerId string into a standard did:key format
+        let deterministic_did_str = format!("did:key:{}", peer_id);
+        let target_did = Did::from(deterministic_did_str);
+
+        let record = match self.contacts.get(&target_did) {
+            Some(r) => r,
+            None => return 1.0, // Baseline neutral reputation for untracked peers
+        };
+
+        if record.reputation.is_blacklisted {
+            return 0.0; // Guaranteed eviction/rejection
+        }
+
+        // Heuristic Scoring Algorithm
+        let mut score: f32 = 1.0;
+
+        // Severe penalty for cryptographic failures (20% reduction per offense)
+        score -= (record.reputation.invalid_sigs as f32) * 0.20;
+
+        // Moderate penalty for resource exhaustion attempts (10% reduction per offense)
+        score -= (record.reputation.quota_violations as f32) * 0.10;
+
+        // Ensure score remains within mathematical bounds.
+        // A minimum of 0.1 distinguishes severely degraded peers from fully blacklisted (0.0) peers.
+        score.clamp(0.1, 1.0)
     }
 }
 

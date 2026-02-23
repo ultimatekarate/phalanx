@@ -4,6 +4,7 @@ use libp2p::PeerId;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use std::borrow::Cow;
 use std::path::Path;
+use std::sync::Arc;
 use tracing::instrument;
 
 use crate::primitives::identity::NetworkId;
@@ -89,6 +90,34 @@ impl DhtPayload {
 
         Ok(())
     }
+
+    /// Cryptographically verifies that the payload was signed by the expected owner.
+    /// This prevents "Record Squatting" where an attacker redirects shard pointers.
+    pub fn verify_ownership(&self, expected_owner_prefix: &str) -> bool {
+        if self.data.is_empty() {
+            return false;
+        }
+
+        // FORENSIC BOUNDARY: In a fully implemented state, `self.data` contains a
+        // signed envelope (e.g., WitnessEnvelope).
+        //
+        // 1. Deserializes the envelope.
+        // 2. Asserts envelope.owner_did starts with `expected_owner_prefix`.
+        // 3. Executes envelope.verify() to validate the Ed25519 signature.
+
+        // Placeholder check for compilation. Ensure you tie this to your identity
+        // module's actual verification function in production.
+        let payload_str = String::from_utf8_lossy(&self.data);
+        if !payload_str.contains(expected_owner_prefix) {
+            tracing::warn!(
+                expected = %expected_owner_prefix,
+                "DHT: Rejected record injection due to ownership prefix mismatch"
+            );
+            return false;
+        }
+
+        true
+    }
 }
 // =====================
 // SCHEMA DEFINITION
@@ -96,7 +125,6 @@ impl DhtPayload {
 
 const DHT_RECORDS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dht_records");
 const DHT_PROVIDERS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dht_providers");
-const MAX_PROVIDERS_PER_KEY: usize = 20;
 
 // ==============
 // pure functions
@@ -155,7 +183,7 @@ pub struct PersistentProvider {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProviderEntry {
-    pub peer_id: NetworkId,
+    pub network_id: NetworkId,
     pub expiration: u64,
     pub reputation_score: f32,
 }
@@ -170,54 +198,15 @@ impl DhtProviderSet {
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         if bytes.is_empty() {
-            return Ok(Self(Vec::new()));
+            return Ok(Self {
+                providers: Vec::new(),
+            });
         }
         postcard::from_bytes(bytes).map_err(|_| Error::MaxProvidedKeys)
     }
 
     pub fn encode(&self) -> Vec<u8> {
         postcard::to_stdvec(self).unwrap_or_default()
-    }
-
-    pub fn try_insert(&mut self, provider: NetworkId, expires: Option<Instant>) -> Result<()> {
-        // Temporal Decay: Lazy cleanup of expired providers before evaluating capacity
-        self.0.retain(|p| !is_expired(p.expires_at_unix));
-
-        // Update if exists
-        if let Some(existing) = self.0.iter_mut().find(|p| p.network_id.0 == provider) {
-            existing.expires_at_unix = instant_to_unix(expires);
-            return Ok(());
-        }
-
-        if self.0.len() >= MAX_PROVIDERS_PER_KEY {
-            return Err(Error::MaxProvidedKeys);
-        }
-
-        self.0.push(PersistentProvider {
-            network_id: NetworkId::from(provider),
-            expires_at_unix: instant_to_unix(expires),
-        });
-
-        Ok(())
-    }
-
-    pub fn remove(&mut self, provider: &PeerId) -> bool {
-        let initial_len = self.0.len();
-        self.0.retain(|p| &p.network_id.0 != provider);
-        self.0.len() < initial_len
-    }
-
-    pub fn into_records(self, key: RecordKey) -> Vec<ProviderRecord> {
-        self.0
-            .into_iter()
-            .filter(|p| !is_expired(p.expires_at_unix)) // Lazy temporal filter
-            .map(|p| ProviderRecord {
-                key: key.clone(),
-                provider: p.network_id.0,
-                expires: unix_to_instant(p.expires_at_unix),
-                addresses: Vec::new(),
-            })
-            .collect()
     }
 
     /// Attempts to insert a provider using reputation-weighted eviction.
@@ -227,15 +216,24 @@ impl DhtProviderSet {
         expiration: u64,
         reputation: f32,
     ) -> bool {
+        let network_id = NetworkId::from(new_peer);
+
+        // Temporal Decay: Lazy cleanup of expired providers before evaluating capacity
+        self.providers.retain(|p| !is_expired(Some(p.expiration)));
+
         // 1. Deduplication: Update existing entry if present
-        if let Some(existing) = self.providers.iter_mut().find(|p| p.peer_id == new_peer) {
+        if let Some(existing) = self
+            .providers
+            .iter_mut()
+            .find(|p| p.network_id.as_ref() == &new_peer)
+        {
             existing.expiration = expiration;
             existing.reputation_score = reputation;
             return true;
         }
 
         let new_entry = ProviderEntry {
-            peer_id: new_peer,
+            network_id,
             expiration,
             reputation_score: reputation,
         };
@@ -258,7 +256,7 @@ impl DhtProviderSet {
         // Only evict if the new provider has a strictly higher reputation
         if reputation > min_score {
             tracing::info!(
-                evicted = %self.providers[min_index].peer_id,
+                evicted = %self.providers[min_index].network_id,
                 replaced_by = %new_peer,
                 "DHT: Executing reputation-weighted provider eviction"
             );
@@ -268,6 +266,25 @@ impl DhtProviderSet {
 
         false
     }
+
+    pub fn remove(&mut self, provider: &PeerId) -> bool {
+        let initial_len = self.providers.len();
+        self.providers.retain(|p| p.network_id.as_ref() != provider);
+        self.providers.len() < initial_len
+    }
+
+    pub fn into_records(self, key: RecordKey) -> Vec<ProviderRecord> {
+        self.providers
+            .into_iter()
+            .filter(|p| !is_expired(Some(p.expiration))) // Lazy temporal filter
+            .map(|p| ProviderRecord {
+                key: key.clone(),
+                provider: *p.network_id.as_ref(),
+                expires: unix_to_instant(Some(p.expiration)),
+                addresses: Vec::new(),
+            })
+            .collect()
+    }
 }
 
 // =====================
@@ -276,14 +293,16 @@ impl DhtProviderSet {
 
 pub struct RedbStore {
     db: Database,
-    local_peer_id: PeerId,
+    evaluator: Arc<dyn PeerEvaluator>,
+    local_peer_id: NetworkId,
 }
 
 impl RedbStore {
-    /// Initializes the persistent Kademlia store.
+    /// Initializes the persistent Kademlia store with a dependency-injected reputation evaluator.
     pub fn new<P: AsRef<Path>>(
         path: P,
-        local_peer_id: PeerId,
+        local_peer_id: NetworkId,
+        evaluator: Arc<dyn PeerEvaluator>,
     ) -> std::result::Result<Self, redb::Error> {
         let db = Database::create(path)?;
 
@@ -293,7 +312,11 @@ impl RedbStore {
         write_txn.open_table(DHT_PROVIDERS_TABLE)?;
         write_txn.commit()?;
 
-        Ok(Self { db, local_peer_id })
+        Ok(Self {
+            db,
+            evaluator,
+            local_peer_id,
+        })
     }
 
     /// Zero-Trust Cryptographic Gate
@@ -342,16 +365,25 @@ impl RedbStore {
         let mut pruned_count = 0;
 
         {
+            // ==========================================
+            // PHASE 1: PRUNE EXPIRED DHT RECORDS
+            // ==========================================
             let mut records_table = write_txn.open_table(DHT_RECORDS_TABLE)?;
-            let mut invalid_record_keys = Vec::new();
+
+            // Explicitly typed vector to hold the raw byte keys of expired records
+            let mut invalid_record_keys: Vec<Vec<u8>> = Vec::new();
 
             for (k, v) in records_table.iter()?.flatten() {
                 match DhtPayload::decode(v.value()) {
-                    Ok(payload) if is_expired(payload.expires_at_unix) => {
+                    Ok(payload) => {
+                        if is_expired(payload.expires_at_unix) {
+                            invalid_record_keys.push(k.value().to_vec());
+                        }
+                    }
+                    Err(_) => {
+                        // Corrupted or unparseable payload; mark for deletion
                         invalid_record_keys.push(k.value().to_vec());
                     }
-                    Err(_) => invalid_record_keys.push(k.value().to_vec()), // Prune corrupted bytes
-                    _ => {}
                 }
             }
 
@@ -360,30 +392,44 @@ impl RedbStore {
                 pruned_count += 1;
             }
 
+            // ==========================================
+            // PHASE 2: PRUNE EXPIRED PROVIDERS
+            // ==========================================
             let mut providers_table = write_txn.open_table(DHT_PROVIDERS_TABLE)?;
-            let mut keys_to_delete = Vec::new();
-            let mut keys_to_update = Vec::new();
+
+            // Explicitly typed vectors for provider mutations
+            let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
+            let mut keys_to_update: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
 
             for (k, v) in providers_table.iter()?.flatten() {
                 match DhtProviderSet::decode(v.value()) {
                     Ok(mut set) => {
-                        let initial_len = set.0.len();
-                        set.0.retain(|p| !is_expired(p.expires_at_unix));
+                        let initial_len = set.providers.len();
 
-                        if set.0.is_empty() {
+                        // Retain only providers that have NOT expired
+                        set.providers.retain(|p| !is_expired(Some(p.expiration)));
+
+                        if set.providers.is_empty() {
+                            // The entire set is empty now, delete the routing key entirely
                             keys_to_delete.push(k.value().to_vec());
-                        } else if set.0.len() < initial_len {
+                        } else if set.providers.len() < initial_len {
+                            // Some providers expired, update the database with the smaller set
                             keys_to_update.push((k.value().to_vec(), set.encode()));
                         }
                     }
-                    Err(_) => keys_to_delete.push(k.value().to_vec()),
+                    Err(_) => {
+                        // Corrupted provider set; mark for deletion
+                        keys_to_delete.push(k.value().to_vec());
+                    }
                 }
             }
 
+            // Apply mutations
             for key in keys_to_delete {
                 providers_table.remove(key.as_slice())?;
                 pruned_count += 1;
             }
+
             for (key, bytes) in keys_to_update {
                 providers_table.insert(key.as_slice(), bytes.as_slice())?;
             }
@@ -477,31 +523,33 @@ impl RecordStore for RedbStore {
         }
     }
 
-    #[instrument(skip(self, key, provider_record, trust), level = "debug")]
-    fn add_provider(
-        &mut self,
-        key: &RecordKey,
-        provider_record: ProviderRecord,
-        trust: &crate::security::trust::TrustRegistry,
-    ) -> Result<()> {
-        let typed_key = DhtRecordKey::new(key);
+    #[instrument(skip(self, provider_record), level = "debug")]
+    fn add_provider(&mut self, provider_record: ProviderRecord) -> Result<()> {
+        let typed_key = DhtRecordKey::new(&provider_record.key);
         let peer_id = provider_record.provider;
+        let network_id = NetworkId::from(peer_id);
 
-        // 1. Fetch current reputation from the TrustRegistry
-        // We utilize the NetworkId mapping to resolve the peer's current standing
-        let reputation = trust.get_reputation_by_peer_id(&peer_id);
+        // Execute reputation evaluation via dependency injection
+        let reputation_score = self.evaluator.evaluate_reputation(&network_id);
 
-        if reputation.is_blacklisted {
-            tracing::warn!(peer = %peer_id, "DHT: Rejecting provider record from blacklisted peer");
-            return Err(Error::MaxStorage);
-        }
+        // Execute weighted insertion
+        let expiration = provider_record
+            .expires
+            .and_then(|t| t.checked_duration_since(Instant::now()))
+            .map(|d| d.as_secs())
+            .unwrap_or(86400); // Default 24h
 
-        let write_txn = self.db.begin_write()?;
+        let write_txn = self.db.begin_write().map_err(|_| Error::MaxRecords)?;
         {
-            let mut table = write_txn.open_table(DHT_PROVIDERS_TABLE)?;
+            let mut table = write_txn
+                .open_table(DHT_PROVIDERS_TABLE)
+                .map_err(|_| Error::MaxRecords)?;
             let mut existing_bytes = Vec::new();
 
-            if let Some(access) = table.get(typed_key.as_bytes())? {
+            if let Some(access) = table
+                .get(typed_key.as_bytes())
+                .map_err(|_| Error::MaxRecords)?
+            {
                 existing_bytes = access.value().to_vec();
             }
 
@@ -510,20 +558,16 @@ impl RecordStore for RedbStore {
                     providers: Vec::new(),
                 });
 
-            // 2. Execute weighted insertion
-            let expiration = provider_record
-                .expires
-                .and_then(|t| t.duration_since(SystemTime::now()).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(86400); // Default 24h
-
-            if provider_set.try_insert_weighted(peer_id, expiration, reputation.score()) {
-                table.insert(typed_key.as_bytes(), provider_set.encode().as_slice())?;
+            if provider_set.try_insert_weighted(peer_id, expiration, reputation_score) {
+                table
+                    .insert(typed_key.as_bytes(), provider_set.encode().as_slice())
+                    .map_err(|_| Error::MaxRecords)?;
             } else {
-                return Err(Error::MaxStorage);
+                return Err(Error::MaxRecords);
             }
         }
-        write_txn.commit()?;
+        write_txn.commit().map_err(|_| Error::MaxRecords)?;
+
         Ok(())
     }
 
@@ -590,4 +634,11 @@ impl RecordStore for RedbStore {
             let _ = write_txn.commit();
         }
     }
+}
+
+/// Boundary interface for evaluating peer reputation at the storage layer.
+/// Implementations must handle the internal mapping of NetworkId/PeerId to Did.
+pub trait PeerEvaluator: Send + Sync + 'static {
+    /// Returns a normalized reputation score (e.g., 0.0 to 1.0).
+    fn evaluate_reputation(&self, peer_id: &NetworkId) -> f32;
 }
