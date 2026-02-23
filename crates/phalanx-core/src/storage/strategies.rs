@@ -3,7 +3,8 @@ const VOLLEY_TIME_THRESHOLD: Duration = Duration::from_secs(1);
 
 use crate::primitives::identity::Did;
 use crate::primitives::shards::{
-    ForensicGap, ShardChunk, ShardId, StorageSequence, Volley, VolleyId, WitnessEnvelope,
+    EnvelopeState, ForensicGap, FragmentedEnvelope, ShardChunk, ShardGapReport, ShardId,
+    StorageSequence, Volley, VolleyId, WitnessEnvelope,
 };
 use crate::primitives::time::TrustedClock;
 use crate::security::gate::ChronosGate;
@@ -19,6 +20,7 @@ pub struct ShardBuffer {
     pub received_count: u32,
     pub parts: BTreeMap<u32, Vec<u8>>,
     pub estimated_chunk_size: usize,
+    pub owner_did: Did,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -32,7 +34,7 @@ pub struct ShardAmalgam;
 
 impl Mold for ShardAmalgam {
     type Input = ShardChunk;
-    type Output = WitnessEnvelope;
+    type Output = EnvelopeState;
     type Key = ShardId;
     type Accumulator = ShardBuffer;
 
@@ -48,6 +50,7 @@ impl Mold for ShardAmalgam {
             received_count: 1,
             parts,
             estimated_chunk_size: item.data.len(),
+            owner_did: item.owner_did.clone(),
         }
     }
 
@@ -66,26 +69,48 @@ impl Mold for ShardAmalgam {
     }
 
     fn assemble(key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output> {
-        // 🔍 DEBUG: Log Shard Assembly
+        // Incomplete or fragmented data - triggered by flush_stale/flush_all
         if acc.received_count != acc.total_chunks {
-            warn!(?key, received=%acc.received_count, total=%acc.total_chunks, "ShardAmalgam: Attempted assembly of incomplete shard");
-            return None;
+            warn!(?key, received=%acc.received_count, total=%acc.total_chunks, "ShardAmalgam: Incomplete shard, transitioning to Fragmented state");
+
+            let mut missing_indices = Vec::new();
+            for i in 0..acc.total_chunks {
+                if !acc.parts.contains_key(&i) {
+                    missing_indices.push(i);
+                }
+            }
+
+            let gap_report = ShardGapReport {
+                shard_id: key,
+                missing_chunk_indices: missing_indices,
+                expected_total_chunks: acc.total_chunks,
+            };
+
+            let fragmented = FragmentedEnvelope {
+                shard_id: key,
+                owner_did: acc.owner_did,
+                gap_report,
+                partial_data: acc.parts,
+            };
+
+            return Some(EnvelopeState::Fragmented(fragmented));
         }
 
+        // Case 2: Happy path, every is there.
         let mut full_data = Vec::new();
         for i in 0..acc.total_chunks {
             if let Some(part) = acc.parts.get(&i) {
                 full_data.extend_from_slice(part);
             } else {
-                error!(?key, chunk_index=%i, "ShardAmalgam: Missing chunk despite count match!");
+                error!(?key, chunk_index=%i, "ShardAmalgam: Illegal internal state, missing chunk despite count match");
                 return None;
             }
         }
 
         match postcard::from_bytes(&full_data) {
-            Ok(env) => Some(env),
+            Ok(env) => Some(EnvelopeState::Intact(env)),
             Err(e) => {
-                error!(?key, error=%e, "ShardAmalgam: Deserialization failed");
+                error!(?key, error=%e, "ShardAmalgam: Deserialization failed on complete shard");
                 None
             }
         }

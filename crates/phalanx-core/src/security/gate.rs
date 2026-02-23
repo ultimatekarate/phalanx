@@ -1,5 +1,7 @@
 use crate::primitives::identity::{NetworkId, PhalanxIdentity};
-use crate::primitives::shards::{Evidence, ReassemblyBuffer, ShardError, ShardId, WitnessEnvelope};
+use crate::primitives::shards::{
+    Evidence, ReassemblyBuffer, ShardError, ShardId, SignatureHash, WitnessEnvelope,
+};
 use crate::primitives::time::{PhalanxTimestamp, TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
 use std::collections::HashMap;
@@ -11,6 +13,7 @@ pub trait WitnessGate {
         self,
         identity: &PhalanxIdentity,
         peer_id: NetworkId,
+        prev_hash: Option<SignatureHash>, // NEW: Alignment with shards.rs
     ) -> Result<WitnessEnvelope, ShardError>;
 }
 
@@ -19,13 +22,16 @@ impl WitnessGate for Evidence {
         self,
         identity: &PhalanxIdentity,
         peer_id: NetworkId,
+        prev_hash: Option<SignatureHash>,
     ) -> Result<WitnessEnvelope, ShardError> {
-        WitnessEnvelope::new(self, identity, peer_id).map_err(|e| {
-            error!(event = "signing_failure", error = %e, "Witness Gate: Failed to cryptographically seal unit");
+        // Correctly propagate the prev_hash into the new envelope
+        WitnessEnvelope::new(self, identity, peer_id, prev_hash).map_err(|e| {
+            tracing::error!(event = "signing_failure", error = %e, "Witness Gate: Failed to seal unit");
             e
         })
     }
 }
+
 /// Gate 3: The Integrity Gate (Reception Side)
 /// Validates incoming Envelopes before they reach storage or the Crucible.
 pub trait IntegrityGate {
@@ -80,6 +86,7 @@ impl PrivacyGate for Evidence {
         let encryption_result = match &mut self {
             Evidence::Video(s) => s.encrypt(key),
             Evidence::Audio(s) => s.encrypt(key),
+            Evidence::Gap(_) | Evidence::Handover(_) => Ok(()),
         };
 
         match encryption_result {
@@ -140,6 +147,34 @@ impl CapacityGate for WitnessEnvelope {
 /// Safely acquires the current forensic time, propagating strict TimeError types.
 pub trait ChronosGate {
     fn forensic_now(&self) -> Result<PhalanxTimestamp, TimeError>;
+
+    fn verify_continuity(&self, envelopes: &[WitnessEnvelope]) -> Result<(), ShardError> {
+        // Default implementation for basic clocks (can be overridden for more complex consensus)
+        if envelopes.is_empty() {
+            return Ok(());
+        }
+
+        for window in envelopes.windows(2) {
+            let prev = &window[0];
+            let curr = &window[1];
+
+            // 1. Hash Linkage: Prove B follows A
+            let expected_hash = prev.signature_hash();
+            if curr.prev_hash != Some(expected_hash) {
+                return Err(ShardError::InvalidConfiguration(format!(
+                    "Causality Break: Envelope {} does not link to {}",
+                    curr.evidence.sequence_id(),
+                    prev.evidence.sequence_id()
+                )));
+            }
+
+            // 2. Monotonicity: Prove time only moves forward
+            if curr.evidence.timestamp() < prev.evidence.timestamp() {
+                return Err(ShardError::InvalidConfiguration("Temporal Paradox".into()));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl ChronosGate for TrustedClock {

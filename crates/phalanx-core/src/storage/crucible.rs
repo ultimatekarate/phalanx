@@ -29,7 +29,6 @@ pub trait Mold {
     fn init_accumulator(item: &Self::Input) -> Self::Accumulator;
     fn ingest(acc: &mut Self::Accumulator, item: Self::Input);
 
-    // CORRECTED: Aligned with crucible.rs process() and strategies.rs
     fn is_ready(acc: &Self::Accumulator, elapsed: Duration) -> bool;
     fn assemble(key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output>;
 }

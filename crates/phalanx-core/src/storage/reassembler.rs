@@ -1,7 +1,7 @@
 use crate::base::config::PhalanxConfig;
 use crate::base::types::{MeshTopic, PowerState};
 use crate::primitives::identity::{NetworkId, PhalanxIdentity};
-use crate::primitives::shards::{ChunkType, ShardChunk, ShardError, WitnessEnvelope};
+use crate::primitives::shards::{ChunkType, EnvelopeState, ShardChunk, ShardError};
 use crate::storage::crucible::Crucible;
 use crate::storage::strategies::ShardAmalgam;
 use async_trait::async_trait;
@@ -43,7 +43,7 @@ impl Reassembler {
     pub fn check_and_finalize_shards(
         &mut self,
         timeout: std::time::Duration,
-    ) -> Vec<WitnessEnvelope> {
+    ) -> Vec<EnvelopeState> {
         let salvaged_envelopes = self.crucible.flush_stale(timeout);
 
         if !salvaged_envelopes.is_empty() {
@@ -64,7 +64,7 @@ impl Reassembler {
         _config: &PhalanxConfig,
         _identity: &PhalanxIdentity,
         _local_peer_id: NetworkId,
-    ) -> Result<Option<WitnessEnvelope>, ShardError> {
+    ) -> Result<Option<EnvelopeState>, ShardError> {
         // 1. Forensic Persistence (WAL)
         journal.record_chunk(&chunk).await?;
         journal.sync().await?;
@@ -80,7 +80,7 @@ impl Reassembler {
         config: &PhalanxConfig,
         identity: &PhalanxIdentity,
         local_peer_id: NetworkId,
-    ) -> Result<Vec<WitnessEnvelope>, ShardError> {
+    ) -> Result<Vec<EnvelopeState>, ShardError> {
         let mut recovered_envelopes = Vec::new();
         let chunks = journal.read_all_chunks().await?;
 
@@ -114,7 +114,7 @@ impl Reassembler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::primitives::shards::{DataPayload, StorageSequence, VolleyId};
+    use crate::primitives::shards::{DataPayload, StorageSequence, VolleyId, WitnessEnvelope};
     use crate::primitives::shards::{Evidence, ShardId, VideoShard};
     use crate::primitives::time::PhalanxTimestamp;
     struct MockJournal;
@@ -212,7 +212,15 @@ mod tests {
 
         // 5. Final Verification
         assert!(result_2.is_some(), "Reassembly should be complete");
-        let recovered_envelope = result_2.unwrap();
+        let recovered_envelope = match result_2.unwrap() {
+            EnvelopeState::Intact(env) => env,
+            EnvelopeState::Fragmented(gap) => {
+                panic!(
+                    "Expected Intact envelope, but received Fragmented state: {:?}",
+                    gap
+                );
+            }
+        };
 
         // Assert cryptographic integrity survived the sharding/ingestion process
         assert_eq!(

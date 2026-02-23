@@ -9,12 +9,50 @@ use serde::{Deserialize, Serialize};
 
 use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
 use crate::primitives::time::{PhalanxTimestamp, TimeError, TrustedClock};
-use crate::security::e2ee::{self, CryptoError, SymmetricKey};
+use crate::security::e2ee::{decrypt_bytes, encrypt_bytes, CryptoError, SymmetricKey};
 use crate::security::gate::ChronosGate;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 // =====================
 // DATA STRUCTURES
 // =====================
+
+/// A strongly-typed wrapper for a SHA-256 hash of a witness signature.
+/// Ensures causality links are not confused with other 32-byte primitives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignatureHash(pub [u8; 32]);
+
+impl SignatureHash {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Deterministic map of missing chunks within a specific shard.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardGapReport {
+    pub shard_id: ShardId,
+    pub missing_chunk_indices: Vec<u32>,
+    pub expected_total_chunks: u32,
+}
+
+/// Represents a shard that failed complete reassembly but possesses
+/// sufficient metadata to remain in the forensic timeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FragmentedEnvelope {
+    pub shard_id: ShardId,
+    pub owner_did: Did,
+    pub gap_report: ShardGapReport,
+    pub partial_data: BTreeMap<u32, Vec<u8>>,
+}
+
+/// The monadic output state of the Reassembler.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EnvelopeState {
+    Intact(WitnessEnvelope),
+    Fragmented(FragmentedEnvelope),
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ShardError {
@@ -74,10 +112,24 @@ impl ReassemblyBuffer {
     }
 }
 
+/// Cryptographic proof of a witness rotation.
+/// Witness A signs the identity of Witness B + the hash of the last unit to
+/// permit the ChronosGate to accept the new identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoverProof {
+    pub volley_id: VolleyId, // Required for attribution
+    pub sequence_id: StorageSequence,
+    pub new_witness_id: NetworkId,
+    pub new_witness_did: Did,
+    pub handover_signature: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Evidence {
     Video(VideoShard),
     Audio(AudioShard),
+    Gap(ForensicGap),
+    Handover(HandoverProof),
 }
 
 impl Evidence {
@@ -86,6 +138,8 @@ impl Evidence {
         match self {
             Evidence::Video(s) => s.sequence_id,
             Evidence::Audio(s) => s.sequence_id,
+            Evidence::Gap(g) => g.start_seq,
+            Evidence::Handover(h) => h.sequence_id,
         }
     }
 
@@ -94,6 +148,8 @@ impl Evidence {
         match self {
             Evidence::Video(s) => &s.volley_id,
             Evidence::Audio(s) => &s.volley_id,
+            Evidence::Gap(g) => &g.volley_id,
+            Evidence::Handover(h) => &h.volley_id,
         }
     }
 
@@ -102,6 +158,8 @@ impl Evidence {
         match self {
             Evidence::Video(s) => s.timestamp,
             Evidence::Audio(s) => s.timestamp,
+            Evidence::Gap(g) => g.detected_at,
+            Evidence::Handover(_) => PhalanxTimestamp::now(),
         }
     }
 }
@@ -213,8 +271,9 @@ pub struct ShardChunk {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForensicGap {
-    pub start_seq: u32,
-    pub end_seq: u32,
+    pub volley_id: VolleyId,
+    pub start_seq: StorageSequence,
+    pub end_seq: StorageSequence,
     pub detected_at: PhalanxTimestamp,
 }
 
@@ -271,12 +330,41 @@ pub struct Volley {
     pub is_complete: bool,
 }
 
+/// A stateful session that maintains the causality chain for a specific timeline.
+pub struct CausalitySession<'a> {
+    identity: &'a PhalanxIdentity,
+    peer_id: NetworkId,
+    last_hash: Option<SignatureHash>,
+}
+
+impl<'a> CausalitySession<'a> {
+    pub fn new(identity: &'a PhalanxIdentity, peer_id: NetworkId) -> Self {
+        Self {
+            identity,
+            peer_id,
+            last_hash: None,
+        }
+    }
+
+    /// The ONLY way to produce a sealed envelope.
+    /// Automatically updates the internal hash chain.
+    pub fn seal_evidence(&mut self, evidence: Evidence) -> Result<WitnessEnvelope, ShardError> {
+        let envelope = WitnessEnvelope::new(evidence, self.identity, self.peer_id, self.last_hash)?;
+
+        // Update the state for the NEXT call
+        self.last_hash = Some(envelope.signature_hash());
+
+        Ok(envelope)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WitnessEnvelope {
     pub evidence: Evidence,
     pub witness_peer_id: NetworkId,
     pub witness_signature: Vec<u8>,
     pub did: Did,
+    pub prev_hash: Option<SignatureHash>,
 }
 
 impl WitnessEnvelope {
@@ -305,6 +393,7 @@ impl WitnessEnvelope {
         evidence: Evidence,
         identity: &PhalanxIdentity,
         peer_id: NetworkId,
+        prev_hash: Option<SignatureHash>,
     ) -> Result<Self, ShardError> {
         let data_to_sign =
             postcard::to_stdvec(&evidence).map_err(|e| ShardError::Serialization(e.to_string()))?;
@@ -316,7 +405,18 @@ impl WitnessEnvelope {
             witness_peer_id: peer_id,
             witness_signature: signature.to_vec(),
             did: identity.did.clone(),
+            prev_hash,
         })
+    }
+
+    pub fn signature_hash(&self) -> SignatureHash {
+        let mut hasher = Sha256::new();
+        hasher.update(&self.witness_signature);
+        let result = hasher.finalize();
+
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&result);
+        SignatureHash(hash)
     }
 
     pub fn chunkify(self, shard_id: ShardId) -> Result<Vec<ShardChunk>, ShardError> {
@@ -342,6 +442,7 @@ impl WitnessEnvelope {
 pub enum DataPayload {
     Clear(Vec<u8>),
     Encrypted { nonce: Vec<u8>, ciphertext: Vec<u8> },
+    Missing(ShardGapReport),
 }
 
 impl Default for DataPayload {
@@ -352,18 +453,26 @@ impl Default for DataPayload {
 
 impl DataPayload {
     pub fn encrypt(&mut self, key: &SymmetricKey) -> Result<(), CryptoError> {
-        if let DataPayload::Clear(data) = self {
-            let (nonce, ciphertext) = e2ee::encrypt_bytes(key.as_bytes(), data)?;
-            *self = DataPayload::Encrypted { nonce, ciphertext };
+        match self {
+            DataPayload::Clear(data) => {
+                let (nonce, ciphertext) = encrypt_bytes(key.as_bytes(), data)?;
+                *self = DataPayload::Encrypted { nonce, ciphertext };
+                Ok(())
+            }
+            DataPayload::Encrypted { .. } => Ok(()),
+            DataPayload::Missing(_) => Ok(()), // Deterministic No-Op: Cannot encrypt gaps
         }
-        Ok(())
     }
 
     pub fn decrypt(&self, key: &SymmetricKey) -> Result<Vec<u8>, CryptoError> {
         match self {
             DataPayload::Clear(data) => Ok(data.clone()),
             DataPayload::Encrypted { nonce, ciphertext } => {
-                e2ee::decrypt_bytes(key.as_bytes(), nonce, ciphertext)
+                decrypt_bytes(key.as_bytes(), nonce, ciphertext)
+            }
+            DataPayload::Missing(_) => {
+                // Compile-time enforcement against reading gaps
+                Err(CryptoError::EncryptionFailure)
             }
         }
     }

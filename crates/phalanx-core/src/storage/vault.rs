@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
-use tracing::instrument;
 
 use crate::base::config::PhalanxConfig;
 use crate::base::types::ByteCapacity;
 use crate::primitives::identity::Did;
-use crate::primitives::shards::{StorageSequence, Volley, WitnessEnvelope};
+use crate::primitives::shards::{
+    EnvelopeState, FragmentedEnvelope, StorageSequence, Volley, WitnessEnvelope,
+};
 use crate::primitives::time::TimeError;
 use crate::storage::crucible::Crucible;
 use crate::storage::strategies::VolleyAmalgam;
@@ -59,30 +60,34 @@ impl Guardian {
     }
 
     /// The sole entry point for data promotion into the permanent archive.
-    #[instrument(skip(self, envelope), fields(owner = %envelope.did))]
-    pub async fn ingest_envelope(
-        &mut self,
-        envelope: WitnessEnvelope,
-    ) -> Result<(), GuardianError> {
+    pub async fn ingest_envelope(&mut self, state: EnvelopeState) -> Result<(), GuardianError> {
         tracing::debug!("Guardian: Received envelope for ingestion. Verifying...");
 
-        if !envelope.verify() {
-            tracing::error!("FORENSIC FAILURE: Cryptographic signature mismatch on envelope");
-            return Err(GuardianError::VerificationFailed(
-                "Signature invalid".into(),
-            ));
+        match state {
+            EnvelopeState::Intact(envelope) => {
+                // 1. Cryptographic Verification
+                if !envelope.verify() {
+                    return Err(GuardianError::VerificationFailed(
+                        "Witness signature mismatch".into(),
+                    ));
+                }
+
+                // 2. Volley Aggregation
+                // The Crucible (bound to VolleyAmalgam) handles sequence-ordering
+                if let Some(volley) = self.crucible.process(envelope) {
+                    self.commit_volley_to_disk(&volley).await?;
+                }
+            }
+            EnvelopeState::Fragmented(fragmented) => {
+                // 3. Forensic Gap Archival
+                // We persist the gap report to ensure the timeline remains continuous
+                self.archive_fragmented_shard(fragmented).await?;
+            }
         }
 
-        if let Some(volley) = self.crucible.process(envelope) {
-            tracing::info!(volley_id = %volley.id, "Crucible: Volley threshold met. Promoting to disk.");
-            self.commit_volley_to_disk(&volley).await?;
-        } else {
-            tracing::debug!(
-                "Crucible: Envelope buffered in workbench. Waiting for more data or TTL."
-            );
-        }
-
+        // Trigger TTL checks, stale volley flushing, and workbench cleanup
         self.check_and_finalize_volley().await?;
+
         Ok(())
     }
 
@@ -94,6 +99,28 @@ impl Guardian {
             self.commit_volley_to_disk(&volley).await?;
         }
         Ok(())
+    }
+
+    async fn archive_fragmented_shard(
+        &mut self,
+        fragmented: FragmentedEnvelope,
+    ) -> Result<(), GuardianError> {
+        tracing::warn!(
+            shard_id = %fragmented.shard_id,
+            missing_chunks = fragmented.gap_report.missing_chunk_indices.len(),
+            "Guardian: Committing forensic gap record to disk"
+        );
+
+        // Serialize the FragmentedEnvelope as a proof of absence
+        let gap_data = postcard::to_stdvec(&fragmented)
+            .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
+
+        let file_name = format!("{}.gap", fragmented.shard_id);
+        let path = std::path::Path::new(&self.vault_path).join(file_name);
+
+        fs::write(path, gap_data)
+            .await
+            .map_err(|e| GuardianError::WalWriteFailed(e.to_string()))
     }
 
     /// Explicit salvage command for node termination sequences.
@@ -180,9 +207,9 @@ mod tests {
         let envelope = WitnessEnvelope::new(Evidence::Video(shard), &identity, NetworkId::random())
             .expect("WitnessEnvelope construction failed");
 
-        // 2. Verify successful asynchronous ingestion routing
-        // Corrected: Must be async fn to use .await
-        let result = guardian.ingest_envelope(envelope).await;
+        let result = guardian
+            .ingest_envelope(EnvelopeState::Intact(envelope))
+            .await;
         assert!(result.is_ok(), "Ingestion failed: {:?}", result.err());
 
         // 3. Verify Crucible state mutation via public API
