@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::io;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 use crate::base::config::PhalanxConfig;
@@ -29,6 +29,13 @@ use crate::security::gate::{ForensicGate, PrivacyGate};
 use crate::storage::kademlia::PeerEvaluator;
 
 pub use libp2p::pnet::PreSharedKey;
+
+pub struct PendingEgress {
+    pub channel_id: String,
+    pub response: VolleyResponse,
+    pub attempt_count: u32,
+    pub next_attempt: Instant,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
