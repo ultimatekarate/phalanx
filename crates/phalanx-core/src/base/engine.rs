@@ -4,7 +4,7 @@ use std::io;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, Instant};
+use tokio::time::{interval, Duration, Instant};
 use tracing::{error, info, warn};
 
 use crate::base::config::PhalanxConfig;
@@ -110,7 +110,7 @@ pub struct StorageActor<J: TransientJournal> {
 
 impl<J: TransientJournal> StorageActor<J> {
     pub async fn run(mut self) {
-        let mut maintenance_timer = tokio::time::interval(Duration::from_millis(1000));
+        let mut maintenance_timer = interval(Duration::from_millis(1000));
 
         loop {
             tokio::select! {
@@ -327,38 +327,6 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
                 }
             }
         }
-        Ok(())
-    }
-
-    async fn _promote_evidence(&mut self, evidence: Evidence) -> Result<(), EngineError> {
-        let local_network_id = self.identity.to_network_id();
-        let topic = MeshTopic::new("phalanx/1.0.0"); // Standard forensic topic
-
-        // 1. Seal via Session (Updates causality)
-        let envelope = self
-            .session
-            .seal_evidence(evidence)
-            .map_err(|e| EngineError::SecurityBreach(e.to_string()))?;
-
-        // 2. Fragment
-        let shard_id = ShardId(self.seq_counter as u32);
-        let chunks = envelope
-            .chunkify(shard_id)
-            .map_err(|e| EngineError::SecurityBreach(e.to_string()))?;
-
-        // 3. FIX: Send as a tuple to satisfy the Ingress pipeline
-        for chunk in chunks {
-            if let Err(e) = self
-                .chunk_tx
-                .send((chunk, topic.clone(), local_network_id))
-                .await
-            {
-                error!("Engine: Loopback channel failed: {}", e);
-                return Err(EngineError::StorageFailure(e.to_string()));
-            }
-        }
-
-        self.seq_counter += 1;
         Ok(())
     }
 
