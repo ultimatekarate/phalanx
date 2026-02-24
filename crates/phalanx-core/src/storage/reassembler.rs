@@ -1,4 +1,5 @@
 use crate::base::config::PhalanxConfig;
+use crate::base::engine::PendingEgress;
 use crate::base::types::{MeshTopic, PowerState};
 use crate::primitives::identity::{NetworkId, PhalanxIdentity};
 use crate::primitives::shards::{ChunkType, EnvelopeState, ShardChunk, ShardError};
@@ -18,6 +19,8 @@ pub trait TransientJournal: Send + Sync {
     async fn sync(&mut self) -> Result<(), ShardError>;
     async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError>;
     async fn clear(&mut self) -> Result<(), ShardError>;
+    async fn record_pending_egress(&mut self, pending: &[PendingEgress]) -> Result<(), ShardError>;
+    async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError>;
 }
 
 pub struct Reassembler {
@@ -118,29 +121,13 @@ mod tests {
     use crate::primitives::shards::{DataPayload, StorageSequence, VolleyId, WitnessEnvelope};
     use crate::primitives::shards::{Evidence, ShardId, VideoShard};
     use crate::primitives::time::PhalanxTimestamp;
-    struct MockJournal;
-    #[async_trait]
-    impl TransientJournal for MockJournal {
-        async fn record_chunk(&mut self, _chunk: &ShardChunk) -> Result<(), ShardError> {
-            Ok(())
-        }
-        async fn sync(&mut self) -> Result<(), ShardError> {
-            Ok(())
-        }
-        async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
-            Ok(vec![])
-        }
-        async fn clear(&mut self) -> Result<(), ShardError> {
-            Ok(())
-        }
-    }
 
     #[tokio::test]
     async fn test_reassembler_chunk_reassembly() {
         let (identity, _) = PhalanxIdentity::generate().unwrap();
         let config = PhalanxConfig::default();
         let mut reassembler = Reassembler::new();
-        let mut journal = MockJournal;
+        let mut journal = crate::base::engine::NoOpJournal;
         let local_peer = identity.to_network_id();
         let topic = MeshTopic::new("phalanx/video");
 

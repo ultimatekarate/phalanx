@@ -54,6 +54,15 @@ impl PhalanxTimestamp {
         self.0
     }
 
+    pub fn as_millis(&self) -> u64 {
+        self.0 // Assuming the inner value is u64 milliseconds
+    }
+
+    /// Re-wraps a primitive millisecond value into a PhalanxTimestamp.
+    pub fn from_millis(millis: u64) -> Self {
+        Self(millis)
+    }
+
     pub fn now() -> Self {
         let duration = SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 
 // Library Imports
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
-use phalanx_core::base::engine::StorageActor; // Imported from library
+use phalanx_core::base::engine::{PendingEgress, StorageActor}; // Imported from library
 use phalanx_core::base::types::MeshTopic;
 use phalanx_core::primitives::identity::{Did, NetworkId, PhalanxIdentity};
 use phalanx_core::primitives::shards::ShardError;
@@ -46,6 +46,14 @@ impl<J: TransientJournal + Send> TransientJournal for MetricJournal<J> {
     }
     async fn clear(&mut self) -> Result<(), ShardError> {
         self.inner.clear().await
+    }
+
+    async fn record_pending_egress(&mut self, pending: &[PendingEgress]) -> Result<(), ShardError> {
+        self.inner.record_pending_egress(pending).await
+    }
+
+    async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError> {
+        self.inner.read_all_pending_egress().await
     }
 }
 

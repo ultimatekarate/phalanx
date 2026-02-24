@@ -4,7 +4,7 @@ use std::io;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::{interval, Duration, Instant};
+use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
 
 use crate::base::config::PhalanxConfig;
@@ -13,7 +13,7 @@ use crate::primitives::identity::{init_identity, Did, IdentityError, NetworkId, 
 use crate::primitives::shards::{
     CausalitySession, Evidence, ShardChunk, ShardError, ShardId, VolleyId, WitnessEnvelope,
 };
-use crate::primitives::time::{TimeError, TrustedClock};
+use crate::primitives::time::{PhalanxTimestamp, TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
 use crate::security::retrieval::RetrievalOrchestrator;
 use crate::security::trust::{Offense, ReputationGate, TrustLevel, TrustRegistry};
@@ -23,18 +23,30 @@ use crate::transport::events::NetworkEvent;
 use crate::transport::health::HealthTracker;
 use crate::transport::network_transport::NetworkTransport;
 use crate::transport::protocol::VolleyResponse;
-
+use serde::{Deserialize, Serialize};
 // IMPORT ALL GATES
 use crate::security::gate::{ForensicGate, PrivacyGate};
 use crate::storage::kademlia::PeerEvaluator;
-
 pub use libp2p::pnet::PreSharedKey;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingEgress {
     pub channel_id: String,
     pub response: VolleyResponse,
     pub attempt_count: u32,
-    pub next_attempt: Instant,
+    pub next_attempt_ts: PhalanxTimestamp,
+}
+
+impl PendingEgress {
+    pub fn new(channel_id: String, response: VolleyResponse, delay: Duration) -> Self {
+        let scheduled_time = PhalanxTimestamp::now().as_millis() + delay.as_millis() as u64;
+        Self {
+            channel_id,
+            response,
+            attempt_count: 0,
+            next_attempt_ts: PhalanxTimestamp::from_millis(scheduled_time),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -69,6 +81,17 @@ impl TransientJournal for NoOpJournal {
     }
     async fn clear(&mut self) -> Result<(), ShardError> {
         Ok(())
+    }
+
+    async fn record_pending_egress(
+        &mut self,
+        _pending: &[PendingEgress],
+    ) -> Result<(), ShardError> {
+        Ok(())
+    }
+
+    async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError> {
+        Ok(vec![])
     }
 }
 
@@ -348,11 +371,14 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
                 "Initial egress failed. Queuing for resilient delivery."
             );
 
+            let now_ms = PhalanxTimestamp::now().as_millis();
+            let delay_ms = Duration::from_millis(500).as_millis() as u64;
+
             self.pending_egress.push_back(PendingEgress {
                 channel_id,
                 response,
                 attempt_count: 0,
-                next_attempt: Instant::now() + Duration::from_millis(500),
+                next_attempt_ts: PhalanxTimestamp::from_millis(now_ms + delay_ms),
             });
         }
     }
@@ -415,11 +441,11 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
     }
 
     async fn process_pending_egress(&mut self) {
-        let current_time = Instant::now();
+        let current_time = PhalanxTimestamp::now();
         let mut failed_retries = VecDeque::new();
 
         while let Some(mut pending_response) = self.pending_egress.pop_front() {
-            if pending_response.next_attempt > current_time {
+            if pending_response.next_attempt_ts > current_time {
                 failed_retries.push_back(pending_response);
                 continue;
             }
@@ -442,14 +468,18 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
                 Err(transport_error) => {
                     pending_response.attempt_count += 1;
                     if pending_response.attempt_count < 3 {
-                        let backoff_duration =
+                        let backoff_delay =
                             Duration::from_millis(500 * (2u64.pow(pending_response.attempt_count)));
-                        pending_response.next_attempt = current_time + backoff_duration;
+                        // Re-calculate math via primitives
+                        let next_millis = PhalanxTimestamp::now().as_millis()
+                            + (backoff_delay.as_millis() as u64);
+                        pending_response.next_attempt_ts =
+                            PhalanxTimestamp::from_millis(next_millis);
 
                         warn!(
                             channel = %pending_response.channel_id,
                             error = %transport_error,
-                            next_retry = ?pending_response.next_attempt,
+                            next_retry = ?pending_response.next_attempt_ts,
                             "Resilient Egress: Redelivery failed, scheduling subsequent retry"
                         );
                         failed_retries.push_back(pending_response);

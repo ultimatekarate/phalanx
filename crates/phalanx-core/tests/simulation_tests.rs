@@ -2,6 +2,7 @@ use tokio::time::Duration;
 
 // Import from the public API
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
+use phalanx_core::base::engine::NoOpJournal;
 use phalanx_core::base::types::{MeshTopic, NodeMode, TrafficGovernor};
 use phalanx_core::primitives::identity::{NetworkId, PhalanxIdentity};
 use phalanx_core::primitives::shards::{
@@ -12,7 +13,7 @@ use phalanx_core::primitives::time::TrustedClock;
 use phalanx_core::security::ingress::{IngressContext, IngressOrchestrator, SecurityPipeline};
 use phalanx_core::security::telemetry::{init_observability, NodeRole, SimEvent};
 use phalanx_core::security::trust::TrustRegistry;
-use phalanx_core::simulation::{SimJournal, SimulationHarness};
+use phalanx_core::simulation::SimulationHarness;
 use phalanx_core::storage::reassembler::Reassembler;
 use phalanx_core::storage::vault::Guardian;
 use phalanx_core::transport::events::NetworkEvent;
@@ -226,7 +227,7 @@ async fn test_leaf_mode_isolation() {
     let mut health_tracker = HealthTracker::new();
     let governor = TrafficGovernor::new();
     let clock = TrustedClock::new();
-    let mut transient_journal = SimJournal;
+    let mut transient_journal = NoOpJournal;
 
     let foreign_chunk = ShardChunk {
         shard_id: ShardId(1),

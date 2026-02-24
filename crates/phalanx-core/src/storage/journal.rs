@@ -1,10 +1,13 @@
+use crate::base::engine::PendingEgress;
 use crate::primitives::shards::{ShardChunk, ShardError};
 use crate::storage::reassembler::TransientJournal;
+
 use async_trait::async_trait;
 use std::io::SeekFrom;
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
+use tracing::info;
 pub struct FileJournal {
     file_path: PathBuf,
     handle: tokio::fs::File,
@@ -115,5 +118,40 @@ impl TransientJournal for FileJournal {
             .await
             .map_err(ShardError::Io)?;
         Ok(())
+    }
+
+    async fn record_pending_egress(&mut self, pending: &[PendingEgress]) -> Result<(), ShardError> {
+        let salvage_path = self.file_path.join("egress_salvage.bin");
+
+        let encoded = postcard::to_stdvec(pending).map_err(|e| {
+            ShardError::SerializationError(format!("Salvage serialization failed: {}", e))
+        })?;
+
+        tokio::fs::write(&salvage_path, encoded)
+            .await
+            .map_err(ShardError::Io)?;
+
+        info!(path = ?salvage_path, "Egress Salvage: State persisted to journal");
+        Ok(())
+    }
+
+    async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError> {
+        let salvage_path = self.file_path.join("egress_salvage.bin");
+        if !salvage_path.exists() {
+            return Ok(vec![]);
+        }
+
+        let encoded = tokio::fs::read(&salvage_path)
+            .await
+            .map_err(ShardError::Io)?;
+
+        let pending: Vec<PendingEgress> = postcard::from_bytes(&encoded).map_err(|_| {
+            ShardError::Encryption(crate::security::e2ee::CryptoError::DecryptionFailure)
+        })?;
+
+        // Cleanup after recovery to prevent replay of the same retry state
+        let _ = tokio::fs::remove_file(salvage_path).await;
+
+        Ok(pending)
     }
 }

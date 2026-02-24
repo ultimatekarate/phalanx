@@ -7,34 +7,10 @@ use crate::base::config::{PhalanxConfig, PhalanxPhysics};
 use crate::base::engine::{PhalanxEngine, SyncReputationCache};
 use crate::base::types::MeshTopic;
 use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
-use crate::primitives::shards::{ShardChunk, ShardError};
 use crate::security::telemetry::{ChaosMode, NodeRole, SimEvent};
 use crate::security::trust::TrustRegistry;
-use crate::storage::reassembler::TransientJournal;
 use crate::transport::events::NetworkEvent;
 use crate::transport::mock::MockTransport;
-
-// =========================================================================================
-//  POLYFILL: Simulation Journal
-// =========================================================================================
-
-pub struct SimJournal;
-
-#[async_trait::async_trait]
-impl TransientJournal for SimJournal {
-    async fn record_chunk(&mut self, _chunk: &ShardChunk) -> Result<(), ShardError> {
-        Ok(())
-    }
-    async fn sync(&mut self) -> Result<(), ShardError> {
-        Ok(())
-    }
-    async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
-        Ok(vec![])
-    }
-    async fn clear(&mut self) -> Result<(), ShardError> {
-        Ok(())
-    }
-}
 
 // =========================================================================================
 //  INFRASTRUCTURE: The Hexagonal Simulation Harness
@@ -125,7 +101,7 @@ impl SimulationHarness {
             self.config.clone(),
             identity,
             transport,
-            SimJournal,
+            crate::base::engine::NoOpJournal,
             trust_registry,
             reputation_cache,
         );
