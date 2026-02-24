@@ -19,6 +19,13 @@ use phalanx_core::storage::vault::{Guardian, GuardianError};
 use phalanx_core::transport::events::NetworkEvent;
 use phalanx_core::transport::health::HealthTracker;
 
+use phalanx_core::base::engine::{PendingEgress, StorageActor, StorageCommand};
+use phalanx_core::primitives::shards::{ShardError, VideoShard};
+use phalanx_core::primitives::time::PhalanxTimestamp;
+use phalanx_core::security::gate::WitnessGate;
+use phalanx_core::storage::reassembler::TransientJournal;
+use phalanx_core::transport::protocol::VolleyResponse;
+
 #[tokio::test]
 async fn test_salvage_on_node_death() {
     init_observability();
@@ -359,13 +366,6 @@ async fn test_vampire_attack_defense() -> Result<(), Box<dyn std::error::Error>>
 
 #[tokio::test]
 async fn test_pillar_salvage_under_disk_pressure() {
-    use phalanx_core::base::engine::{PendingEgress, StorageActor, StorageCommand};
-    use phalanx_core::primitives::shards::{ShardError, VideoShard};
-    use phalanx_core::primitives::time::PhalanxTimestamp;
-    use phalanx_core::security::gate::WitnessGate;
-    use phalanx_core::storage::reassembler::TransientJournal;
-    use phalanx_core::transport::protocol::VolleyResponse;
-
     // --- CLINICAL MOCK: THE CRUMBLING JOURNAL ---
     struct BrokenJournal;
     #[async_trait::async_trait]
@@ -459,4 +459,118 @@ async fn test_pillar_salvage_under_disk_pressure() {
         result.is_ok(),
         "The StorageActor deadlocked when the Journal failed to salvage evidence!"
     );
+}
+
+#[tokio::test]
+async fn test_reputation_gate_signature_mismatch() {
+    use phalanx_core::base::engine::StorageCommand;
+    use phalanx_core::security::gate::WitnessGate;
+
+    // 1. Setup Environment
+    let temp = tempfile::tempdir().unwrap();
+    let config = PhalanxConfig::test_defaults();
+    let (my_identity, _) = PhalanxIdentity::generate().unwrap();
+    let (attacker_identity, _) = PhalanxIdentity::generate().unwrap();
+    let attacker_net_id = attacker_identity.to_network_id();
+
+    // 2. Create "Poisoned" Evidence
+    let video_shard = VideoShard {
+        timestamp: PhalanxTimestamp::now(),
+        sequence_id: StorageSequence(1),
+        fps: 30,
+        volley_id: VolleyId::new("v1"),
+        payload: DataPayload::Clear(vec![0xBA, 0xAD, 0xF0, 0x0D]),
+    };
+
+    // Seal it legitimately first
+    let mut envelope = Evidence::Video(video_shard)
+        .seal(&attacker_identity, attacker_net_id.clone(), None)
+        .expect("Failed to seal initial envelope");
+
+    // POISON: Flip a bit in the signature to invalidate it
+    if let Some(sig_byte) = envelope.witness_signature.as_mut_slice().get_mut(0) {
+        *sig_byte ^= 0xFF; // Flip the bits
+    }
+
+    let poisoned_data = postcard::to_stdvec(&envelope).expect("Serialization failed");
+
+    let chunk = ShardChunk {
+        shard_id: ShardId(666),
+        chunk_index: 0,
+        total_chunks: 1,
+        data: poisoned_data,
+        owner_did: attacker_identity.did.clone(),
+        chunk_type: ChunkType::Witnessed,
+    };
+
+    // 3. Setup Channels and Actor
+    let (storage_tx, storage_rx) = tokio::sync::mpsc::channel::<StorageCommand>(10);
+    let (forensic_tx, mut forensic_rx) =
+        tokio::sync::mpsc::channel::<(NetworkId, Did, GuardianError)>(10);
+
+    let actor = StorageActor {
+        reassembler: Reassembler::new(),
+        guardian: Guardian::new(
+            &temp.path().to_string_lossy(),
+            &config,
+            my_identity.did.clone(),
+        ),
+        journal: NoOpJournal, // NoOp because we expect rejection before the journal is reached
+        config,
+        identity: my_identity,
+        forensic_tx,
+        local_peer_id: NetworkId::random(),
+    };
+
+    // 4. Inject Poisoned Chunk via Ingest Command
+    let topic = MeshTopic::new("phalanx/video/1.0.0");
+    storage_tx
+        .send(StorageCommand::Ingest(
+            chunk,
+            topic,
+            attacker_net_id.clone(),
+        ))
+        .await
+        .unwrap();
+
+    // 5. Start Actor
+    let actor_handle = tokio::spawn(async move {
+        actor.run(storage_rx).await;
+    });
+
+    // 6. Verification: Listen for the Forensic Escalation
+    let escalation = tokio::time::timeout(Duration::from_millis(500), forensic_rx.recv()).await;
+
+    // Cleanup
+    drop(storage_tx);
+    actor_handle.abort();
+
+    // 7. Assertions
+    let (offender_net_id, offender_did, error) = escalation
+        .expect("Timeout: Actor failed to escalate the signature mismatch!")
+        .expect("Forensic channel closed prematurely");
+
+    assert_eq!(offender_net_id, attacker_net_id, "Wrong peer reported!");
+    assert_eq!(offender_did, attacker_identity.did, "Wrong DID reported!");
+
+    // Check that the error is specifically a Cryptographic/Signature failure
+    match error {
+        // FIX: Match the actual variant and message reported by the Guardian
+        GuardianError::VerificationFailed(ref msg) => {
+            assert!(
+                msg.contains("signature mismatch"),
+                "Unexpected verification error: {}",
+                msg
+            );
+            println!("Gatekeepers held! Signature mismatch detected: {}", msg);
+        }
+        // If your enum also has InvalidSignature, we keep it as a fallback
+        GuardianError::InvalidSignature(..) => {
+            println!("Gatekeepers held! Invalid signature detected.");
+        }
+        _ => panic!(
+            "Expected VerificationFailed/InvalidSignature, got: {:?}",
+            error
+        ),
+    }
 }

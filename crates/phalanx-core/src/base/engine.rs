@@ -390,10 +390,11 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
         if self.pending_egress.len() >= 1000 {
             self.pending_egress.pop_front();
         }
-        if let Err(_) = self
+        if self
             .network
             .send_response(&channel_id, response.clone())
             .await
+            .is_err()
         {
             self.pending_egress.push_back(PendingEgress::new(
                 channel_id,
