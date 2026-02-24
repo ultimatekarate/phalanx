@@ -17,7 +17,7 @@ fn default_cleanup_interval() -> Duration {
 ///
 /// This pattern is essential for reconstructing high-level objects from fragmented network
 /// data, such as reassembling shards into envelopes or grouping envelopes into volleys.
-pub trait Mold {
+pub trait Mold: Send + Sync + Serialize + for<'de> Deserialize<'de> {
     type Input;
     type Output;
     // ENFORCEMENT: Keys must be serializable to reconstruct the BTreeMap
@@ -37,7 +37,7 @@ pub trait Mold {
 
     fn ingest(acc: &mut Self::Accumulator, item: Self::Input);
     fn is_ready(acc: &Self::Accumulator, elapsed: Duration) -> bool;
-    fn assemble(key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output>;
+    fn assemble(&self, key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output>;
 }
 /// A generic execution engine and container for stateful data aggregation.
 ///
@@ -59,6 +59,7 @@ pub trait Mold {
     bound = "S::Key: Serialize + DeserializeOwned, S::Accumulator: Serialize + DeserializeOwned"
 )]
 pub struct Crucible<S: Mold> {
+    strategy: S,
     pub contexts: BTreeMap<S::Key, WorkContext<S::Accumulator>>,
     #[serde(skip, default = "tokio::time::Instant::now")]
     pub last_cleanup: tokio::time::Instant,
@@ -78,8 +79,9 @@ pub struct WorkContext<A> {
 
 impl<S: Mold> Crucible<S> {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(strategy: S, _cleanup_interval: Duration) -> Self {
         Self {
+            strategy,
             contexts: std::collections::BTreeMap::new(),
             last_cleanup: tokio::time::Instant::now(),
             cleanup_interval: Duration::from_secs(1),
@@ -96,23 +98,26 @@ impl<S: Mold> Crucible<S> {
         self.perform_cleanup();
         let key = S::get_key(&item);
 
-        // 1. INGEST (Unified Logic)
         let (is_ready_now, elapsed) = match self.contexts.entry(key.clone()) {
             Entry::Occupied(mut entry) => {
                 let ctx = entry.get_mut();
                 S::ingest(&mut ctx.accumulator, item);
-                // Check readiness against elapsed time
                 let el = ctx.created_at.elapsed();
 
                 (S::is_ready(&ctx.accumulator, el), el)
             }
             Entry::Vacant(entry) => {
+                // Initialize the empty accumulator
+                let mut acc = S::init_accumulator(&item);
+
+                // FIX: Actually ingest the first item!
+                S::ingest(&mut acc, item);
+
                 let ctx = entry.insert(WorkContext {
-                    accumulator: S::init_accumulator(&item),
+                    accumulator: acc,
                     created_at: Instant::now(),
                 });
-                // Check readiness IMMEDIATELY (Elapsed = 0)
-                // Critical for 0-latency configs
+
                 (
                     S::is_ready(&ctx.accumulator, Duration::ZERO),
                     Duration::ZERO,
@@ -126,14 +131,13 @@ impl<S: Mold> Crucible<S> {
                 ?elapsed,
                 "Crucible: Item ingested but NOT ready to seal."
             );
+            return None; // Ensure we exit if not ready
         }
 
-        // 2. EJECT (If ready)
-        if is_ready_now {
-            info!(?key, ?elapsed, "Crucible: Item READY. Sealing...");
-            if let Some(ctx) = self.contexts.remove(&key) {
-                return S::assemble(key, ctx.accumulator);
-            }
+        info!(?key, ?elapsed, "Crucible: Item READY. Sealing...");
+        if let Some(ctx) = self.contexts.remove(&key) {
+            // FIX: Call assemble on the instance
+            return self.strategy.assemble(key, ctx.accumulator);
         }
 
         None
@@ -200,7 +204,7 @@ impl<S: Mold> Crucible<S> {
         for key in ready_keys {
             if let Some(ctx) = self.contexts.remove(&key) {
                 info!(target: "phalanx::forensics", ?key, "CRUCIBLE_EJECTING_STALE_KEY");
-                if let Some(out) = S::assemble(key, ctx.accumulator) {
+                if let Some(out) = self.strategy.assemble(key, ctx.accumulator) {
                     results.push(out);
                 }
             }
@@ -215,7 +219,7 @@ impl<S: Mold> Crucible<S> {
         for key in keys {
             if let Some(ctx) = self.contexts.remove(&key) {
                 // Assemble immediately regardless of state
-                if let Some(out) = S::assemble(key, ctx.accumulator) {
+                if let Some(out) = self.strategy.assemble(key, ctx.accumulator) {
                     results.push(out);
                 }
             }
@@ -224,10 +228,11 @@ impl<S: Mold> Crucible<S> {
     }
 }
 
-impl<S: Mold> Default for Crucible<S> {
+impl<S: Mold + Default> Default for Crucible<S> {
     /// Initializes a default Crucible workbench with a standard 1-second cleanup interval.
     fn default() -> Self {
-        Self::new()
+        // Use the strategy's default and our standard 1s interval
+        Self::new(S::default(), Duration::from_secs(1))
     }
 }
 
@@ -237,7 +242,10 @@ mod tests {
     use std::time::Duration;
 
     // 1. MOCK STRATEGY
+    // 1. MOCK STRATEGY - Now with Derives
+    #[derive(Debug, Serialize, Deserialize, Default)]
     struct SumMold;
+
     impl Mold for SumMold {
         type Input = i32;
         type Output = String;
@@ -245,20 +253,22 @@ mod tests {
         type Accumulator = Vec<i32>;
 
         fn get_key(_item: &i32) -> String {
-            "fixed_key".to_string()
+            "fixed".to_string()
         }
-        fn init_accumulator(item: &i32) -> Vec<i32> {
-            vec![*item]
+
+        fn init_accumulator(_item: &i32) -> Vec<i32> {
+            vec![]
         }
+
         fn ingest(acc: &mut Vec<i32>, item: i32) {
             acc.push(item);
         }
 
         fn is_ready(acc: &Vec<i32>, _elapsed: Duration) -> bool {
-            acc.len() >= 3 // Ready when we have 3 items
+            acc.len() >= 3
         }
 
-        fn assemble(_key: String, acc: Vec<i32>) -> Option<String> {
+        fn assemble(&self, _key: String, acc: Vec<i32>) -> Option<String> {
             let sum: i32 = acc.iter().sum();
             Some(format!("Sum: {}", sum))
         }
@@ -267,7 +277,7 @@ mod tests {
     // FIX: Must use tokio::test because Crucible::new() calls tokio::time::Instant::now()
     #[tokio::test]
     async fn test_crucible_auto_seal() {
-        let mut crucible = Crucible::<SumMold>::new();
+        let mut crucible = Crucible::new(SumMold, Duration::from_secs(5));
 
         // 1. Ingest 2 items (Not ready)
         assert!(crucible.process(10).is_none());
@@ -283,7 +293,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_crucible_flush_stale() {
-        let mut crucible = Crucible::<SumMold>::new();
+        let mut crucible = Crucible::new(SumMold, Duration::from_secs(5));
 
         // 1. Ingest 1 item (Stale)
         crucible.process(5);
@@ -301,7 +311,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_crucible_flush_all() {
-        let mut crucible = Crucible::<SumMold>::new();
+        let mut crucible = Crucible::new(SumMold, Duration::from_secs(5));
         crucible.process(1);
         crucible.process(2); // 2 items waiting
 

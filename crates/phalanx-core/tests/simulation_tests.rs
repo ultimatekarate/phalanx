@@ -246,12 +246,14 @@ async fn test_leaf_mode_isolation() {
         mode: NodeMode::Leaf,
     };
 
+    let mut seen_cache = std::collections::HashSet::new();
     let mut security_pipeline = SecurityPipeline {
         reassembler: &mut reassembler,
         journal: &mut transient_journal,
         guardian: &mut guardian,
         trust_registry: &mut trust_registry,
         health_tracker: &mut health_tracker,
+        seen_cache: &mut seen_cache,
     };
 
     let result = IngressOrchestrator::process_chunk(

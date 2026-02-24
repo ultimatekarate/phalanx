@@ -7,6 +7,8 @@ use crate::security::trust::{Offense, TrustLevel, TrustRegistry};
 use crate::storage::reassembler::{Reassembler, TransientJournal};
 use crate::storage::vault::{Guardian, GuardianError};
 use crate::transport::health::HealthTracker;
+use std::collections::HashSet;
+use tracing::{debug, instrument};
 
 pub struct IngressContext<'a> {
     pub config: &'a PhalanxConfig,
@@ -23,6 +25,8 @@ pub struct SecurityPipeline<'a, J: TransientJournal> {
     pub guardian: &'a mut Guardian,
     pub trust_registry: &'a mut TrustRegistry,
     pub health_tracker: &'a mut HealthTracker,
+    // Deduplication gate
+    pub seen_cache: &'a mut HashSet<(crate::primitives::shards::ShardId, u32)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -33,16 +37,17 @@ pub enum IngressError {
     #[error("Traffic rejected by Governor")]
     Throttled,
 
-    #[error("Reassembler rejected payload: {0}")]
+    #[error("Reassembler rejected chunk: {0}")]
     ReassemblerRejected(#[from] ShardError),
 
-    #[error("Guardian rejected payload: {0}")]
+    #[error("Guardian rejected envelope: {0}")]
     GuardianRejected(#[from] GuardianError),
 }
 
 pub struct IngressOrchestrator;
 
 impl IngressOrchestrator {
+    #[instrument(skip(pipeline, ctx, chunk), level = "info")]
     pub async fn process_chunk<J: TransientJournal>(
         chunk: ShardChunk,
         topic: &MeshTopic,
@@ -50,30 +55,38 @@ impl IngressOrchestrator {
         pipeline: &mut SecurityPipeline<'_, J>,
     ) -> Result<Option<()>, IngressError> {
         let sender_did = chunk.owner_did.clone();
+        let chunk_id = (chunk.shard_id, chunk.chunk_index);
 
-        // 3. Trust Gate: Check reputation
+        // 1. DEDUPLICATION GATE
+        if !pipeline.seen_cache.insert(chunk_id) {
+            debug!(?chunk_id, "Ingress: Dropping duplicate chunk.");
+            return Ok(None);
+        }
+
+        // 2. TRUST GATE
         let trust_level = pipeline.trust_registry.check_trust(&sender_did);
         if matches!(trust_level, TrustLevel::Blocked) {
             return Err(IngressError::Blacklisted(sender_did));
         }
 
-        // 4. Reassembly Phase
-        // Utilizing your existing `process_chunk` which currently handles WAL internally.
+        // 3. REASSEMBLY PHASE
+        // Corrected to 6 arguments to match implementation requirements
         match pipeline
             .reassembler
             .ingest_chunk(
                 chunk,
                 pipeline.journal,
-                topic,
+                topic, // 6th argument added
                 ctx.config,
                 ctx.identity,
                 ctx.network_id,
             )
             .await
         {
-            Ok(Some(envelope)) => {
-                // 5. Finalization Phase (Archival)
-                match pipeline.guardian.ingest_envelope(envelope).await {
+            Ok(Some(state)) => {
+                // 4. GUARDIAN PHASE
+                // ingest_envelope now expects the full EnvelopeState (Intact or Fragmented)
+                match pipeline.guardian.ingest_envelope(state).await {
                     Ok(_) => Ok(Some(())),
                     Err(guardian_error) => {
                         Self::report_offense(&sender_did, &guardian_error, ctx, pipeline).await;
@@ -81,11 +94,8 @@ impl IngressOrchestrator {
                     }
                 }
             }
-            Ok(None) => Ok(None), // Reassembly ongoing
-            Err(shard_error) => {
-                // Map shard errors to reputation offenses
-                Err(IngressError::ReassemblerRejected(shard_error))
-            }
+            Ok(None) => Ok(None),
+            Err(shard_error) => Err(IngressError::ReassemblerRejected(shard_error)),
         }
     }
 

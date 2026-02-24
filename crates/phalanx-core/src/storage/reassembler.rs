@@ -5,6 +5,7 @@ use crate::primitives::shards::{ChunkType, EnvelopeState, ShardChunk, ShardError
 use crate::storage::crucible::Crucible;
 use crate::storage::strategies::ShardAmalgam;
 use async_trait::async_trait;
+use std::time::Duration;
 use tracing::{info, instrument};
 
 // =====================
@@ -33,7 +34,7 @@ impl Default for Reassembler {
 impl Reassembler {
     pub fn new() -> Self {
         Self {
-            crucible: Crucible::new(),
+            crucible: Crucible::new(ShardAmalgam, Duration::from_secs(5)),
             power_state: PowerState::Normal,
         }
     }

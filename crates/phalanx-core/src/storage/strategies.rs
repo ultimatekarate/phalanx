@@ -30,6 +30,7 @@ pub struct VolleyBuffer {
     pub artifacts: BTreeMap<StorageSequence, WitnessEnvelope>,
 }
 // --- STRATEGY 1: SHARD REASSEMBLY (Chunks -> Envelope) --
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ShardAmalgam;
 
 impl Mold for ShardAmalgam {
@@ -68,7 +69,7 @@ impl Mold for ShardAmalgam {
         acc.received_count == acc.total_chunks
     }
 
-    fn assemble(key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output> {
+    fn assemble(&self, key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output> {
         // Incomplete or fragmented data - triggered by flush_stale/flush_all
         if acc.received_count != acc.total_chunks {
             warn!(?key, received=%acc.received_count, total=%acc.total_chunks, "ShardAmalgam: Incomplete shard, transitioning to Fragmented state");
@@ -118,6 +119,7 @@ impl Mold for ShardAmalgam {
 }
 
 // --- STRATEGY 2: VOLLEY ASSEMBLY (Envelopes -> Volley) ---
+#[derive(Debug, Serialize, Deserialize)]
 pub struct VolleyAmalgam;
 
 impl Mold for VolleyAmalgam {
@@ -183,7 +185,7 @@ impl Mold for VolleyAmalgam {
         acc.artifacts.len() >= VOLLEY_SIZE_THRESHOLD || elapsed > VOLLEY_TIME_THRESHOLD
     }
 
-    fn assemble(key: VolleyId, acc: Self::Accumulator) -> Option<Self::Output> {
+    fn assemble(&self, key: VolleyId, acc: Self::Accumulator) -> Option<Self::Output> {
         if acc.artifacts.is_empty() {
             return None;
         }
@@ -253,5 +255,118 @@ impl Mold for VolleyAmalgam {
             gaps,
             is_complete: gaps_2.is_empty(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::primitives::identity::PhalanxIdentity;
+    use crate::primitives::shards::{
+        create_video_shard, Evidence, HandoverProof, ShardId, StorageSequence, VolleyId,
+        WitnessEnvelope,
+    };
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn test_shard_amalgam_gap_reporting() {
+        // 1. Setup metadata
+        let (identity, _) = PhalanxIdentity::generate().unwrap();
+        let shard_id = ShardId(505);
+        let vid = VolleyId::new("gap_test");
+
+        // 2. Create a real WitnessEnvelope to simulate serialized data
+        let video_shard =
+            create_video_shard(vec![vec![0xAA, 0xBB]], StorageSequence(1), 30, vid).unwrap();
+
+        let envelope = WitnessEnvelope::new(
+            Evidence::Video(video_shard),
+            &identity,
+            identity.to_network_id(),
+            None,
+        )
+        .unwrap();
+
+        let full_serialized_data = postcard::to_stdvec(&envelope).unwrap();
+
+        // Split data into 3 mock chunks
+        let chunk_size = (full_serialized_data.len() / 3) + 1;
+        let mut parts = BTreeMap::new();
+        parts.insert(0, full_serialized_data[0..chunk_size].to_vec());
+        // We SKIP index 1 to simulate a network drop
+        parts.insert(2, full_serialized_data[(chunk_size * 2)..].to_vec());
+
+        // 3. Manually populate the Accumulator (ShardBuffer)
+        let acc = ShardBuffer {
+            total_chunks: 3,
+            received_count: 2, // 0 and 2 arrived, 1 is missing
+            parts,
+            estimated_chunk_size: chunk_size,
+            owner_did: identity.did.clone(),
+        };
+
+        // 4. EXECUTE ASSEMBLE (The Triage Path)
+        let strategy = ShardAmalgam;
+        let result = strategy
+            .assemble(shard_id, acc)
+            .expect("Should return a state");
+
+        // 5. ASSERTIONS
+        if let EnvelopeState::Fragmented(fragmented) = result {
+            assert_eq!(fragmented.shard_id, shard_id);
+            assert_eq!(fragmented.gap_report.missing_chunk_indices, vec![1]);
+            assert_eq!(fragmented.gap_report.expected_total_chunks, 3);
+            assert_eq!(
+                fragmented.partial_data.len(),
+                2,
+                "Should preserve the data we DO have"
+            );
+        } else {
+            panic!("Expected Fragmented state, got {:?}", result);
+        }
+    }
+
+    #[test]
+    fn test_shard_amalgam_full_reassembly() {
+        let (identity, _) = PhalanxIdentity::generate().unwrap();
+        let shard_id = ShardId(707);
+
+        // 1. Create a REAL envelope so postcard can deserialize it successfully
+        let envelope = WitnessEnvelope::new(
+            Evidence::Handover(HandoverProof {
+                volley_id: VolleyId::new("test"),
+                sequence_id: StorageSequence(0),
+                old_did: identity.did.clone(),
+                new_did: identity.did.clone(),
+                anchor_hash: SignatureHash([0; 32]),
+                old_signature: identity.sign(b"test"),
+                new_signature: identity.sign(b"test"),
+            }),
+            &identity,
+            identity.to_network_id(),
+            None,
+        )
+        .unwrap();
+
+        let data = postcard::to_stdvec(&envelope).unwrap();
+
+        let mut parts = BTreeMap::new();
+        parts.insert(0, data.clone());
+
+        let acc = ShardBuffer {
+            total_chunks: 1,
+            received_count: 1,
+            parts,
+            estimated_chunk_size: data.len(),
+            owner_did: identity.did.clone(),
+        };
+
+        let strategy = ShardAmalgam;
+        // This will now succeed because the bytes represent a valid WitnessEnvelope
+        let result = strategy
+            .assemble(shard_id, acc)
+            .expect("Should assemble successfully");
+
+        assert!(matches!(result, EnvelopeState::Intact(_)));
     }
 }
