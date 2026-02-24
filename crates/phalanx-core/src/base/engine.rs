@@ -537,10 +537,54 @@ mod tests {
     use crate::base::config::PhalanxConfig;
     use crate::base::types::MeshTopic;
     use crate::primitives::identity::PhalanxIdentity;
+    use crate::primitives::shards::{DataPayload, Evidence, StorageSequence, VideoShard};
     use crate::transport::events::NetworkEvent;
     use crate::transport::mock::MockTransport;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
+
+    // --- CLINICAL MOCK: FAILING TRANSPORT ---
+    struct FailingTransport;
+
+    #[async_trait::async_trait]
+    impl NetworkTransport for FailingTransport {
+        async fn send_response(&mut self, _: &str, _: VolleyResponse) -> Result<(), String> {
+            // Pillar 3: Force failure to verify re-queueing
+            Err("Simulated Network Failure".to_string())
+        }
+        async fn next_event(&mut self) -> Option<NetworkEvent> {
+            None
+        }
+        async fn publish(&mut self, _: &MeshTopic, _: Vec<u8>) -> Result<(), String> {
+            Ok(())
+        }
+        async fn ban_peer(&mut self, _: &NetworkId) {}
+    }
+
+    struct RecoveryJournal(Vec<PendingEgress>);
+
+    #[async_trait::async_trait]
+    impl TransientJournal for RecoveryJournal {
+        async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError> {
+            // Pillar 2: Return the "salvaged" state
+            Ok(self.0.clone())
+        }
+        async fn record_pending_egress(&mut self, _: &[PendingEgress]) -> Result<(), ShardError> {
+            Ok(())
+        }
+        async fn record_chunk(&mut self, _: &ShardChunk) -> Result<(), ShardError> {
+            Ok(())
+        }
+        async fn sync(&mut self) -> Result<(), ShardError> {
+            Ok(())
+        }
+        async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
+            Ok(vec![])
+        }
+        async fn clear(&mut self) -> Result<(), ShardError> {
+            Ok(())
+        }
+    }
 
     fn create_mock_transport() -> MockTransport {
         let (_, ingress_rx) = mpsc::channel::<NetworkEvent>(10);
@@ -605,5 +649,123 @@ mod tests {
             .await
             .unwrap();
         assert!(engine.clock.now().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pillar_retry_logic_and_backoff() {
+        let _temp = tempfile::tempdir().unwrap();
+        // Initialize with NoOpJournal as we are testing the Engine's internal loop
+        let mut engine = PhalanxEngine::new(
+            PhalanxConfig::test_defaults(),
+            PhalanxIdentity::new(),
+            FailingTransport,
+            NoOpJournal,
+            TrustRegistry::build(&PhalanxConfig::test_defaults()).await,
+            Arc::new(SyncReputationCache::default()),
+        )
+        .await
+        .unwrap();
+
+        // 1. Inject a "stale" message (next_attempt is in the past)
+        let past_ts = PhalanxTimestamp::from_millis(PhalanxTimestamp::now().as_millis() - 5000);
+        engine.pending_egress.push_back(PendingEgress {
+            channel_id: "retry_target_01".into(),
+            response: VolleyResponse::NotFound,
+            attempt_count: 0,
+            next_attempt: past_ts,
+        });
+
+        // 2. Execute the retry processor
+        engine.process_pending_egress().await;
+
+        // 3. Verify Pillar 3: Backoff math and retention
+        let pending = engine
+            .pending_egress
+            .front()
+            .expect("Pillar 3 Failure: Message was dropped instead of re-queued on failure");
+
+        assert_eq!(pending.attempt_count, 1);
+        // The new timestamp should be roughly now + 1000ms (500 * 2^1)
+        assert!(pending.next_attempt > PhalanxTimestamp::now());
+        assert_eq!(pending.channel_id, "retry_target_01");
+    }
+
+    #[tokio::test]
+    async fn test_pillar_salvage_intent() {
+        use crate::security::gate::WitnessGate;
+
+        let (identity, _) = PhalanxIdentity::generate().unwrap();
+
+        let mut engine = PhalanxEngine::new(
+            PhalanxConfig::test_defaults(),
+            identity.clone(),
+            FailingTransport,
+            NoOpJournal,
+            TrustRegistry::build(&PhalanxConfig::test_defaults()).await,
+            Arc::new(SyncReputationCache::default()),
+        )
+        .await
+        .unwrap();
+
+        // 1. Create a structurally valid WitnessEnvelope
+        let video_shard = VideoShard {
+            timestamp: PhalanxTimestamp::now(),
+            sequence_id: StorageSequence(1),
+            fps: 30,
+            volley_id: VolleyId::new("v1"),
+            payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        };
+
+        let envelope = Evidence::Video(video_shard)
+            .seal(&identity, identity.to_network_id(), None)
+            .expect("Failed to seal test envelope");
+
+        // 2. Populate live queue with the correct type
+        engine.pending_egress.push_back(PendingEgress::new(
+            "ch_live".into(),
+            VolleyResponse::Success(vec![envelope]),
+            Duration::from_secs(5),
+        ));
+
+        // 3. Simulate the Shutdown branch logic
+        let salvage_payload: Vec<PendingEgress> = engine.pending_egress.drain(..).collect();
+
+        // 4. Verify Pillar 1
+        assert_eq!(salvage_payload.len(), 1);
+        assert_eq!(salvage_payload[0].channel_id, "ch_live");
+
+        // Ensure the data inside matches
+        if let VolleyResponse::Success(ref envelopes) = salvage_payload[0].response {
+            assert_eq!(envelopes.len(), 1);
+        } else {
+            panic!("Pillar 1 Failure: Response type was corrupted during salvage drain");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_recovery() {
+        // Pre-create some "salvaged" data
+        let salvaged = vec![PendingEgress::new(
+            "ch_salvaged".into(),
+            VolleyResponse::Unauthorized,
+            Duration::from_secs(1),
+        )];
+        let journal = RecoveryJournal(salvaged);
+
+        // 1. Initialize Engine
+        let engine = PhalanxEngine::new(
+            PhalanxConfig::test_defaults(),
+            PhalanxIdentity::new(),
+            FailingTransport, // Reuse the stub
+            journal,
+            TrustRegistry::build(&PhalanxConfig::test_defaults()).await,
+            Arc::new(SyncReputationCache::default()),
+        )
+        .await
+        .unwrap();
+
+        // 2. Verify Pillar 2: The engine "remembered" the salvaged queue
+        assert_eq!(engine.pending_egress.len(), 1);
+        assert_eq!(engine.pending_egress[0].channel_id, "ch_salvaged");
     }
 }

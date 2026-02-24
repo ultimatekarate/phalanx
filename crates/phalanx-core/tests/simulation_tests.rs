@@ -4,7 +4,7 @@ use tokio::time::Duration;
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
 use phalanx_core::base::engine::NoOpJournal;
 use phalanx_core::base::types::{MeshTopic, NodeMode, TrafficGovernor};
-use phalanx_core::primitives::identity::{NetworkId, PhalanxIdentity};
+use phalanx_core::primitives::identity::{Did, NetworkId, PhalanxIdentity};
 use phalanx_core::primitives::shards::{
     self, create_video_shard, ChunkType, DataPayload, EnvelopeState, Evidence, ShardChunk, ShardId,
     StorageSequence, VolleyId, WitnessEnvelope,
@@ -15,7 +15,7 @@ use phalanx_core::security::telemetry::{init_observability, NodeRole, SimEvent};
 use phalanx_core::security::trust::TrustRegistry;
 use phalanx_core::simulation::SimulationHarness;
 use phalanx_core::storage::reassembler::Reassembler;
-use phalanx_core::storage::vault::Guardian;
+use phalanx_core::storage::vault::{Guardian, GuardianError};
 use phalanx_core::transport::events::NetworkEvent;
 use phalanx_core::transport::health::HealthTracker;
 
@@ -355,4 +355,108 @@ async fn test_vampire_attack_defense() -> Result<(), Box<dyn std::error::Error>>
         "Vampire defense failed to block malformed payload"
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn test_pillar_salvage_under_disk_pressure() {
+    use phalanx_core::base::engine::{PendingEgress, StorageActor, StorageCommand};
+    use phalanx_core::primitives::shards::{ShardError, VideoShard};
+    use phalanx_core::primitives::time::PhalanxTimestamp;
+    use phalanx_core::security::gate::WitnessGate;
+    use phalanx_core::storage::reassembler::TransientJournal;
+    use phalanx_core::transport::protocol::VolleyResponse;
+
+    // --- CLINICAL MOCK: THE CRUMBLING JOURNAL ---
+    struct BrokenJournal;
+    #[async_trait::async_trait]
+    impl TransientJournal for BrokenJournal {
+        async fn record_pending_egress(&mut self, _: &[PendingEgress]) -> Result<(), ShardError> {
+            // Pillar 1 Failure: Simulated Disk Full / IO Error
+            let io_err = std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "DISK FULL: Phalanx cannot salvage egress state",
+            );
+            Err(ShardError::Io(io_err))
+        }
+        // ... stubs for other methods ...
+        async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError> {
+            Ok(vec![])
+        }
+        async fn record_chunk(&mut self, _: &ShardChunk) -> Result<(), ShardError> {
+            Ok(())
+        }
+        async fn sync(&mut self) -> Result<(), ShardError> {
+            Ok(())
+        }
+        async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
+            Ok(vec![])
+        }
+        async fn clear(&mut self) -> Result<(), ShardError> {
+            Ok(())
+        }
+    }
+
+    // 1. Setup Engine with the Broken Pillar
+    let temp = tempfile::tempdir().unwrap();
+    let config = PhalanxConfig::test_defaults();
+    let (identity, _) = PhalanxIdentity::generate().unwrap();
+
+    // 3. Prepare Real Forensic Evidence via WitnessGate
+    let video_shard = VideoShard {
+        timestamp: PhalanxTimestamp::now(),
+        sequence_id: StorageSequence(1),
+        fps: 30,
+        volley_id: VolleyId::new("v1"),
+        payload: DataPayload::Clear(vec![0xCA, 0xFE, 0xBA, 0xBE]),
+    };
+
+    let envelope = Evidence::Video(video_shard)
+        .seal(&identity, identity.to_network_id(), None)
+        .expect("Failed to seal forensic evidence");
+
+    // 4. Setup the Guardian & Actor
+    let guardian = Guardian::new(
+        &temp.path().to_string_lossy(),
+        &config,
+        identity.did.clone(),
+    );
+
+    let (storage_tx, storage_rx) = tokio::sync::mpsc::channel::<StorageCommand>(10);
+    let (forensic_tx, _forensic_rx) =
+        tokio::sync::mpsc::channel::<(NetworkId, Did, GuardianError)>(1);
+
+    let actor = StorageActor {
+        reassembler: Reassembler::new(),
+        guardian,
+        journal: BrokenJournal,
+        config: config.clone(),
+        identity: identity.clone(),
+        forensic_tx,
+        local_peer_id: identity.to_network_id(),
+    };
+
+    // 5. Trigger Salvage with Evidence
+    let salvage_data = vec![PendingEgress::new(
+        "ch_broken_pillar".into(),
+        VolleyResponse::Success(vec![envelope]),
+        Duration::from_secs(1),
+    )];
+
+    storage_tx
+        .send(StorageCommand::EmergencySalvage(salvage_data))
+        .await
+        .unwrap();
+    drop(storage_tx); // Close the channel to signal shutdown after processing
+
+    // 6. Verification: Ensure no deadlock
+    let actor_handle = tokio::spawn(async move {
+        actor.run(storage_rx).await;
+    });
+
+    let result = tokio::time::timeout(Duration::from_millis(500), actor_handle).await;
+
+    assert!(
+        result.is_ok(),
+        "The StorageActor deadlocked when the Journal failed to salvage evidence!"
+    );
 }
