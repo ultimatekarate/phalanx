@@ -31,8 +31,8 @@ impl FileJournal {
 impl TransientJournal for FileJournal {
     async fn record_chunk(&mut self, chunk: &ShardChunk) -> Result<(), ShardError> {
         // 1. Serialize and explicitly map the postcard::Error to a String
-        let payload =
-            postcard::to_stdvec(chunk).map_err(|e| ShardError::Serialization(e.to_string()))?;
+        let payload = postcard::to_stdvec(chunk)
+            .map_err(|e| ShardError::SerializationError(e.to_string()))?;
 
         // 2. Prepare length-prefix (4-byte unsigned little-endian)
         let payload_length = payload.len() as u32;

@@ -3,7 +3,7 @@ const VOLLEY_TIME_THRESHOLD: Duration = Duration::from_secs(1);
 
 use crate::primitives::identity::Did;
 use crate::primitives::shards::{
-    EnvelopeState, ForensicGap, FragmentedEnvelope, ShardChunk, ShardGapReport, ShardId,
+    EnvelopeState, Evidence, ForensicGap, FragmentedEnvelope, ShardChunk, ShardGapReport, ShardId,
     SignatureHash, StorageSequence, Volley, VolleyId, WitnessEnvelope,
 };
 use crate::primitives::time::TrustedClock;
@@ -143,7 +143,40 @@ impl Mold for VolleyAmalgam {
 
     fn ingest(acc: &mut Self::Accumulator, item: Self::Input) {
         let seq = item.evidence.sequence_id();
-        acc.artifacts.insert(seq, item);
+
+        match &item.evidence {
+            Evidence::Handover(proof) => {
+                // 1. Verify the bridge connects to the CURRENT legal owner
+                if proof.old_did == acc.owner_did {
+                    tracing::info!(
+                        volley = %acc.volley_id,
+                        "Crucible: Advancing stream ownership via HandoverProof"
+                    );
+
+                    // Transfer legal ownership of the active buffer
+                    acc.owner_did = proof.new_did.clone();
+                    acc.artifacts.insert(seq, item);
+                } else {
+                    tracing::warn!(
+                        volley = %acc.volley_id,
+                        "Crucible rejected HandoverProof: Unauthorized origin"
+                    );
+                }
+            }
+            _ => {
+                // 2. Standard Frame Verification
+                if item.did == acc.owner_did {
+                    acc.artifacts.insert(seq, item);
+                } else {
+                    // ZERO-TRUST DROP: Prevent buffer bloat from malicious peers
+                    tracing::warn!(
+                        volley = %acc.volley_id,
+                        seq = %seq.0,
+                        "Crucible dropped illegal frame: Causality Breach (Identity Mismatch)"
+                    );
+                }
+            }
+        }
     }
 
     fn is_ready(acc: &Self::Accumulator, elapsed: Duration) -> bool {

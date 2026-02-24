@@ -127,7 +127,7 @@ impl Guardian {
     }
 
     /// Explicit salvage command for node termination sequences.
-    pub async fn force_salvage_all(&mut self) -> Result<(), GuardianError> {
+    pub async fn salvage(&mut self) -> Result<(), GuardianError> {
         let active_volleys = self.crucible.flush_all();
 
         if active_volleys.is_empty() {

@@ -57,6 +57,7 @@ x25519-dalek = {version = "2.0.1", features = ["static_secrets"]}
 tempfile = "3.25.0"
 redb = "3.1.0"
 async-trait = "0.1.89"
+blake3 = "1.8.3"
 
 # --- Networking (Consolidated) ---
 [dependencies.libp2p]
