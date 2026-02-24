@@ -37,7 +37,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         journal,
         trust_registry,
         reputation_cache,
-    )?;
+    )
+    .await?;
 
     engine.run().await
 }

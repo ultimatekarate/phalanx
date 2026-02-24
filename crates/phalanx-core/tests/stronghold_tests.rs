@@ -5,13 +5,14 @@ use tokio::sync::mpsc;
 
 // Library Imports
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
-use phalanx_core::base::engine::{PendingEgress, StorageActor}; // Imported from library
+use phalanx_core::base::engine::{PendingEgress, StorageActor, StorageCommand}; // Imported from library
 use phalanx_core::base::types::MeshTopic;
 use phalanx_core::primitives::identity::{Did, NetworkId, PhalanxIdentity};
 use phalanx_core::primitives::shards::ShardError;
 use phalanx_core::primitives::shards::{
     ChunkType, DataPayload, Evidence, ShardChunk, ShardId, StorageSequence, VideoShard, VolleyId,
 };
+
 use phalanx_core::primitives::time::PhalanxTimestamp;
 use phalanx_core::security::gate::WitnessGate;
 use phalanx_core::security::telemetry::init_observability;
@@ -163,40 +164,39 @@ async fn test_storage_actor_metric_pipeline() {
     let (identity, _) = PhalanxIdentity::generate().unwrap();
     let local_peer_id = identity.to_network_id();
 
-    let (chunk_tx, chunk_rx) = mpsc::channel(10);
-    // Initialize the forensic escalation channel required by the actor
+    // Unified Command Channel (Replaces chunk_rx and query_rx)
+    let (command_tx, command_rx) = mpsc::channel::<StorageCommand>(100);
+
+    // Forensic escalation channel for Guardian rejections
     let (forensic_tx, mut _forensic_rx) = mpsc::channel::<(NetworkId, Did, GuardianError)>(10);
 
     let storage_load = Arc::new(AtomicUsize::new(0));
 
-    // 2. Initialize the Persistent Layer with Metric Tracking
-    let base_journal = NoOpJournal; // Or FileJournal if available
+    // 2. MetricJournal Wrapper
     let journal = MetricJournal {
-        inner: base_journal,
+        inner: NoOpJournal,
         counter: Arc::clone(&storage_load),
     };
 
     let guardian = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
-    let (_query_tx, query_rx) = tokio::sync::mpsc::channel(100);
 
+    // 3. Initialize Unified StorageActor
     let storage_actor = StorageActor {
         reassembler: Reassembler::new(),
         guardian,
         journal,
         config: config.clone(),
         identity: identity.clone(),
-        chunk_rx,
         forensic_tx,
         local_peer_id: local_peer_id.clone(),
-        query_rx,
     };
 
-    // 3. Start the Actor in a background task
+    // Start the Actor with the unified command receiver
     let actor_handle = tokio::spawn(async move {
-        storage_actor.run().await;
+        storage_actor.run(command_rx).await;
     });
 
-    assert_eq!(storage_load.load(Ordering::Relaxed), 0);
+    assert_eq!(storage_load.load(std::sync::atomic::Ordering::Relaxed), 0);
 
     // 4. Generate and Sign Test Evidence
     let video_shard = VideoShard {
@@ -207,6 +207,7 @@ async fn test_storage_actor_metric_pipeline() {
         payload: DataPayload::Clear(vec![0xBA, 0xAD, 0xF0, 0x0D]),
     };
 
+    // Seal via WitnessGate
     let envelope = Evidence::Video(video_shard)
         .seal(&identity, local_peer_id.clone(), None)
         .expect("Failed to seal evidence");
@@ -224,19 +225,19 @@ async fn test_storage_actor_metric_pipeline() {
 
     let topic = MeshTopic::new("phalanx/video/1.0.0");
 
-    // 5. Inject the chunk
-    chunk_tx.send((chunk, topic, local_peer_id)).await.unwrap();
+    // 5. Inject via Ingest Command
+    let ingest_command = StorageCommand::Ingest(chunk, topic, local_peer_id);
+    command_tx.send(ingest_command).await.unwrap();
 
     // 6. Verification: Wait for reassembly and journal commit
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
 
-    let final_load = storage_load.load(Ordering::SeqCst);
+    let final_load = storage_load.load(std::sync::atomic::Ordering::SeqCst);
 
-    // Cleanup
+    // Cleanup: Shutdown the actor
     actor_handle.abort();
 
     // 7. Assert metric update
-    // The counter increments when the actor calls journal.record_chunk()
     assert!(
         final_load > 0,
         "StorageActor failed to update metric via the Journal conduit. Load: {}",

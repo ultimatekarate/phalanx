@@ -28,78 +28,78 @@ pub unsafe extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut
     }
 
     let c_str = CStr::from_ptr(storage_path);
-
     let Ok(path_str) = c_str.to_str() else {
-        return ptr::null_mut(); // Invalid UTF-8
+        return ptr::null_mut();
     };
 
-    // 1. Establish Configuration & Identity (Mobile context usually implies WAN)
+    // 1. Establish Configuration
     let mut config = PhalanxConfig::default();
     config.storage.vault_path = path_str.to_string();
     let physics = PhalanxPhysics::default_wan();
-
-    let identity_path = Path::new(path_str).join("identity.pem");
-    let identity_path_str = identity_path.to_str().unwrap_or("identity.pem");
-    let identity = init_identity(identity_path_str).unwrap_or_default();
-    let network_keypair = identity.to_libp2p_keypair();
-
-    // --- ZERO-TRUST DEPENDENCY GRAPH ---
-    // Isolate ownership for the synchronous initialization thread
-    let registry_config = config.clone();
-
-    // The FFI boundary is synchronous. We must spawn a temporary async reactor
-    // to build the TrustRegistry from disk, ensuring it blocks until complete.
-    let trust_registry = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to initialize transient async reactor for JNI TrustRegistry");
-
-        rt.block_on(TrustRegistry::build(&registry_config))
-    })
-    .join()
-    .expect("JNI TrustRegistry initialization thread panicked");
-
+    let identity = init_identity(
+        Path::new(path_str)
+            .join("identity.pem")
+            .to_str()
+            .unwrap_or("identity.pem"),
+    )
+    .unwrap_or_default();
     let reputation_cache = Arc::new(SyncReputationCache::default());
 
-    // 2. Instantiate the Production Network Adapter
-    let swarm = match setup_phalanx_swarm(
-        network_keypair,
-        &config,
-        &physics,
-        None,
-        reputation_cache.clone(),
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to initialize mobile swarm: {e}");
-            return ptr::null_mut();
-        }
-    };
+    // 2. Unitary Async Initialization
+    // We build a single runtime to drive the entire initialization sequence.
+    let engine_result = std::thread::spawn({
+        let config = config.clone();
+        let identity = identity.clone();
+        let reputation_cache = reputation_cache.clone();
 
-    let network_adapter = Libp2pAdapter::new(swarm);
+        move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to build Mobile Runtime");
 
-    // 3. Initialize the engine synchronously with the injected dependencies
-    match PhalanxEngine::new(
-        config,
-        identity,
-        network_adapter,
-        NoOpJournal,
-        trust_registry,
-        reputation_cache,
-    ) {
-        Ok(engine) => {
-            // Success: Move engine to heap and return raw pointer
-            Box::into_raw(Box::new(engine))
+            rt.block_on(async {
+                // T0: Build Trust (Guardian Logic)
+                let trust_registry = TrustRegistry::build(&config).await;
+
+                // T1: Setup Network (Transport Logic)
+                let swarm = setup_phalanx_swarm(
+                    identity.to_libp2p_keypair(),
+                    &config,
+                    &physics,
+                    None,
+                    reputation_cache.clone(),
+                )
+                .map_err(|e| format!("Swarm Failure: {e}"))?;
+
+                let adapter = Libp2pAdapter::new(swarm);
+
+                // T2: Initialize Engine (Sentinel Logic)
+                // Now natively awaited inside the block_on
+                PhalanxEngine::new(
+                    config,
+                    identity,
+                    adapter,
+                    NoOpJournal,
+                    trust_registry,
+                    reputation_cache,
+                )
+                .await
+                .map_err(|e| format!("Engine Failure: {e}"))
+            })
         }
+    })
+    .join()
+    .expect("FFI Initialization panicked");
+
+    match engine_result {
+        Ok(engine) => Box::into_raw(Box::new(engine)),
         Err(e) => {
-            // Failure: Log error and return Null
-            eprintln!("Failed to init Phalanx Engine: {e}");
+            eprintln!("Phalanx FFI Error: {e}");
             ptr::null_mut()
         }
     }
 }
-
 /// Frees the Phalanx Engine pointer.
 ///
 /// # Safety

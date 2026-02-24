@@ -104,7 +104,8 @@ impl SimulationHarness {
             crate::base::engine::NoOpJournal,
             trust_registry,
             reputation_cache,
-        );
+        )
+        .await;
 
         let mut engine = match engine_result {
             Ok(e) => e,

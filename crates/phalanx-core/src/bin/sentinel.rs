@@ -68,7 +68,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         journal,
         trust_registry,
         reputation_cache,
-    )?;
+    )
+    .await?;
 
     println!("--- PHALANX SENSOR: ONLINE (WAN + LAN) ---");
 

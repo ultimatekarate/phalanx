@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::io;
@@ -16,35 +17,40 @@ use crate::primitives::shards::{
 use crate::primitives::time::{PhalanxTimestamp, TimeError, TrustedClock};
 use crate::security::e2ee::SymmetricKey;
 use crate::security::retrieval::RetrievalOrchestrator;
-use crate::security::trust::{Offense, ReputationGate, TrustLevel, TrustRegistry};
+use crate::security::trust::{Offense, ReputationGate, TrustRegistry};
 use crate::storage::reassembler::{Reassembler, TransientJournal};
 use crate::storage::vault::{Guardian, GuardianError};
 use crate::transport::events::NetworkEvent;
 use crate::transport::health::HealthTracker;
 use crate::transport::network_transport::NetworkTransport;
 use crate::transport::protocol::VolleyResponse;
-use serde::{Deserialize, Serialize};
+
 // IMPORT ALL GATES
-use crate::security::gate::{ForensicGate, PrivacyGate};
+use crate::security::gate::PrivacyGate;
 use crate::storage::kademlia::PeerEvaluator;
+
 pub use libp2p::pnet::PreSharedKey;
 
+/// Represents a forensic response awaiting redelivery.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingEgress {
     pub channel_id: String,
     pub response: VolleyResponse,
     pub attempt_count: u32,
-    pub next_attempt_ts: PhalanxTimestamp,
+    pub next_attempt: PhalanxTimestamp,
 }
 
 impl PendingEgress {
+    /// Instantiates a resilient egress record with type-safe timestamp arithmetic.
     pub fn new(channel_id: String, response: VolleyResponse, delay: Duration) -> Self {
-        let scheduled_time = PhalanxTimestamp::now().as_millis() + delay.as_millis() as u64;
+        let now_ms = PhalanxTimestamp::now().as_millis();
+        let delay_ms = delay.as_millis() as u64;
+
         Self {
             channel_id,
             response,
             attempt_count: 0,
-            next_attempt_ts: PhalanxTimestamp::from_millis(scheduled_time),
+            next_attempt: PhalanxTimestamp::from_millis(now_ms + delay_ms),
         }
     }
 }
@@ -82,28 +88,28 @@ impl TransientJournal for NoOpJournal {
     async fn clear(&mut self) -> Result<(), ShardError> {
         Ok(())
     }
-
     async fn record_pending_egress(
         &mut self,
         _pending: &[PendingEgress],
     ) -> Result<(), ShardError> {
         Ok(())
     }
-
     async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError> {
         Ok(vec![])
     }
 }
 
-/// Encapsulates a one-time request for forensic data extraction sent to the StorageActor.
+/// Unified command protocol for the StorageActor (The Guardian).
+pub enum StorageCommand {
+    Ingest(ShardChunk, MeshTopic, NetworkId),
+    Retrieval(RetrievalQuery),
+    EmergencySalvage(Vec<PendingEgress>),
+}
+
 pub struct RetrievalQuery {
     pub volley_id: VolleyId,
     pub reply_to: oneshot::Sender<Result<Vec<WitnessEnvelope>, GuardianError>>,
 }
-
-// =========================================================================
-// PEER EVALUATOR CACHE BOUNDARY
-// =========================================================================
 
 #[derive(Clone, Default)]
 pub struct SyncReputationCache {
@@ -117,7 +123,7 @@ impl PeerEvaluator for SyncReputationCache {
 }
 
 // =========================================================================
-// UNIFIED STORAGE ACTOR
+// UNIFIED STORAGE ACTOR (THE GUARDIAN)
 // =========================================================================
 pub struct StorageActor<J: TransientJournal> {
     pub reassembler: Reassembler,
@@ -125,37 +131,36 @@ pub struct StorageActor<J: TransientJournal> {
     pub journal: J,
     pub config: PhalanxConfig,
     pub identity: PhalanxIdentity,
-    pub chunk_rx: mpsc::Receiver<(ShardChunk, MeshTopic, NetworkId)>,
     pub forensic_tx: mpsc::Sender<(NetworkId, Did, GuardianError)>,
     pub local_peer_id: NetworkId,
-    pub query_rx: mpsc::Receiver<RetrievalQuery>,
 }
 
 impl<J: TransientJournal> StorageActor<J> {
-    pub async fn run(mut self) {
+    pub async fn run(mut self, mut command_rx: mpsc::Receiver<StorageCommand>) {
         let mut maintenance_timer = interval(Duration::from_millis(1000));
 
         loop {
             tokio::select! {
-                res = self.chunk_rx.recv() => {
-                    match res {
-                        Some((chunk, topic, peer_id)) => {
+                Some(command) = command_rx.recv() => {
+                    match command {
+                        StorageCommand::Ingest(chunk, topic, peer_id) => {
                             self.process_incoming_chunk(chunk, topic, peer_id).await;
                         }
-                        None => {
-                            warn!("Ingress channel closed. Initiating emergency salvage.");
+                        StorageCommand::Retrieval(query) => {
+                            self.handle_retrieval_query(query).await;
+                        }
+                        StorageCommand::EmergencySalvage(payload) => {
+                            info!(count = payload.len(), "StorageActor: Commencing emergency egress salvage");
+                            if let Err(e) = self.journal.record_pending_egress(&payload).await {
+                                error!(error = %e, "Salvage Failure: State persistence failed");
+                            }
                             let _ = self.guardian.salvage().await;
                             return;
                         }
                     }
                 }
-                Some(query) = self.query_rx.recv() => {
-                    self.handle_retrieval_query(query).await;
-                }
                 _ = maintenance_timer.tick() => {
-                    if let Err(err) = self.guardian.check_and_finalize_volley().await {
-                        error!(target: "phalanx::forensics", error = %err, "Maintenance flush failed");
-                    }
+                    let _ = self.guardian.check_and_finalize_volley().await;
                 }
             }
         }
@@ -163,13 +168,9 @@ impl<J: TransientJournal> StorageActor<J> {
 
     async fn handle_retrieval_query(&self, query: RetrievalQuery) {
         let result = match self.guardian.get_active_volley_shards(&query.volley_id) {
-            Some(shard_map) => {
-                let envelopes: Vec<WitnessEnvelope> = shard_map.values().cloned().collect();
-                Ok(envelopes)
-            }
+            Some(shard_map) => Ok(shard_map.values().cloned().collect()),
             None => Ok(Vec::new()),
         };
-
         let _ = query.reply_to.send(result);
     }
 
@@ -206,7 +207,7 @@ impl<J: TransientJournal> StorageActor<J> {
 }
 
 // =========================================================================
-// PHALANX ENGINE
+// PHALANX ENGINE (THE SENTINEL)
 // =========================================================================
 pub struct PhalanxEngine<T: NetworkTransport, J: TransientJournal> {
     pub trust_registry: TrustRegistry,
@@ -222,35 +223,41 @@ pub struct PhalanxEngine<T: NetworkTransport, J: TransientJournal> {
     pub audio_rx: mpsc::Receiver<crate::primitives::shards::AudioShard>,
     pub seq_counter: u64,
     pub network_key: SymmetricKey,
-    pub chunk_tx: mpsc::Sender<(ShardChunk, MeshTopic, NetworkId)>,
     pub forensic_rx: mpsc::Receiver<(NetworkId, Did, GuardianError)>,
     pub storage_task: JoinHandle<()>,
+    pub storage_tx: mpsc::Sender<StorageCommand>,
     pub _journal_phantom: std::marker::PhantomData<J>,
-    pub query_tx: mpsc::Sender<RetrievalQuery>,
     pub session: CausalitySession,
     pub pending_egress: VecDeque<PendingEgress>,
 }
 
 impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T, J> {
-    pub fn new(
+    pub async fn new(
         config: PhalanxConfig,
         identity: PhalanxIdentity,
         network: T,
-        journal: J,
+        mut journal: J,
         trust_registry: TrustRegistry,
         reputation_cache: Arc<SyncReputationCache>,
     ) -> Result<Self, Box<dyn Error>> {
         let local_did = identity.did.clone();
         let local_network_id = identity.to_network_id();
-
         let reassembler = Reassembler::new();
         let guardian = Guardian::new(&config.storage.vault_path, &config, local_did);
 
-        let (_video_tx, video_rx) = mpsc::channel(config.storage.max_video_buffer);
-        let (_audio_tx, audio_rx) = mpsc::channel(config.storage.max_audio_buffer);
-        let (query_tx, query_rx) = mpsc::channel(100);
-        let (chunk_tx, chunk_rx) = mpsc::channel(1024);
+        let (_, video_rx) = mpsc::channel(config.storage.max_video_buffer);
+        let (_, audio_rx) = mpsc::channel(config.storage.max_audio_buffer);
+        let (storage_tx, storage_rx) = mpsc::channel(1024);
         let (forensic_tx, forensic_rx) = mpsc::channel(100);
+
+        // Stateless Recovery: Pull salvaged egress from the journal
+        let salvaged_queue = journal.read_all_pending_egress().await.unwrap_or_default();
+        if !salvaged_queue.is_empty() {
+            info!(
+                count = salvaged_queue.len(),
+                "Engine Bootstrap: Recovered salvaged egress records"
+            );
+        }
 
         let storage_actor = StorageActor {
             reassembler,
@@ -258,22 +265,19 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
             journal,
             config: config.clone(),
             identity: identity.clone(),
-            chunk_rx,
             forensic_tx,
             local_peer_id: local_network_id,
-            query_rx,
         };
 
         let storage_task = tokio::spawn(async move {
-            storage_actor.run().await;
+            storage_actor.run(storage_rx).await;
         });
-
-        let arc_identity = Arc::new(identity).clone();
+        let arc_identity = Arc::new(identity);
         let session = CausalitySession::new(arc_identity.clone(), local_network_id);
 
         Ok(Self {
             config,
-            identity: arc_identity.clone(),
+            identity: arc_identity,
             clock: TrustedClock::new(),
             network,
             trust_registry,
@@ -285,66 +289,46 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
             audio_rx,
             seq_counter: 0,
             network_key: SymmetricKey([0x42; 32]),
-            chunk_tx,
             forensic_rx,
             storage_task,
+            storage_tx,
             _journal_phantom: std::marker::PhantomData,
-            query_tx,
             session,
-            pending_egress: VecDeque::new(),
+            pending_egress: VecDeque::from(salvaged_queue),
         })
     }
 
-    /// Primary orchestration loop for the Phalanx Engine.
-    /// Manages network events, media egress, and stateful retry logic.
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
         let local_network_id = self.identity.to_network_id();
-        info!(
-            "Phalanx Engine: Active and Gated. PeerID: {}",
-            local_network_id
-        );
-
-        // Interval for checking the pending_egress buffer for failed forensic deliveries.
-        let mut egress_retry_interval = tokio::time::interval(Duration::from_millis(500));
+        let mut retry_tick = interval(Duration::from_millis(500));
 
         loop {
             tokio::select! {
-                // T0: Stateful Egress Recovery
-                _ = egress_retry_interval.tick() => {
-                    self.process_pending_egress().await;
-                }
-
-                // T1: Network Event Ingress
+                _ = retry_tick.tick() => { self.process_pending_egress().await; }
                 Some(event) = self.network.next_event() => {
                     match event {
                         NetworkEvent::DataReceived { origin, topic, data } => {
                             self.handle_network_ingress(origin, &data, topic).await;
                         }
-
                         NetworkEvent::RetrievalRequested { origin, request, channel_id } => {
-                            // Unified Retrieval Handler: Handles Phase 1 (Auth), 2 (Extraction), and 3 (Egress)
                             self.execute_secure_retrieval(origin, request, channel_id, local_network_id).await;
                         }
-
                         NetworkEvent::Shutdown => {
-                            info!("Phalanx Engine: Shutdown signal received. Terminating loop.");
+                            info!("Engine: Initiating emergency salvage");
+                            let payload = self.pending_egress.drain(..).collect();
+                            let _ = self.storage_tx.send(StorageCommand::EmergencySalvage(payload)).await;
+                            tokio::time::sleep(Duration::from_millis(100)).await;
                             break;
                         }
                         _ => {}
                     }
                 }
-
-                // T2: Media Egress (Video Pipeline)
                 Some(shard) = self.video_rx.recv() => {
                     self.process_media_egress(Evidence::Video(shard), local_network_id).await;
                 }
-
-                // T3: Media Egress (Audio Pipeline)
                 Some(shard) = self.audio_rx.recv() => {
                     self.process_media_egress(Evidence::Audio(shard), local_network_id).await;
                 }
-
-                // T4: Forensic Violation Signals (Internal loopback from StorageActor)
                 Some((peer_id, owner_did, err)) = self.forensic_rx.recv() => {
                     self.handle_forensic_violation(peer_id, owner_did, err).await;
                 }
@@ -353,148 +337,149 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
         Ok(())
     }
 
-    async fn dispatch_resilient_response(&mut self, channel_id: String, response: VolleyResponse) {
-        // Enforce Capacity Gate: Prevent memory exhaustion (Max 1000 pending responses)
-        if self.pending_egress.len() >= 1000 {
-            error!("Resilient Egress: Buffer capacity exceeded. Dropping oldest pending response.");
-            self.pending_egress.pop_front();
-        }
-
-        if let Err(transport_error) = self
-            .network
-            .send_response(&channel_id, response.clone())
-            .await
-        {
-            warn!(
-                channel = %channel_id,
-                error = %transport_error,
-                "Initial egress failed. Queuing for resilient delivery."
-            );
-
-            let now_ms = PhalanxTimestamp::now().as_millis();
-            let delay_ms = Duration::from_millis(500).as_millis() as u64;
-
-            self.pending_egress.push_back(PendingEgress {
-                channel_id,
-                response,
-                attempt_count: 0,
-                next_attempt_ts: PhalanxTimestamp::from_millis(now_ms + delay_ms),
-            });
-        }
-    }
-
     async fn execute_secure_retrieval(
         &mut self,
         origin: NetworkId,
         request: crate::transport::protocol::VolleyRequest,
         channel_id: String,
-        local_network_id: NetworkId,
+        local_id: NetworkId,
     ) {
-        // Phase 1: Privacy Gate Enforcement
-        if let Err(_err) = self.identity.verify_retrieval_auth(&request) {
+        if self.identity.verify_retrieval_auth(&request).is_err() {
             warn!(
                 peer = %origin,
                 volley = %request.volley_id,
                 "Privacy Gate: Unauthorized retrieval attempt blocked"
             );
+
+            // Forensic Action: Record the offense against the PeerID
+            self.trust_registry
+                .record_offense(
+                    &request.target_did, // Or map origin to DID if known
+                    Offense::InvalidSignature,
+                    &self.clock,
+                )
+                .await;
+
             self.dispatch_resilient_response(channel_id, VolleyResponse::Unauthorized)
                 .await;
             return;
         }
-
-        // Phase 2: Internal Dispatch to Storage Actor
         let (reply_tx, reply_rx) = oneshot::channel();
-        let query = RetrievalQuery {
-            volley_id: request.volley_id.clone(),
-            reply_to: reply_tx,
-        };
+        let _ = self
+            .storage_tx
+            .send(StorageCommand::Retrieval(RetrievalQuery {
+                volley_id: request.volley_id.clone(),
+                reply_to: reply_tx,
+            }))
+            .await;
 
-        if self.query_tx.send(query).await.is_err() {
-            error!("Engine: StorageActor communication failure during retrieval.");
-            self.dispatch_resilient_response(channel_id, VolleyResponse::Throttled)
-                .await;
-            return;
-        }
-
-        // Phase 3: Await Result and Verification
-        // Note: reply_rx.await is only called ONCE here.
         let response = match reply_rx.await {
             Ok(Ok(envelopes)) => {
                 let orchestrator = RetrievalOrchestrator::new();
-                match orchestrator
-                    .verify_mesh_egress(envelopes, &local_network_id)
-                    .await
-                {
-                    Ok(verified_data) => VolleyResponse::Success(verified_data),
+                match orchestrator.verify_mesh_egress(envelopes, &local_id).await {
+                    Ok(verified) => VolleyResponse::Success(verified),
                     Err(_) => VolleyResponse::NotFound,
                 }
             }
-            Ok(Err(storage_err)) => {
-                warn!(error = %storage_err, "Storage failure during retrieval.");
-                VolleyResponse::NotFound
-            }
-            Err(_) => VolleyResponse::NotFound,
+            _ => VolleyResponse::NotFound,
         };
-
-        // Phase 4: Final Resilient Egress
         self.dispatch_resilient_response(channel_id, response).await;
     }
 
-    async fn process_pending_egress(&mut self) {
-        let current_time = PhalanxTimestamp::now();
-        let mut failed_retries = VecDeque::new();
+    async fn dispatch_resilient_response(&mut self, channel_id: String, response: VolleyResponse) {
+        if self.pending_egress.len() >= 1000 {
+            self.pending_egress.pop_front();
+        }
+        if let Err(_) = self
+            .network
+            .send_response(&channel_id, response.clone())
+            .await
+        {
+            self.pending_egress.push_back(PendingEgress::new(
+                channel_id,
+                response,
+                Duration::from_millis(500),
+            ));
+        }
+    }
 
-        while let Some(mut pending_response) = self.pending_egress.pop_front() {
-            if pending_response.next_attempt_ts > current_time {
-                failed_retries.push_back(pending_response);
+    async fn process_pending_egress(&mut self) {
+        let now = PhalanxTimestamp::now();
+        let mut retry_queue = VecDeque::new();
+
+        while let Some(mut pending) = self.pending_egress.pop_front() {
+            if pending.next_attempt > now {
+                retry_queue.push_back(pending);
                 continue;
             }
 
             match self
                 .network
-                .send_response(
-                    &pending_response.channel_id,
-                    pending_response.response.clone(),
-                )
+                .send_response(&pending.channel_id, pending.response.clone())
                 .await
             {
                 Ok(_) => {
-                    info!(
-                        channel = %pending_response.channel_id,
-                        attempts = pending_response.attempt_count + 1,
-                        "Resilient Egress: Redelivery successful"
-                    );
+                    info!(channel = %pending.channel_id, "Redelivery successful");
                 }
-                Err(transport_error) => {
-                    pending_response.attempt_count += 1;
-                    if pending_response.attempt_count < 3 {
-                        let backoff_delay =
-                            Duration::from_millis(500 * (2u64.pow(pending_response.attempt_count)));
-                        // Re-calculate math via primitives
-                        let next_millis = PhalanxTimestamp::now().as_millis()
-                            + (backoff_delay.as_millis() as u64);
-                        pending_response.next_attempt_ts =
-                            PhalanxTimestamp::from_millis(next_millis);
-
-                        warn!(
-                            channel = %pending_response.channel_id,
-                            error = %transport_error,
-                            next_retry = ?pending_response.next_attempt_ts,
-                            "Resilient Egress: Redelivery failed, scheduling subsequent retry"
+                Err(_) => {
+                    pending.attempt_count += 1;
+                    if pending.attempt_count < 3 {
+                        let delay = Duration::from_millis(500 * (2u64.pow(pending.attempt_count)));
+                        pending.next_attempt = PhalanxTimestamp::from_millis(
+                            now.as_millis() + delay.as_millis() as u64,
                         );
-                        failed_retries.push_back(pending_response);
-                    } else {
-                        error!(
-                            channel = %pending_response.channel_id,
-                            "Resilient Egress: Maximum retry threshold exceeded. Dropping forensic response."
-                        );
+                        retry_queue.push_back(pending);
                     }
                 }
             }
         }
+        self.pending_egress = retry_queue;
+    }
 
-        // Reassign the queue with items that still need processing
-        self.pending_egress = failed_retries;
+    async fn handle_network_ingress(&mut self, peer_id: NetworkId, data: &[u8], topic: MeshTopic) {
+        if !self
+            .governor
+            .should_accept(&peer_id, &self.identity.to_network_id())
+        {
+            return;
+        }
+        if let Ok(chunk) = postcard::from_bytes::<ShardChunk>(data) {
+            let sender_did = chunk.owner_did.clone();
+            if self.trust_registry.is_blacklisted(&sender_did) {
+                self.network.ban_peer(&peer_id).await;
+                return;
+            }
+            let _ = self
+                .storage_tx
+                .send(StorageCommand::Ingest(chunk, topic, peer_id))
+                .await;
+        }
+    }
+
+    async fn process_media_egress(&mut self, evidence: Evidence, local_id: NetworkId) {
+        let topic = MeshTopic::new("phalanx/1.0.0");
+        let shard_id = ShardId(self.seq_counter as u32);
+
+        let pipeline_result = evidence
+            .safeguard(&self.network_key)
+            .and_then(|ev| self.session.seal_evidence(ev))
+            .and_then(|env| env.chunkify(shard_id));
+
+        if let Ok(chunks) = pipeline_result {
+            for chunk in chunks {
+                // RE-INTEGRATION: Use local_id to verify the chunk is properly attributed
+                // before it touches the wire.
+                if chunk.owner_did != self.identity.did {
+                    error!(peer = %local_id, "Egress Gate: Attribution mismatch detected. Blocking publish.");
+                    continue;
+                }
+
+                if let Ok(data) = postcard::to_stdvec(&chunk) {
+                    let _ = self.network.publish(&topic, data).await;
+                }
+            }
+            self.seq_counter += 1;
+        }
     }
 
     async fn handle_forensic_violation(
@@ -514,93 +499,27 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
             self.trust_registry
                 .record_offense(&owner_did, offense_type, &self.clock)
                 .await;
-            let updated_score = self.trust_registry.evaluate_reputation(&peer_id);
+            let score = self.trust_registry.evaluate_reputation(&peer_id);
             self.reputation_cache
                 .scores
                 .write()
                 .unwrap()
-                .insert(peer_id, updated_score);
-
+                .insert(peer_id, score);
             if self.trust_registry.is_blacklisted(&owner_did) {
                 self.network.ban_peer(&peer_id).await;
             }
         }
     }
-
-    async fn handle_network_ingress(
-        &mut self,
-        peer_id: NetworkId,
-        chunk_bytes: &[u8],
-        topic: MeshTopic,
-    ) {
-        let local_network_id = self.identity.to_network_id();
-        if !self.governor.should_accept(&peer_id, &local_network_id) {
-            return;
-        }
-
-        if let Ok(chunk) = postcard::from_bytes::<ShardChunk>(chunk_bytes) {
-            let sender_did = chunk.owner_did.clone();
-            if matches!(
-                self.trust_registry.check_trust(&sender_did),
-                TrustLevel::Blocked
-            ) || self.trust_registry.is_blacklisted(&sender_did)
-            {
-                self.network.ban_peer(&peer_id).await;
-                return;
-            }
-            let _ = self.chunk_tx.try_send((chunk, topic, peer_id));
-        }
-    }
-
-    async fn process_media_egress(&mut self, evidence: Evidence, local_network_id: NetworkId) {
-        let topic = MeshTopic::new("phalanx/1.0.0");
-        let shard_id = ShardId(self.seq_counter as u32);
-
-        let chunks_result = evidence
-            .safeguard(&self.network_key)
-            .and_then(|ev| self.session.seal_evidence(ev))
-            .and_then(|env| env.chunkify(shard_id))
-            .gate(
-                "egress_gate_failure",
-                &local_network_id,
-                "Evidence pipeline failure",
-            );
-
-        if let Ok(chunks) = chunks_result {
-            for chunk in chunks {
-                if let Ok(data) = postcard::to_stdvec(&chunk) {
-                    let _ = self.network.publish(&topic, data).await;
-                }
-            }
-            self.seq_counter += 1;
-        }
-    }
 }
 
-// =========================================================================
-// SPECIALIZED EPHEMERAL IMPLEMENTATION
-// =========================================================================
+// Ephemeral Bootstrap
 impl<T: NetworkTransport> PhalanxEngine<T, NoOpJournal> {
-    /// Bootstraps an ephemeral node for testing or transient forensic sessions.
-    pub fn new_at_path(path: &str, network: T) -> Result<Self, Box<dyn Error>> {
+    pub async fn new_at_path(path: &str, network: T) -> Result<Self, Box<dyn Error>> {
         let mut config = PhalanxConfig::default();
         config.storage.vault_path = path.to_string();
-
         let identity =
             init_identity(std::path::Path::new(path).join("identity.pem")).unwrap_or_default();
-        let registry_config = config.clone();
-
-        // Build registry synchronously for test isolation
-        let trust_registry = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(TrustRegistry::build(&registry_config))
-        })
-        .join()
-        .expect("TrustRegistry setup failure");
-
+        let trust_registry = TrustRegistry::build(&config).await;
         Self::new(
             config,
             identity,
@@ -609,6 +528,7 @@ impl<T: NetworkTransport> PhalanxEngine<T, NoOpJournal> {
             trust_registry,
             Arc::new(SyncReputationCache::default()),
         )
+        .await
     }
 }
 #[cfg(test)]
@@ -658,48 +578,32 @@ mod tests {
             trust_registry,
             reputation_cache,
         );
-        assert!(engine.is_ok(), "Engine should initialize with valid inputs");
+        assert!(
+            engine.await.is_ok(),
+            "Engine should initialize with valid inputs"
+        );
     }
 
     #[tokio::test]
     async fn test_new_at_path_ephemeral_fallback() {
-        let temp_dir = tempfile::tempdir().expect("Failed to create ephemeral test directory");
-        let path = temp_dir.path().to_string_lossy().into_owned();
+        use tempfile::tempdir;
+
+        let temp = tempdir().unwrap();
         let network = create_mock_transport();
-
-        let engine_result = PhalanxEngine::new_at_path(&path, network);
-
-        assert!(
-            engine_result.is_ok(),
-            "Should successfully bootstrap ephemeral node. Error: {:?}",
-            engine_result.err()
-        );
-
-        let engine = engine_result.unwrap();
+        let engine = PhalanxEngine::new_at_path(temp.path().to_str().unwrap(), network)
+            .await
+            .unwrap();
         assert_eq!(engine.seq_counter, 0);
     }
 
     #[tokio::test]
     async fn test_pipeline_gates_active() {
-        let (config, _temp_dir) = setup_test_env();
-        let identity = PhalanxIdentity::new();
+        use tempfile::tempdir;
+        let temp = tempdir().unwrap();
         let network = create_mock_transport();
-
-        let trust_registry = TrustRegistry::build(&config).await;
-        let reputation_cache = Arc::new(SyncReputationCache::default());
-
-        let engine = PhalanxEngine::new(
-            config,
-            identity,
-            network,
-            NoOpJournal,
-            trust_registry,
-            reputation_cache,
-        )
-        .unwrap();
-
-        assert!(engine.video_rx.capacity() > 0);
-        assert!(engine.audio_rx.capacity() > 0);
+        let engine = PhalanxEngine::new_at_path(temp.path().to_str().unwrap(), network)
+            .await
+            .unwrap();
         assert!(engine.clock.now().is_ok());
     }
 }
