@@ -49,6 +49,7 @@ pub struct FragmentedEnvelope {
 }
 
 /// The monadic output state of the Reassembler.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EnvelopeState {
     Intact(WitnessEnvelope),

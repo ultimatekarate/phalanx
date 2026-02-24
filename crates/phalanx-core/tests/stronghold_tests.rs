@@ -52,6 +52,7 @@ impl<J: TransientJournal + Send> TransientJournal for MetricJournal<J> {
 #[tokio::test]
 async fn test_stronghold_ingestion_and_persistence() {
     use phalanx_core::primitives::shards::{create_video_shard, WitnessEnvelope};
+    // Ensure all other required types (PhalanxConfig, PhalanxPhysics, etc.) are imported at the top of your file.
 
     let _ = init_observability();
     // 1. Setup Environment
@@ -81,6 +82,7 @@ async fn test_stronghold_ingestion_and_persistence() {
     .expect("Failed to create video shard");
 
     // SEAL the evidence into a WitnessEnvelope
+    // Includes the 4th argument 'None' for the causality anchor
     let envelope = WitnessEnvelope::new(
         Evidence::Video(video_shard),
         &peer_identity,
@@ -116,7 +118,9 @@ async fn test_stronghold_ingestion_and_persistence() {
         )
         .await
         .expect("Injection failed");
+
     // 5. Assert: Give the StorageActor a moment to write to the Vault
+    // 2200ms allows the 2000ms Crucible timeout to naturally trigger the flush
     tokio::time::sleep(Duration::from_millis(2200)).await;
 
     // Robust recursive check to find the file regardless of "vault-1" vs "DID" root naming
@@ -136,7 +140,8 @@ async fn test_stronghold_ingestion_and_persistence() {
 
     // Check the physical file system for the persistent shard
     assert!(
-        find_file_recursive(temp_dir.path(), "v1.vid.phlx"),
+        // FIX: Search for the updated .volley extension instead of .vid.phlx
+        find_file_recursive(temp_dir.path(), "v1.volley"),
         "Stronghold failed to create persistent shard in vault within the flush window"
     );
 }
