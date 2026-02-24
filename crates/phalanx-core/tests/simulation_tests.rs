@@ -555,7 +555,6 @@ async fn test_reputation_gate_signature_mismatch() {
 
     // Check that the error is specifically a Cryptographic/Signature failure
     match error {
-        // FIX: Match the actual variant and message reported by the Guardian
         GuardianError::VerificationFailed(ref msg) => {
             assert!(
                 msg.contains("signature mismatch"),
