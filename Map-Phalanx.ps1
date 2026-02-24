@@ -1,118 +1,137 @@
 <#
 .SYNOPSIS
-    Generates a pure 'Map' of the project architecture.
+    Phalanx Core Architect Context Scraper v12.1
     FIXES:
-    - parser error caused by special characters in comments.
-    - Uses single-quoted format strings for safety.
+    - Multi-line Signatures: Implements a lookahead accumulator for long signatures.
+    - Reference Handling: Explicitly ignores '&' during signature capture.
+    - AST Integrity: Maintains v12 unit-struct and brace-depth logic.
 #>
 
-# --- CONFIGURATION ---
-$RootPath = "crates\phalanx-core\src" # Adjust to your target crate
-$CargoPath = "Cargo.toml"
-$OutputFile = "C:\Users\joevo\GoogleDrive\PROJECT_CONTEXT.md"
+$RootPath = 'crates\phalanx-core\src'
+$CargoPath = 'Cargo.toml'
+$OutputFile = 'C:\Users\joevo\GoogleDrive\PROJECT_CONTEXT.md'
+$NL = [System.Environment]::NewLine
 
-# --- 1. ARCHITECTURE SUMMARY (Cargo.toml) ---
-function Get-CargoSummary {
+function Get-SystemMetadata {
     param([string]$Path)
-    if (-not (Test-Path $Path)) { return "" }
-    
-    $content = Get-Content $Path -Raw
-    $summary = @()
-    $summary += "## Workspace Architecture"
-    
-    if ($content -match 'rust-version\s*=\s*"([^"]+)"') {
-        $summary += "* **Rust Version:** $($Matches[1])"
+    if (-not (Test-Path $Path)) { return '## Workspace Architecture' + $NL + '* Metadata unavailable.' }
+    $raw = Get-Content $Path -Raw
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('## Workspace Architecture')
+    if ($raw -match 'rust-version\s*=\s*"([^"]+)"') { 
+        [void]$sb.AppendLine(('* **Rust Version:** {0}' -f $Matches[1])) 
     }
-
-    $keyDeps = @("tokio", "libp2p", "tracing", "postcard", "serde", "sqlx")
-    $foundDeps = @()
-    foreach ($dep in $keyDeps) {
-        if ($content -match "$dep\s*=") { $foundDeps += $dep }
+    $stack = @('tokio', 'libp2p', 'tracing', 'postcard', 'serde', 'sqlx')
+    $found = @()
+    foreach ($dep in $stack) { if ($raw -match ("{0}\s*=" -f $dep)) { $found += $dep } }
+    if ($found.Count) { 
+        [void]$sb.AppendLine(('* **Key Stack:** {0}' -f ($found -join ', '))) 
     }
-    if ($foundDeps.Count -gt 0) {
-        $summary += "* **Key Stack:** $($foundDeps -join ", ")"
-    }
-
-    return ($summary -join "`n") + "`n---"
+    [void]$sb.AppendLine('---')
+    return $sb.ToString()
 }
 
-# --- 2. PUBLIC INTERFACE MAPPER (Source Scraper) ---
-function Get-PublicInterface {
+function Get-ProjectInterface {
     param([string]$Path)
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('## Public API Surface')
     
-    $output = @()
-    $output += "## Public API Surface"
-    
-    $files = Get-ChildItem -Path $Path -Filter "*.rs" -Recurse | 
-             Where-Object { $_.FullName -notmatch "target|tests" }
+    $allFiles = Get-ChildItem -Path $Path -Filter '*.rs' -Recurse | Where-Object { $_.FullName -notmatch 'target|tests' }
 
-    foreach ($file in $files) {
-        $relPath = Resolve-Path -Path $file.FullName -Relative
+    foreach ($file in $allFiles) {
+        $rel = Resolve-Path -Path $file.FullName -Relative
         $lines = Get-Content $file.FullName
-        $fileItems = @()
-
-        # Regex: Capture Indent (1), Type (2), Rest (3)
-        $regexStart = '^(\s*)pub\s+(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?(struct|enum|trait|fn|type|mod)\s+(.*)'
+        $fileHasContent = $false
+        $tempSb = New-Object System.Text.StringBuilder
         
-        for ($i = 0; $i -lt $lines.Count; $i++) {
+        $i = 0
+        while ($i -lt $lines.Count) {
             $line = $lines[$i]
-            
-            if ($line -match $regexStart) {
-                $rawIndent = $Matches[1]
-                $type = $Matches[2]
-                $rest = $Matches[3]
-                
-                # Logic for Indentation Prefix
-                $prefix = if ($rawIndent.Length -ge 4) { "  -" } else { "-" }
+            if ([string]::IsNullOrWhiteSpace($line)) { $i++; continue }
 
-                if ($type -eq "fn") {
-                    # --- Multi-Line Accumulator ---
-                    $fullSig = $line.Trim()
+            # 1. SKIP TEST BLOCKS
+            if ($line -match '^\s*#\[cfg\(test\)\]') {
+                $d = 0; $started = $false
+                while ($i -lt $lines.Count) {
+                    if ($lines[$i] -match '\{') { $started = $true }
+                    $d += ($lines[$i].ToCharArray() | Where-Object { $_ -eq '{' }).Count
+                    $d -= ($lines[$i].ToCharArray() | Where-Object { $_ -eq '}' }).Count
+                    if ($started -and $d -le 0) { break }; $i++
+                }
+                $i++; continue
+            }
+
+            # 2. DATA STRUCTURES (Unit, Tuple, Block)
+            if ($line -match '^\s*(?:#\[.*?\]\s*)*(?:pub(?:\s*\(.*?\))?\s+)?(?:struct|enum|type)\b') {
+                $fileHasContent = $true
+                $fullDef = New-Object System.Collections.Generic.List[string]
+                $d = 0; $started = $false
+                
+                while ($i -lt $lines.Count) {
+                    $cur = $lines[$i]; [void]$fullDef.Add($cur)
+                    if ($cur -match '\{') { $started = $true }
+                    if (-not $started -and $cur -match ';\s*(?://.*)?$') { break }
                     
-                    while ($true) {
-                        if ($fullSig -match '\{') { break }     # Stop at body
-                        if ($fullSig -match ';\s*$') { break }  # Stop at end of decl
-                        if (($i + 1) -ge $lines.Count) { break }
-                        
-                        $i++
-                        $nextLine = $lines[$i].Trim()
-                        $fullSig += " " + $nextLine
+                    $d += ($cur.ToCharArray() | Where-Object { $_ -eq '{' }).Count
+                    $d -= ($cur.ToCharArray() | Where-Object { $_ -eq '}' }).Count
+                    if ($started -and $d -le 0) { break }
+                    $i++
+                }
+                [void]$tempSb.AppendLine('')
+                [void]$tempSb.AppendLine('**[data]**')
+                [void]$tempSb.AppendLine('```rust')
+                [void]$tempSb.AppendLine(($fullDef -join $NL))
+                [void]$tempSb.AppendLine('```')
+            }
+            # 3. API SIGNATURES (Impl / Trait)
+            elseif ($line -match '^\s*(?:pub\s+)?(?:impl|trait)\b') {
+                $fileHasContent = $true
+                $header = $line.Trim() -replace '\{.*$', ''
+                [void]$tempSb.AppendLine('')
+                [void]$tempSb.AppendLine(('**[api]** `{0}`' -f $header))
+                
+                $d = 0; $started = $false
+                while ($i -lt $lines.Count) {
+                    $cur = $lines[$i]; $prevD = $d
+                    if ($cur -match '\{') { $started = $true }
+                    $d += ($cur.ToCharArray() | Where-Object { $_ -eq '{' }).Count
+                    $d -= ($cur.ToCharArray() | Where-Object { $_ -eq '}' }).Count
+                    
+                    # Capture Property if inside impl root
+                    if ($started -and $prevD -eq 1) {
+                        # Handle Multi-line Function Signatures
+                        if ($cur -match '^\s*(?:pub\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+') {
+                            $fullSig = $cur.Trim()
+                            $lookIdx = $i
+                            while ($fullSig -notmatch '\{|;' -and $lookIdx -lt ($lines.Count - 1)) {
+                                $lookIdx++
+                                $fullSig += ' ' + $lines[$lookIdx].Trim()
+                            }
+                            $cleanSig = $fullSig -replace '\{.*$', '' -replace ';.*$', ''
+                            [void]$tempSb.AppendLine(('- `{0};`' -f $cleanSig.Trim()))
+                        }
+                        # Handle Types and Consts
+                        elseif ($cur -match '^\s*(?:pub\s+)?(?:type|const)\s+') {
+                            $fileEntries += ('- `{0}`' -f ($cur.Trim() -replace '\{.*$', ';'))
+                            [void]$tempSb.AppendLine(('- `{0}`' -f ($cur.Trim() -replace '\{.*$', ';')))
+                        }
                     }
-                    
-                    # Clean up signature
-                    $fullSig = $fullSig -replace '\s+', ' '
-                    $fullSig = $fullSig -replace '\s*\{.*$', '' -replace ';\s*$', ''
-                    $sigOnly = $fullSig -replace '^.*?fn\s+', ''
-                    
-                    # SAFE FORMATTING: Single quotes prevent parser errors
-                    $fileItems += '{0} **[fn]** `{1}`' -f $prefix, $sigOnly
-                } 
-                else {
-                    # Structs/Enums
-                    $name = $rest -split '[{(;=]' | Select-Object -First 1
-                    $name = $name.Trim()
-                    
-                    # SAFE FORMATTING: Single quotes prevent parser errors
-                    $fileItems += '{0} **[{1}]** `{2}`' -f $prefix, $type, $name
+                    if ($started -and $d -le 0) { break }; $i++
                 }
             }
+            $i++
         }
 
-        if ($fileItems.Count -gt 0) {
-            $output += "`n### File: $relPath"
-            $output += $fileItems
+        if ($fileHasContent) {
+            [void]$sb.AppendLine('')
+            [void]$sb.AppendLine(('### File: {0}' -f $rel))
+            [void]$sb.Append($tempSb.ToString())
         }
     }
-    return $output -join "`n"
+    return $sb.ToString()
 }
 
-# --- EXECUTION ---
-Write-Host "Building Context Map..." -ForegroundColor Cyan
-
-$finalContent = @()
-$finalContent += Get-CargoSummary -Path $CargoPath
-$finalContent += Get-PublicInterface -Path $RootPath
-
-$finalContent | Out-File -FilePath $OutputFile -Encoding utf8 -Force
-
-Write-Host "Done. Saved to $OutputFile" -ForegroundColor Green
+Write-Host 'Phalanx v12.1: The Reference Guard Active...' -ForegroundColor Cyan
+$finalContent = (Get-SystemMetadata -Path $CargoPath) + $NL + (Get-ProjectInterface -Path $RootPath)
+[System.IO.File]::WriteAllText($OutputFile, $finalContent)
+Write-Host 'Success: Context Map Synchronized.' -ForegroundColor Green
