@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::io;
 use std::sync::{Arc, RwLock};
@@ -205,6 +205,7 @@ pub struct PhalanxEngine<T: NetworkTransport, J: TransientJournal> {
     pub _journal_phantom: std::marker::PhantomData<J>,
     pub query_tx: mpsc::Sender<RetrievalQuery>,
     pub session: CausalitySession,
+    pub pending_egress: VecDeque<PendingEgress>,
 }
 
 impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T, J> {
@@ -267,6 +268,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
             _journal_phantom: std::marker::PhantomData,
             query_tx,
             session,
+            pending_egress: VecDeque::new(),
         })
     }
 
