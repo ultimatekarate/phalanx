@@ -386,6 +386,59 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
         Ok(())
     }
 
+    async fn process_pending_egress(&mut self) {
+        let current_time = Instant::now();
+        let mut failed_retries = VecDeque::new();
+
+        while let Some(mut pending_response) = self.pending_egress.pop_front() {
+            if pending_response.next_attempt > current_time {
+                failed_retries.push_back(pending_response);
+                continue;
+            }
+
+            match self
+                .network
+                .send_response(
+                    &pending_response.channel_id,
+                    pending_response.response.clone(),
+                )
+                .await
+            {
+                Ok(_) => {
+                    info!(
+                        channel = %pending_response.channel_id,
+                        attempts = pending_response.attempt_count + 1,
+                        "Resilient Egress: Redelivery successful"
+                    );
+                }
+                Err(transport_error) => {
+                    pending_response.attempt_count += 1;
+                    if pending_response.attempt_count < 3 {
+                        let backoff_duration =
+                            Duration::from_millis(500 * (2u64.pow(pending_response.attempt_count)));
+                        pending_response.next_attempt = current_time + backoff_duration;
+
+                        warn!(
+                            channel = %pending_response.channel_id,
+                            error = %transport_error,
+                            next_retry = ?pending_response.next_attempt,
+                            "Resilient Egress: Redelivery failed, scheduling subsequent retry"
+                        );
+                        failed_retries.push_back(pending_response);
+                    } else {
+                        error!(
+                            channel = %pending_response.channel_id,
+                            "Resilient Egress: Maximum retry threshold exceeded. Dropping forensic response."
+                        );
+                    }
+                }
+            }
+        }
+
+        // Reassign the queue with items that still need processing
+        self.pending_egress = failed_retries;
+    }
+
     async fn handle_forensic_violation(
         &mut self,
         peer_id: NetworkId,
