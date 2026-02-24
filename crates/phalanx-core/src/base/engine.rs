@@ -272,6 +272,8 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
         })
     }
 
+    /// Primary orchestration loop for the Phalanx Engine.
+    /// Manages network events, media egress, and stateful retry logic.
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
         let local_network_id = self.identity.to_network_id();
         info!(
@@ -279,73 +281,47 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
             local_network_id
         );
 
+        // Interval for checking the pending_egress buffer for failed forensic deliveries.
+        let mut egress_retry_interval = tokio::time::interval(Duration::from_millis(500));
+
         loop {
             tokio::select! {
+                // T0: Stateful Egress Recovery
+                _ = egress_retry_interval.tick() => {
+                    self.process_pending_egress().await;
+                }
+
+                // T1: Network Event Ingress
                 Some(event) = self.network.next_event() => {
                     match event {
                         NetworkEvent::DataReceived { origin, topic, data } => {
                             self.handle_network_ingress(origin, &data, topic).await;
                         }
+
                         NetworkEvent::RetrievalRequested { origin, request, channel_id } => {
-                            // Phase 1: Privacy Enforcement
-                            // If the user hasn't authorized THIS specific person, we stop here.
-                            if let Err(_err) = self.identity.verify_retrieval_auth(&request) {
-                                warn!(
-                                    peer = %origin,
-                                    volley = %request.volley_id,
-                                    "Privacy Gate: Unauthorized retrieval attempt blocked"
-                                );
-                                let _ = self.network.send_response(&channel_id, VolleyResponse::Unauthorized).await;
-                                continue;
-                            }
-
-                            // Phase 2: Data Extraction (only happens if authorized)
-                            let (reply_tx, reply_rx) = oneshot::channel();
-                            let query = RetrievalQuery {
-                                volley_id: request.volley_id.clone(), // Use the VolleyId from the protocol
-                                reply_to: reply_tx,
-                            };
-
-                            if self.query_tx.send(query).await.is_err() {
-                                let _ = self.network.send_response(&channel_id, VolleyResponse::Throttled).await;
-                                continue;
-                            }
-
-                            // 3. Collect and Egress
-                            match reply_rx.await {
-                                Ok(Ok(envelopes)) => {
-                                    let orchestrator = RetrievalOrchestrator::new();
-                                    match orchestrator.verify_mesh_egress(envelopes, &local_network_id).await {
-                                        Ok(verified_data) => {
-                                            let response = crate::transport::protocol::VolleyResponse::Success(verified_data);
-                                            let _ = self.network.send_response(&channel_id, response).await;
-                                        }
-                                        Err(_) => {
-                                            let _ = self.network.send_response(
-                                                &channel_id,
-                                                crate::transport::protocol::VolleyResponse::NotFound
-                                            ).await;
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    let _ = self.network.send_response(
-                                        &channel_id,
-                                        crate::transport::protocol::VolleyResponse::NotFound
-                                    ).await;
-                                }
-                            }
+                            // Unified Retrieval Handler: Handles Phase 1 (Auth), 2 (Extraction), and 3 (Egress)
+                            self.execute_secure_retrieval(origin, request, channel_id, local_network_id).await;
                         }
-                        NetworkEvent::Shutdown => break,
+
+                        NetworkEvent::Shutdown => {
+                            info!("Phalanx Engine: Shutdown signal received. Terminating loop.");
+                            break;
+                        }
                         _ => {}
                     }
                 }
+
+                // T2: Media Egress (Video Pipeline)
                 Some(shard) = self.video_rx.recv() => {
                     self.process_media_egress(Evidence::Video(shard), local_network_id).await;
                 }
+
+                // T3: Media Egress (Audio Pipeline)
                 Some(shard) = self.audio_rx.recv() => {
                     self.process_media_egress(Evidence::Audio(shard), local_network_id).await;
                 }
+
+                // T4: Forensic Violation Signals (Internal loopback from StorageActor)
                 Some((peer_id, owner_did, err)) = self.forensic_rx.recv() => {
                     self.handle_forensic_violation(peer_id, owner_did, err).await;
                 }
@@ -384,6 +360,90 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
 
         self.seq_counter += 1;
         Ok(())
+    }
+
+    async fn dispatch_resilient_response(&mut self, channel_id: String, response: VolleyResponse) {
+        // Enforce Capacity Gate: Prevent memory exhaustion (Max 1000 pending responses)
+        if self.pending_egress.len() >= 1000 {
+            error!("Resilient Egress: Buffer capacity exceeded. Dropping oldest pending response.");
+            self.pending_egress.pop_front();
+        }
+
+        if let Err(transport_error) = self
+            .network
+            .send_response(&channel_id, response.clone())
+            .await
+        {
+            warn!(
+                channel = %channel_id,
+                error = %transport_error,
+                "Initial egress failed. Queuing for resilient delivery."
+            );
+
+            self.pending_egress.push_back(PendingEgress {
+                channel_id,
+                response,
+                attempt_count: 0,
+                next_attempt: Instant::now() + Duration::from_millis(500),
+            });
+        }
+    }
+
+    async fn execute_secure_retrieval(
+        &mut self,
+        origin: NetworkId,
+        request: crate::transport::protocol::VolleyRequest,
+        channel_id: String,
+        local_network_id: NetworkId,
+    ) {
+        // Phase 1: Privacy Gate Enforcement
+        if let Err(_err) = self.identity.verify_retrieval_auth(&request) {
+            warn!(
+                peer = %origin,
+                volley = %request.volley_id,
+                "Privacy Gate: Unauthorized retrieval attempt blocked"
+            );
+            self.dispatch_resilient_response(channel_id, VolleyResponse::Unauthorized)
+                .await;
+            return;
+        }
+
+        // Phase 2: Internal Dispatch to Storage Actor
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let query = RetrievalQuery {
+            volley_id: request.volley_id.clone(),
+            reply_to: reply_tx,
+        };
+
+        if self.query_tx.send(query).await.is_err() {
+            error!("Engine: StorageActor communication failure during retrieval.");
+            self.dispatch_resilient_response(channel_id, VolleyResponse::Throttled)
+                .await;
+            return;
+        }
+
+        // Phase 3: Await Result and Verification
+        // Note: reply_rx.await is only called ONCE here.
+        let response = match reply_rx.await {
+            Ok(Ok(envelopes)) => {
+                let orchestrator = RetrievalOrchestrator::new();
+                match orchestrator
+                    .verify_mesh_egress(envelopes, &local_network_id)
+                    .await
+                {
+                    Ok(verified_data) => VolleyResponse::Success(verified_data),
+                    Err(_) => VolleyResponse::NotFound,
+                }
+            }
+            Ok(Err(storage_err)) => {
+                warn!(error = %storage_err, "Storage failure during retrieval.");
+                VolleyResponse::NotFound
+            }
+            Err(_) => VolleyResponse::NotFound,
+        };
+
+        // Phase 4: Final Resilient Egress
+        self.dispatch_resilient_response(channel_id, response).await;
     }
 
     async fn process_pending_egress(&mut self) {
