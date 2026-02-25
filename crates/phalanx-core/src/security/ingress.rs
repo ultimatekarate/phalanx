@@ -70,17 +70,9 @@ impl IngressOrchestrator {
         }
 
         // 3. REASSEMBLY PHASE
-        // Corrected to 6 arguments to match implementation requirements
         match pipeline
             .reassembler
-            .ingest_chunk(
-                chunk,
-                pipeline.journal,
-                topic, // 6th argument added
-                ctx.config,
-                ctx.identity,
-                ctx.network_id,
-            )
+            .ingest_chunk(chunk, pipeline.journal)
             .await
         {
             Ok(Some(state)) => {

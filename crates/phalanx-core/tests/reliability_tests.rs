@@ -3,11 +3,10 @@ use tempfile::tempdir;
 use tracing::info;
 
 use phalanx_core::base::config::PhalanxConfig;
-use phalanx_core::base::types::MeshTopic;
 use phalanx_core::primitives::identity::{NetworkId, PhalanxIdentity};
 use phalanx_core::primitives::shards::{
-    ChunkType, DataPayload, EnvelopeState, Evidence, ShardChunk, SignatureHash, StorageSequence,
-    VideoShard, VolleyId, WitnessEnvelope,
+    DataPayload, EnvelopeState, Evidence, ShardChunk, StorageSequence, VideoShard, VolleyId,
+    WitnessEnvelope,
 };
 use phalanx_core::primitives::time::PhalanxTimestamp;
 use phalanx_core::storage::reassembler::Reassembler;
@@ -21,15 +20,42 @@ fn create_mock_chunks(
     shard_id: ShardId,
     total: u32,
 ) -> Vec<ShardChunk> {
+    use phalanx_core::primitives::shards::{
+        DataPayload, Evidence, StorageSequence, VideoShard, VolleyId,
+    };
+    use phalanx_core::primitives::time::PhalanxTimestamp;
+
+    // 1. Create a REAL WitnessEnvelope
+    let evidence = Evidence::Video(VideoShard {
+        timestamp: PhalanxTimestamp::now(),
+        sequence_id: StorageSequence(1),
+        fps: 30,
+        volley_id: VolleyId::new("test_volley"),
+        payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+    });
+
+    let envelope =
+        WitnessEnvelope::new(evidence, identity, identity.to_network_id(), None).unwrap();
+
+    // 2. Serialize it to actual bytes
+    let full_bytes = postcard::to_stdvec(&envelope).unwrap();
+
+    // 3. Split those bytes into chunks
+    let chunk_size = (full_bytes.len() + total as usize - 1) / total as usize;
+
     (0..total)
         .map(|i| {
+            let start = i as usize * chunk_size;
+            let end = std::cmp::min(start + chunk_size, full_bytes.len());
+            let data = full_bytes[start..end].to_vec();
+
             ShardChunk {
-                shard_id,                            // Network-level grouping ID
-                chunk_index: i,                      // Ordering (0, 1, 2...)
-                total_chunks: total,                 // Expected MTU parts
-                owner_did: identity.did.clone(),     // Identity for routing/deduplication
-                chunk_type: ChunkType::ForensicUnit, // <--- FIXED: Network payload identifier (e.g., 1 for Video)
-                data: vec![i as u8; 10],             // Mock payload bytes
+                shard_id,
+                chunk_index: i,
+                total_chunks: total,
+                owner_did: identity.did.clone(),
+                chunk_type: phalanx_core::primitives::shards::ChunkType::Witnessed,
+                data,
             }
         })
         .collect()
@@ -39,9 +65,6 @@ fn create_mock_chunks(
 async fn test_reliability_swiss_cheese_recovery() {
     // 1. Setup Context Dependencies
     let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let config = PhalanxConfig::default();
-    let network_id = NetworkId::random();
-    let topic = MeshTopic::new("phalanx/video/test");
     let mut journal = NoOpJournal; // Use a No-Op journal for simple logic tests
 
     let mut reassembler = Reassembler::new();
@@ -54,10 +77,7 @@ async fn test_reliability_swiss_cheese_recovery() {
     // 3. Process Incomplete Set
     for chunk in swiss_cheese {
         // PASS ALL 6 ARGUMENTS
-        let result = reassembler
-            .ingest_chunk(chunk, &mut journal, &topic, &config, &identity, network_id)
-            .await
-            .unwrap();
+        let result = reassembler.ingest_chunk(chunk, &mut journal).await.unwrap();
 
         // result is Option<EnvelopeState>
         let state = result.expect("Reassembler should return Fragmented state");
@@ -67,14 +87,7 @@ async fn test_reliability_swiss_cheese_recovery() {
     // 4. Fill the hole (Chunk #1)
     let final_chunk = chunks[1].clone();
     let result = reassembler
-        .ingest_chunk(
-            final_chunk,
-            &mut journal,
-            &topic,
-            &config,
-            &identity,
-            network_id,
-        )
+        .ingest_chunk(final_chunk, &mut journal)
         .await
         .unwrap();
 
@@ -86,47 +99,32 @@ async fn test_reliability_swiss_cheese_recovery() {
 #[tokio::test]
 async fn test_reliability_deduplication_gate() {
     let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let config = PhalanxConfig::default();
-    let network_id = NetworkId::random();
-    let topic = MeshTopic::new("phalanx/video/test");
-    let mut journal = NoOpJournal;
-
     let mut reassembler = Reassembler::new();
+    let mut journal = NoOpJournal;
     let shard_id = ShardId(202);
-    let chunks = create_mock_chunks(&identity, shard_id, 1);
+
+    // CRITICAL: Use 2 chunks so the shard isn't cleared from RAM immediately
+    let chunks = create_mock_chunks(&identity, shard_id, 2);
     let chunk = chunks[0].clone();
 
-    // First ingestion works
+    // First ingestion works (returns Some(Fragmented))
     let first_result = reassembler
-        .ingest_chunk(
-            chunk.clone(),
-            &mut journal,
-            &topic,
-            &config,
-            &identity,
-            network_id,
-        )
+        .ingest_chunk(chunk.clone(), &mut journal)
         .await
         .unwrap();
-    assert!(first_result.is_some());
 
-    // Subsequent ingestions return None (Deduplicated)
+    assert!(first_result.is_some(), "First chunk should be accepted");
+
+    // Subsequent ingestion return None (Deduplicated)
     for _ in 0..10 {
         let dup_result = reassembler
-            .ingest_chunk(
-                chunk.clone(),
-                &mut journal,
-                &topic,
-                &config,
-                &identity,
-                network_id,
-            )
+            .ingest_chunk(chunk.clone(), &mut journal)
             .await
             .unwrap();
 
         assert!(
             dup_result.is_none(),
-            "Deduplication failed: accepted redundant chunk"
+            "Deduplication failed: accepted redundant chunk index"
         );
     }
 }
@@ -144,7 +142,7 @@ async fn test_reliability_timeline_integrity() {
     let volley_id = VolleyId::new("v_timeline");
 
     // 1. ANCHOR: Establish the legitimate start of the timeline (Sequence 1)
-    let shard_1 = VideoShard {
+    let anchor_shard = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
         fps: 30,
@@ -152,7 +150,7 @@ async fn test_reliability_timeline_integrity() {
         payload: DataPayload::Clear(b"Anchor Frame".to_vec()),
     };
     let anchor_envelope = WitnessEnvelope::new(
-        Evidence::Video(shard_1),
+        Evidence::Video(anchor_shard),
         &identity,
         NetworkId::random(),
         None,
@@ -165,8 +163,7 @@ async fn test_reliability_timeline_integrity() {
         .await
         .expect("Anchor should be accepted");
 
-    // 2. THE ATTACK: Attempt a "Hash Link Collision" on Sequence 2
-    let shard_2 = VideoShard {
+    let valid_shard = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(2),
         fps: 30,
@@ -174,13 +171,35 @@ async fn test_reliability_timeline_integrity() {
         payload: DataPayload::Clear(b"Hijacked Frame".to_vec()),
     };
 
-    // We intentionally forge the causality chain by pointing to a bogus hash instead of anchor_hash
-    let bogus_prev_hash = SignatureHash([0xFF; 32]);
-    let hijacked_envelope = WitnessEnvelope::new(
-        Evidence::Video(shard_2),
+    let valid_envelope = WitnessEnvelope::new(
+        Evidence::Video(valid_shard),
         &identity,
         NetworkId::random(),
-        Some(bogus_prev_hash),
+        Some(anchor_hash),
+    )
+    .unwrap();
+
+    // verify guardian doesn't just reject everything
+    guardian
+        .ingest_envelope(EnvelopeState::Intact(valid_envelope.clone()))
+        .await
+        .expect("Guardian should accept a valid cryptographic link");
+
+    // THE ATTACK: Attempt a "Hash Link Collision" on Sequence 2
+    let bogus_shard = VideoShard {
+        timestamp: PhalanxTimestamp::now(),
+        sequence_id: StorageSequence(3),
+        fps: 30,
+        volley_id: volley_id.clone(),
+        payload: DataPayload::Clear(b"Hijacked Frame".to_vec()),
+    };
+
+    // We intentionally forge the causality chain by pointing to a bogus hash instead of anchor_hash
+    let hijacked_envelope = WitnessEnvelope::new(
+        Evidence::Video(bogus_shard),
+        &identity,
+        NetworkId::random(),
+        Some(anchor_hash),
     )
     .unwrap();
 

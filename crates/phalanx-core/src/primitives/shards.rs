@@ -89,6 +89,7 @@ pub enum ShardError {
     #[error("Invalid Signature: {0}")]
     SalvageError(String),
 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReassemblyBuffer {
     pub chunks: Vec<Option<Vec<u8>>>,

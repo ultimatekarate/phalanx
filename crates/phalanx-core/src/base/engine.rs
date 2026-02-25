@@ -160,7 +160,9 @@ impl<J: TransientJournal> StorageActor<J> {
                 Some(command) = command_rx.recv() => {
                     match command {
                         StorageCommand::Ingest(chunk, topic, peer_id) => {
-                            self.process_incoming_chunk(chunk, topic, peer_id).await;
+
+                            let _ = self.process_incoming_chunk(chunk, topic, peer_id).await;
+
                         }
                         StorageCommand::Retrieval(query) => {
                             self.handle_retrieval_query(query).await;
@@ -206,17 +208,16 @@ impl<J: TransientJournal> StorageActor<J> {
         topic: MeshTopic,
         peer_id: NetworkId,
     ) {
+        // Immediately check subscription. Drop otherwise.
+        if topic != self.config.network.video_topic && topic != self.config.network.audio_topic {
+            tracing::warn!(?topic, "Dropped chunk from unsubscribed or unknown topic");
+            return;
+        }
+
         let chunk_owner_did = chunk.owner_did.clone();
         let envelope_opt = self
             .reassembler
-            .ingest_chunk(
-                chunk,
-                &mut self.journal,
-                &topic,
-                &self.config,
-                &self.identity,
-                peer_id,
-            )
+            .ingest_chunk(chunk, &mut self.journal)
             .await;
 
         match envelope_opt {

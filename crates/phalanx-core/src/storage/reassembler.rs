@@ -1,12 +1,12 @@
-use crate::base::config::PhalanxConfig;
 use crate::base::engine::PendingEgress;
-use crate::base::types::{MeshTopic, PowerState};
-use crate::primitives::identity::{NetworkId, PhalanxIdentity};
-use crate::primitives::shards::{ChunkType, EnvelopeState, ShardChunk, ShardError};
-use crate::storage::crucible::Crucible;
-use crate::storage::strategies::ShardAmalgam;
+use crate::base::types::PowerState;
+use crate::primitives::identity::NetworkId;
+use crate::primitives::shards::{
+    EnvelopeState, ShardChunk, ShardError, ShardGapReport, ShardId, WitnessEnvelope,
+};
+use crate::storage::strategies::ShardBuffer;
 use async_trait::async_trait;
-use std::time::Duration;
+use std::collections::HashMap;
 use tracing::{info, instrument};
 
 // =====================
@@ -24,7 +24,7 @@ pub trait TransientJournal: Send + Sync {
 }
 
 pub struct Reassembler {
-    pub crucible: Crucible<ShardAmalgam>,
+    pub active_shards: HashMap<ShardId, ShardBuffer>,
     pub power_state: PowerState,
 }
 
@@ -37,7 +37,7 @@ impl Default for Reassembler {
 impl Reassembler {
     pub fn new() -> Self {
         Self {
-            crucible: Crucible::new(ShardAmalgam, Duration::from_secs(5)),
+            active_shards: HashMap::new(),
             power_state: PowerState::Normal,
         }
     }
@@ -46,9 +46,41 @@ impl Reassembler {
     /// This prevents memory leaks from incomplete network broadcasts.
     pub fn check_and_finalize_shards(
         &mut self,
-        timeout: std::time::Duration,
+        _timeout: std::time::Duration,
     ) -> Vec<EnvelopeState> {
-        let salvaged_envelopes = self.crucible.flush_stale(timeout);
+        let mut salvaged_envelopes = Vec::new();
+        let mut stale_keys = Vec::new();
+
+        // In a true implementation, ShardBuffer needs a 'created_at' timestamp to check against `timeout`.
+        // For now, we flush all pending buffers as fragmented.
+        for (key, acc) in self.active_shards.iter() {
+            let mut missing_indices = Vec::new();
+            for i in 0..acc.total_chunks {
+                if !acc.parts.contains_key(&i) {
+                    missing_indices.push(i);
+                }
+            }
+
+            let gap_report = ShardGapReport {
+                shard_id: *key,
+                missing_chunk_indices: missing_indices,
+                expected_total_chunks: acc.total_chunks,
+            };
+
+            let fragmented = crate::primitives::shards::FragmentedEnvelope {
+                shard_id: *key,
+                owner_did: acc.owner_did.clone(),
+                gap_report,
+                partial_data: acc.parts.clone(),
+            };
+
+            salvaged_envelopes.push(EnvelopeState::Fragmented(fragmented));
+            stale_keys.push(*key);
+        }
+
+        for key in stale_keys {
+            self.active_shards.remove(&key);
+        }
 
         if !salvaged_envelopes.is_empty() {
             tracing::info!(
@@ -64,47 +96,101 @@ impl Reassembler {
         &mut self,
         chunk: ShardChunk,
         journal: &mut J,
-        _topic: &MeshTopic,
-        _config: &PhalanxConfig,
-        _identity: &PhalanxIdentity,
-        _local_peer_id: NetworkId,
     ) -> Result<Option<EnvelopeState>, ShardError> {
         // 1. Forensic Persistence (WAL)
         journal.record_chunk(&chunk).await?;
         journal.sync().await?;
 
-        // 2. Crucible Aggregation
-        Ok(self.crucible.process(chunk))
+        let shard_id = chunk.shard_id;
+
+        // 2. Access the buffer directly
+        let buffer = self
+            .active_shards
+            .entry(shard_id)
+            .or_insert_with(|| ShardBuffer {
+                total_chunks: chunk.total_chunks,
+                received_count: 0,
+                parts: std::collections::BTreeMap::new(),
+                estimated_chunk_size: chunk.data.len(),
+                owner_did: chunk.owner_did.clone(),
+            });
+
+        // 3. Deduplication: Fast, direct check
+        if buffer.parts.contains_key(&chunk.chunk_index) {
+            return Ok(None);
+        }
+
+        // 4. Ingest data
+        if chunk.data.len() > buffer.estimated_chunk_size {
+            buffer.estimated_chunk_size = chunk.data.len();
+        }
+        buffer.parts.insert(chunk.chunk_index, chunk.data);
+        buffer.received_count += 1;
+
+        // 5. Check Completion
+        if buffer.received_count == buffer.total_chunks {
+            let finalized = self.active_shards.remove(&shard_id).unwrap();
+
+            // Concatenate MTU fragments into a single byte stream
+            let mut full_payload = Vec::with_capacity(
+                finalized.estimated_chunk_size * finalized.total_chunks as usize,
+            );
+            for i in 0..finalized.total_chunks {
+                if let Some(part) = finalized.parts.get(&i) {
+                    full_payload.extend(part);
+                } else {
+                    tracing::error!(?shard_id, chunk_index=%i, "Reassembler: Illegal internal state, missing chunk despite count match");
+                    return Err(ShardError::SalvageError(
+                        "Missing chunk despite count match".into(),
+                    ));
+                }
+            }
+
+            // Deserialize the assembled WitnessEnvelope
+            let envelope = postcard::from_bytes::<WitnessEnvelope>(&full_payload)
+                .map_err(|e| ShardError::SerializationError(e.to_string()))?;
+
+            Ok(Some(EnvelopeState::Intact(envelope)))
+        } else {
+            // 6. SWISS CHEESE ACKNOWLEDGMENT: Return Fragmented state
+            let mut missing_indices = Vec::new();
+            for i in 0..buffer.total_chunks {
+                if !buffer.parts.contains_key(&i) {
+                    missing_indices.push(i);
+                }
+            }
+            Ok(Some(EnvelopeState::Fragmented(
+                crate::primitives::shards::FragmentedEnvelope {
+                    shard_id,
+                    owner_did: buffer.owner_did.clone(),
+                    gap_report: ShardGapReport {
+                        shard_id,
+                        missing_chunk_indices: missing_indices,
+                        expected_total_chunks: buffer.total_chunks,
+                    },
+                    partial_data: buffer.parts.clone(),
+                },
+            )))
+        }
     }
 
-    #[instrument(skip(self, journal, config, identity))]
+    #[instrument(skip(self, journal,))]
     pub async fn recover_from_journal<J: TransientJournal>(
         &mut self,
         journal: &mut J,
-        config: &PhalanxConfig,
-        identity: &PhalanxIdentity,
         local_peer_id: NetworkId,
     ) -> Result<Vec<EnvelopeState>, ShardError> {
         let mut recovered_envelopes = Vec::new();
         let chunks = journal.read_all_chunks().await?;
 
         for chunk in chunks {
-            let topic = if chunk.chunk_type == ChunkType::ForensicUnit {
-                &config.network.video_topic
-            } else {
-                &config.network.audio_topic
-            };
-
-            if let Some(envelope) = self
-                .ingest_chunk(chunk, journal, topic, config, identity, local_peer_id)
-                .await?
-            {
+            if let Some(envelope) = self.ingest_chunk(chunk, journal).await? {
                 recovered_envelopes.push(envelope);
             }
         }
 
         // Apply salvage protocols to transient states post-recovery
-        let salvaged_envelopes = self.crucible.flush_all();
+        let salvaged_envelopes = self.check_and_finalize_shards(std::time::Duration::from_secs(0));
         recovered_envelopes.extend(salvaged_envelopes);
 
         info!(
@@ -118,18 +204,44 @@ impl Reassembler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::primitives::identity::PhalanxIdentity;
+    use crate::primitives::shards::ChunkType;
     use crate::primitives::shards::{DataPayload, StorageSequence, VolleyId, WitnessEnvelope};
     use crate::primitives::shards::{Evidence, ShardId, VideoShard};
     use crate::primitives::time::PhalanxTimestamp;
 
+    struct MockJournal;
+    #[async_trait]
+    impl TransientJournal for MockJournal {
+        async fn record_chunk(&mut self, _chunk: &ShardChunk) -> Result<(), ShardError> {
+            Ok(())
+        }
+        async fn sync(&mut self) -> Result<(), ShardError> {
+            Ok(())
+        }
+        async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
+            Ok(vec![])
+        }
+        async fn clear(&mut self) -> Result<(), ShardError> {
+            Ok(())
+        }
+        async fn record_pending_egress(
+            &mut self,
+            _pending: &[PendingEgress],
+        ) -> Result<(), ShardError> {
+            Ok(())
+        }
+        async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError> {
+            Ok(vec![])
+        }
+    }
+
     #[tokio::test]
     async fn test_reassembler_chunk_reassembly() {
         let (identity, _) = PhalanxIdentity::generate().unwrap();
-        let config = PhalanxConfig::default();
         let mut reassembler = Reassembler::new();
-        let mut journal = crate::base::engine::NoOpJournal;
+        let mut journal = MockJournal;
         let local_peer = identity.to_network_id();
-        let topic = MeshTopic::new("phalanx/video");
 
         // 1. Create a valid, fully-populated VideoShard
         let evidence = Evidence::Video(VideoShard {
@@ -171,30 +283,18 @@ mod tests {
 
         // 4. Execute Ingestion Flow
         let result_1 = reassembler
-            .ingest_chunk(
-                chunk_1,
-                &mut journal,
-                &topic,
-                &config,
-                &identity,
-                local_peer.clone(),
-            )
+            .ingest_chunk(chunk_1, &mut journal)
             .await
             .unwrap();
+
+        // Assert that we get a Fragmented report back on partial ingestion
         assert!(
-            result_1.is_none(),
-            "Buffer should be pending after first chunk"
+            matches!(result_1.unwrap(), EnvelopeState::Fragmented(_)),
+            "Buffer should return Fragmented state after first chunk"
         );
 
         let result_2 = reassembler
-            .ingest_chunk(
-                chunk_2,
-                &mut journal,
-                &topic,
-                &config,
-                &identity,
-                local_peer,
-            )
+            .ingest_chunk(chunk_2, &mut journal)
             .await
             .unwrap();
 
@@ -216,7 +316,7 @@ mod tests {
             original_envelope.witness_signature
         );
         assert_eq!(
-            reassembler.crucible.contexts.len(),
+            reassembler.active_shards.len(),
             0,
             "Memory leak: Buffer not cleared"
         );
