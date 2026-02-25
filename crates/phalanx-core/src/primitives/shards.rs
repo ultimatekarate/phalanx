@@ -85,6 +85,9 @@ pub enum ShardError {
 
     #[error("Invalid Signature: {0}")]
     InvalidSignature(String),
+
+    #[error("Invalid Signature: {0}")]
+    SalvageError(String),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReassemblyBuffer {

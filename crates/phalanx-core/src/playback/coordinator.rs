@@ -50,8 +50,6 @@ impl<S: PlaybackSink> PlaybackCoordinator<S> {
             let shard_opt = reply_rx
                 .await
                 .context("StorageActor dropped the response channel")?;
-            // Scope the read lock so we don't hold it while sleeping or decrypting
-
             match shard_opt {
                 Some(envelope) => {
                     let payload = match &envelope.evidence {

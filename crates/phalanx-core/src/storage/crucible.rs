@@ -98,20 +98,19 @@ impl<S: Mold> Crucible<S> {
         self.perform_cleanup();
         let key = S::get_key(&item);
 
-        let (is_ready_now, elapsed) = match self.contexts.entry(key.clone()) {
+        let (is_ready_now, elapsed, was_new_info) = match self.contexts.entry(key.clone()) {
             Entry::Occupied(mut entry) => {
                 let ctx = entry.get_mut();
-                S::ingest(&mut ctx.accumulator, item);
+
+                // S::ingest must return bool: true if it was a new, unique chunk
+                let was_new = S::ingest(&mut ctx.accumulator, item);
                 let el = ctx.created_at.elapsed();
 
-                (S::is_ready(&ctx.accumulator, el), el)
+                (S::is_ready(&ctx.accumulator, el), el, was_new)
             }
             Entry::Vacant(entry) => {
-                // Initialize the empty accumulator
                 let mut acc = S::init_accumulator(&item);
-
-                // FIX: Actually ingest the first item!
-                S::ingest(&mut acc, item);
+                S::ingest(&mut acc, item); // Initial ingestion
 
                 let ctx = entry.insert(WorkContext {
                     accumulator: acc,
@@ -121,26 +120,27 @@ impl<S: Mold> Crucible<S> {
                 (
                     S::is_ready(&ctx.accumulator, Duration::ZERO),
                     Duration::ZERO,
+                    true, // First chunk is always new info
                 )
             }
         };
 
-        if !is_ready_now {
-            debug!(
-                ?key,
-                ?elapsed,
-                "Crucible: Item ingested but NOT ready to seal."
-            );
-            return None; // Ensure we exit if not ready
+        // 1. DEDUPLICATION GATE: If it's a duplicate, return None (Silent Drop)
+        if !was_new_info {
+            return None;
         }
 
-        info!(?key, ?elapsed, "Crucible: Item READY. Sealing...");
-        if let Some(ctx) = self.contexts.remove(&key) {
-            // FIX: Call assemble on the instance
-            return self.strategy.assemble(key, ctx.accumulator);
+        // 2. SEALING GATE: If complete, remove from RAM and assemble
+        if is_ready_now {
+            if let Some(ctx) = self.contexts.remove(&key) {
+                return self.strategy.assemble(key, ctx.accumulator);
+            }
         }
 
-        None
+        // 3. RELIABILITY GATE: If not ready, return a partial state (Fragmented)
+        // This makes the 'Swiss Cheese' test pass!
+        let ctx = self.contexts.get(&key)?;
+        self.strategy.partial(key, &ctx.accumulator)
     }
 
     #[must_use]

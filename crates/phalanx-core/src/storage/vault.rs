@@ -45,6 +45,9 @@ pub enum GuardianError {
 
     #[error("Storage error: {0}")]
     StorageFailure(String),
+
+    #[error("Chain Integrity Violation")]
+    ChainIntegrityViolation,
 }
 
 pub struct Guardian {
@@ -75,6 +78,30 @@ impl Guardian {
                     ));
                 }
 
+                let seq = envelope.evidence.sequence_id();
+                let volley_id = envelope.evidence.volley_id();
+
+                if seq.0 > 1 {
+                    let prev_seq = StorageSequence(seq.0 - 1);
+
+                    // Look up the previous anchor in the vault
+                    if let Some(prev_envelope) = self.get_shard(&volley_id, prev_seq) {
+                        let actual_hash = prev_envelope.signature_hash();
+
+                        // Verify the cryptographic link
+                        if envelope.prev_hash != Some(actual_hash) {
+                            tracing::error!(
+                                "TIMELINE HIJACK DETECTED: Volley {} Seq {} points to invalid hash.",
+                                volley_id, seq.0
+                            );
+                            return Err(GuardianError::ChainIntegrityViolation);
+                        }
+                    } else {
+                        // OPTIONAL: Strict Contiguous Check
+                        // If you want to reject sequence 2 if sequence 1 isn't here yet:
+                        // return Err(GuardianError::MissingCausalityAnchor);
+                    }
+                }
                 // 2. Volley Aggregation
                 // The Crucible (bound to VolleyAmalgam) handles sequence-ordering
                 if let Some(volley) = self.crucible.process(envelope) {
