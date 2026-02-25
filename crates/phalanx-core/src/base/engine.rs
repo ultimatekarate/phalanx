@@ -153,8 +153,10 @@ pub struct StorageActor<J: TransientJournal> {
 
 impl<J: TransientJournal> StorageActor<J> {
     pub async fn run(mut self, mut command_rx: mpsc::Receiver<StorageCommand>) {
-        let mut maintenance_timer = interval(Duration::from_millis(1000));
+        tracing::info!("StorageActor: Entering forensic bootstrap phase");
 
+        // PILLAR 2: Deterministic Recovery
+        // Hydrate the Reassembler state from the TransientJournal (WAL) before opening the command gate.
         match self
             .reassembler
             .recover_from_journal(&mut self.journal, self.local_peer_id)
@@ -162,51 +164,79 @@ impl<J: TransientJournal> StorageActor<J> {
         {
             Ok(recovered_states) => {
                 for state in recovered_states {
-                    // Promote recovered (complete or partial) envelopes to the Guardian
+                    // Promote recovered envelopes to the Guardian for verification and Crucible processing.
                     if let Err(e) = self.guardian.ingest_envelope(state).await {
-                        error!(error = %e, "StorageActor: Failed to ingest recovered envelope");
+                        tracing::error!(error = %e, "Bootstrap: Guardian rejected recovered state");
                     }
                 }
-                info!("StorageActor: Forensic recovery phase complete");
+                tracing::info!(
+                    active_volleys = self.reassembler.active_shards.len(),
+                    "StorageActor: Bootstrap complete. State hydrated."
+                );
             }
-            Err(e) => error!(error = %e, "StorageActor: Recovery phase failed"),
+            Err(e) => {
+                tracing::error!(error = %e, "CRITICAL: Bootstrap recovery failed. Starting with empty state.");
+            }
         }
+
+        let mut maintenance_timer = interval(Duration::from_millis(1000));
 
         loop {
             tokio::select! {
                 Some(command) = command_rx.recv() => {
                     match command {
                         StorageCommand::Ingest(chunk, topic, peer_id) => {
-                            let _ = self.process_incoming_chunk(chunk, topic, peer_id).await;
+                            self.process_incoming_chunk(chunk, topic, peer_id).await;
                         }
+
+                        StorageCommand::IngestEnvelope(state) => {
+                            // Manual or recovered envelope ingestion path.
+                            if let Err(err) = self.guardian.ingest_envelope(state).await {
+                                tracing::error!(error = %err, "Vault: Rejected explicit envelope ingestion");
+                                let _ = self.forensic_tx.send((
+                                    self.local_peer_id,
+                                    self.identity.did.clone(),
+                                    err
+                                )).await;
+                            }
+                        }
+
                         StorageCommand::Retrieval(query) => {
+                            // Delegate to specialized retrieval logic.
                             self.handle_retrieval_query(query).await;
                         }
-                        StorageCommand::EmergencySalvage(payload) => {
-                            info!(count = payload.len(), "StorageActor: Commencing emergency egress salvage");
-                            if let Err(e) = self.journal.record_pending_egress(&payload).await {
-                                error!(error = %e, "Salvage Failure: State persistence failed");
-                            }
-                            // Ensure reassembler state is also synced to journal before exit
-                            let _ = self.journal.sync().await;
-                            let _ = self.guardian.salvage().await;
-                            return;
-                        }
+
                         StorageCommand::GetShard { volley_id, sequence_id, reply_to } => {
-                            // Synchronously fetch from Guardian and send back via oneshot
-                            let shard = self.guardian.get_shard(&volley_id, sequence_id);
-                            let _ = reply_to.send(shard);
+                            // Synchronous vault lookup for specific causality anchors.
+                            let shard_opt = self.guardian.get_shard(&volley_id, sequence_id);
+                            let _ = reply_to.send(shard_opt);
                         }
-                        StorageCommand::IngestEnvelope(state) => {
-                            if let Err(err) = self.guardian.ingest_envelope(state).await {
-                                tracing::error!(error = %err, "Vault rejected explicit envelope");
-                                let _ = self.forensic_tx.send((self.local_peer_id, self.identity.did.clone(), err)).await;
+
+                        StorageCommand::EmergencySalvage(payload) => {
+                            tracing::info!(count = payload.len(), "Pillar 1: Executing emergency salvage protocol");
+
+                            // 1. Commit pending egress to WAL.
+                            if let Err(e) = self.journal.record_pending_egress(&payload).await {
+                                tracing::error!(error = %e, "Salvage: Failed to record pending egress to journal");
                             }
+
+                            // 2. Force deterministic disk synchronization.
+                            let _ = self.journal.sync().await;
+
+                            // 3. Trigger Guardian-level salvage (Crucible flushing).
+                            let _ = self.guardian.salvage().await;
+
+                            tracing::info!("Salvage sequence complete. Terminating actor task.");
+                            return;
                         }
                     }
                 }
+
                 _ = maintenance_timer.tick() => {
-                    let _ = self.guardian.check_and_finalize_volley().await;
+                    // Periodic Crucible maintenance: TTL checks and stale volley flushing.
+                    if let Err(e) = self.guardian.check_and_finalize_volley().await {
+                        tracing::warn!(error = %e, "Maintenance: Crucible cycle failed");
+                    }
                 }
             }
         }
@@ -226,15 +256,10 @@ impl<J: TransientJournal> StorageActor<J> {
         topic: MeshTopic,
         peer_id: NetworkId,
     ) {
-        // Log start of forensic ingestion
-        tracing::debug!(
-            target: "phalanx::forensics",
-            shard_id = %chunk.shard_id,
-            peer = %peer_id,
-            "Ingesting shard for forensic review"
-        );
+        let normalized_video = MeshTopic::new(self.config.network.video_topic.as_str());
+        let normalized_audio = MeshTopic::new(self.config.network.audio_topic.as_str());
 
-        if topic != self.config.network.video_topic && topic != self.config.network.audio_topic {
+        if topic != normalized_video && topic != normalized_audio {
             tracing::warn!(target: "phalanx::forensics", ?topic, "Rejecting shard: Topic mismatch");
             return;
         }
@@ -247,23 +272,21 @@ impl<J: TransientJournal> StorageActor<J> {
             .ingest_chunk(chunk, &mut self.journal)
             .await;
 
+        if let Err(e) = self.journal.sync().await {
+            error!(error = %e, "Forensics: Critical failure to sync WAL to disk");
+        }
+
         match reassembly_result {
             Ok(Some(envelope_state)) => {
                 tracing::info!(target: "phalanx::forensics", "Reassembly complete. Handing to Guardian.");
 
-                // Guardian Stage
-                match self.guardian.ingest_envelope(envelope_state).await {
-                    Ok(_) => {
-                        tracing::debug!(target: "phalanx::forensics", "Guardian accepted envelope.");
-                    }
-                    Err(err) => {
-                        tracing::error!(target: "phalanx::forensics", error = %err, "Guardian validation failed. Escalating violation.");
+                // Reassembly complete. Proceed to Guardian validation.
+                if let Err(err) = self.guardian.ingest_envelope(envelope_state).await {
+                    tracing::error!(error = %err, "Forensics: Guardian rejected network envelope");
 
-                        // Ensure we aren't blocked here; the Engine must be polling forensic_rx
-                        if let Err(e) = self.forensic_tx.send((peer_id, chunk_owner_did, err)).await
-                        {
-                            tracing::error!(target: "phalanx::forensics", error = %e, "CRITICAL: Forensic channel closed");
-                        }
+                    // Deterministic escalation to the Sentinel.
+                    if let Err(e) = self.forensic_tx.send((peer_id, chunk_owner_did, err)).await {
+                        tracing::error!(error = %e, "CRITICAL: Forensic channel disconnected");
                     }
                 }
             }

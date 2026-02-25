@@ -121,7 +121,7 @@ impl TransientJournal for FileJournal {
     }
 
     async fn record_pending_egress(&mut self, pending: &[PendingEgress]) -> Result<(), ShardError> {
-        let salvage_path = self.file_path.join("egress_salvage.bin");
+        let salvage_path = self.file_path.with_file_name("egress_salvage.bin");
 
         let encoded = postcard::to_stdvec(pending).map_err(|e| {
             ShardError::SerializationError(format!("Salvage serialization failed: {}", e))
@@ -136,7 +136,7 @@ impl TransientJournal for FileJournal {
     }
 
     async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError> {
-        let salvage_path = self.file_path.join("egress_salvage.bin");
+        let salvage_path = self.file_path.with_file_name("egress_salvage.bin");
         if !salvage_path.exists() {
             return Ok(vec![]);
         }

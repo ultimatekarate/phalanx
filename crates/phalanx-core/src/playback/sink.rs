@@ -63,7 +63,7 @@ impl PlaybackSink for VideoPlayerSink {
 /// The External Exodus: Prepares a C2PA-compliant forensic artifact.
 /// (Placeholder for the 'Artifact' half of the Dual Exodus)
 pub struct ArtifactSink {
-    file_path: std::path::PathBuf,
+    _file_path: std::path::PathBuf,
     // Add C2PA manifest builder components here later
 }
 

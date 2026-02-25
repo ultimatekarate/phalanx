@@ -7,7 +7,7 @@ use crate::primitives::shards::{
 use crate::storage::strategies::ShardBuffer;
 use async_trait::async_trait;
 use std::collections::HashMap;
-use tracing::{info, instrument};
+use tracing::instrument;
 
 // =====================
 // REASSEMBLER CORE
@@ -178,26 +178,43 @@ impl Reassembler {
     pub async fn recover_from_journal<J: TransientJournal>(
         &mut self,
         journal: &mut J,
-        local_peer_id: NetworkId,
+        _local_peer_id: NetworkId,
     ) -> Result<Vec<EnvelopeState>, ShardError> {
-        let mut recovered_envelopes = Vec::new();
         let chunks = journal.read_all_chunks().await?;
+        let mut recovered_count = 0;
 
         for chunk in chunks {
-            if let Some(envelope) = self.ingest_chunk(chunk, journal).await? {
-                recovered_envelopes.push(envelope);
+            // Bypass `ingest_chunk` to prevent duplicating entries in the WAL
+            let shard_id = chunk.shard_id;
+            let buffer = self
+                .active_shards
+                .entry(shard_id)
+                .or_insert_with(|| ShardBuffer {
+                    total_chunks: chunk.total_chunks,
+                    received_count: 0,
+                    parts: std::collections::BTreeMap::new(),
+                    estimated_chunk_size: chunk.data.len(),
+                    owner_did: chunk.owner_did.clone(),
+                });
+
+            if !buffer.parts.contains_key(&chunk.chunk_index) {
+                if chunk.data.len() > buffer.estimated_chunk_size {
+                    buffer.estimated_chunk_size = chunk.data.len();
+                }
+                buffer.parts.insert(chunk.chunk_index, chunk.data);
+                buffer.received_count += 1;
+                recovered_count += 1;
             }
         }
 
-        // Apply salvage protocols to transient states post-recovery
-        let salvaged_envelopes = self.check_and_finalize_shards(std::time::Duration::from_secs(0));
-        recovered_envelopes.extend(salvaged_envelopes);
-
-        info!(
-            recovered_count = recovered_envelopes.len(),
-            "Forensic recovery complete"
+        tracing::info!(
+            recovered_chunks = recovered_count,
+            active_volleys = self.active_shards.len(),
+            "Forensic recovery phase complete"
         );
-        Ok(recovered_envelopes)
+
+        // Return an empty vector; incomplete volleys remain in active_shards awaiting final chunks.
+        Ok(Vec::new())
     }
 }
 

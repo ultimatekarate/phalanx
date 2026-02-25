@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 // Library Imports
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
 use phalanx_core::base::engine::{PendingEgress, StorageActor, StorageCommand}; // Imported from library
-use phalanx_core::base::types::MeshTopic;
+
 use phalanx_core::primitives::identity::{Did, NetworkId, PhalanxIdentity};
 use phalanx_core::primitives::shards::ShardError;
 use phalanx_core::primitives::shards::{
@@ -70,7 +70,7 @@ async fn test_stronghold_ingestion_and_persistence() {
     config.storage.vault_path = temp_dir.path().to_string_lossy().into_owned();
 
     let physics = PhalanxPhysics::test_profile();
-    let (mut harness, _telemetry_rx) = SimulationHarness::init_mesh(config, physics);
+    let (mut harness, _telemetry_rx) = SimulationHarness::init_mesh(config.clone(), physics);
 
     // 2. Spawn the Stronghold Node
     let stronghold_did = harness
@@ -115,13 +115,14 @@ async fn test_stronghold_ingestion_and_persistence() {
     // Note: The HARNESS expects the outer layer to be the ShardChunk
     let network_payload = postcard::to_stdvec(&chunk).unwrap();
 
+    let topic = config.network.video_topic.clone();
     // 4. Inject Network Event
     harness
         .inject_event(
             &stronghold_did,
             NetworkEvent::DataReceived {
                 origin: peer_net_id,
-                topic: MeshTopic::new("phalanx/video/1.0.0"),
+                topic,
                 data: network_payload,
             },
         )
@@ -223,7 +224,7 @@ async fn test_storage_actor_metric_pipeline() {
         chunk_type: ChunkType::Witnessed,
     };
 
-    let topic = MeshTopic::new("phalanx/video/1.0.0");
+    let topic = config.network.video_topic;
 
     // 5. Inject via Ingest Command
     let ingest_command = StorageCommand::Ingest(chunk, topic, local_peer_id);

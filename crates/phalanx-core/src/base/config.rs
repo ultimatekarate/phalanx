@@ -159,9 +159,9 @@ impl Default for NetworkConfig {
         Self {
             protocol_version: default_protocol_version(),
             max_chunk_size_bytes: 8192,
-            video_topic: "phalanx/video".into(),
-            audio_topic: "phalanx/audio".into(),
-            control_topic: "phalanx/control".into(),
+            video_topic: "/phalanx/video".into(),
+            audio_topic: "/phalanx/audio".into(),
+            control_topic: "/phalanx/control".into(),
             cleanup_interval_secs: 60,
             bootstrap_peers: vec![],
             guardian_service_key: default_service_key(),

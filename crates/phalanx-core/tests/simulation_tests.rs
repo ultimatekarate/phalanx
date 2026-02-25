@@ -1,9 +1,10 @@
+use phalanx_core::storage::journal::FileJournal;
 use tokio::time::Duration;
 
 // Import from the public API
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
 use phalanx_core::base::engine::NoOpJournal;
-use phalanx_core::base::types::MeshTopic;
+
 use phalanx_core::primitives::identity::{Did, NetworkId, PhalanxIdentity};
 use phalanx_core::primitives::shards::{
     self, create_video_shard, ChunkType, DataPayload, EnvelopeState, Evidence, ShardChunk, ShardId,
@@ -34,33 +35,109 @@ fn create_test_shard(seq: u32, volley_id: VolleyId) -> VideoShard {
     }
 }
 
+async fn spawn_persistent_node(
+    harness: &mut SimulationHarness,
+    identity: PhalanxIdentity,
+    journal: FileJournal,
+) -> Did {
+    let node_did = identity.did.clone();
+    let network_id = identity.to_network_id();
+
+    harness
+        .identity_registry
+        .write()
+        .await
+        .insert(node_did.clone(), network_id);
+
+    let (ingress_tx, ingress_rx) = tokio::sync::mpsc::channel(4096);
+    let (egress_tx, mut egress_rx) = tokio::sync::mpsc::channel(4096);
+
+    let transport = phalanx_core::transport::mock::MockTransport::new(ingress_rx, Some(egress_tx))
+        .with_telemetry(network_id, harness.telemetry_tx.clone());
+
+    harness
+        .ingress_routes
+        .write()
+        .await
+        .insert(node_did.clone(), ingress_tx);
+
+    let trust_registry = phalanx_core::security::trust::TrustRegistry::build(&harness.config).await;
+    let reputation_cache =
+        std::sync::Arc::new(phalanx_core::base::engine::SyncReputationCache::default());
+    let (discovery_tx, discovery_rx) = tokio::sync::mpsc::channel(100);
+
+    // Engine initialized with the exact identity and persistent journal
+    let mut engine = phalanx_core::base::engine::PhalanxEngine::new(
+        harness.config.clone(),
+        identity,
+        transport,
+        journal,
+        trust_registry,
+        reputation_cache,
+        discovery_rx,
+        discovery_tx,
+    )
+    .await
+    .expect("Failed to initialize engine");
+
+    tokio::spawn(async move {
+        let _ = engine.run().await;
+    });
+
+    // Mesh Egress Routing
+    let routing_table = std::sync::Arc::clone(&harness.ingress_routes);
+    let source_did = node_did.clone();
+
+    tokio::spawn(async move {
+        while let Some((topic, data)) = egress_rx.recv().await {
+            let event = NetworkEvent::DataReceived {
+                origin: network_id,
+                topic,
+                data,
+            };
+            let routes = routing_table.read().await;
+            for (target_did, target_tx) in routes.iter() {
+                if target_did != &source_did {
+                    let _ = target_tx.send(event.clone()).await;
+                }
+            }
+        }
+    });
+
+    node_did
+}
+
 #[tokio::test]
 async fn test_salvage_on_node_death() {
     init_observability();
 
-    let config = PhalanxConfig::test_salvage_on_node_death();
-    let physics = PhalanxPhysics::test_profile();
-    let (mut harness, _telemetry_rx) = SimulationHarness::init_mesh(config.clone(), physics);
+    let test_base_path = std::env::temp_dir().join("phalanx_salvage_test");
+    let wal_path = test_base_path.join("storage.wal");
+    let vault_path = test_base_path.join("vault");
 
-    // 1. SETUP IDENTITIES
+    let _ = std::fs::remove_dir_all(&test_base_path);
+    std::fs::create_dir_all(&vault_path).expect("Failed to create test vault");
+
+    let mut config = PhalanxConfig::test_salvage_on_node_death();
+    config.storage.vault_path = vault_path.to_string_lossy().into_owned();
+
+    let physics = PhalanxPhysics::test_profile();
+    let (mut harness, _) = SimulationHarness::init_mesh(config.clone(), physics);
+
     let (victim_identity, _) = PhalanxIdentity::generate().unwrap();
     let victim_did = victim_identity.did.clone();
-    let victim_device_did = harness
-        .spawn_node("VictimDevice", NodeRole::Guardian)
-        .await
-        .expect("Failed to spawn VictimDevice");
 
-    let vid = VolleyId::new("salvage_volley_01");
     let topic = config.network.video_topic.clone();
 
-    // 2. GENERATE VALID FORENSIC DATA
-    // We must use a real WitnessEnvelope so the Reassembler doesn't
-    // throw a SerializationError during the salvage phase.
+    let journal = FileJournal::new(&wal_path).await.unwrap();
+    let victim_device_did =
+        spawn_persistent_node(&mut harness, victim_identity.clone(), journal).await;
+
     let real_shard = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(999),
         fps: 30,
-        volley_id: vid.clone(),
+        volley_id: VolleyId::new("salvage_volley_01"),
         payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
     };
 
@@ -68,24 +145,23 @@ async fn test_salvage_on_node_death() {
         Evidence::Video(real_shard),
         &victim_identity,
         NetworkId::random(),
-        None, // Anchor frame
+        None,
     )
-    .expect("Failed to sign envelope");
+    .unwrap();
 
     let serialized_envelope = postcard::to_stdvec(&envelope).unwrap();
 
-    // Split into 4 chunks to ensure we can "die" in the middle of reassembly
+    // CLINICAL FIX: Calculate correct chunk_size to yield exactly 4 chunks
+    let chunk_size = serialized_envelope.len().div_ceil(4);
     let chunks = shards::chunkify(
         ShardId(999),
         serialized_envelope,
-        4,
+        chunk_size,
         victim_did.clone(),
         ChunkType::Witnessed,
     )
-    .expect("Failed to chunkify");
+    .unwrap();
 
-    // 3. PARTIAL INGESTION & "CRASH"
-    // Send only 3 of 4 chunks to the VictimDevice
     for chunk in chunks.iter().take(3) {
         let chunk_bytes = postcard::to_stdvec(&chunk).unwrap();
         harness
@@ -101,24 +177,19 @@ async fn test_salvage_on_node_death() {
             .unwrap();
     }
 
-    // Wait for the WAL (TransientJournal) to flush to disk
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // SHUTDOWN: Simulate the "Death"
     harness
         .inject_event(&victim_device_did, NetworkEvent::Shutdown)
         .await
-        .expect("Failed to kill node");
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // 4. THE SALVAGE (RESTART)
-    // We "respawn" the node. The StorageActor's initialization logic
-    // MUST call reassembler.recover_from_journal() here.
-    let rebooted_device_did = harness
-        .spawn_node("VictimDevice", NodeRole::Guardian)
-        .await
-        .expect("Failed to reboot node");
+    // THE SALVAGE REBOOT
+    let journal2 = FileJournal::new(&wal_path).await.unwrap();
+    let rebooted_device_did =
+        spawn_persistent_node(&mut harness, victim_identity.clone(), journal2).await;
 
-    // Inject the FINAL missing chunk to complete the "Swiss Cheese"
     let final_chunk_bytes = postcard::to_stdvec(&chunks[3]).unwrap();
     harness
         .inject_event(
@@ -132,14 +203,9 @@ async fn test_salvage_on_node_death() {
         .await
         .unwrap();
 
-    // Give the Guardian time to finalize the .volley file
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
 
-    // 5. VERIFY DISK PERSISTENCE
-    // Check the vault for the finalized evidence
-    let victim_safe_did = victim_did.to_safe_name();
-    let evidence_dir = std::path::PathBuf::from("sim_vault").join(&victim_safe_did);
-
+    let evidence_dir = vault_path.join(victim_did.to_safe_name());
     let mut found_file = false;
     if evidence_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&evidence_dir) {
@@ -154,8 +220,9 @@ async fn test_salvage_on_node_death() {
 
     assert!(
         found_file,
-        "Salvage failed: Node rebooted but failed to finish reassembly from the WAL."
+        "Salvage failed: Node rebooted but failed to finish reassembly from the FileJournal WAL."
     );
+    let _ = std::fs::remove_dir_all(&test_base_path);
 }
 
 #[tokio::test]
@@ -348,7 +415,7 @@ async fn test_vampire_attack_defense() -> Result<(), Box<dyn std::error::Error>>
                     &victim_did,
                     NetworkEvent::DataReceived {
                         origin: attacker_net_id.clone(),
-                        topic: MeshTopic::new("phalanx/video/1.0.0"),
+                        topic: config.network.video_topic.clone(),
                         data: postcard::to_stdvec(first_chunk)?,
                     },
                 )
