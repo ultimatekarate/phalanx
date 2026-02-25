@@ -11,10 +11,14 @@ use tracing::{error, info, warn};
 use crate::base::config::PhalanxConfig;
 use crate::base::types::{MeshTopic, NodeMode, TrafficGovernor};
 use crate::primitives::identity::{init_identity, Did, IdentityError, NetworkId, PhalanxIdentity};
+use crate::primitives::shards::EnvelopeState;
 use crate::primitives::shards::{
-    CausalitySession, Evidence, ShardChunk, ShardError, ShardId, VolleyId, WitnessEnvelope,
+    CausalitySession, Evidence, ShardChunk, ShardError, ShardId, StorageSequence, VolleyId,
+    WitnessEnvelope,
 };
 use crate::primitives::time::{PhalanxTimestamp, TimeError, TrustedClock};
+
+use crate::playback::coordinator::PlaybackCoordinator;
 use crate::security::e2ee::SymmetricKey;
 use crate::security::retrieval::RetrievalOrchestrator;
 use crate::security::trust::{Offense, ReputationGate, TrustRegistry};
@@ -30,6 +34,12 @@ use crate::security::gate::PrivacyGate;
 use crate::storage::kademlia::PeerEvaluator;
 
 pub use libp2p::pnet::PreSharedKey;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardDiscoveryRequest {
+    pub volley_id: VolleyId,
+    pub sequence_id: StorageSequence,
+}
 
 /// Represents a forensic response awaiting redelivery.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +114,12 @@ pub enum StorageCommand {
     Ingest(ShardChunk, MeshTopic, NetworkId),
     Retrieval(RetrievalQuery),
     EmergencySalvage(Vec<PendingEgress>),
+    GetShard {
+        volley_id: VolleyId,
+        sequence_id: StorageSequence,
+        reply_to: tokio::sync::oneshot::Sender<Option<WitnessEnvelope>>,
+    },
+    IngestEnvelope(EnvelopeState),
 }
 
 pub struct RetrievalQuery {
@@ -156,6 +172,16 @@ impl<J: TransientJournal> StorageActor<J> {
                             }
                             let _ = self.guardian.salvage().await;
                             return;
+                        }
+                        StorageCommand::GetShard { volley_id, sequence_id, reply_to } => {
+                            // Synchronously fetch from Guardian and send back via oneshot
+                            let shard = self.guardian.get_shard(&volley_id, sequence_id);
+                            let _ = reply_to.send(shard);
+                        }
+                        StorageCommand::IngestEnvelope(state) => {
+                            if let Err(err) = self.guardian.ingest_envelope(state).await {
+                                tracing::error!(error = %err, "Vault rejected explicit envelope");
+                            }
                         }
                     }
                 }
@@ -229,6 +255,8 @@ pub struct PhalanxEngine<T: NetworkTransport, J: TransientJournal> {
     pub _journal_phantom: std::marker::PhantomData<J>,
     pub session: CausalitySession,
     pub pending_egress: VecDeque<PendingEgress>,
+    pub discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
+    pub discovery_rx: mpsc::Receiver<(VolleyId, StorageSequence)>,
 }
 
 impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T, J> {
@@ -239,6 +267,8 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
         mut journal: J,
         trust_registry: TrustRegistry,
         reputation_cache: Arc<SyncReputationCache>,
+        discovery_rx: mpsc::Receiver<(VolleyId, StorageSequence)>,
+        discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
     ) -> Result<Self, Box<dyn Error>> {
         let local_did = identity.did.clone();
         let local_network_id = identity.to_network_id();
@@ -295,6 +325,8 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
             _journal_phantom: std::marker::PhantomData,
             session,
             pending_egress: VecDeque::from(salvaged_queue),
+            discovery_rx,
+            discovery_tx,
         })
     }
 
@@ -332,9 +364,61 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> PhalanxEngine<T,
                 Some((peer_id, owner_did, err)) = self.forensic_rx.recv() => {
                     self.handle_forensic_violation(peer_id, owner_did, err).await;
                 }
+                Some((volley_id, gap_sequence)) = self.discovery_rx.recv() => {
+                    tracing::info!("Mesh heal triggered for sequence {:?}", gap_sequence);
+                    self.handle_gap_discovery(volley_id, gap_sequence).await;
+                }
             }
         }
         Ok(())
+    }
+
+    async fn handle_gap_discovery(&mut self, volley_id: VolleyId, gap_sequence: StorageSequence) {
+        tracing::info!(
+            "Playback gap detected for Volley {:?} at sequence {}. Initiating mesh discovery.",
+            volley_id,
+            gap_sequence.0
+        );
+
+        let topic = MeshTopic::new("phalanx/discovery/1.0.0");
+
+        let request = ShardDiscoveryRequest {
+            volley_id,
+            sequence_id: gap_sequence,
+        };
+
+        // Serialize the request using your standard Postcard format
+        match postcard::to_stdvec(&request) {
+            Ok(data) => {
+                // Broadcast to the mesh. Any node with this Volley will hear it.
+                if let Err(e) = self.network.publish(&topic, data).await {
+                    tracing::error!("Failed to broadcast discovery request: {}", e);
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to serialize discovery request: {}", e);
+            }
+        }
+    }
+
+    pub fn spawn_playback<S: crate::playback::sink::PlaybackSink + 'static>(
+        &self,
+        volley_id: VolleyId,
+        sink: S,
+    ) -> tokio::task::JoinHandle<()> {
+        let mut coordinator = PlaybackCoordinator::new(
+            self.storage_tx.clone(),        // Share the safe room
+            Some(self.network_key.clone()), // Symmetric key logic goes here if needed
+            sink,
+            self.discovery_tx.clone(), // Clone the Samson Reflex wire
+        );
+
+        // Spawn it as a detached Tokio task so it runs concurrently with the Engine
+        tokio::spawn(async move {
+            if let Err(e) = coordinator.run(volley_id).await {
+                tracing::error!("Playback Coordinator terminated with error: {:?}", e);
+            }
+        })
     }
 
     async fn execute_secure_retrieval(
@@ -521,6 +605,7 @@ impl<T: NetworkTransport> PhalanxEngine<T, NoOpJournal> {
         let identity =
             init_identity(std::path::Path::new(path).join("identity.pem")).unwrap_or_default();
         let trust_registry = TrustRegistry::build(&config).await;
+        let (discovery_tx, discovery_rx) = mpsc::channel(100);
         Self::new(
             config,
             identity,
@@ -528,6 +613,8 @@ impl<T: NetworkTransport> PhalanxEngine<T, NoOpJournal> {
             NoOpJournal,
             trust_registry,
             Arc::new(SyncReputationCache::default()),
+            discovery_rx,
+            discovery_tx,
         )
         .await
     }
@@ -614,7 +701,7 @@ mod tests {
 
         let trust_registry = TrustRegistry::build(&config).await;
         let reputation_cache = Arc::new(SyncReputationCache::default());
-
+        let (discovery_tx, discovery_rx) = mpsc::channel(100);
         let engine = PhalanxEngine::new(
             config,
             identity,
@@ -622,6 +709,8 @@ mod tests {
             NoOpJournal,
             trust_registry,
             reputation_cache,
+            discovery_rx,
+            discovery_tx,
         );
         assert!(
             engine.await.is_ok(),
@@ -655,7 +744,10 @@ mod tests {
     #[tokio::test]
     async fn test_pillar_retry_logic_and_backoff() {
         let _temp = tempfile::tempdir().unwrap();
+        let (discovery_tx, discovery_rx) = mpsc::channel(100);
+
         // Initialize with NoOpJournal as we are testing the Engine's internal loop
+
         let mut engine = PhalanxEngine::new(
             PhalanxConfig::test_defaults(),
             PhalanxIdentity::new(),
@@ -663,6 +755,8 @@ mod tests {
             NoOpJournal,
             TrustRegistry::build(&PhalanxConfig::test_defaults()).await,
             Arc::new(SyncReputationCache::default()),
+            discovery_rx,
+            discovery_tx,
         )
         .await
         .unwrap();
@@ -696,6 +790,7 @@ mod tests {
         use crate::security::gate::WitnessGate;
 
         let (identity, _) = PhalanxIdentity::generate().unwrap();
+        let (discovery_tx, discovery_rx) = mpsc::channel(100);
 
         let mut engine = PhalanxEngine::new(
             PhalanxConfig::test_defaults(),
@@ -704,6 +799,8 @@ mod tests {
             NoOpJournal,
             TrustRegistry::build(&PhalanxConfig::test_defaults()).await,
             Arc::new(SyncReputationCache::default()),
+            discovery_rx,
+            discovery_tx,
         )
         .await
         .unwrap();
@@ -752,7 +849,7 @@ mod tests {
             Duration::from_secs(1),
         )];
         let journal = RecoveryJournal(salvaged);
-
+        let (discovery_tx, discovery_rx) = mpsc::channel(100);
         // 1. Initialize Engine
         let engine = PhalanxEngine::new(
             PhalanxConfig::test_defaults(),
@@ -761,6 +858,8 @@ mod tests {
             journal,
             TrustRegistry::build(&PhalanxConfig::test_defaults()).await,
             Arc::new(SyncReputationCache::default()),
+            discovery_rx,
+            discovery_tx,
         )
         .await
         .unwrap();

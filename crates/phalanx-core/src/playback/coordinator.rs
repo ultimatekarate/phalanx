@@ -1,67 +1,93 @@
-use crate::playback::sink::PlaybackSink;
-use crate::primitives::identity::PhalanxIdentity;
-use crate::storage::vault::Guardian;
+use crate::primitives::shards::{DataPayload, Evidence, VolleyId};
+use crate::security::e2ee::SymmetricKey;
+use crate::{playback::sink::PlaybackSink, primitives::shards::StorageSequence};
+
 use anyhow::{Context, Result};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+use crate::base::engine::StorageCommand;
+
 pub struct PlaybackCoordinator<S: PlaybackSink> {
-    guardian: Guardian,
-    identity: PhalanxIdentity,
+    storage_tx: mpsc::Sender<StorageCommand>,
+    decryption_key: Option<SymmetricKey>,
     sink: S,
-    discovery_tx: mpsc::Sender<u64>,
-    current_sequence: u64,
+    discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
+    current_sequence: StorageSequence,
 }
 
 impl<S: PlaybackSink> PlaybackCoordinator<S> {
     pub fn new(
-        guardian: Guardian,
-        identity: PhalanxIdentity,
+        storage_tx: mpsc::Sender<StorageCommand>,
+        decryption_key: Option<SymmetricKey>,
         sink: S,
-        discovery_tx: mpsc::Sender<u64>,
+        discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
     ) -> Self {
         Self {
-            guardian,
-            identity,
+            storage_tx,
+            decryption_key,
             sink,
             discovery_tx,
-            current_sequence: 1, // Forensic truth starts at 1
+            current_sequence: StorageSequence(1), // Forensic truth starts at 1
         }
     }
 
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(&mut self, volley_id: VolleyId) -> Result<()> {
         loop {
-            // Attempt to pull from the "Safe Room" (Guardian)
-            // Implicit Trust: Data only enters the Guardian via the StorageActor's Gate
-            match self.guardian.get_shard(self.current_sequence).await {
-                Some(encrypted_shard) => {
-                    // JIT Decryption: Lightweight symmetric math (AES-GCM or ChaCha20)
-                    let decrypted = self
-                        .identity
-                        .decrypt_payload(&encrypted_shard.data)
-                        .context("Failed JIT decryption in Playback")?;
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
 
-                    // Push to the Sink (UI Stream or File Artifact)
+            // 2. Ask the StorageActor for the frame
+            self.storage_tx
+                .send(StorageCommand::GetShard {
+                    volley_id: volley_id.clone(),
+                    sequence_id: self.current_sequence,
+                    reply_to: reply_tx,
+                })
+                .await
+                .context("StorageActor mailbox closed")?;
+
+            // 3. Await the response from the StorageActor
+            let shard_opt = reply_rx
+                .await
+                .context("StorageActor dropped the response channel")?;
+            // Scope the read lock so we don't hold it while sleeping or decrypting
+
+            match shard_opt {
+                Some(envelope) => {
+                    let payload = match &envelope.evidence {
+                        Evidence::Video(v) => &v.payload,
+                        Evidence::Audio(a) => &a.payload,
+                        Evidence::Gap(_) | Evidence::Handover(_) => {
+                            self.current_sequence.0 += 1;
+                            continue;
+                        }
+                    };
+
+                    let frame_data = match payload {
+                        DataPayload::Clear(data) => data.clone(),
+                        DataPayload::Encrypted { .. } => {
+                            let key = self.decryption_key.as_ref().context(
+                                "Encountered encrypted shard, but no SymmetricKey was provided",
+                            )?;
+                            payload.decrypt(key)?
+                        }
+                        DataPayload::Missing(_) => {
+                            self.current_sequence.0 += 1;
+                            continue;
+                        }
+                    };
+
                     self.sink
-                        .handle_chunk(self.current_sequence, decrypted)
+                        .handle_chunk(self.current_sequence, frame_data)
                         .await?;
-
-                    self.current_sequence += 1;
+                    self.current_sequence.0 += 1;
                 }
                 None => {
-                    // GAP DETECTED: The "Samson Reflex"
-                    // Signal the Engine/Libp2p adapter to find this specific sequence.
-                    if let Err(e) = self.discovery_tx.try_send(self.current_sequence) {
-                        // Using try_send to avoid blocking the loop if the channel is full
-                        // But we log it as a forensic bottleneck.
-                        eprintln!(
-                            "Discovery channel full, retrying gap fill for {}: {}",
-                            self.current_sequence, e
-                        );
-                    }
-
-                    // Mobile-Conscientious Wait: Avoid tight-looping the CPU
-                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    // Gap detected, trigger Samson Reflex
+                    let _ = self
+                        .discovery_tx
+                        .try_send((volley_id.clone(), self.current_sequence));
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
         }

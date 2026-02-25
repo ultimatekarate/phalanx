@@ -104,6 +104,17 @@ impl Guardian {
         Ok(())
     }
 
+    pub fn get_shard(
+        &self,
+        volley_id: &VolleyId,
+        sequence_id: StorageSequence,
+    ) -> Option<WitnessEnvelope> {
+        // We leverage the Crucible's active contexts directly
+        self.get_active_volley_shards(volley_id)
+            .and_then(|shards| shards.get(&sequence_id))
+            .cloned()
+    }
+
     async fn archive_fragmented_shard(
         &mut self,
         fragmented: FragmentedEnvelope,

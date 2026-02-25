@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use zeroize::Zeroize;
 
+use crate::primitives::shards::StorageSequence;
+
 /// The PlaybackSink trait defines the "Exit Gates" for Phalanx data.
 /// Whether the data is going to a RAM buffer for the UI or a C2PA-wrapped file,
 /// it must pass through this trait.
@@ -10,7 +12,8 @@ use zeroize::Zeroize;
 pub trait PlaybackSink: Send + Sync {
     /// Handles a decrypted chunk of forensic data.
     /// The implementation is responsible for the "Dual Exodus" logic.
-    async fn handle_chunk(&mut self, sequence_id: u64, mut data: Vec<u8>) -> Result<()>;
+    async fn handle_chunk(&mut self, sequence_id: StorageSequence, mut data: Vec<u8>)
+        -> Result<()>;
 
     /// Called when the playback sequence is complete or terminated.
     async fn finalize(&mut self) -> Result<()>;
@@ -31,7 +34,11 @@ impl VideoPlayerSink {
 
 #[async_trait]
 impl PlaybackSink for VideoPlayerSink {
-    async fn handle_chunk(&mut self, _sequence_id: u64, mut data: Vec<u8>) -> Result<()> {
+    async fn handle_chunk(
+        &mut self,
+        _sequence_id: StorageSequence,
+        mut data: Vec<u8>,
+    ) -> Result<()> {
         // 1. Hand off to the UI layer.
         // We send a clone to the channel so the UI can process/render it.
         if let Err(e) = self.ui_tx.send(data.clone()).await {
@@ -62,7 +69,7 @@ pub struct ArtifactSink {
 
 #[async_trait]
 impl PlaybackSink for ArtifactSink {
-    async fn handle_chunk(&mut self, _sequence_id: u64, _data: Vec<u8>) -> Result<()> {
+    async fn handle_chunk(&mut self, _sequence_id: StorageSequence, _data: Vec<u8>) -> Result<()> {
         // Implementation for writing to disk and building the C2PA manifest
         todo!("Implement C2PA-wrapped file writing")
     }

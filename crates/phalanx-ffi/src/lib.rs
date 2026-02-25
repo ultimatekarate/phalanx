@@ -9,6 +9,7 @@ use std::os::raw::c_char;
 use std::path::Path;
 use std::ptr;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 #[cfg(target_os = "android")]
 pub mod jni;
@@ -73,7 +74,7 @@ pub unsafe extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut
                 .map_err(|e| format!("Swarm Failure: {e}"))?;
 
                 let adapter = Libp2pAdapter::new(swarm);
-
+                let (discovery_tx, discovery_rx) = mpsc::channel(100);
                 // T2: Initialize Engine (Sentinel Logic)
                 // Now natively awaited inside the block_on
                 PhalanxEngine::new(
@@ -83,6 +84,8 @@ pub unsafe extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut
                     NoOpJournal,
                     trust_registry,
                     reputation_cache,
+                    discovery_rx,
+                    discovery_tx,
                 )
                 .await
                 .map_err(|e| format!("Engine Failure: {e}"))

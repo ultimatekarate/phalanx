@@ -97,6 +97,7 @@ impl SimulationHarness {
         let trust_registry = TrustRegistry::build(&registry_config).await;
         let reputation_cache = std::sync::Arc::new(SyncReputationCache::default());
 
+        let (discovery_tx, discovery_rx) = mpsc::channel(100);
         let engine_result = PhalanxEngine::new(
             self.config.clone(),
             identity,
@@ -104,6 +105,8 @@ impl SimulationHarness {
             crate::base::engine::NoOpJournal,
             trust_registry,
             reputation_cache,
+            discovery_rx,
+            discovery_tx,
         )
         .await;
 

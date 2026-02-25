@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing::info;
 
 // Internal Modules from Workspace
@@ -58,7 +59,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Wrap the standard library/libp2p I/O inside the domain-compliant adapter
     let network_adapter = Libp2pAdapter::new(swarm);
-
+    let (discovery_tx, discovery_rx) = mpsc::channel(100);
     // 5. Engine Initialization
     // The engine is now completely agnostic to libp2p and simply consumes the NetworkTransport trait
     let mut engine = PhalanxEngine::new(
@@ -68,6 +69,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         journal,
         trust_registry,
         reputation_cache,
+        discovery_rx,
+        discovery_tx,
     )
     .await?;
 

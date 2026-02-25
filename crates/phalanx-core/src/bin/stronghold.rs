@@ -1,6 +1,7 @@
 use phalanx_core::base::engine::{PhalanxEngine, SyncReputationCache};
 use phalanx_core::security::trust::TrustRegistry;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let network = phalanx_core::transport::libp2p_adapter::Libp2pAdapter::new(swarm);
     let journal = phalanx_core::storage::journal::FileJournal::new("crucible_wal.bin").await?;
-
+    let (discovery_tx, discovery_rx) = mpsc::channel(100);
     // Instantiate the unified engine
     let mut engine = PhalanxEngine::new(
         config,
@@ -37,6 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         journal,
         trust_registry,
         reputation_cache,
+        discovery_rx,
+        discovery_tx,
     )
     .await?;
 

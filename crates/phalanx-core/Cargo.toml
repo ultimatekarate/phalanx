@@ -59,6 +59,7 @@ redb = "3.1.0"
 async-trait = "0.1.89"
 blake3 = "1.8.3"
 anyhow = "1.0.102"
+zeroize = "1.8.2"
 
 # --- Networking (Consolidated) ---
 [dependencies.libp2p]
