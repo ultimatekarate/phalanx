@@ -49,6 +49,11 @@ pub mod security {
 
 pub mod simulation;
 
+pub mod playback {
+    pub mod coordinator;
+    pub mod sink;
+}
+
 // --- 6. DRIVERS (Conditional) ---
 #[cfg(feature = "edge")]
 pub mod drivers {
