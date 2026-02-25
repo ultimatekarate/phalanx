@@ -85,7 +85,7 @@ impl Guardian {
                     let prev_seq = StorageSequence(seq.0 - 1);
 
                     // Look up the previous anchor in the vault
-                    if let Some(prev_envelope) = self.get_shard(&volley_id, prev_seq) {
+                    if let Some(prev_envelope) = self.get_shard(volley_id, prev_seq) {
                         let actual_hash = prev_envelope.signature_hash();
 
                         // Verify the cryptographic link
