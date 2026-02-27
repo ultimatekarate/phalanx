@@ -1,0 +1,41 @@
+[package]
+name = "phalanx-node"
+version = "0.1.0"
+edition = "2021"
+description = "The Sentence: Orchestrating the StorageActor, Sentinel, and Production Runtime."
+
+[lib]
+name = "phalanx_node"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sentinel"
+path = "src/bin/sentinel.rs"
+
+[[bin]]
+name = "stronghold"
+path = "src/bin/stronghold.rs"
+
+[dependencies]
+# The Linguistic Foundation
+phalanx-proto = { path = "../phalanx-proto" }
+phalanx-forensics = { path = "../phalanx-forensics" }
+phalanx-transport = { path = "../phalanx-transport" }
+
+# Runtime & Async
+tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# CLI & Configuration (The "Interface" Prepositions)
+clap = { version = "4.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+config = "0.13"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serialization for storage
+postcard = "1.0"

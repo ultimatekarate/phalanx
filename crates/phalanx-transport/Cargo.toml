@@ -1,0 +1,30 @@
+[package]
+name = "phalanx-transport"
+version = "0.1.0"
+edition = "2021"
+description = "The Phalanx Post Office: Handling the Prepositions of the Mesh."
+
+[dependencies]
+# The Foundation
+phalanx-proto = { path = "../phalanx-proto" }
+
+# Async & Networking
+tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# Physical Adapters (The "Across")
+# Real-world QUIC transport
+s2n-quic = "1.75.0" 
+# For P2P Mesh logic (Gossipsub/DHT)
+libp2p = { version = "0.56", features = ["gossipsub", "noise", "yamux", "tcp", "tokio"] }
+
+# Utilities
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0.18"
+tracing = "0.1"
+bytes = "1.0"
+
+[dev-dependencies]
+# For testing our Prepositional logic
+tokio-test = "0.4"

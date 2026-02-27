@@ -1,0 +1,29 @@
+[package]
+name = "phalanx-forensics"
+version = "0.1.0"
+edition = "2021"
+description = "The Phalanx Laboratory: Verbs, Integrity Judges, and the Evidence Weaver."
+
+[dependencies]
+# The Linguistic Foundation
+phalanx-proto = { path = "../phalanx-proto" }
+
+# Error Handling & Logic
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tracing = "0.1"
+postcard = "1.0"
+
+# Cryptographic Verbs (The "Judge" needs these)
+# These live here so the proto crate stays lightweight
+ed25519-dalek = { version = "2.1", features = ["serde"] }
+aes-gcm = "0.10" # For the .decrypt() and .encrypt() Verbs
+rand = "0.8"
+
+# Utilities
+async-trait = "0.1" # If we have async Verbs (like database checks)
+itertools = "0.12"  # Great for chunk manipulation logic
+
+[dev-dependencies]
+# For testing the Weaver without a network
+tokio = { version = "1.0", features = ["macros", "rt"] }

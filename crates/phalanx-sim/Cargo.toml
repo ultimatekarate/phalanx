@@ -1,0 +1,28 @@
+[package]
+name = "phalanx-sim"
+version = "0.1.0"
+edition = "2021"
+description = "The Sandbox: Controlling the world where Phalanx sentences are spoken."
+
+[dependencies]
+# Our linguistic building blocks
+phalanx-proto = { path = "../phalanx-proto" }
+phalanx-forensics = { path = "../phalanx-forensics" }
+phalanx-transport = { path = "../phalanx-transport" }
+# We depend on the node's library parts to spawn them
+phalanx-node = { path = "../phalanx-node" }
+
+# The Matrix Engine
+tokio = { version = "1.0", features = ["full", "test-util"] } # test-util is KEY for virtual time
+async-trait = "0.1"
+futures = "0.3"
+parking_lot = "0.12" # Fast, ergonomic mutexes for the World State
+
+# Chaos & Observability
+rand = "0.8"        # For "The Chaos Preposition" (packet drops/latency)
+tracing = "0.1"     # To see what the God-crate is doing
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Data handling for injection
+postcard = "1.0"
+serde = { version = "1.0", features = ["derive"] }
