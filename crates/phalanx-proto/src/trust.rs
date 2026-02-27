@@ -1,6 +1,9 @@
-use serde::{Deserialize, Serialize};
 use crate::identity::Did;
 use crate::time::PhalanxTimestamp;
+use crate::time::TimeError;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Offense {
@@ -82,7 +85,6 @@ impl fmt::Display for PetName {
         write!(f, "{}", self.0)
     }
 }
-
 
 #[derive(Debug, Error)]
 pub enum TrustError {

@@ -1,5 +1,9 @@
+use crate::evidence::ForensicGap;
+use crate::WitnessEnvelope;
+use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::str::FromStr;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize, Default,
@@ -11,8 +15,6 @@ impl fmt::Display for ShardId {
         write!(f, "shard:{}", self.0)
     }
 }
-
-
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct VolleyId(String);
@@ -67,7 +69,6 @@ pub struct Volley {
     pub is_complete: bool,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Did(pub String);
@@ -121,15 +122,19 @@ impl AsRef<str> for Did {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct NetworkId(pub String);
 
+impl From<String> for NetworkId {
+    fn from(id_string: String) -> Self {
+        Self(id_string)
+    }
+}
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct NetworkId(pub libp2p::PeerId);
-
-impl NetworkId {
-    /// Generates a random NetworkId (wrapping a random PeerId).
-    /// I wrote this purely for testing purposes. This stupid thing
-    /// has saved me so much trouble.
+impl std::fmt::Display for NetworkId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
 }
 
 impl Serialize for NetworkId {
@@ -152,46 +157,8 @@ impl<'de> Deserialize<'de> for NetworkId {
     }
 }
 
-impl fmt::Display for NetworkId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0.to_base58())
-    }
-}
-
-impl From<PeerId> for NetworkId {
-    fn from(peer_id: PeerId) -> Self {
-        Self(peer_id)
-    }
-}
-
-impl From<&PeerId> for NetworkId {
-    fn from(peer_id: &PeerId) -> Self {
-        Self(*peer_id)
-    }
-}
-
-impl FromStr for NetworkId {
-    type Err = libp2p::identity::ParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let peer_id = PeerId::from_str(s)?;
-        Ok(Self(peer_id))
-    }
-}
-
-// Ensure the inner PeerId is accessible if needed
-impl AsRef<PeerId> for NetworkId {
-    fn as_ref(&self) -> &PeerId {
-        &self.0
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignatureHash(pub [u8; 32]);
-
-use serde::{Deserialize, Serialize};
-use ed25519_dalek::SigningKey;
-use std::fmt;
 
 /// The sovereign cryptographic root for a Phalanx Node.
 #[derive(Serialize, Deserialize, Clone)]
@@ -214,7 +181,7 @@ impl fmt::Debug for PhalanxIdentity {
 impl Default for PhalanxIdentity {
     fn default() -> Self {
         // Defined here structurally, implemented in Node crate
-        Self::new_ephemeral() 
+        Self::new_ephemeral()
     }
 }
 
@@ -224,18 +191,26 @@ pub enum NodeRole {
     Stronghold,
 }
 
-
 #[derive(Debug, thiserror::Error, Serialize, Deserialize)]
 pub enum LocatorError {
-    #[error("Locator input is malformed or incorrectly delimited")] MalformedInput,
-    #[error("Locator is missing the required author/signer field")] MissingAuthor,
-    #[error("Locator scheme is unsupported or invalid: {0}")] InvalidScheme(String),
-    #[error("Locator payload exceeds maximum forensic length: {0}")] PayloadTooLarge(usize),
-    #[error("Cryptographic signature in locator failed verification")] SignatureMismatch,
-    #[error("Internal encoding error: {0}")] Encoding(String),
-    #[error("Missing fragment (Decryption Key)")] MissingKey,
-    #[error("Malformatted component")] ParseError,
-    #[error("Locator is missing a recipient.")] MissingRecipient,
+    #[error("Locator input is malformed or incorrectly delimited")]
+    MalformedInput,
+    #[error("Locator is missing the required author/signer field")]
+    MissingAuthor,
+    #[error("Locator scheme is unsupported or invalid: {0}")]
+    InvalidScheme(String),
+    #[error("Locator payload exceeds maximum forensic length: {0}")]
+    PayloadTooLarge(usize),
+    #[error("Cryptographic signature in locator failed verification")]
+    SignatureMismatch,
+    #[error("Internal encoding error: {0}")]
+    Encoding(String),
+    #[error("Missing fragment (Decryption Key)")]
+    MissingKey,
+    #[error("Malformatted component")]
+    ParseError,
+    #[error("Locator is missing a recipient.")]
+    MissingRecipient,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -249,7 +224,11 @@ pub struct PhalanxLocator {
 impl fmt::Display for PhalanxLocator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // phx://[id]#[secret]@[author]>[recipient]
-        write!(f, "phx://{}#{}@{} > {}", self.id, self.secret, self.author.0, self.recipient_did.0)
+        write!(
+            f,
+            "phx://{}#{}@{} > {}",
+            self.id, self.secret, self.author.0, self.recipient_did.0
+        )
     }
 }
 
@@ -257,19 +236,27 @@ impl FromStr for PhalanxLocator {
     type Err = LocatorError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let remainder = s.strip_prefix("phx://").ok_or_else(|| LocatorError::InvalidScheme(s.to_string()))?;
+        let remainder = s
+            .strip_prefix("phx://")
+            .ok_or_else(|| LocatorError::InvalidScheme(s.to_string()))?;
 
         let parts: Vec<&str> = remainder.split('#').collect();
         let id_str = parts.first().ok_or(LocatorError::MalformedInput)?.trim();
         let metadata = parts.get(1).ok_or(LocatorError::MissingKey)?.trim();
 
         let meta_parts: Vec<&str> = metadata.split('@').collect();
-        let secret_str = meta_parts.first().ok_or(LocatorError::MalformedInput)?.trim();
+        let secret_str = meta_parts
+            .first()
+            .ok_or(LocatorError::MalformedInput)?
+            .trim();
         let identities = meta_parts.get(1).ok_or(LocatorError::MissingAuthor)?.trim();
 
         let id_parts: Vec<&str> = identities.split('>').collect();
         let author_str = id_parts.first().ok_or(LocatorError::MalformedInput)?.trim();
-        let recipient_str = id_parts.get(1).ok_or(LocatorError::MissingRecipient)?.trim();
+        let recipient_str = id_parts
+            .get(1)
+            .ok_or(LocatorError::MissingRecipient)?
+            .trim();
 
         Ok(PhalanxLocator {
             id: VolleyId::from_str(id_str).map_err(|_| LocatorError::ParseError)?,
@@ -288,7 +275,10 @@ mod tests {
     fn test_locator_roundtrip() {
         let author_did = "did:key:z6MkqAWvMbaN66VtXfBTMu7XGvGWW3i8GfV9f8f8f8f8f";
         let recipient_did = "did:key:z6MkpTHR8VNsBxY9jnLpqfPLz6NfSu2yt";
-        let original_uri = format!("phx://volley-hash-123#secret-key-456@{} > {}", author_did, recipient_did);
+        let original_uri = format!(
+            "phx://volley-hash-123#secret-key-456@{} > {}",
+            author_did, recipient_did
+        );
 
         let locator = PhalanxLocator::from_str(&original_uri).expect("Should parse");
         assert_eq!(locator.secret, "secret-key-456");

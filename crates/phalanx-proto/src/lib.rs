@@ -1,41 +1,50 @@
 // crates/phalanx-proto/src/lib.rs
 
-pub mod identity;   // The Who
-pub mod evidence;   // The What
-pub mod topic;      // The Where
-pub mod time;       // The When
-pub mod error;
-
-// Re-export the core Nouns for ergonomic "Sentence" construction
-pub use identity::*;
-pub use evidence::*;
-pub use topic::*;
-pub use time::*;
-
+pub mod constants;
+pub mod crypto;
+pub mod error; // The Oops
+pub mod evidence; // The What
+pub mod identity; // The Who
+pub mod kademlia; // The Ledger Nouns
+pub mod network;
+pub mod retrieval;
+pub mod storage; // The Vault Nouns
+pub mod telemetry;
+pub mod time; // The When
+pub mod topic; // The Where
+pub mod trust; // The Social Graph
+pub mod types;
+pub mod vitals; // The Health Nouns
 pub mod prelude {
     // Identity Nouns
-    pub use crate::identity::{Did, ShardId, VolleyId};
-    
+    pub use crate::identity::{Did, NetworkId, PhalanxIdentity, ShardId, VolleyId};
+
     // Evidence Nouns
     pub use crate::evidence::{
-        ShardChunk, 
-        DataPayload, 
-        HandoverProof, 
+        DataPayload, EnvelopeState, FragmentedEnvelope, HandoverProof, ShardChunk, ShardGapReport,
         SignatureHash,
-        ShardGapReport,
-        FragmentedEnvelope,
-        EnvelopeState
     };
-    
+
     // Contextual Nouns
-    pub use crate::topic::MeshTopic;
     pub use crate::time::{PhalanxTimestamp, TrustedClock};
-    
+    pub use crate::topic::MeshTopic;
+
     // Error Nouns
     pub use crate::error::{ShardError, TimeError};
+    pub use crate::storage::GuardianError;
+
+    // Trust & Networking Nouns
+    pub use crate::kademlia::{DhtPayload, PayloadKind};
+    pub use crate::trust::{PetName, TrustLevel};
+    pub use crate::vitals::ControlMessage;
 }
 
-use serde::{Serialize, Deserialize};
+use crate::evidence::WitnessEnvelope;
+use crate::identity::PhalanxLocator;
+use crate::prelude::Did;
+use crate::prelude::VolleyId;
+
+use serde::{Deserialize, Serialize};
 
 // Nouns
 #[derive(Debug, Clone, Serialize, Deserialize)]

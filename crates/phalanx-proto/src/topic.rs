@@ -18,12 +18,13 @@ impl MeshTopic {
         let base = cleaned
             .trim_start_matches('/')
             .trim_start_matches("phalanx/");
-            
+
         Self(format!("/phalanx/{}", base))
     }
 
-    pub fn video() -> Self { Self::new("video/1.0.0") }
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn video() -> Self {
+        Self::new("video/1.0.0")
+    }
 }
 
 impl fmt::Display for MeshTopic {

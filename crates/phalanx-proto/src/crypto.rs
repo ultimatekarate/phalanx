@@ -1,18 +1,13 @@
-
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use thiserror;
 
-#[derive(Debug, Serialize, Deserialize, thiserror::Error)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum CryptoError {
     #[error("Encryption failure")]
     EncryptionFailure,
     #[error("Decryption failure")]
     DecryptionFailure,
-}
-
-impl fmt::Display for CryptoError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
 }
 
 impl std::error::Error for CryptoError {}
@@ -153,23 +148,6 @@ impl fmt::Display for SealedLocator {
         )
     }
 }
-
-#[derive(Debug, Error)]
-pub enum CryptoError {
-    #[error("Encryption failed")]
-    EncryptionFailure,
-    #[error("Decryption failed - Invalid Identity or Key")]
-    DecryptionFailure,
-    #[error("Key length mismatch")]
-    InvalidKeyLength,
-    #[error("Could not resolve DID to Public Key")]
-    IdentityResolutionError,
-    #[error("Encoding error: {0}")]
-    EncodingError(String),
-}
-
-
-
 // Stub for serialization helper
 mod base64_serde {
     use super::*;
@@ -191,19 +169,17 @@ mod base64_serde {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prelude::PhalanxIdentity;
+    use crate::Did;
+    use crate::VolleyId;
     // Using Nouns from the Dictionary
-    use phalanx_proto::identity::{Did, PhalanxIdentity};
-    use phalanx_proto::shards::VolleyId;
-    use phalanx_proto::crypto::{SealedLocator, CryptoError};
-
     /// --- TEST HELPER: Generate Identity ---
     /// Bridges PhalanxIdentity to the multibase 'did:key' format for testing.
     fn generate_identity() -> (Did, [u8; 32]) {
-        let identity = PhalanxIdentity::generate(); 
+        let identity = PhalanxIdentity::generate();
         let secret_bytes = identity.keypair.to_bytes();
         let pub_bytes = identity.keypair.verifying_key().to_bytes();
 
@@ -228,11 +204,12 @@ mod tests {
             sender_did.clone(),
             &sender_sk,
             recipient_did.clone(),
-        ).expect("Failed to create sealed locator");
+        )
+        .expect("Failed to create sealed locator");
 
         assert_eq!(locator.sender, sender_did);
         assert_eq!(locator.recipient, recipient_did);
-        
+
         let decrypted_key = locator
             .unlock(&recipient_sk)
             .expect("Recipient failed to decrypt grant");
@@ -252,7 +229,8 @@ mod tests {
             sender_did,
             &sender_sk,
             recipient_did,
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = locator.unlock(&attacker_sk);
         assert!(matches!(result, Err(CryptoError::DecryptionFailure)));
@@ -269,14 +247,18 @@ mod tests {
             sender_did,
             &sender_sk,
             recipient_did,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Tamper with the ciphertext
         if let Some(byte) = locator.sealed_key.get_mut(0) {
             *byte ^= 0xFF;
         }
 
-        assert!(matches!(locator.unlock(&recipient_sk), Err(CryptoError::DecryptionFailure)));
+        assert!(matches!(
+            locator.unlock(&recipient_sk),
+            Err(CryptoError::DecryptionFailure)
+        ));
     }
 
     #[test]
@@ -290,7 +272,8 @@ mod tests {
             sender_did,
             &sender_sk,
             recipient_did,
-        ).unwrap();
+        )
+        .unwrap();
 
         let uri = locator.to_string();
         assert!(uri.starts_with("phx-grant://"));

@@ -1,3 +1,9 @@
+use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
+use std::fmt;
+use std::ops::{AddAssign, SubAssign};
+use std::time::Duration;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct UnitInterval(f32);
 
@@ -70,9 +76,6 @@ impl PartialOrd for UnitInterval {
         Some(self.cmp(other))
     }
 }
-
-// 4. Ergonomics: Compare directly with f32 / f64
-// Allows: if load > 0.8 { ... }
 
 impl PartialEq<f32> for UnitInterval {
     fn eq(&self, other: &f32) -> bool {
@@ -200,21 +203,6 @@ impl VitalityRate {
     }
 
     /// Derives a heartbeat interval based on current system power and load.
-    #[must_use]
-    pub fn calculate(physics: &PhalanxPhysics, state: PowerState, load: UnitInterval) -> Self {
-        let base_ms = (physics.tau_rtt / 2) as f32;
-
-        // 2. Load Scaling: Scaled by 1.0 + load factor
-        let mut dynamic_ms = base_ms * (1.0 + load.as_f32());
-
-        // 3. Power State Modifier: If in Leaf Mode, slow down significantly to save radio
-        if state == PowerState::Leaf {
-            dynamic_ms *= 5.0; // 5x slower for self-preservation
-        }
-
-        Self::new(dynamic_ms as u64)
-    }
-
     #[must_use]
     pub fn as_duration(&self) -> Duration {
         Duration::from_millis(self.0)

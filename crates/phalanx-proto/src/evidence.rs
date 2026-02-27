@@ -1,6 +1,13 @@
-use serde::{Deserialize, Serialize};
+use crate::crypto::CryptoError;
+use crate::crypto::SymmetricKey;
 use crate::identity::{Did, ShardId, VolleyId};
+use crate::prelude::NetworkId;
+use crate::prelude::PhalanxIdentity;
+use crate::prelude::ShardError;
 use crate::time::PhalanxTimestamp;
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+use std::ops::{Add, Deref, Sub};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum DataPayload {
@@ -107,7 +114,6 @@ pub struct ShardGapReport {
     pub shard_id: ShardId,
     pub missing_indices: Vec<u32>,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum ChunkType {
@@ -307,7 +313,6 @@ impl HandoverProof {
             new_signature,
         })
     }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -359,7 +364,6 @@ impl SignatureHash {
     }
 }
 
-
 /// Represents a shard that failed complete reassembly but possesses
 /// sufficient metadata to remain in the forensic timeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -377,7 +381,6 @@ pub enum EnvelopeState {
     Intact(WitnessEnvelope),
     Fragmented(FragmentedEnvelope),
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardDiscoveryRequest {
@@ -408,7 +411,6 @@ impl PendingEgress {
         }
     }
 }
-
 
 pub enum StorageCommand {
     Ingest(ShardChunk, MeshTopic, NetworkId),
@@ -441,7 +443,7 @@ pub struct AudioFrame {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoFrame {
     pub data: Vec<u8>,
-    pub timestamp: u64, 
+    pub timestamp: u64,
     pub sequence: u64,
     pub width: u32,
     pub height: u32,

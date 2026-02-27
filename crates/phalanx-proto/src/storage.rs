@@ -1,8 +1,7 @@
 // crates/phalanx-proto/src/storage.rs
-use serde::{Deserialize, Serialize};
-use crate::base::ByteCapacity;
 use crate::time::TimeError;
-
+use crate::types::ByteCapacity;
+use serde::{Deserialize, Serialize};
 #[derive(Debug, thiserror::Error, Serialize, Deserialize)]
 pub enum GuardianError {
     #[error("Quota exceeded: {0:?}")]

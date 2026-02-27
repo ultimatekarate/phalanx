@@ -1,37 +1,64 @@
 // crates/phalanx-transport/src/lib.rs
+
 pub mod adapters;
-pub mod routing;
-pub mod signaling;
-
-use async_trait::async_trait;
-use phalanx_proto::{MeshTopic, NetworkId};
-use crate::signaling::NetworkEvent;
-
-#[async_trait]
-pub trait TransportAdapter: Send + Sync {
-    /// Send a Noun (data) across a Preposition (target/topic).
-    async fn send(&self, target: &NetworkId, topic: MeshTopic, data: Vec<u8>) -> Result<(), TransportError>;
-    
-    /// The stream of incoming Prepositional signals.
-    async fn ingress_stream(&self) -> tokio::sync::mpsc::Receiver<NetworkEvent>;
+pub mod behaviour;
+pub mod builder;
+pub mod codec;
+pub mod events;
+pub mod identity_ext;
+pub mod io;
+pub mod kademlia;
+pub mod retrieval;
+pub mod routing {
+    pub mod governor;
+    pub mod table;
 }
 
+pub mod signaling;
 
-#[async_trait]
-pub trait NetworkTransport: Send + 'static {
-    /// Pushes a payload out to the mesh
-    async fn publish(&mut self, topic: &MeshTopic, data: Vec<u8>) -> Result<(), String>;
+#[cfg(test)]
+pub mod mock;
 
-    /// Pulls the next parsed event from the underlying network implementation
+use crate::events::NetworkEvent;
+use phalanx_proto::prelude::*;
+use phalanx_proto::retrieval::VolleyResponse; // Resolved from Dictionary
+
+/// The Transport Prelude: Interface for the MeshSentinel to the physical wire.
+pub mod prelude {
+    pub use crate::adapters::libp2p::Libp2pAdapter;
+    pub use crate::events::NetworkEvent;
+    pub use crate::NetworkTransport;
+    pub use crate::TransportError;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TransportError {
+    #[error("Network failure: {0}")]
+    Network(String),
+
+    #[error("Serialization failure: {0}")]
+    Serialization(String),
+
+    #[error("Protocol violation: {0}")]
+    Protocol(String),
+}
+
+/// The Mouth: Defines the physical interaction with the data mesh.
+/// Note: Native async is utilized here to avoid BoxFuture overhead.
+pub trait NetworkTransport: Send + Sync + 'static {
+    /// Pushes a payload out to the mesh (Gossipsub/Broadcast).
+    async fn publish(&mut self, topic: &MeshTopic, data: Vec<u8>) -> Result<(), TransportError>;
+
+    /// Pulls the next parsed forensic event from the physical layer.
     async fn next_event(&mut self) -> Option<NetworkEvent>;
 
-    /// Drops a peer from the routing table (used by the TrustRegistry)
+    /// Explicitly blacklists a peer in the physical routing tables.
     async fn ban_peer(&mut self, peer: &NetworkId);
 
-    /// Fulfills a pending network retrieval request
+    /// Fulfills a Direct-Request (Request/Response) interaction.
     async fn send_response(
         &mut self,
         channel_id: &str,
         response: VolleyResponse,
-    ) -> Result<(), String>;
+    ) -> Result<(), TransportError>;
 }

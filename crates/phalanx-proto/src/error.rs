@@ -1,3 +1,5 @@
+use std::io;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ShardError {
     #[error("Dataset capacity exceeded: calculated chunk count {0} exceeds u32 limit")]
@@ -16,7 +18,7 @@ pub enum ShardError {
     SigningError(String),
 
     #[error("Encryption error: {0}")]
-    Encryption(#[from] CryptoError),
+    Encryption(String),
 
     // NEW: Required for Write-Ahead Log disk operations
     #[error("Disk I/O failed: {0}")]
@@ -40,13 +42,12 @@ pub enum TimeError {
     Expired,
 }
 
-
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error("Critical startup failure: {0}")]
     StartupFailure(String),
     #[error("Identity subsystem failure: {0}")]
-    Identity(#[from] IdentityError),
+    Identity(String),
     #[error("Forensic persistence error: {0}")]
     Io(#[from] io::Error),
     #[error("Time synchronization error: {0}")]

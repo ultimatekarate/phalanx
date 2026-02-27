@@ -1,7 +1,28 @@
-use serde::{Deserialize, Serialize};
+use crate::evidence::Evidence;
+use crate::prelude::NetworkId;
+use crate::prelude::PhalanxIdentity;
+use crate::prelude::ShardError;
+use crate::prelude::SignatureHash;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+use crate::WitnessEnvelope;
+
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[serde(transparent)]
 pub struct PhalanxTimestamp(pub u64);
+
+impl PhalanxTimestamp {
+    pub fn from_u64(raw: u64) -> Self {
+        Self(raw)
+    }
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+    pub fn from_millis(millis: u64) -> Self {
+        Self(millis)
+    }
+}
 
 pub trait TrustedClock: Send + Sync {
     fn now(&self) -> PhalanxTimestamp;
@@ -36,24 +57,16 @@ impl CausalitySession {
     }
 }
 
-// crates/phalanx-proto/src/time.rs
-use serde::{Deserialize, Serialize};
-
 #[derive(Debug, thiserror::Error, Serialize, Deserialize)]
 pub enum TimeError {
-    #[error("System clock drift detected")] ClockSkew,
-    #[error("Time synchronization lock poisoned")] LockPoisoned,
-    #[error("Timestamp is too far in the past: {0}s difference")] Stale(u64),
-    #[error("Timestamp is in the future: {0}s difference")] Future(u64),
-    #[error("NTP Sync failed: {0}")] NtpError(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
-#[serde(transparent)]
-pub struct PhalanxTimestamp(u64);
-
-impl PhalanxTimestamp {
-    pub fn from_u64(raw: u64) -> Self { Self(raw) }
-    pub fn as_u64(&self) -> u64 { self.0 }
-    pub fn from_millis(millis: u64) -> Self { Self(millis) }
+    #[error("System clock drift detected")]
+    ClockSkew,
+    #[error("Time synchronization lock poisoned")]
+    LockPoisoned,
+    #[error("Timestamp is too far in the past: {0}s difference")]
+    Stale(u64),
+    #[error("Timestamp is in the future: {0}s difference")]
+    Future(u64),
+    #[error("NTP Sync failed: {0}")]
+    NtpError(String),
 }

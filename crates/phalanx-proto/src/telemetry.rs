@@ -1,7 +1,8 @@
-use serde::{Deserialize, Serialize};
 use crate::identity::NetworkId;
-use crate::shards::{ShardChunk, VolleyId};
-use crate::base::{ByteCapacity, UnitInterval, VitalityRate};
+use crate::prelude::ShardChunk;
+use crate::types::{ByteCapacity, UnitInterval, VitalityRate};
+use crate::VolleyId;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub enum ChaosMode {
@@ -22,15 +23,44 @@ pub enum DiscoverySource {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SimEvent {
-    ChunkIngested { origin: NetworkId, chunk: ShardChunk },
-    Heartbeat { origin: NetworkId, uptime: u64, health: VitalityRate },
-    OffloadComplete { origin: NetworkId, target: NetworkId, size: ByteCapacity },
-    PeerDiscovered { peer: NetworkId, source: DiscoverySource }, // Note: Role handled by Identity
-    ShardProcessed { peer_id: NetworkId, byte_size: ByteCapacity },
-    CrucibleFinalized { volley_id: VolleyId },
-    AttackAttemptBlocked { attacker: NetworkId, target: NetworkId, reason: String },
+    ChunkIngested {
+        origin: NetworkId,
+        chunk: ShardChunk,
+    },
+    Heartbeat {
+        origin: NetworkId,
+        uptime: u64,
+        health: VitalityRate,
+    },
+    OffloadComplete {
+        origin: NetworkId,
+        target: NetworkId,
+        size: ByteCapacity,
+    },
+    PeerDiscovered {
+        peer: NetworkId,
+        source: DiscoverySource,
+    }, // Note: Role handled by Identity
+    ShardProcessed {
+        peer_id: NetworkId,
+        byte_size: ByteCapacity,
+    },
+    CrucibleFinalized {
+        volley_id: VolleyId,
+    },
+    AttackAttemptBlocked {
+        attacker: NetworkId,
+        target: NetworkId,
+        reason: String,
+    },
     SystemStressUpdate(UnitInterval),
     Shutdown,
-    ChaosUpdate { target: NetworkId, mode: ChaosMode },
-    ShardPublished { origin: NetworkId, chunk: ShardChunk },
+    ChaosUpdate {
+        target: NetworkId,
+        mode: ChaosMode,
+    },
+    ShardPublished {
+        origin: NetworkId,
+        chunk: ShardChunk,
+    },
 }

@@ -31,3 +31,15 @@ pub fn ed_to_x25519_sk(ed_bytes: &[u8]) -> Result<x25519_dalek::StaticSecret, Cr
 
     Ok(x25519_dalek::StaticSecret::from(x25519_bytes))
 }
+
+/// Mock resolution for the DID-to-Key mapping.
+/// In a live system, this queries the Kademlia DHT or a local TrustRegistry.
+pub fn resolve_did_pk(did: &Did) -> Result<VerifyingKey, CryptoError> {
+    // Logic to extract public key from 'did:key:z...' format
+    // This assumes the multibase-encoded Ed25519 format.
+    let pub_bytes = did.resolve_raw_public_key()
+        .map_err(|_| CryptoError::DidResolutionFailure)?;
+    
+    VerifyingKey::from_bytes(&pub_bytes)
+        .map_err(|_| CryptoError::DidResolutionFailure)
+}
