@@ -1,5 +1,5 @@
+use phalanx_proto::{Did, MeshTopic, NetworkId};
 use serde::Deserialize;
-use phalanx_proto::{Did, NetworkId, MeshTopic};
 use std::path::PathBuf;
 
 #[derive(Debug, Deserialize)]
@@ -58,7 +58,6 @@ impl fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
-
 
 /// The Root Configuration for the Phalanx Engine.
 #[derive(Debug, Deserialize, Clone)]

@@ -100,13 +100,13 @@ impl Default for TrustedClock {
 
 #[cfg(test)]
 mod tests {
-    use super::*; 
+    use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn test_clock_skew_correction() {
         let clock = TrustedClock::new();
-        
+
         // Apply 10 second offset
         clock.set_offset(10_000).unwrap();
 

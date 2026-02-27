@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
+use rand::OsRng;
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize, Default,
 )]
@@ -122,8 +123,18 @@ impl AsRef<str> for Did {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NetworkId(pub String);
+
+impl NetworkId {
+    /// Returns the forensic identifier as a Base58 string.
+    /// In the Dictionary layer, this is an identity operation as the
+    /// representation is already encoded.
+    #[inline]
+    pub fn to_base58(&self) -> &str {
+        &self.0
+    }
+}
 
 impl From<String> for NetworkId {
     fn from(id_string: String) -> Self {
@@ -131,29 +142,15 @@ impl From<String> for NetworkId {
     }
 }
 
-impl std::fmt::Display for NetworkId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl From<&str> for NetworkId {
+    fn from(id_str: &str) -> Self {
+        Self(id_str.to_string())
+    }
+}
+
+impl fmt::Display for NetworkId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
-    }
-}
-
-impl Serialize for NetworkId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.0.to_base58())
-    }
-}
-
-impl<'de> Deserialize<'de> for NetworkId {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        let peer_id = s.parse().map_err(serde::de::Error::custom)?;
-        Ok(NetworkId(peer_id))
     }
 }
 
@@ -161,27 +158,63 @@ impl<'de> Deserialize<'de> for NetworkId {
 pub struct SignatureHash(pub [u8; 32]);
 
 /// The sovereign cryptographic root for a Phalanx Node.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize)]
 pub struct PhalanxIdentity {
     pub version: u32,
     pub did: Did,
+    pub network_id: NetworkId,
     pub keypair: SigningKey,
 }
 
-impl fmt::Debug for PhalanxIdentity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PhalanxIdentity")
-            .field("version", &self.version)
-            .field("did", &self.did)
-            .field("keypair", &"[REDACTED]")
-            .finish()
+impl PhalanxIdentity {
+    pub const CURRENT_VERSION: u32 = 1;
+
+    /// Generates a new, non-persistent identity.
+    ///
+    /// This is a "Verb" performed within the Dictionary to initialize the "Noun."
+    /// It utilizes OsRng for entropy, ensuring the identity is cryptographically unique.
+    pub fn new_ephemeral() -> Self {
+        let mut csprng = OsRng;
+        let signing_key = SigningKey::generate(&mut csprng);
+        let verifying_key = signing_key.verifying_key();
+
+        // 1. Derive Forensic NetworkId
+        // We use the Base58 encoding of the public key. In the Phalanx mesh,
+        // this string is used by the Hands layer to reconstruct a libp2p PeerId.
+        let public_key_bytes = verifying_key.to_bytes();
+        let network_id_string = bs58::encode(public_key_bytes).into_string();
+        let network_id = NetworkId(network_id_string);
+
+        // 2. Derive Decentralized Identifier (DID)
+        // Follows the did:key format using the Ed25519 multicodec prefix (0xed01)
+        let mut multicodec_payload = vec![0xed, 0x01];
+        multicodec_payload.extend_from_slice(&public_key_bytes);
+        let multibase_pubkey = bs58::encode(multicodec_payload).into_string();
+        let did = Did(format!("did:key:z{}", multibase_pubkey));
+
+        Self {
+            version: Self::CURRENT_VERSION,
+            did,
+            network_id,
+            keypair: signing_key,
+        }
     }
 }
 
 impl Default for PhalanxIdentity {
     fn default() -> Self {
-        // Defined here structurally, implemented in Node crate
         Self::new_ephemeral()
+    }
+}
+
+impl std::fmt::Debug for PhalanxIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PhalanxIdentity")
+            .field("version", &self.version)
+            .field("did", &self.did)
+            .field("network_id", &self.network_id)
+            .field("keypair", &"[REDACTED]")
+            .finish()
     }
 }
 

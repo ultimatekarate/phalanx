@@ -7,13 +7,13 @@ use libp2p::{
     noise, pnet, relay, request_response, tcp, yamux, PeerId, StreamProtocol, Transport,
 };
 
+use crate::behaviour::PhalanxBehaviour;
+use crate::codec::PhalanxRetrievalProtocol;
 use phalanx_proto::{
     constants::RETRIEVAL_PROTOCOL_ID,
     physics::{PhalanxPhysics, PowerState},
     // Note: VitalityRate and UnitInterval must be imported from the appropriate proto/domain module
 };
-use crate::behaviour::PhalanxBehaviour;
-use crate::codec::PhalanxRetrievalProtocol;
 
 /// Constructs the foundational transport stack for the node.
 pub fn build_base_transport(
@@ -87,10 +87,8 @@ where
 
     kademlia.set_mode(Some(kad::Mode::Server));
 
-    let identify = identify::Behaviour::new(identify::Config::new(
-        protocol_version,
-        local_key.public(),
-    ));
+    let identify =
+        identify::Behaviour::new(identify::Config::new(protocol_version, local_key.public()));
 
     let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
     let relay_server = relay::Behaviour::new(local_peer_id, relay::Config::default());

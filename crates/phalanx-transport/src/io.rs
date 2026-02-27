@@ -1,9 +1,9 @@
 // crates/phalanx-transport/src/io.rs
 
-use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use phalanx_proto::constants::MAX_PAYLOAD_SIZE;
+use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// Reads a u32 length prefix, validates against MAX_PAYLOAD_SIZE, 
+/// Reads a u32 length prefix, validates against MAX_PAYLOAD_SIZE,
 /// and retrieves the exact payload bytes from the stream.
 pub async fn read_length_prefixed_payload<T>(io: &mut T) -> io::Result<Vec<u8>>
 where
@@ -16,7 +16,10 @@ where
     if payload_length > MAX_PAYLOAD_SIZE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Payload length {} exceeds protocol limit of {}", payload_length, MAX_PAYLOAD_SIZE),
+            format!(
+                "Payload length {} exceeds protocol limit of {}",
+                payload_length, MAX_PAYLOAD_SIZE
+            ),
         ));
     }
 
@@ -25,7 +28,7 @@ where
     Ok(payload_bytes)
 }
 
-/// Prepends a u32 length prefix to the payload and writes it to the stream, 
+/// Prepends a u32 length prefix to the payload and writes it to the stream,
 /// followed by an explicit flush.
 pub async fn write_length_prefixed_payload<T>(io: &mut T, payload: &[u8]) -> io::Result<()>
 where

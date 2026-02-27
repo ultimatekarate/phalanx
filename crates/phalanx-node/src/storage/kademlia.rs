@@ -1,8 +1,8 @@
+pub use crate::storage::kademlia::RedbStore;
+use libp2p::kad::record::store::RecordStore;
 use phalanx_forensics::kademlia::*;
 use phalanx_forensics::trust::PeerEvaluator; // Use the trait we moved earlier
 use redb::{Database, TableDefinition};
-use libp2p::kad::record::store::RecordStore;
-pub use crate::storage::kademlia::RedbStore;
 
 pub type PhalanxKadStore = RedbStore;
 const DHT_RECORDS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dht_records");

@@ -1,5 +1,3 @@
-
-
 /// Internal driver handling Time Drift and I/O.
 struct CameraDriver {
     fps_interval: Duration,
@@ -66,7 +64,6 @@ impl CameraDriver {
         })
     }
 }
-
 
 #[cfg(test)]
 mod tests {

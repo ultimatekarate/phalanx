@@ -1,7 +1,7 @@
-use phalanx_proto::prelude::*;
-use phalanx_forensics::trust::{ReputationGate, PeerEvaluator};
-use crate::config::PhalanxConfig;
 use crate::clock::TrustedClock;
+use crate::config::PhalanxConfig;
+use phalanx_forensics::trust::{PeerEvaluator, ReputationGate};
+use phalanx_proto::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::fs::{self, File};
@@ -301,7 +301,6 @@ impl PeerEvaluator for TrustRegistry {
         score.clamp(0.1, 1.0)
     }
 }
-
 
 #[cfg(test)]
 mod tests {

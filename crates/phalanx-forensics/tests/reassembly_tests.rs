@@ -1,4 +1,3 @@
-
 fn create_mock_chunks(
     identity: &PhalanxIdentity,
     shard_id: ShardId,

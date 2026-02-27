@@ -1,6 +1,6 @@
-use phalanx_proto::prelude::*;            // Nouns: NetworkId, ShardError, WitnessEnvelope
+use crate::clock::TrustedClock; // Node Hands: The actual Clock
 use phalanx_forensics::judge::IntegrityGate; // Verbs: The Integrity Gate (Gate 3)
-use crate::clock::TrustedClock;           // Node Hands: The actual Clock
+use phalanx_proto::prelude::*; // Nouns: NetworkId, ShardError, WitnessEnvelope
 use tracing::info;
 pub struct RetrievalOrchestrator {
     pub clock: TrustedClock,

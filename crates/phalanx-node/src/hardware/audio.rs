@@ -1,7 +1,10 @@
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use tokio::sync::{broadcast, mpsc};
+use phalanx_forensics::prelude::*;
 use phalanx_proto::prelude::*;
-use phalanx_forensics::prelude::*; // Bring in AudioWeaver
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use tokio::sync::{broadcast, mpsc}; // Bring in AudioWeaver
 pub struct PhalanxAudioThread {
     sample_rate: u32,
     channels: u8,
@@ -200,7 +203,6 @@ impl AudioDriver {
         })
     }
 }
-
 
 #[cfg(test)]
 mod tests {

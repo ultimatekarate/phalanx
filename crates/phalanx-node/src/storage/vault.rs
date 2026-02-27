@@ -1,11 +1,11 @@
+use phalanx_forensics::chain::VolleyAmalgam;
+use phalanx_forensics::crucible::Crucible;
 use phalanx_proto::prelude::*;
 use phalanx_proto::storage::GuardianError;
-use phalanx_forensics::crucible::Crucible;
-use phalanx_forensics::chain::VolleyAmalgam;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::fs;
-use tracing::{info, warn, debug, instrument};
+use tracing::{debug, info, instrument, warn};
 
 pub struct Guardian {
     pub crucible: Crucible<VolleyAmalgam>,

@@ -7,8 +7,8 @@ use phalanx_proto::prelude::*;
 use phalanx_forensics::reassembler::{Reassembler, TransientJournal};
 // Node Hands & State
 use crate::clock::TrustedClock;
-use crate::trust::{Offense, TrustLevel, TrustRegistry};
 use crate::storage::vault::{Guardian, GuardianError};
+use crate::trust::{Offense, TrustLevel, TrustRegistry};
 use crate::vitals::HealthTracker;
 
 pub struct IngressContext<'a> {

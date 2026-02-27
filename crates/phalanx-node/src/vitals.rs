@@ -1,15 +1,14 @@
-
-use std::collections::HashMap;
-use tokio::time::Instant;
 use phalanx_proto::prelude::*;
 use phalanx_proto::vitals::ControlMessage;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use tokio::time::Instant;
 
+use phalanx_proto::telemetry::SimEvent;
 use std::sync::{Once, OnceLock};
+use tokio::sync::broadcast;
 use tracing::Level;
 use tracing_subscriber::{filter::Targets, fmt, prelude::*};
-use phalanx_proto::telemetry::SimEvent;
-use tokio::sync::broadcast;
 
 static TELEMETRY_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 static INIT: Once = Once::new();
@@ -77,8 +76,6 @@ impl SystemGovernor {
         // Map 0-1 -> Nominal, 2 -> Fair, 3 -> Serious, 4+ -> Critical
     }
 }
-
-
 
 /// The physical hub for routing events inside a running node.
 pub struct TelemetryHub {
