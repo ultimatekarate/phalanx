@@ -1,5 +1,7 @@
 // crates/phalanx-forensics/src/storage/handover.rs
 
+use crate::judge::JudgeExt;
+use ed25519_dalek::Verifier;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::prelude::*;
 use phalanx_proto::storage::HandoverProof;

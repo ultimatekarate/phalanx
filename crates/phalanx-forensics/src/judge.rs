@@ -1,3 +1,6 @@
+use crate::crucible::EvidenceExt;
+use chacha20poly1305::aead::Aead;
+use chacha20poly1305::KeyInit;
 use chacha20poly1305::XChaCha20Poly1305;
 use chacha20poly1305::XNonce;
 use ed25519_dalek::Signer;
@@ -8,7 +11,6 @@ use phalanx_proto::evidence::Evidence;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::PhalanxIdentity;
 use phalanx_proto::storage::HandoverProof;
-
 pub trait HandoverJudge {
     fn verify_signatures(&self) -> Result<SignatureHash, ShardError>;
 }
@@ -196,14 +198,14 @@ pub trait PrivacyGate {
 impl PrivacyGate for Evidence {
     fn safeguard(mut self, key: &SymmetricKey) -> Result<Self, ShardError> {
         let res = match &mut self {
-            Evidence::Video(s) => s.encrypt(key),
-            Evidence::Audio(s) => s.encrypt(key),
+            Evidence::Video(s) => s.payload.encrypt(key),
+            Evidence::Audio(s) => s.payload.encrypt(key),
             _ => Ok(()),
         };
 
         res.map(|_| self).map_err(|e| {
             error!(event = "privacy_failure", error = %e, "Safeguarding failed");
-            ShardError::Encryption(e)
+            ShardError::Encryption(e.to_string())
         })
     }
 }

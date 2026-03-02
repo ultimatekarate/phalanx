@@ -33,13 +33,14 @@ impl GrantAuthority for SealedLocator {
     ) -> Result<Self, CryptoError> {
         // 1. Resolve Recipient Public Key and convert to X25519 for encryption
         let recipient_ed = resolve_did_pk(&recipient_did)?;
-        let recipient_x = ed_to_x25519_pk(&recipient_ed)?;
+        let recipient_x_bytes = ed_to_x25519_pk(&recipient_ed)?;
+        let recipient_pub = x25519_dalek::PublicKey::from(recipient_x_bytes);
 
         // 2. Convert Sender Private Key to X25519
-        let sender_x = ed_to_x25519_sk(&sender.keypair);
+        let sender_x = ed_to_x25519_sk(&sender.keypair)?;
 
         // 3. Derive Shared Secret (ECDH)
-        let shared_secret = sender_x.diffie_hellman(&recipient_x);
+        let shared_secret = sender_x.diffie_hellman(&recipient_pub);
 
         // 4. Authenticated Encryption (AEAD)
         let cipher = XChaCha20Poly1305::new(shared_secret.as_bytes().into());
@@ -74,13 +75,14 @@ impl GrantAuthority for SealedLocator {
 
         // 2. Resolve Sender Public Key and convert to X25519
         let sender_ed = resolve_did_pk(&self.sender)?;
-        let sender_x = ed_to_x25519_pk(&sender_ed)?;
+        let sender_x_bytes = ed_to_x25519_pk(&sender_ed)?;
+        let sender_pub = x25519_dalek::PublicKey::from(sender_x_bytes);
 
         // 3. Convert My Private Key to X25519
-        let my_x = ed_to_x25519_sk(&me.keypair);
+        let my_x = ed_to_x25519_sk(&me.keypair)?;
 
         // 4. Re-derive the identical Shared Secret (ECDH)
-        let shared_secret = my_x.diffie_hellman(&sender_x);
+        let shared_secret = my_x.diffie_hellman(&sender_pub);
 
         // 5. Decrypt and Verify Integrity
         let cipher = XChaCha20Poly1305::new(shared_secret.as_bytes().into());

@@ -1,8 +1,14 @@
 use crate::crucible::{Crucible, Mold};
 use crate::prelude::TransientJournal;
-use async_trait::async_trait;
+use crate::ForensicError;
 use flate2::write::GzEncoder; // Compression lives in the Lab, not Proto
 use flate2::Compression;
+use image::DynamicImage;
+use image::ImageFormat;
+use phalanx_proto::evidence::AudioShard;
+use phalanx_proto::evidence::ChunkType;
+use phalanx_proto::evidence::StorageSequence;
+use phalanx_proto::evidence::VideoShard;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::{Did, ShardId};
 use phalanx_proto::prelude::DataPayload;
@@ -11,134 +17,10 @@ use phalanx_proto::types::PowerState;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::prelude::*;
-use std::io::SeekFrom;
-use tracing::{error, info};
-
-#[async_trait]
-impl TransientJournal for FileJournal {
-    async fn record_chunk(&mut self, chunk: &ShardChunk) -> Result<(), ShardError> {
-        // 1. Serialize and explicitly map the postcard::Error to a String
-        let payload = postcard::to_allocvec(chunk)
-            .map_err(|e| ShardError::SerializationError(e.to_string()))?;
-
-        // 2. Prepare length-prefix (4-byte unsigned little-endian)
-        let payload_length = payload.len() as u32;
-        let length_bytes = payload_length.to_le_bytes();
-
-        // 3. Write framing length, then payload
-        self.handle
-            .write_all(&length_bytes)
-            .await
-            .map_err(ShardError::Io)?;
-        self.handle
-            .write_all(&payload)
-            .await
-            .map_err(ShardError::Io)?;
-
-        // 4. Flush data to disk (excluding metadata for performance)
-        self.handle.sync_data().await.map_err(ShardError::Io)?;
-
-        Ok(())
-    }
-
-    async fn sync(&mut self) -> Result<(), ShardError> {
-        self.handle.sync_all().await.map_err(ShardError::Io)
-    }
-
-    async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
-        let mut chunks = Vec::new();
-
-        // 1. Rewind the file pointer to the beginning for boot-time recovery
-        self.handle
-            .seek(SeekFrom::Start(0))
-            .await
-            .map_err(ShardError::Io)?;
-
-        // 2. Stream chunks sequentially using the 4-byte length prefix
-        loop {
-            let mut len_buf = [0u8; 4];
-            match self.handle.read_exact(&mut len_buf).await {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break, // Deterministic EOF
-                Err(e) => return Err(ShardError::Io(e)),
-            }
-
-            let payload_len = u32::from_le_bytes(len_buf);
-            let mut payload = vec![0u8; payload_len as usize];
-
-            match self.handle.read_exact(&mut payload).await {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    tracing::warn!(
-                        "WAL corruption detected: Incomplete payload. Truncating remainder."
-                    );
-                    break;
-                }
-                Err(e) => return Err(ShardError::Io(e)),
-            }
-
-            if let Ok(chunk) = postcard::from_bytes::<ShardChunk>(&payload) {
-                chunks.push(chunk);
-            } else {
-                tracing::warn!("WAL corruption detected: Failed to deserialize payload.");
-                break;
-            }
-        }
-
-        // 3. Reset the file pointer to the end to resume appending
-        self.handle
-            .seek(SeekFrom::End(0))
-            .await
-            .map_err(ShardError::Io)?;
-
-        Ok(chunks)
-    }
-
-    async fn clear(&mut self) -> Result<(), ShardError> {
-        self.handle = tokio::fs::OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(&self.file_path)
-            .await
-            .map_err(ShardError::Io)?;
-        Ok(())
-    }
-
-    async fn record_pending_egress(&mut self, pending: &[PendingEgress]) -> Result<(), ShardError> {
-        let salvage_path = self.file_path.with_file_name("egress_salvage.bin");
-
-        let encoded = postcard::to_allocvec(pending).map_err(|e| {
-            ShardError::SerializationError(format!("Salvage serialization failed: {}", e))
-        })?;
-
-        tokio::fs::write(&salvage_path, encoded)
-            .await
-            .map_err(ShardError::Io)?;
-
-        info!(path = ?salvage_path, "Egress Salvage: State persisted to journal");
-        Ok(())
-    }
-
-    async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError> {
-        let salvage_path = self.file_path.with_file_name("egress_salvage.bin");
-        if !salvage_path.exists() {
-            return Ok(vec![]);
-        }
-
-        let encoded = tokio::fs::read(&salvage_path)
-            .await
-            .map_err(ShardError::Io)?;
-
-        let pending: Vec<PendingEgress> = postcard::from_bytes(&encoded).map_err(|_| {
-            ShardError::Encryption(crate::security::e2ee::CryptoError::DecryptionFailure)
-        })?;
-
-        // Cleanup after recovery to prevent replay of the same retry state
-        let _ = tokio::fs::remove_file(salvage_path).await;
-
-        Ok(pending)
-    }
-}
+use std::io::Cursor;
+use tokio::time::Duration;
+use tracing::error;
+use tracing::warn;
 
 // --- THE REASSEMBLER ---
 pub struct Reassembler {
@@ -347,37 +229,6 @@ impl Mold for ShardAmalgam {
     }
 }
 
-pub trait ShardFactory {
-    fn compress_frame(&self) -> Result<Vec<u8>, ForensicError>;
-
-    fn create_shard(&self, id: ShardId, owner: Did, is_compressed: bool) -> Shard;
-}
-
-impl ShardFactory for Vec<u8> {
-    fn compress_frame(&self) -> Result<Vec<u8>, ForensicError> {
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder
-            .write_all(self)
-            .map_err(|_| ForensicError::Assembly("Compression failed".into()))?;
-        Ok(encoder
-            .finish()
-            .map_err(|_| ForensicError::Assembly("Encoder flush failed".into()))?)
-    }
-
-    fn create_shard(&self, id: ShardId, owner: Did, is_compressed: bool) -> Shard {
-        Shard {
-            id,
-            owner_did: owner,
-            metadata: ShardMetadata {
-                size: self.len() as u64,
-                checksum: calculate_checksum(self), // Internal helper in weaver.rs
-                is_compressed,
-            },
-            data: DataPayload::Clear(self.clone()),
-        }
-    }
-}
-
 pub trait Chunkifier {
     fn chunkify(
         &self,
@@ -439,8 +290,7 @@ pub fn create_video_shard(
     fps: u8,
     volley_id: VolleyId,
 ) -> Result<VideoShard, ShardError> {
-    let clock = TrustedClock::new();
-    let now = clock.forensic_now()?;
+    let now = PhalanxTimestamp::now();
 
     let raw_bytes = postcard::to_allocvec(&frames)
         .map_err(|e| ShardError::SerializationError(e.to_string()))?;
@@ -462,8 +312,7 @@ pub fn create_audio_shard(
     channels: u8,
     volley_id: VolleyId,
 ) -> Result<AudioShard, ShardError> {
-    let clock = TrustedClock::new();
-    let now = clock.forensic_now()?;
+    let now = PhalanxTimestamp::now(); // FIX: Remove the ? and TrustedClock
 
     Ok(AudioShard {
         timestamp: now,
@@ -479,8 +328,8 @@ pub fn create_audio_shard(
 pub struct ReassemblyBuffer {
     pub chunks: Vec<Option<Vec<u8>>>,
     pub total_chunks: usize,
-    #[serde(skip, default = "tokio::time::Instant::now")]
-    pub last_activity: tokio::time::Instant,
+    #[serde(skip, default = "std::time::Instant::now")]
+    pub last_activity: std::time::Instant,
 }
 
 impl ReassemblyBuffer {
@@ -490,7 +339,7 @@ impl ReassemblyBuffer {
         Self {
             chunks: vec![None; total_chunks],
             total_chunks,
-            last_activity: tokio::time::Instant::now(),
+            last_activity: std::time::Instant::now(),
         }
     }
 
@@ -505,34 +354,6 @@ impl ReassemblyBuffer {
         self.chunks.iter().flatten().flatten().cloned().collect()
     }
 }
-
-async fn process_media_egress(&mut self, evidence: Evidence, local_id: NetworkId) {
-    let topic = MeshTopic::new("phalanx/1.0.0");
-    let shard_id = ShardId(self.seq_counter as u32);
-
-    let pipeline_result = evidence
-        .safeguard(&self.network_key)
-        .and_then(|ev| self.session.seal_evidence(ev))
-        .and_then(|env| env.chunkify(shard_id));
-
-    if let Ok(chunks) = pipeline_result {
-        for chunk in chunks {
-            // RE-INTEGRATION: Use local_id to verify the chunk is properly attributed
-            // before it touches the wire.
-            if chunk.owner_did != self.identity.did {
-                error!(peer = %local_id, "Egress Gate: Attribution mismatch detected. Blocking publish.");
-                continue;
-            }
-
-            if let Ok(data) = postcard::to_allocvec(&chunk) {
-                let _ = self.network.publish(&topic, data).await;
-            }
-        }
-        self.seq_counter += 1;
-    }
-}
-
-use phalanx_proto::prelude::*;
 
 pub trait AudioWeaver {
     /// The "Birth" Verb for audio data.
@@ -555,7 +376,7 @@ impl AudioWeaver for Vec<u8> {
     ) -> AudioShard {
         // This is where shards::create_audio_shard logic now lives
         AudioShard {
-            data: DataPayload::Clear(self.clone()),
+            payload: DataPayload::Clear(self.clone()),
             sequence_id: sequence,
             sample_rate: rate,
             channels,
@@ -575,23 +396,7 @@ pub trait VideoWeaver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::convert::TryFrom;
-    use std::fmt;
-    use std::io::Cursor;
-    use std::ops::{Add, Deref, Sub};
-
-    // external crates
-    use image::{DynamicImage, ImageFormat};
-    use serde::{Deserialize, Serialize};
-
-    use crate::primitives::identity::{Did, NetworkId, PhalanxIdentity};
-    use crate::primitives::time::{PhalanxTimestamp, TimeError, TrustedClock};
-    use crate::security::e2ee::{decrypt_bytes, encrypt_bytes, CryptoError, SymmetricKey};
-    use crate::security::gate::ChronosGate;
-    use ed25519_dalek::Signature;
-    use sha2::{Digest, Sha256};
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
+    use phalanx_proto::crypto::SymmetricKey;
 
     fn get_test_key() -> SymmetricKey {
         SymmetricKey([0x42; 32])

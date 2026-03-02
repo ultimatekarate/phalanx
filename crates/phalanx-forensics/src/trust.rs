@@ -51,8 +51,6 @@ pub trait PeerEvaluator: Send + Sync {
 /// Allows any component to verify peer standing without knowing internal registry logic.
 impl ReputationGate for TrustRegistry {
     fn is_blacklisted(&self, did: &Did) -> bool {
-        self.contacts
-            .get(did)
-            .is_some_and(|record| record.reputation.is_blacklisted)
+        self.peers.get(did).is_some_and(|record| record.is_banned)
     }
 }

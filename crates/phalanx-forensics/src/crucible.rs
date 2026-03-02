@@ -9,12 +9,45 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::time::Duration;
-use tokio::time::Instant;
+use std::time::Instant;
 use tracing::{debug, info, instrument};
 use tracing::{error, warn};
 
 fn default_cleanup_interval() -> Duration {
     Duration::from_secs(1)
+}
+
+pub trait EvidenceExt {
+    fn volley_id(&self) -> &VolleyId;
+    fn sequence_id(&self) -> StorageSequence;
+    fn timestamp(&self) -> PhalanxTimestamp;
+}
+
+impl EvidenceExt for Evidence {
+    fn volley_id(&self) -> &VolleyId {
+        match self {
+            Evidence::Video(s) => &s.volley_id,
+            Evidence::Audio(s) => &s.volley_id,
+            Evidence::Handover(h) => &h.volley_id,
+            _ => unimplemented!("Add other variants here"),
+        }
+    }
+    fn sequence_id(&self) -> StorageSequence {
+        match self {
+            Evidence::Video(s) => s.sequence_id,
+            Evidence::Audio(s) => s.sequence_id,
+            Evidence::Handover(h) => h.sequence_id,
+            _ => unimplemented!("Add other variants here"),
+        }
+    }
+    fn timestamp(&self) -> PhalanxTimestamp {
+        match self {
+            Evidence::Video(s) => s.timestamp,
+            Evidence::Audio(s) => s.timestamp,
+            // Handover doesn't have a time in the struct, so we default to now or add it to proto later
+            _ => PhalanxTimestamp::now(),
+        }
+    }
 }
 /// A stateful aggregation strategy for transforming stream-based inputs into unified outputs.
 ///
@@ -80,8 +113,8 @@ pub struct Crucible<S: Mold> {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkContext<A> {
     pub accumulator: A,
-    #[serde(skip, default = "tokio::time::Instant::now")]
-    pub created_at: tokio::time::Instant,
+    #[serde(skip, default = "std::time::Instant::now")]
+    pub created_at: std::time::Instant,
 }
 
 impl<S: Mold> Crucible<S> {
