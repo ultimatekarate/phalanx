@@ -23,6 +23,13 @@ rand = "0.8"
 # Utilities
 async-trait = "0.1" # If we have async Verbs (like database checks)
 itertools = "0.12"  # Great for chunk manipulation logic
+tokio = "1.0"
+sha2 = "0.10.9"
+chacha20poly1305 = "0.10.1"
+curve25519-dalek = "4.1.3"
+x25519-dalek = {version = "2.0.1", features = ["static_secrets"]}
+blake3 = "1.8.3"
+base64 = "0.22.1"
 
 [dev-dependencies]
 # For testing the Weaver without a network

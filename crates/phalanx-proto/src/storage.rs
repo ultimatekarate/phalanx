@@ -1,7 +1,11 @@
 // crates/phalanx-proto/src/storage.rs
+use crate::evidence::{SignatureHash, StorageSequence};
+use crate::identity::{Did, VolleyId};
 use crate::time::TimeError;
 use crate::types::ByteCapacity;
+use ed25519_dalek::Signature;
 use serde::{Deserialize, Serialize};
+
 #[derive(Debug, thiserror::Error, Serialize, Deserialize)]
 pub enum GuardianError {
     #[error("Quota exceeded: {0:?}")]
@@ -36,4 +40,15 @@ pub enum GuardianError {
 
     #[error("Chain Integrity Violation")]
     ChainIntegrityViolation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HandoverProof {
+    pub volley_id: VolleyId,
+    pub sequence_id: StorageSequence,
+    pub old_did: Did,
+    pub new_did: Did,
+    pub anchor_hash: SignatureHash,
+    pub old_signature: Signature,
+    pub new_signature: Signature,
 }

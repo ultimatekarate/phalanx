@@ -1,11 +1,12 @@
+use crate::storage::journal::TransientJournal;
+use phalanx_proto::prelude::*;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+use std::sync::mpsc;
 use std::time::Duration;
 use tokio::time::Instant;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tracing::{debug, info, instrument};
-use phalanx_proto::prelude::*;
-use std::collections::HashMap;
 use tracing::{error, warn};
 
 pub struct StorageActor<J: TransientJournal> {
@@ -17,66 +18,6 @@ pub struct StorageActor<J: TransientJournal> {
     pub forensic_tx: mpsc::Sender<(NetworkId, Did, GuardianError)>,
     pub local_peer_id: NetworkId,
 }
-
-
-pub trait ChronosGate {
-    fn verify_continuity(&self, envelopes: &[WitnessEnvelope]) -> Result<(), ShardError> {
-        if envelopes.is_empty() { return Ok(()); }
-
-        for window in envelopes.windows(2) {
-            let (prev, curr) = (&window[0], &window[1]);
-
-            // Hash Linkage (Causality)
-            if curr.prev_hash != Some(prev.signature_hash()) {
-                return Err(ShardError::InvalidConfiguration("Causality Break".into()));
-            }
-
-            // Monotonicity (Temporal Paradox)
-            if curr.evidence.timestamp() < prev.evidence.timestamp() {
-                return Err(ShardError::InvalidConfiguration("Temporal Paradox".into()));
-            }
-        }
-        Ok(())
-    }
-}
-
-pub trait BufferCapacityGate {
-    fn enforce_capacity_limit(
-        &mut self,
-        incoming_shard: &ShardId,
-        capacity_limit: usize,
-    ) -> Result<&mut Self, ShardError>;
-}
-
-impl BufferCapacityGate for HashMap<ShardId, ReassemblyBuffer> {
-    fn enforce_capacity_limit(
-        &mut self,
-        incoming_shard: &ShardId,
-        limit: usize,
-    ) -> Result<&mut Self, ShardError> {
-        if !self.contains_key(incoming_shard) && self.len() >= limit {
-            let stale = self.iter()
-                .min_by_key(|(_, b)| b.last_activity)
-                .map(|(k, _)| *k);
-
-            if let Some(id) = stale {
-                warn!(event = "buffer_eviction", evicted = %id, "Memory limit reached");
-                self.remove(&id);
-            } else {
-                return Err(ShardError::InvalidConfiguration("Zero capacity".into()));
-            }
-        }
-        Ok(self)
-    }
-}
-
-use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
-use std::time::Duration;
-use tokio::time::Instant;
-use tracing::{debug, info, instrument, warn};
-
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 fn default_cleanup_interval() -> Duration {
     Duration::from_secs(1)
@@ -305,6 +246,145 @@ impl<S: Mold + Default> Default for Crucible<S> {
     fn default() -> Self {
         // Use the strategy's default and our standard 1s interval
         Self::new(S::default(), Duration::from_secs(1))
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VolleyAmalgam;
+
+impl Mold for VolleyAmalgam {
+    type Input = WitnessEnvelope;
+    type Output = Volley;
+    type Key = VolleyId;
+    type Accumulator = VolleyBuffer;
+
+    fn get_key(item: &Self::Input) -> Self::Key {
+        item.evidence.volley_id().clone()
+    }
+
+    fn init_accumulator(item: &Self::Input) -> Self::Accumulator {
+        let mut artifacts = BTreeMap::new();
+        artifacts.insert(item.evidence.sequence_id(), item.clone());
+
+        VolleyBuffer {
+            artifacts,
+            volley_id: item.evidence.volley_id().clone(),
+            owner_did: item.did.clone(),
+        }
+    }
+
+    fn ingest(acc: &mut Self::Accumulator, item: Self::Input) {
+        let seq = item.evidence.sequence_id();
+
+        match &item.evidence {
+            Evidence::Handover(proof) => {
+                // 1. Verify the bridge connects to the CURRENT legal owner
+                if proof.old_did == acc.owner_did {
+                    tracing::info!(
+                        volley = %acc.volley_id,
+                        "Crucible: Advancing stream ownership via HandoverProof"
+                    );
+
+                    // Transfer legal ownership of the active buffer
+                    acc.owner_did = proof.new_did.clone();
+                    acc.artifacts.insert(seq, item);
+                } else {
+                    tracing::warn!(
+                        volley = %acc.volley_id,
+                        "Crucible rejected HandoverProof: Unauthorized origin"
+                    );
+                }
+            }
+            _ => {
+                // 2. Standard Frame Verification
+                if item.did == acc.owner_did {
+                    acc.artifacts.insert(seq, item);
+                } else {
+                    // ZERO-TRUST DROP: Prevent buffer bloat from malicious peers
+                    tracing::warn!(
+                        volley = %acc.volley_id,
+                        seq = %seq.0,
+                        "Crucible dropped illegal frame: Causality Breach (Identity Mismatch)"
+                    );
+                }
+            }
+        }
+    }
+
+    fn is_ready(acc: &Self::Accumulator, elapsed: Duration) -> bool {
+        acc.artifacts.len() >= VOLLEY_SIZE_THRESHOLD || elapsed > VOLLEY_TIME_THRESHOLD
+    }
+
+    fn assemble(&self, key: VolleyId, acc: Self::Accumulator) -> Option<Self::Output> {
+        if acc.artifacts.is_empty() {
+            return None;
+        }
+
+        let mut sorted_envelopes: Vec<WitnessEnvelope> = Vec::with_capacity(acc.artifacts.len());
+        let mut gaps = Vec::new();
+        let clock = TrustedClock::new();
+        let now = clock.forensic_now().ok()?;
+
+        let mut expected_seq: Option<StorageSequence> = None;
+        let mut last_signature_hash: Option<SignatureHash> = None;
+
+        // BTreeMap guarantees we iterate by StorageSequence order
+        for (seq, env) in acc.artifacts {
+            let current_seq: StorageSequence = seq;
+
+            // 1. SEQUENCE CONTINUITY CHECK
+            if let Some(expected) = expected_seq {
+                if current_seq > expected {
+                    // Detected a sequence gap - create an attributed ForensicGap
+                    gaps.push(ForensicGap {
+                        volley_id: key.clone(), // FIX: Every gap belongs to the Volley
+                        start_seq: expected,
+                        end_seq: current_seq - 1,
+                        detected_at: now,
+                    });
+
+                    // Note: A gap breaks the hash-link by definition.
+                    // In a 'Healable' timeline, we reset the link anchor here.
+                    last_signature_hash = None;
+                }
+            }
+
+            // 2. CAUSALITY (HASH-LINK) VERIFICATION
+            // Only verify link if there wasn't just a gap or if it's not the first unit
+            if let (Some(expected_hash), Some(actual_link)) = (last_signature_hash, env.prev_hash) {
+                if expected_hash != actual_link {
+                    error!(
+                        volley_id = %key,
+                        seq = %current_seq,
+                        "VolleyAmalgam: CAUSALITY BREACH - Hash link mismatch detected"
+                    );
+                    // In Zero-Trust, a breach means we discard the assembly to prevent corruption
+                    return None;
+                }
+            }
+
+            // Update state for next iteration
+            expected_seq = Some(current_seq + 1);
+            last_signature_hash = Some(env.signature_hash());
+            sorted_envelopes.push(env);
+        }
+
+        info!(
+            volley_id = %key,
+            artifacts = %sorted_envelopes.len(),
+            gaps = %gaps.len(),
+            "VolleyAmalgam: Finalized chain with verified causality"
+        );
+
+        let gaps_2 = gaps.clone();
+
+        Some(Volley {
+            id: key.clone(),
+            owner_did: acc.owner_did,
+            artifacts: sorted_envelopes,
+            gaps,
+            is_complete: gaps_2.is_empty(),
+        })
     }
 }
 

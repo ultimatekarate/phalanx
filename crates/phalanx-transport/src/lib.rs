@@ -1,6 +1,11 @@
 // crates/phalanx-transport/src/lib.rs
 
-pub mod adapters;
+pub mod adapters {
+    pub mod kademlia;
+    pub mod libp2p;
+    pub mod mock;
+    pub mod quic;
+}
 pub mod behaviour;
 pub mod builder;
 pub mod codec;

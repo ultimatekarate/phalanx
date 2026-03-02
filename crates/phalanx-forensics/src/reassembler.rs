@@ -1,20 +1,23 @@
-
-use phalanx_proto::{Shard, ShardId, ShardMetadata, DataPayload, Did};
-use flate2::write::GzEncoder; // Compression lives in the Lab, not Proto
-use flate2::Compression;
-use std::io::prelude::*;
-use phalanx_proto::prelude::*;
 use crate::crucible::{Crucible, Mold};
 use async_trait::async_trait;
-use tracing::{info, instrument, error};
-use std::collections::BTreeMap;
+use flate2::write::GzEncoder; // Compression lives in the Lab, not Proto
+use flate2::Compression;
+use phalanx_proto::identity::{Did, ShardId};
+use phalanx_proto::prelude::DataPayload;
+use phalanx_proto::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::io::prelude::*;
+use std::io::SeekFrom;
+use tracing::{error, info, instrument};
+
+use phalanx_proto::types::PowerState;
 
 #[async_trait]
 impl TransientJournal for FileJournal {
     async fn record_chunk(&mut self, chunk: &ShardChunk) -> Result<(), ShardError> {
         // 1. Serialize and explicitly map the postcard::Error to a String
-        let payload = postcard::to_stdvec(chunk)
+        let payload = postcard::to_allocvec(chunk)
             .map_err(|e| ShardError::SerializationError(e.to_string()))?;
 
         // 2. Prepare length-prefix (4-byte unsigned little-endian)
@@ -100,12 +103,10 @@ impl TransientJournal for FileJournal {
         Ok(())
     }
 
-
-
     async fn record_pending_egress(&mut self, pending: &[PendingEgress]) -> Result<(), ShardError> {
         let salvage_path = self.file_path.with_file_name("egress_salvage.bin");
 
-        let encoded = postcard::to_stdvec(pending).map_err(|e| {
+        let encoded = postcard::to_allocvec(pending).map_err(|e| {
             ShardError::SerializationError(format!("Salvage serialization failed: {}", e))
         })?;
 
@@ -138,7 +139,6 @@ impl TransientJournal for FileJournal {
     }
 }
 
-
 // --- THE REASSEMBLER ---
 pub struct Reassembler {
     pub active_shards: Crucible<ShardMold>,
@@ -166,7 +166,7 @@ impl Reassembler {
 
         let shard_id = chunk.shard_id;
         let owner_did = chunk.owner_did.clone();
-        
+
         // 2. Delegate to the Crucible Engine
         match self.active_shards.process(chunk) {
             Some(envelope) => Ok(Some(EnvelopeState::Intact(envelope))),
@@ -178,7 +178,7 @@ impl Reassembler {
                     owner_did,
                     gap_report: ShardGapReport {
                         shard_id,
-                        missing_indices: buffer.missing_indices()
+                        missing_indices: buffer.missing_indices(),
                     },
                     partial_data: buffer.parts.clone(),
                 })))
@@ -208,8 +208,10 @@ impl Mold for ShardMold {
     type Key = ShardId;
     type Accumulator = ShardBuffer;
 
-    fn get_key(item: &Self::Input) -> Self::Key { item.shard_id }
-    
+    fn get_key(item: &Self::Input) -> Self::Key {
+        item.shard_id
+    }
+
     fn init_accumulator(item: &Self::Input) -> Self::Accumulator {
         ShardBuffer {
             total_chunks: item.total_chunks,
@@ -292,7 +294,7 @@ impl Mold for ShardAmalgam {
 
             let gap_report = ShardGapReport {
                 shard_id: key,
-                missing_indices: missing_indices
+                missing_indices: missing_indices,
             };
 
             let fragmented = FragmentedEnvelope {
@@ -326,27 +328,23 @@ impl Mold for ShardAmalgam {
     }
 }
 
-
-
-
 pub struct Weaver;
 
 pub trait ShardFactory {
     fn compress_frame(&self) -> Result<Vec<u8>, ForensicError>;
-    
-    fn create_shard(
-        &self, 
-        id: ShardId, 
-        owner: Did,
-        is_compressed: bool
-    ) -> Shard;
+
+    fn create_shard(&self, id: ShardId, owner: Did, is_compressed: bool) -> Shard;
 }
 
 impl ShardFactory for Vec<u8> {
     fn compress_frame(&self) -> Result<Vec<u8>, ForensicError> {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(self).map_err(|_| ForensicError::Assembly("Compression failed".into()))?;
-        Ok(encoder.finish().map_err(|_| ForensicError::Assembly("Encoder flush failed".into()))?)
+        encoder
+            .write_all(self)
+            .map_err(|_| ForensicError::Assembly("Compression failed".into()))?;
+        Ok(encoder
+            .finish()
+            .map_err(|_| ForensicError::Assembly("Encoder flush failed".into()))?)
     }
 
     fn create_shard(&self, id: ShardId, owner: Did, is_compressed: bool) -> Shard {
@@ -364,12 +362,7 @@ impl ShardFactory for Vec<u8> {
 }
 
 pub trait Chunkifier {
-    fn chunkify(
-        &self, 
-        shard_id: ShardId, 
-        owner: Did, 
-        chunk_size: usize
-    ) -> Vec<ShardChunk>;
+    fn chunkify(&self, shard_id: ShardId, owner: Did, chunk_size: usize) -> Vec<ShardChunk>;
 }
 
 impl Chunkifier for Vec<u8> {
@@ -435,8 +428,8 @@ pub fn create_video_shard(
     let clock = TrustedClock::new();
     let now = clock.forensic_now()?;
 
-    let raw_bytes =
-        postcard::to_stdvec(&frames).map_err(|e| ShardError::SerializationError(e.to_string()))?;
+    let raw_bytes = postcard::to_allocvec(&frames)
+        .map_err(|e| ShardError::SerializationError(e.to_string()))?;
 
     Ok(VideoShard {
         timestamp: now,
@@ -467,7 +460,6 @@ pub fn create_audio_shard(
         volley_id,
     })
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReassemblyBuffer {
@@ -501,31 +493,31 @@ impl ReassemblyBuffer {
 }
 
 async fn process_media_egress(&mut self, evidence: Evidence, local_id: NetworkId) {
-        let topic = MeshTopic::new("phalanx/1.0.0");
-        let shard_id = ShardId(self.seq_counter as u32);
+    let topic = MeshTopic::new("phalanx/1.0.0");
+    let shard_id = ShardId(self.seq_counter as u32);
 
-        let pipeline_result = evidence
-            .safeguard(&self.network_key)
-            .and_then(|ev| self.session.seal_evidence(ev))
-            .and_then(|env| env.chunkify(shard_id));
+    let pipeline_result = evidence
+        .safeguard(&self.network_key)
+        .and_then(|ev| self.session.seal_evidence(ev))
+        .and_then(|env| env.chunkify(shard_id));
 
-        if let Ok(chunks) = pipeline_result {
-            for chunk in chunks {
-                // RE-INTEGRATION: Use local_id to verify the chunk is properly attributed
-                // before it touches the wire.
-                if chunk.owner_did != self.identity.did {
-                    error!(peer = %local_id, "Egress Gate: Attribution mismatch detected. Blocking publish.");
-                    continue;
-                }
-
-                if let Ok(data) = postcard::to_stdvec(&chunk) {
-                    let _ = self.network.publish(&topic, data).await;
-                }
+    if let Ok(chunks) = pipeline_result {
+        for chunk in chunks {
+            // RE-INTEGRATION: Use local_id to verify the chunk is properly attributed
+            // before it touches the wire.
+            if chunk.owner_did != self.identity.did {
+                error!(peer = %local_id, "Egress Gate: Attribution mismatch detected. Blocking publish.");
+                continue;
             }
-            self.seq_counter += 1;
+
+            if let Ok(data) = postcard::to_allocvec(&chunk) {
+                let _ = self.network.publish(&topic, data).await;
+            }
         }
+        self.seq_counter += 1;
     }
-    
+}
+
 use phalanx_proto::prelude::*;
 
 pub trait AudioWeaver {
@@ -564,12 +556,7 @@ pub trait VideoWeaver {
     fn compress_frame(data: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, ForensicError>;
 
     /// The "Birth" Verb: Packages frames into a VideoShard.
-    fn weave_video(
-        &self,
-        sequence: StorageSequence,
-        fps: u8,
-        volley: VolleyId,
-    ) -> VideoShard;
+    fn weave_video(&self, sequence: StorageSequence, fps: u8, volley: VolleyId) -> VideoShard;
 }
 #[cfg(test)]
 mod tests {
@@ -698,7 +685,7 @@ mod tests {
 
         shard.payload.encrypt(&key)?;
 
-        let wire_data = postcard::to_stdvec(&shard)?;
+        let wire_data = postcard::to_allocvec(&shard)?;
         let received_shard: VideoShard = postcard::from_bytes(&wire_data)?;
 
         let decrypted_payload = received_shard.payload.decrypt(&key)?;
@@ -712,15 +699,13 @@ mod tests {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
-use super::*;
+    use super::*;
     use phalanx_proto::prelude::*;
     use phalanx_proto::shards::{
-        Evidence, ShardId, StorageSequence, VolleyId, 
-        WitnessEnvelope, EnvelopeState, ShardBuffer, HandoverProof
+        EnvelopeState, Evidence, HandoverProof, ShardBuffer, ShardId, StorageSequence, VolleyId,
+        WitnessEnvelope,
     };
     use std::collections::BTreeMap;
 
@@ -771,7 +756,7 @@ use super::*;
             .expect("Failed to sign envelope");
 
         let serialized_envelope =
-            postcard::to_stdvec(&original_envelope).expect("Failed to serialize envelope");
+            postcard::to_allocvec(&original_envelope).expect("Failed to serialize envelope");
 
         // 3. Shard the serialized bytes into two halves
         let mid = serialized_envelope.len() / 2;
@@ -836,7 +821,6 @@ use super::*;
         );
     }
 
-
     #[test]
     fn test_shard_amalgam_gap_reporting() {
         // 1. Setup metadata
@@ -856,7 +840,7 @@ use super::*;
         )
         .unwrap();
 
-        let full_serialized_data = postcard::to_stdvec(&envelope).unwrap();
+        let full_serialized_data = postcard::to_allocvec(&envelope).unwrap();
 
         // Split data into 3 mock chunks
         let chunk_size = (full_serialized_data.len() / 3) + 1;
@@ -917,7 +901,7 @@ use super::*;
         )
         .unwrap();
 
-        let data = postcard::to_stdvec(&envelope).unwrap();
+        let data = postcard::to_allocvec(&envelope).unwrap();
 
         let mut parts = BTreeMap::new();
         parts.insert(0, data.clone());

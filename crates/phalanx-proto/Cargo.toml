@@ -24,6 +24,7 @@ bs58 = "0.5.1"
 tracing.workspace = true
 rand = { version = "0.9", features = ["std"]}
 blake3 = "1.8.3"
+base64 = "0.22.1"
 
 [dev-dependencies]
 # For property-based testing of our Nouns

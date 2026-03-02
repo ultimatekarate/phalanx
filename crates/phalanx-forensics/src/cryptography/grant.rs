@@ -1,14 +1,15 @@
 // crates/phalanx-forensics/src/cryptography/grant.rs
 
+use crate::cryptography::bridge::{ed_to_x25519_pk, ed_to_x25519_sk, resolve_did_pk};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
 use phalanx_proto::crypto::{CryptoError, SealedLocator};
 use phalanx_proto::prelude::*;
-use crate::cryptography::bridge::{ed_to_x25519_pk, ed_to_x25519_sk, resolve_did_pk};
-
-/// The Verb "To Authorize": Defines the forensic capability to secure and recover 
+use std::fmt;
+/// The Verb "To Authorize": Defines the forensic capability to secure and recover
 /// symmetric keys using asymmetric identities.
 pub trait GrantAuthority {
     /// Seals a symmetric VolleyKey into a locator targeted at a specific recipient.
@@ -36,7 +37,7 @@ impl GrantAuthority for SealedLocator {
         let recipient_x = ed_to_x25519_pk(&recipient_ed)?;
 
         // 2. Convert Sender Private Key to X25519
-        let sender_x = ed_to_x25519_sk(&sender.keypair.to_bytes());
+        let sender_x = ed_to_x25519_sk(&sender.keypair);
 
         // 3. Derive Shared Secret (ECDH)
         let shared_secret = sender_x.diffie_hellman(&recipient_x);
@@ -67,7 +68,7 @@ impl GrantAuthority for SealedLocator {
     }
 
     fn unlock(&self, me: &PhalanxIdentity) -> Result<[u8; 32], CryptoError> {
-        // 1. Enforce Recipient Sovereignty: Only the intended recipient can attempt decryption
+        // 1. Enforce Recipient Sovereignty
         if self.recipient != me.did {
             return Err(CryptoError::DecryptionFailure);
         }
@@ -77,7 +78,7 @@ impl GrantAuthority for SealedLocator {
         let sender_x = ed_to_x25519_pk(&sender_ed)?;
 
         // 3. Convert My Private Key to X25519
-        let my_x = ed_to_x25519_sk(&me.keypair.to_bytes());
+        let my_x = ed_to_x25519_sk(&me.keypair);
 
         // 4. Re-derive the identical Shared Secret (ECDH)
         let shared_secret = my_x.diffie_hellman(&sender_x);
@@ -103,14 +104,10 @@ impl GrantAuthority for SealedLocator {
     }
 }
 
-fn resolve_did_pk_mock(_did: &Did) -> Result<ed25519_dalek::VerifyingKey, CryptoError> {
-    // In live: extract pubkey from did:key string
-    Err(CryptoError::DidResolutionFailure)
-}
+// Ensure base64 is in your Cargo.toml for this formatting!
 
 impl fmt::Display for SealedLocator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Format: phx-grant://<ID>#<RECIPIENT>@<SENDER>:<NONCE>:<CIPHERTEXT>
         let b64_cipher = URL_SAFE_NO_PAD.encode(&self.sealed_key);
         let b64_nonce = URL_SAFE_NO_PAD.encode(&self.nonce);
 
@@ -119,5 +116,108 @@ impl fmt::Display for SealedLocator {
             "phx-grant://{}#{}@{}?n={}&p={}",
             self.target, self.recipient, self.sender, b64_nonce, b64_cipher
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phalanx_proto::crypto::CryptoError;
+    use phalanx_proto::prelude::*;
+
+    // Notice how we simplify this helper to just return the PhalanxIdentity!
+    fn generate_identity() -> PhalanxIdentity {
+        PhalanxIdentity::new_ephemeral()
+    }
+
+    // MOCK Bridge for tests (ensure your resolve_did_pk handles this correctly or mock it out)
+    // If your resolve_did_pk relies on external network calls, you might need a local mock inside the tests.
+
+    #[test]
+    fn test_grant_lifecycle_success() {
+        let sender = generate_identity();
+        let recipient = generate_identity();
+        let volley_key = [0x42u8; 32];
+        let volley_id = VolleyId::new("volley-test-001");
+
+        // Use the Seal Verb
+        let locator = SealedLocator::seal(
+            volley_id.clone(),
+            &volley_key,
+            &sender,
+            recipient.did.clone(),
+        )
+        .expect("Failed to create sealed locator");
+
+        assert_eq!(locator.sender, sender.did);
+        assert_eq!(locator.recipient, recipient.did);
+
+        // Use the Unlock Verb with the recipient identity
+        let decrypted_key = locator
+            .unlock(&recipient)
+            .expect("Recipient failed to decrypt grant");
+
+        assert_eq!(decrypted_key, volley_key);
+    }
+
+    #[test]
+    fn test_wrong_recipient_cannot_unlock() {
+        let sender = generate_identity();
+        let recipient = generate_identity();
+        let attacker = generate_identity();
+
+        let locator = SealedLocator::seal(
+            VolleyId::new("v2"),
+            &[0xAA; 32],
+            &sender,
+            recipient.did.clone(),
+        )
+        .unwrap();
+
+        // The attacker tries to unlock using their own identity
+        let result = locator.unlock(&attacker);
+        assert!(matches!(result, Err(CryptoError::DecryptionFailure)));
+    }
+
+    #[test]
+    fn test_tampered_payload_fails() {
+        let sender = generate_identity();
+        let recipient = generate_identity();
+
+        let mut locator = SealedLocator::seal(
+            VolleyId::new("v1"),
+            &[0xBB; 32],
+            &sender,
+            recipient.did.clone(),
+        )
+        .unwrap();
+
+        // Tamper with the ciphertext payload
+        if let Some(byte) = locator.sealed_key.get_mut(0) {
+            *byte ^= 0xFF;
+        }
+
+        assert!(matches!(
+            locator.unlock(&recipient),
+            Err(CryptoError::DecryptionFailure)
+        ));
+    }
+
+    #[test]
+    fn test_display_formatting() {
+        let sender = generate_identity();
+        let recipient = generate_identity();
+
+        let locator = SealedLocator::seal(
+            VolleyId::new("test-id"),
+            &[0u8; 32],
+            &sender,
+            recipient.did.clone(),
+        )
+        .unwrap();
+
+        let uri = locator.to_string();
+        assert!(uri.starts_with("phx-grant://"));
+        assert!(uri.contains("test-id"));
     }
 }

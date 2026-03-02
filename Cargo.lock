@@ -2854,15 +2854,21 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "async-trait",
+ "base64 0.22.1",
+ "blake3",
+ "chacha20poly1305",
+ "curve25519-dalek",
  "ed25519-dalek",
  "itertools 0.12.1",
  "phalanx-proto",
  "postcard",
  "rand 0.8.5",
  "serde",
+ "sha2",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -2888,6 +2894,7 @@ dependencies = [
 name = "phalanx-proto"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "blake3",
  "bs58",
  "chrono",

@@ -21,8 +21,7 @@ pub mod prelude {
 
     // Evidence Nouns
     pub use crate::evidence::{
-        DataPayload, EnvelopeState, FragmentedEnvelope, HandoverProof, ShardChunk, ShardGapReport,
-        SignatureHash,
+        DataPayload, EnvelopeState, FragmentedEnvelope, ShardChunk, ShardGapReport, SignatureHash,
     };
 
     // Contextual Nouns

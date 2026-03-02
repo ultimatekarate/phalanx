@@ -1,10 +1,8 @@
-use crate::evidence::Evidence;
 use crate::prelude::NetworkId;
 use crate::prelude::PhalanxIdentity;
-use crate::prelude::ShardError;
 use crate::prelude::SignatureHash;
-
-use crate::WitnessEnvelope;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -22,6 +20,15 @@ impl PhalanxTimestamp {
     pub fn from_millis(millis: u64) -> Self {
         Self(millis)
     }
+
+    pub fn now() -> Self {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("System clock went backwards")
+            .as_millis() as u64;
+
+        Self(millis)
+    }
 }
 
 pub trait TrustedClock: Send + Sync {
@@ -30,9 +37,9 @@ pub trait TrustedClock: Send + Sync {
 
 /// A stateful session that maintains the causality chain for a specific timeline.
 pub struct CausalitySession {
-    identity: Arc<PhalanxIdentity>,
-    peer_id: NetworkId,
-    last_hash: Option<SignatureHash>,
+    pub identity: Arc<PhalanxIdentity>,
+    pub peer_id: NetworkId,
+    pub last_hash: Option<SignatureHash>,
 }
 
 impl CausalitySession {
@@ -42,22 +49,6 @@ impl CausalitySession {
             peer_id,
             last_hash: None,
         }
-    }
-
-    /// The ONLY way to produce a sealed envelope.
-    /// Automatically updates the internal hash chain.
-    pub fn seal_evidence(&mut self, evidence: Evidence) -> Result<WitnessEnvelope, ShardError> {
-        let envelope = WitnessEnvelope::new(
-            evidence,
-            &self.identity,
-            self.peer_id.clone(),
-            self.last_hash,
-        )?;
-
-        // Update the state for the NEXT call
-        self.last_hash = Some(envelope.signature_hash());
-
-        Ok(envelope)
     }
 }
 

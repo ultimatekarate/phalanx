@@ -2,6 +2,7 @@ use crate::identity::Did;
 use crate::time::PhalanxTimestamp;
 use crate::time::TimeError;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 use thiserror::Error;
 
@@ -20,6 +21,29 @@ pub enum TrustLevel {
     Ignored,
     Verified,
     Ally,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustRecord {
+    pub reputation: i64,
+    pub is_banned: bool,
+    pub last_seen: PhalanxTimestamp,
+}
+
+impl Default for TrustRecord {
+    fn default() -> Self {
+        Self {
+            reputation: 100, // Default starting trust score
+            is_banned: false,
+            last_seen: PhalanxTimestamp::now(),
+        }
+    }
+}
+
+/// The Trust Registry: The Noun that holds the mesh's perception of peers.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TrustRegistry {
+    pub peers: HashMap<Did, TrustRecord>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

@@ -1,9 +1,16 @@
-
-use phalanx_proto::HandoverProof;
-use ed25519_dalek::{Verifier, Signature, VerifyingKey}; // Crypto stays here!
+use chacha20poly1305::XChaCha20Poly1305;
+use chacha20poly1305::XNonce;
+use ed25519_dalek::Signer;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey}; // Crypto stays here!
+use phalanx_proto::crypto::CryptoError;
+use phalanx_proto::crypto::SymmetricKey;
+use phalanx_proto::evidence::Evidence;
+use phalanx_proto::evidence::WitnessEnvelope;
+use phalanx_proto::identity::PhalanxIdentity;
+use phalanx_proto::storage::HandoverProof;
 
 pub trait HandoverJudge {
-    fn verify_signatures(&self) -> Result<(), String>;
+    fn verify_signatures(&self) -> Result<SignatureHash, ShardError>;
 }
 
 impl HandoverJudge for HandoverProof {
@@ -16,7 +23,7 @@ impl HandoverJudge for HandoverProof {
             &self.anchor_hash,
         );
 
-        let manifest_bytes = postcard::to_stdvec(&transfer_manifest)
+        let manifest_bytes = postcard::to_allocvec(&transfer_manifest)
             .map_err(|e| ShardError::SerializationError(e.to_string()))?;
 
         let mut hasher = blake3::Hasher::new();
@@ -24,27 +31,39 @@ impl HandoverJudge for HandoverProof {
 
         Ok(SignatureHash(hasher.finalize().into()))
     }
-
 }
 
 pub trait Decryptor {
-    fn reveal(&self, key: &SymmetricKey) -> Result<Vec<u8>, ForensicError>;
+    fn reveal(&self, key: &SymmetricKey) -> Result<Vec<u8>, CryptoError>;
 }
 
 impl Decryptor for DataPayload {
-    fn reveal(&self, key: &SymmetricKey) -> Result<Vec<u8>, ForensicError> {
+    fn reveal(&self, key: &SymmetricKey) -> Result<Vec<u8>, CryptoError> {
         match self {
-            DataPayload::Encrypted { data, .. } => {
-                // Actual decryption math lives here
-                Ok(decrypted_bytes)
-            },
-            DataPayload::Clear(data) => Ok(data.clone()),
-            _ => Err(ForensicError::Validation("Payload not decryptable".into())),
-        }
-}
+            DataPayload::Encrypted { nonce, ciphertext } => {
+                // 1. Initialize the cryptographic engine using the provided 32-byte key
+                let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
 
-use phalanx_proto::identity::PhalanxIdentity;
-use ed25519_dalek::{Signature, Signer, VerifyingKey};
+                // 2. Load the 24-byte extended nonce
+                let x_nonce = XNonce::from_slice(nonce);
+
+                // 3. Perform Authenticated Decryption
+                // If the ciphertext was tampered with, this will safely fail.
+                let decrypted_bytes = cipher
+                    .decrypt(x_nonce, ciphertext.as_ref())
+                    .map_err(|_| CryptoError::DecryptionFailure)?;
+
+                Ok(decrypted_bytes)
+            }
+
+            // If the payload is already in the clear, just clone and return it
+            DataPayload::Clear(data) => Ok(data.clone()),
+
+            // Gaps and Compressed data cannot be decrypted directly via this trait
+            _ => Err(CryptoError::DecryptionFailure),
+        }
+    }
+}
 
 pub trait JudgeExt {
     fn verify(pubkey: &[u8], msg: &[u8], sig: &[u8]) -> bool;
@@ -82,7 +101,11 @@ impl JudgeExt for PhalanxIdentity {
 use phalanx_proto::time::{PhalanxTimestamp, TimeError};
 
 pub trait TimeJudge {
-    fn verify_freshness(&self, current_now: PhalanxTimestamp, tolerance: u64) -> Result<(), TimeError>;
+    fn verify_freshness(
+        &self,
+        current_now: PhalanxTimestamp,
+        tolerance: u64,
+    ) -> Result<(), TimeError>;
 }
 
 impl TimeJudge for PhalanxTimestamp {
@@ -148,7 +171,9 @@ impl IntegrityGate for WitnessEnvelope {
     ) -> Result<Self, ShardError> {
         if !self.verify() {
             error!(event = "integrity_failure", node = %node_id, peer = %self.did, "SIGNATURE_INVALID");
-            return Err(ShardError::SigningError("Signature verification failed".into()));
+            return Err(ShardError::SigningError(
+                "Signature verification failed".into(),
+            ));
         }
 
         match self.evidence.timestamp().verify_freshness(now, tolerance) {
@@ -163,7 +188,9 @@ impl IntegrityGate for WitnessEnvelope {
 
 /// Gate 4: The Privacy Gate (Egress)
 pub trait PrivacyGate {
-    fn safeguard(self, key: &SymmetricKey) -> Result<Self, ShardError> where Self: Sized;
+    fn safeguard(self, key: &SymmetricKey) -> Result<Self, ShardError>
+    where
+        Self: Sized;
 }
 
 impl PrivacyGate for Evidence {
@@ -183,12 +210,23 @@ impl PrivacyGate for Evidence {
 
 /// Gate 5: The Capacity Gate (Ingress)
 pub trait CapacityGate {
-    fn check_capacity(self, peer: &NetworkId, pending: usize, limit: usize) -> Result<Self, ShardError>
-    where Self: Sized;
+    fn check_capacity(
+        self,
+        peer: &NetworkId,
+        pending: usize,
+        limit: usize,
+    ) -> Result<Self, ShardError>
+    where
+        Self: Sized;
 }
 
 impl CapacityGate for WitnessEnvelope {
-    fn check_capacity(self, peer: &NetworkId, pending: usize, limit: usize) -> Result<Self, ShardError> {
+    fn check_capacity(
+        self,
+        peer: &NetworkId,
+        pending: usize,
+        limit: usize,
+    ) -> Result<Self, ShardError> {
         if pending > limit {
             warn!(event = "capacity_shedding", peer = %peer, "Node saturated");
             return Err(ShardError::CapacityExceeded(pending as u64));
@@ -210,5 +248,3 @@ impl<T, E: std::fmt::Display> ForensicGate<T, E> for Result<T, E> {
         self
     }
 }
-
-// crates/phalanx-forensics/src/judge.rs
