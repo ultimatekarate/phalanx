@@ -15,6 +15,8 @@ pub enum CryptoError {
     InvalidKeyLength,
     #[error("DID resolution failure")]
     DidResolutionFailure,
+    #[error("Encoding error: {0}")]
+    EncodingError(String),
 }
 
 #[derive(Clone, Serialize, Deserialize)]

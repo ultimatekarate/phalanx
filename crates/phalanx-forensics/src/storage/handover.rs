@@ -77,19 +77,25 @@ impl HandoverAuthority for HandoverProof {
 
         // 4. Resolve Public Keys from DIDs
         // Assuming your bridge provides a way to extract the Ed25519 public key from a did:key string
-        let old_pk = crate::cryptography::bridge::resolve_did_pk(&self.old_did)
-            .map_err(|_| ShardError::InvalidProof("Could not resolve old_did".to_string()))?;
-        let new_pk = crate::cryptography::bridge::resolve_did_pk(&self.new_did)
-            .map_err(|_| ShardError::InvalidProof("Could not resolve new_did".to_string()))?;
+        let old_pk = crate::cryptography::bridge::resolve_did_pk(&self.old_did).map_err(|_| {
+            ShardError::InvalidConfiguration("Could not resolve old_did".to_string())
+        })?;
+        let new_pk = crate::cryptography::bridge::resolve_did_pk(&self.new_did).map_err(|_| {
+            ShardError::InvalidConfiguration("Could not resolve new_did".to_string())
+        })?;
 
         // 5. Verify Signatures
         old_pk
             .verify(&hash_bytes, &self.old_signature)
-            .map_err(|_| ShardError::InvalidProof("Old identity signature mismatch".to_string()))?;
+            .map_err(|_| {
+                ShardError::InvalidConfiguration("Old identity signature mismatch".to_string())
+            })?;
 
         new_pk
             .verify(&hash_bytes, &self.new_signature)
-            .map_err(|_| ShardError::InvalidProof("New identity signature mismatch".to_string()))?;
+            .map_err(|_| {
+                ShardError::InvalidConfiguration("New identity signature mismatch".to_string())
+            })?;
 
         Ok(())
     }

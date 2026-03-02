@@ -1,3 +1,9 @@
+use phalanx_proto::prelude::*;
+use phalanx_proto::types::PhalanxPhysics;
+use phalanx_proto::types::PowerState;
+use phalanx_proto::types::UnitInterval;
+use phalanx_proto::vitals::HeartbeatInterval;
+
 pub struct TrafficGovernor {
     pub power_state: PowerState,
 }
@@ -12,11 +18,7 @@ impl TrafficGovernor {
 
     /// Primary security gate: Determines if a chunk should be processed.
     #[must_use]
-    pub fn should_accept(
-        &self,
-        peer_id: &crate::primitives::identity::NetworkId,
-        local_peer_id: &crate::primitives::identity::NetworkId,
-    ) -> bool {
+    pub fn should_accept(&self, peer_id: &NetworkId, local_peer_id: &NetworkId) -> bool {
         match self.power_state {
             PowerState::Normal => true,
             // Pre-allocation check: only allow loopback traffic when in survival mode
@@ -38,9 +40,6 @@ impl Default for TrafficGovernor {
 
 // crates/phalanx-forensics/src/policy.rs
 
-use phalanx_proto::prelude::*;
-use phalanx_proto::vitals::HeartbeatInterval;
-
 pub struct HeartbeatGovernor;
 
 impl HeartbeatGovernor {
@@ -55,7 +54,7 @@ impl HeartbeatGovernor {
         let base_latency_ms = (physics.tau_rtt / 2) as f32;
 
         // Apply Load Scaling: 1.0 + load factor (range 1.0 to 2.0)
-        let mut dynamic_ms = base_latency_ms * (1.0 + load.0 as f32);
+        let mut dynamic_ms = base_latency_ms * (1.0 + load.as_f32());
 
         // Apply Power State Modifier
         if state == PowerState::Leaf {

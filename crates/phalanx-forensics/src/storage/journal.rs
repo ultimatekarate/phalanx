@@ -20,4 +20,14 @@ pub trait TransientJournal: Send + Sync + 'static {
     /// The Verb "To Prune": Drops Volleys that have exceeded the retention window,
     /// freeing up space for active forensic streams.
     async fn prune_stale(&self, older_than: Duration) -> Result<usize, ShardError>;
+
+    // --- WAL (Write-Ahead Log) Verbs ---
+    async fn record_chunk(&mut self, chunk: &ShardChunk) -> Result<(), ShardError>;
+    async fn sync(&mut self) -> Result<(), ShardError>;
+    async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError>;
+    async fn clear(&mut self) -> Result<(), ShardError>;
+
+    // --- Egress Salvage Verbs ---
+    async fn record_pending_egress(&mut self, pending: &[PendingEgress]) -> Result<(), ShardError>;
+    async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError>;
 }

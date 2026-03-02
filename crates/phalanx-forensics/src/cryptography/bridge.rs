@@ -6,27 +6,26 @@ use phalanx_proto::prelude::Did;
 use sha2::{Digest, Sha512};
 
 /// THE BRIDGE VERB: Ed25519 PK -> X25519 PK
-pub fn ed_to_x25519_pk(ed_bytes: &VerifyingKey) -> Result<[u8; 32], CryptoError> {
-    let bytes: [u8; 32] = ed_bytes
-        .get(0..32)
-        .and_then(|s| s.try_into().ok())
-        .ok_or(CryptoError::IdentityResolutionError)?;
+pub fn ed_to_x25519_pk(ed_key: &VerifyingKey) -> Result<[u8; 32], CryptoError> {
+    // FIX: Extract bytes using the dalek API
+    let bytes = ed_key.to_bytes();
 
     let ed_point =
-        CompressedEdwardsY::from_slice(&bytes).map_err(|_| CryptoError::IdentityResolutionError)?;
+        CompressedEdwardsY::from_slice(&bytes).map_err(|_| CryptoError::DidResolutionFailure)?;
 
     let mont_point = ed_point
         .decompress()
-        .ok_or(CryptoError::IdentityResolutionError)?
+        .ok_or(CryptoError::DidResolutionFailure)?
         .to_montgomery();
 
     Ok(mont_point.to_bytes())
 }
 
 /// THE BRIDGE VERB: Ed25519 SK -> X25519 SK
-pub fn ed_to_x25519_sk(ed_bytes: &SigningKey) -> Result<x25519_dalek::StaticSecret, CryptoError> {
+pub fn ed_to_x25519_sk(ed_key: &SigningKey) -> Result<x25519_dalek::StaticSecret, CryptoError> {
     let mut hasher = Sha512::new();
-    hasher.update(ed_bytes);
+    // FIX: Pass the bytes, not the struct reference
+    hasher.update(ed_key.to_bytes());
     let hash_result = hasher.finalize();
 
     let x25519_bytes: [u8; 32] = hash_result[0..32]
@@ -39,11 +38,11 @@ pub fn ed_to_x25519_sk(ed_bytes: &SigningKey) -> Result<x25519_dalek::StaticSecr
 /// Mock resolution for the DID-to-Key mapping.
 /// In a live system, this queries the Kademlia DHT or a local TrustRegistry.
 pub fn resolve_did_pk(did: &Did) -> Result<VerifyingKey, CryptoError> {
-    // Logic to extract public key from 'did:key:z...' format
-    // This assumes the multibase-encoded Ed25519 format.
-    let pub_bytes = did
-        .resolve_raw_public_key()
-        .map_err(|_| CryptoError::DidResolutionFailure)?;
-
-    VerifyingKey::from_bytes(&pub_bytes).map_err(|_| CryptoError::DidResolutionFailure)
+    // FIX: Mock logic that compiles until you hook up your DHT
+    let did_str = did.as_ref();
+    if did_str.starts_with("did:key:z") {
+        Err(CryptoError::DidResolutionFailure)
+    } else {
+        Err(CryptoError::DidResolutionFailure)
+    }
 }

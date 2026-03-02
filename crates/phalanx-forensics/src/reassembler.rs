@@ -1,17 +1,18 @@
 use crate::crucible::{Crucible, Mold};
+use crate::prelude::TransientJournal;
 use async_trait::async_trait;
 use flate2::write::GzEncoder; // Compression lives in the Lab, not Proto
 use flate2::Compression;
+use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::{Did, ShardId};
 use phalanx_proto::prelude::DataPayload;
 use phalanx_proto::prelude::*;
+use phalanx_proto::types::PowerState;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::prelude::*;
 use std::io::SeekFrom;
-use tracing::{error, info, instrument};
-
-use phalanx_proto::types::PowerState;
+use tracing::{error, info};
 
 #[async_trait]
 impl TransientJournal for FileJournal {
@@ -217,6 +218,7 @@ impl Mold for ShardMold {
             total_chunks: item.total_chunks,
             received_count: 0,
             parts: BTreeMap::new(),
+            estimated_chunk_size: 0,
             owner_did: item.owner_did.clone(),
         }
     }
@@ -238,6 +240,23 @@ impl Mold for ShardMold {
             full_payload.extend(acc.parts.get(&i)?);
         }
         postcard::from_bytes(&full_payload).ok()
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ShardBuffer {
+    pub total_chunks: u32,
+    pub received_count: u32,
+    pub parts: BTreeMap<u32, Vec<u8>>,
+    pub estimated_chunk_size: usize,
+    pub owner_did: Did,
+}
+
+impl ShardBuffer {
+    pub fn missing_indices(&self) -> Vec<u32> {
+        (0..self.total_chunks)
+            .filter(|i| !self.parts.contains_key(i))
+            .collect()
     }
 }
 
@@ -328,8 +347,6 @@ impl Mold for ShardAmalgam {
     }
 }
 
-pub struct Weaver;
-
 pub trait ShardFactory {
     fn compress_frame(&self) -> Result<Vec<u8>, ForensicError>;
 
@@ -362,44 +379,41 @@ impl ShardFactory for Vec<u8> {
 }
 
 pub trait Chunkifier {
-    fn chunkify(&self, shard_id: ShardId, owner: Did, chunk_size: usize) -> Vec<ShardChunk>;
+    fn chunkify(
+        &self,
+        shard_id: ShardId,
+        owner_did: Did,
+        chunk_size: usize,
+        chunk_type: ChunkType,
+    ) -> Result<Vec<ShardChunk>, ShardError>;
 }
 
 impl Chunkifier for Vec<u8> {
     fn chunkify(
+        &self,
         shard_id: ShardId,
-        data: Vec<u8>,
-        chunk_size: usize,
         owner_did: Did,
+        chunk_size: usize,
         chunk_type: ChunkType,
     ) -> Result<Vec<ShardChunk>, ShardError> {
-        if data.is_empty() || chunk_size == 0 {
+        if self.is_empty() || chunk_size == 0 {
             return Ok(Vec::new());
         }
 
-        let total_len = data.len() as u64;
-        let size_u64 = chunk_size as u64;
+        let total_chunks = (self.len() as f32 / chunk_size as f32).ceil() as u32;
 
-        // Checked math to prevent panic on zero (already handled) but good for robustness
-        let count_u64 = total_len.div_ceil(size_u64);
-
-        let total_chunks =
-            u32::try_from(count_u64).map_err(|_| ShardError::CapacityExceeded(count_u64))?;
-
-        let chunks = data
+        Ok(self
             .chunks(chunk_size)
             .enumerate()
-            .map(|(index, chunk_slice)| ShardChunk {
+            .map(|(i, data)| ShardChunk {
                 shard_id,
-                chunk_index: index as u32,
+                chunk_index: i as u32,
                 total_chunks,
+                data: data.to_vec(),
                 owner_did: owner_did.clone(),
-                data: chunk_slice.to_vec(),
                 chunk_type,
             })
-            .collect();
-
-        Ok(chunks)
+            .collect())
     }
 }
 

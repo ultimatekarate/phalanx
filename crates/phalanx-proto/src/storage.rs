@@ -1,6 +1,8 @@
 // crates/phalanx-proto/src/storage.rs
 use crate::evidence::{SignatureHash, StorageSequence};
 use crate::identity::{Did, VolleyId};
+use crate::prelude::PhalanxTimestamp;
+use crate::prelude::ShardError;
 use crate::time::TimeError;
 use crate::types::ByteCapacity;
 use ed25519_dalek::Signature;
@@ -51,4 +53,18 @@ pub struct HandoverProof {
     pub anchor_hash: SignatureHash,
     pub old_signature: Signature,
     pub new_signature: Signature,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingEgress {
+    pub channel_id: String,
+    pub response: VolleyResponse, // Ensure VolleyResponse is defined/imported
+    pub attempt_count: u32,
+    pub next_attempt: PhalanxTimestamp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum VolleyResponse {
+    Success(VolleyId),
+    Failure(ShardError),
 }

@@ -28,10 +28,11 @@ pub mod prelude {
     // Contextual Nouns
     pub use crate::time::{PhalanxTimestamp, TrustedClock};
     pub use crate::topic::MeshTopic;
+    pub use crate::types::PhalanxPhysics;
 
     // Error Nouns
     pub use crate::error::{ShardError, TimeError};
-    pub use crate::storage::GuardianError;
+    pub use crate::storage::{GuardianError, PendingEgress, VolleyResponse};
 
     // Trust & Networking Nouns
     pub use crate::kademlia::{DhtPayload, PayloadKind};

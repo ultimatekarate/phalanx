@@ -1,9 +1,11 @@
 // crates/phalanx-forensics/src/kademlia.rs
-use phalanx_proto::crypto::CryptoError;
+
 use phalanx_proto::identity::NetworkId;
 use phalanx_proto::kademlia::*;
-use phalanx_proto::kademlia::*;
+use phalanx_proto::prelude::ShardError;
+use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::time::Duration;
 
 /// THE CHRONOS VERBS: Time math for DHT entries
 pub fn is_expired(unix_timestamp: Option<u64>) -> bool {
@@ -45,60 +47,76 @@ fn system_time_now_unix() -> u64 {
         .as_secs()
 }
 
-impl DhtPayload {
-    pub fn new(data: Vec<u8>, variant: PayloadKind, expires: Option<Instant>) -> Self {
+pub trait DhtPayloadAuthority {
+    fn new(data: Vec<u8>, variant: PayloadKind, expires: Option<Instant>) -> Self;
+    fn encode(&self) -> Result<Vec<u8>, ShardError>;
+    fn decode(bytes: &[u8]) -> Result<Self, ShardError>
+    where
+        Self: Sized;
+    fn validate(&self) -> Result<(), ShardError>;
+    fn verify_ownership(&self, expected_owner_prefix: &str) -> bool;
+}
+
+impl DhtPayloadAuthority for DhtPayload {
+    fn new(data: Vec<u8>, variant: PayloadKind, expires: Option<Instant>) -> Self {
         Self {
-            version: Self::CURRENT_VERSION,
+            version: 1, // Accessing static consts or hardcoding for the Noun
             variant,
             expires_at_unix: instant_to_unix(expires),
             data,
         }
     }
 
-    pub fn encode(&self) -> Result<Vec<u8>> {
+    fn encode(&self) -> Result<Vec<u8>, ShardError> {
         self.validate()?;
-        postcard::to_stdvec(self).map_err(|_| Error::ValueTooLarge)
+        postcard::to_allocvec(self).map_err(|e| ShardError::SerializationError(e.to_string()))
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self> {
-        let decoded: Self = postcard::from_bytes(bytes).map_err(|_| Error::ValueTooLarge)?;
+    fn decode(bytes: &[u8]) -> Result<Self, ShardError> {
+        let decoded: Self = postcard::from_bytes(bytes)
+            .map_err(|e| ShardError::SerializationError(e.to_string()))?;
         decoded.validate()?;
         Ok(decoded)
     }
 
-    pub fn validate(&self) -> Result<()> {
+    fn validate(&self) -> Result<(), ShardError> {
         if self.data.is_empty() {
-            return Err(Error::ValueTooLarge);
+            return Err(ShardError::InvalidConfiguration("Empty DHT payload".into()));
         }
-
-        if self.data.len() > Self::MAX_PAYLOAD_SIZE {
-            return Err(Error::ValueTooLarge);
+        // Use the constant from the Dictionary
+        if self.data.len() > 1024 {
+            // Replace with DhtPayload::MAX_SIZE if defined in proto
+            return Err(ShardError::SerializationError("Payload too large".into()));
         }
-
         Ok(())
     }
 
-    pub fn verify_ownership(&self, expected_owner_prefix: &str) -> bool {
+    fn verify_ownership(&self, expected_owner_prefix: &str) -> bool {
         if self.data.is_empty() {
             return false;
         }
 
         let payload_str = String::from_utf8_lossy(&self.data);
         if !payload_str.contains(expected_owner_prefix) {
-            tracing::warn!(
-                expected = %expected_owner_prefix,
-                "DHT: Rejected record injection due to ownership prefix mismatch"
-            );
+            tracing::warn!(expected = %expected_owner_prefix, "DHT: Ownership mismatch");
             return false;
         }
-
         true
     }
 }
 
-impl DhtProviderSet {
+pub trait ProviderAuthority {
+    fn try_insert_weighted(
+        &mut self,
+        new_peer: NetworkId,
+        expiration: u64,
+        reputation: f32,
+    ) -> bool;
+}
+
+impl ProviderAuthority for DhtProviderSet {
     /// THE WEIGHTED VERB: Reputation-based eviction logic
-    pub fn try_insert_weighted(
+    fn try_insert_weighted(
         &mut self,
         new_peer: NetworkId,
         expiration: u64,

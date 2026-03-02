@@ -22,7 +22,7 @@ pub use judge::{Decryptor, HandoverJudge};
 pub use policy::TrafficGovernor;
 pub use reassembler::{
     AudioWeaver, Chunkifier, Reassembler, ReassemblyBuffer, ShardAmalgam, ShardFactory, ShardMold,
-    VideoWeaver, Weaver,
+    VideoWeaver,
 };
 pub use trust::{PeerEvaluator, ReputationGate};
 

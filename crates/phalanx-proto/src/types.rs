@@ -4,6 +4,24 @@ use std::fmt;
 use std::ops::{AddAssign, SubAssign};
 use std::time::Duration;
 
+/// The Noun: PhalanxPhysics represents the physical constraints
+/// observed by the node in the current mesh environment.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct PhalanxPhysics {
+    /// The smoothed Round Trip Time (RTT) constant used for temporal governance.
+    pub tau_rtt: u64,
+    /// Environmental signal-to-noise ratio or battery coefficient (0.0 to 1.0).
+    pub energy_efficiency: UnitInterval,
+}
+
+impl Default for PhalanxPhysics {
+    fn default() -> Self {
+        Self {
+            tau_rtt: 200, // Default 200ms RTT
+            energy_efficiency: UnitInterval(1.0),
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct UnitInterval(f32);
 
