@@ -1,5 +1,7 @@
 use libp2p::identity::Keypair;
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity};
+
+use phalanx_proto::prelude::PhalanxIdentity;
+use phalanx_proto::prelude::*;
 
 pub trait Libp2pExt {
     fn to_libp2p_keypair(&self) -> Keypair;
@@ -15,7 +17,7 @@ impl Libp2pExt for PhalanxIdentity {
 
     fn to_network_id(&self) -> NetworkId {
         let libp2p_key = self.to_libp2p_keypair();
-        NetworkId(libp2p_key.public().to_peer_id())
+        NetworkId(libp2p_key.public().to_peer_id().to_string())
     }
 }
 

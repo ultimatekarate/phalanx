@@ -134,6 +134,13 @@ impl NetworkId {
     pub fn to_base58(&self) -> &str {
         &self.0
     }
+
+    /// Generates a random NetworkId for testing.
+    pub fn random() -> Self {
+        use rand::Rng;
+        let bytes: [u8; 32] = rand::rng().random();
+        Self(bs58::encode(bytes).into_string())
+    }
 }
 
 impl From<String> for NetworkId {

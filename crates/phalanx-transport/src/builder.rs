@@ -6,12 +6,11 @@ use libp2p::{
 use std::error::Error;
 use std::time::Duration;
 
-use crate::behaviour::PhalanxBehaviour;
+use crate::behaviour::{PhalanxBehaviour, PhalanxKadStore};
 
 use phalanx_proto::{
     constants::RETRIEVAL_PROTOCOL_ID,
-    types::{PhalanxPhysics, PowerState, UnitInterval, VitalityRate},
-    // Note: VitalityRate and UnitInterval must be imported from the appropriate proto/domain module
+    types::{PhalanxPhysics, VitalityRate},
 };
 
 /// Constructs the foundational transport stack for the node.
@@ -56,23 +55,19 @@ pub fn build_base_transport(
 }
 
 /// Instantiates the composite network behaviour logic.
-pub fn build_behaviour<S>(
+pub fn build_behaviour(
     local_key: &Keypair,
     max_chunk_size_bytes: usize,
     protocol_version: String,
     physics: &PhalanxPhysics,
     relay_client: relay::client::Behaviour,
-    mut kademlia: kad::Behaviour<S>,
-) -> Result<PhalanxBehaviour, Box<dyn Error>>
-where
-    S: kad::store::RecordStore + Send + Sync + 'static,
-{
+    mut kademlia: kad::Behaviour<PhalanxKadStore>,
+) -> Result<PhalanxBehaviour, Box<dyn Error>> {
     let local_peer_id = local_key.public().to_peer_id();
 
     // Calculate gossipsub heartbeat based on physics simulation state
     // Note: Requires VitalityRate and UnitInterval definitions to compile properly
-    let gossip_heartbeat =
-        VitalityRate::calculate(physics, PowerState::Normal, UnitInterval::new(0.0)).as_duration();
+    let gossip_heartbeat = VitalityRate::new(physics.tau_rtt).as_duration();
 
     let gossipsub = gossipsub::Behaviour::new(
         gossipsub::MessageAuthenticity::Signed(local_key.clone()),

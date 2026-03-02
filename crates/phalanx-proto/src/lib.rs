@@ -32,7 +32,8 @@ pub mod prelude {
 
     // Error Nouns
     pub use crate::error::{ShardError, TimeError};
-    pub use crate::storage::{GuardianError, PendingEgress, VolleyResponse};
+    pub use crate::retrieval::VolleyResponse;
+    pub use crate::storage::{GuardianError, PendingEgress};
 
     // Trust & Networking Nouns
     pub use crate::kademlia::{DhtPayload, PayloadKind};
@@ -41,28 +42,7 @@ pub mod prelude {
     pub use crate::vitals::ControlMessage;
 }
 
-use crate::evidence::WitnessEnvelope;
-use crate::identity::PhalanxLocator;
-use crate::prelude::Did;
-use crate::prelude::VolleyId;
-
-use serde::{Deserialize, Serialize};
-
-// Nouns
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VolleyRequest {
-    pub target_did: Did,
-    pub volley_id: VolleyId,
-    pub locator: PhalanxLocator,
-    pub signature: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum VolleyResponse {
-    Success(Vec<WitnessEnvelope>),
-    Throttled,
-    NotFound,
-    Unauthorized,
-}
+// Re-export the canonical Retrieval Nouns from their home modules.
+pub use retrieval::{VolleyRequest, VolleyResponse};
 
 pub const MAX_PAYLOAD_SIZE: usize = 10_000_000;

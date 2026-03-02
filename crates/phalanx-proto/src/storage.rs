@@ -58,13 +58,13 @@ pub struct HandoverProof {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingEgress {
     pub channel_id: String,
-    pub response: VolleyResponse, // Ensure VolleyResponse is defined/imported
+    pub response: StorageAck,
     pub attempt_count: u32,
     pub next_attempt: PhalanxTimestamp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum VolleyResponse {
+pub enum StorageAck {
     Success(VolleyId),
     Failure(ShardError),
 }

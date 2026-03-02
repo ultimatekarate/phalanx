@@ -1,108 +1,104 @@
-use crate::adapters::TransportAdapter;
-use crate::events::PhalanxEvent;
+use crate::TransportAdapter;
 use async_trait::async_trait;
-use libp2p::futures::StreamExt;
-use libp2p::request_response::ResponseChannel;
-use libp2p::swarm::{Swarm, SwarmEvent};
+use libp2p::swarm::Swarm;
+use std::sync::{Arc, Mutex}; // Must use std::sync::Mutex for synchronous extraction
+use tokio::sync::mpsc;
+
+// Assume these are correctly mapped in your actual prelude/dictionary
+use crate::TransportError;
+use phalanx_proto::identity::NetworkId;
 use phalanx_proto::network::NetworkEvent;
-use phalanx_proto::prelude::*;
 use phalanx_proto::topic::MeshTopic;
-use std::collections::HashMap;
+
+pub enum TransportCommand {
+    Publish(MeshTopic, Vec<u8>),
+    SendDirect(NetworkId, Vec<u8>),
+    Ban(NetworkId),
+}
+
+#[derive(Clone)]
 pub struct Libp2pAdapter {
-    swarm: Swarm<crate::behaviour::PhalanxBehaviour>,
-    // Maps domain channel IDs back to physical libp2p response tokens
-    pending_responses: HashMap<String, ResponseChannel<VolleyResponse>>,
-    request_counter: u64,
+    command_tx: mpsc::Sender<TransportCommand>,
+    // Arc<Mutex<>> ensures the Receiver can be extracted safely across threads
+    event_rx_factory: Arc<Mutex<Option<mpsc::Receiver<NetworkEvent>>>>,
 }
 
 impl Libp2pAdapter {
-    pub fn new(swarm: Swarm<crate::behaviour::PhalanxBehaviour>) -> Self {
+    /// Initializes the Actor Pattern.
+    /// The Swarm is moved into a detached Tokio task to preserve thread safety (Sync).
+    pub fn new(mut swarm: Swarm<crate::behaviour::PhalanxBehaviour>) -> Self {
+        let (command_tx, mut command_rx) = mpsc::channel::<TransportCommand>(128);
+        let (event_tx, event_rx) = mpsc::channel::<NetworkEvent>(1024);
+
+        // Detach the non-Sync Swarm into a localized actor loop.
+        // NOTE: In the full Phalanx architecture, this loop logic may be
+        // delegated to `MeshSentinel` in the `phalanx-node` crate.
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    // 1. Process outbound commands from the Handle
+                    command_option = command_rx.recv() => {
+                        match command_option {
+                            Some(TransportCommand::Publish(topic, data)) => {
+                                // Implement swarm publish logic here
+                            }
+                            Some(TransportCommand::SendDirect(target, data)) => {
+                                // Implement swarm direct send logic here
+                            }
+                            Some(TransportCommand::Ban(peer)) => {
+                                let _ = swarm.disconnect_peer_id(peer.into());
+                            }
+                            None => break, // Channel dropped, terminate task
+                        }
+                    },
+
+                    // 2. Process inbound network events from the Swarm
+                    swarm_event = libp2p::futures::StreamExt::next(&mut swarm) => {
+                        if let Some(event) = swarm_event {
+                            // Translate libp2p::swarm::SwarmEvent to phalanx_proto::network::NetworkEvent
+                            // let network_event = translate_event(event);
+                            // let _ = event_tx.send(network_event).await;
+                        }
+                    }
+                }
+            }
+        });
+
         Self {
-            swarm,
-            pending_responses: HashMap::new(),
-            request_counter: 0,
+            command_tx,
+            event_rx_factory: Arc::new(Mutex::new(Some(event_rx))),
         }
     }
 }
 
 #[async_trait]
 impl TransportAdapter for Libp2pAdapter {
-    async fn publish(&mut self, topic: &MeshTopic, data: Vec<u8>) -> Result<(), String> {
-        let topic_hash = libp2p::gossipsub::IdentTopic::new(topic.as_str());
-        self.swarm
-            .behaviour_mut()
-            .gossipsub
-            .publish(topic_hash, data)
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+    async fn publish(&self, topic: MeshTopic, data: Vec<u8>) -> Result<(), TransportError> {
+        self.command_tx
+            .send(TransportCommand::Publish(topic, data))
+            .await
+            .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
     }
 
-    async fn next_event(&mut self) -> Option<NetworkEvent> {
-        loop {
-            match self.swarm.select_next_some().await {
-                SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(
-                    libp2p::gossipsub::Event::Message {
-                        propagation_source,
-                        message,
-                        ..
-                    },
-                )) => {
-                    return Some(NetworkEvent::DataReceived {
-                        origin: NetworkId(propagation_source),
-                        topic: MeshTopic::new(message.topic.as_str()),
-                        data: message.data,
-                    });
-                }
-                SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                    return Some(NetworkEvent::PeerDiscovered(NetworkId(peer_id)));
-                }
-                SwarmEvent::Behaviour(PhalanxEvent::Retrieval(
-                    libp2p::request_response::Event::Message {
-                        message:
-                            libp2p::request_response::Message::Request {
-                                request, channel, ..
-                            },
-                        ..
-                    },
-                )) => {
-                    self.request_counter += 1;
-                    let channel_id = format!("req-{}", self.request_counter);
-
-                    // Store the one-shot channel token
-                    self.pending_responses.insert(channel_id.clone(), channel);
-                    let origin = NetworkId::random(); // TODO: This is temporary.
-                    return Some(NetworkEvent::VolleyRequested {
-                        origin,
-                        request,
-                        channel_id,
-                    });
-                }
-                _ => continue,
-            }
-        }
+    async fn send_direct(&self, target: &NetworkId, data: Vec<u8>) -> Result<(), TransportError> {
+        self.command_tx
+            .send(TransportCommand::SendDirect(target.clone(), data))
+            .await
+            .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
     }
 
-    async fn ban_peer(&mut self, peer: &NetworkId) {
-        let _ = self.swarm.disconnect_peer_id(peer.0);
+    fn ingress_stream(&self) -> mpsc::Receiver<NetworkEvent> {
+        self.event_rx_factory
+            .lock()
+            .expect("Mutex poisoned in Libp2pAdapter")
+            .take()
+            .expect("Ingress stream has already been consumed by the Sentinel")
     }
 
-    async fn send_response(
-        &mut self,
-        channel_id: &str,
-        response: VolleyResponse,
-    ) -> Result<(), String> {
-        // Retrieve and consume the one-shot libp2p channel
-        let channel = self
-            .pending_responses
-            .remove(channel_id)
-            .ok_or_else(|| "Channel ID not found or already consumed".to_string())?;
-
-        // Note: Assumes the request_response behaviour is named `retrieval` in PhalanxBehaviour.
-        // Adjust field name if defined differently in swarm.rs.
-        self.swarm
-            .behaviour_mut()
-            .retrieval
-            .send_response(channel, response)
-            .map_err(|_| "Failed to push response to underlying libp2p stream".to_string())
+    async fn ban_peer(&self, peer: &NetworkId) -> Result<(), TransportError> {
+        self.command_tx
+            .send(TransportCommand::Ban(peer.clone()))
+            .await
+            .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
     }
 }

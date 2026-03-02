@@ -27,6 +27,12 @@ impl MeshTopic {
     }
 }
 
+impl Default for MeshTopic {
+    fn default() -> Self {
+        Self::new("default")
+    }
+}
+
 impl fmt::Display for MeshTopic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)

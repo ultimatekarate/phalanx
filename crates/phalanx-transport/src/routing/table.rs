@@ -1,5 +1,6 @@
 use phalanx_proto::VolleyResponse;
 
+use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::*;
 use std::collections::HashMap;
 use tokio::sync::mpsc;

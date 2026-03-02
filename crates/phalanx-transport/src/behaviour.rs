@@ -1,9 +1,14 @@
+use crate::codec::PhalanxRetrievalProtocol;
+use crate::events::PhalanxEvent;
 use libp2p::kad::RecordKey;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{autonat, dcutr, gossipsub, identify, kad, mdns, relay, request_response};
+use phalanx_proto::constants::DiscoveryError;
 use phalanx_proto::prelude::*;
 // Also, define STRONGHOLD_NAMESPACE if it was lost in the proto move:
 pub const STRONGHOLD_NAMESPACE: &[u8] = b"phalanx/stronghold";
+
+pub type PhalanxKadStore = kad::store::MemoryStore;
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "PhalanxEvent")]
@@ -33,15 +38,20 @@ impl PhalanxBehaviour {
             "Announcing local node as Stronghold provider"
         );
 
-        self.kademlia
+        let result = self
+            .kademlia
             .start_providing(record_key)
-            .map_err(|_| DiscoveryError::StorageError)
-            .gate(
-                "dht_announce_fail",
-                local_node_id,
-                "DHT Announcement Failed",
-            )
-            .ok()
+            .map_err(|_| DiscoveryError::StorageError);
+
+        if let Err(ref e) = result {
+            tracing::warn!(
+                target: "phalanx::transport",
+                node = %local_node_id,
+                "DHT Announcement Failed: {:?}", e
+            );
+        }
+
+        result.ok()
     }
 
     pub fn find_strongholds(&mut self) -> kad::QueryId {

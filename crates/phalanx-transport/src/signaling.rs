@@ -1,14 +1,5 @@
 // crates/phalanx-transport/src/signaling.rs
-use phalanx_proto::prelude::{MeshTopic, NetworkId};
-
-#[derive(Debug, Clone)]
-pub enum NetworkEvent {
-    DataReceived {
-        origin: NetworkId,
-        topic: MeshTopic,
-        data: Vec<u8>,
-    },
-    PeerConnected(NetworkId),
-    PeerDisconnected(NetworkId),
-    TransmissionError(String),
-}
+//
+// Re-export the canonical NetworkEvent from the Dictionary.
+// Any transport-specific signaling extensions should be added here.
+pub use phalanx_proto::network::NetworkEvent;

@@ -14,6 +14,16 @@ pub struct PhalanxPhysics {
     pub energy_efficiency: UnitInterval,
 }
 
+impl PhalanxPhysics {
+    /// WAN defaults: higher RTT, full energy.
+    pub fn default_wan() -> Self {
+        Self {
+            tau_rtt: 200,
+            energy_efficiency: UnitInterval(1.0),
+        }
+    }
+}
+
 impl Default for PhalanxPhysics {
     fn default() -> Self {
         Self {
