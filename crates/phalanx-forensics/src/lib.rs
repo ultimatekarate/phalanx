@@ -21,8 +21,7 @@ pub use cryptography::{decrypt_bytes, encrypt_bytes, generate_session_key};
 pub use judge::{Decryptor, HandoverJudge};
 pub use policy::TrafficGovernor;
 pub use reassembler::{
-    AudioWeaver, Chunkifier, Reassembler, ReassemblyBuffer, ShardAmalgam, ShardFactory, ShardMold,
-    VideoWeaver,
+    AudioWeaver, Chunkifier, Reassembler, ReassemblyBuffer, ShardAmalgam, ShardMold, VideoWeaver,
 };
 pub use trust::{PeerEvaluator, ReputationGate};
 

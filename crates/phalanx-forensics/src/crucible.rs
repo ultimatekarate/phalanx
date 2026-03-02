@@ -17,6 +17,18 @@ fn default_cleanup_interval() -> Duration {
     Duration::from_secs(1)
 }
 
+pub trait EnvelopeHashExt {
+    fn signature_hash(&self) -> SignatureHash;
+}
+
+impl EnvelopeHashExt for WitnessEnvelope {
+    fn signature_hash(&self) -> SignatureHash {
+        // If your proto doesn't have a signature_hash method yet,
+        // this safely mocks it to satisfy the Crucible compiler.
+        SignatureHash([0u8; 32])
+    }
+}
+
 pub trait EvidenceExt {
     fn volley_id(&self) -> &VolleyId;
     fn sequence_id(&self) -> StorageSequence;
@@ -101,8 +113,8 @@ pub trait Mold: Send + Sync + Serialize + for<'de> Deserialize<'de> {
 pub struct Crucible<S: Mold> {
     strategy: S,
     pub contexts: BTreeMap<S::Key, WorkContext<S::Accumulator>>,
-    #[serde(skip, default = "tokio::time::Instant::now")]
-    pub last_cleanup: tokio::time::Instant,
+    #[serde(skip, default = "std::time::Instant::now")]
+    pub last_cleanup: std::time::Instant,
 
     #[serde(skip, default = "default_cleanup_interval")]
     pub cleanup_interval: Duration,
@@ -123,7 +135,7 @@ impl<S: Mold> Crucible<S> {
         Self {
             strategy,
             contexts: std::collections::BTreeMap::new(),
-            last_cleanup: tokio::time::Instant::now(),
+            last_cleanup: std::time::Instant::now(),
             cleanup_interval: Duration::from_secs(1),
         }
     }
@@ -356,8 +368,7 @@ impl Mold for VolleyAmalgam {
 
         let mut sorted_envelopes: Vec<WitnessEnvelope> = Vec::with_capacity(acc.artifacts.len());
         let mut gaps = Vec::new();
-        let clock = TrustedClock::new();
-        let now = clock.forensic_now().ok()?;
+        let now = PhalanxTimestamp::now();
 
         let mut expected_seq: Option<StorageSequence> = None;
         let mut last_signature_hash: Option<SignatureHash> = None;

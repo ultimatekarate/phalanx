@@ -1,8 +1,6 @@
 use crate::crucible::{Crucible, Mold};
 use crate::prelude::TransientJournal;
 use crate::ForensicError;
-use flate2::write::GzEncoder; // Compression lives in the Lab, not Proto
-use flate2::Compression;
 use image::DynamicImage;
 use image::ImageFormat;
 use phalanx_proto::evidence::AudioShard;
@@ -16,9 +14,8 @@ use phalanx_proto::prelude::*;
 use phalanx_proto::types::PowerState;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::prelude::*;
 use std::io::Cursor;
-use tokio::time::Duration;
+use std::time::Duration;
 use tracing::error;
 use tracing::warn;
 
@@ -26,6 +23,12 @@ use tracing::warn;
 pub struct Reassembler {
     pub active_shards: Crucible<ShardMold>,
     pub power_state: PowerState,
+}
+
+impl Default for Reassembler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Reassembler {
@@ -106,8 +109,8 @@ impl Mold for ShardMold {
     }
 
     fn ingest(acc: &mut Self::Accumulator, item: Self::Input) {
-        if !acc.parts.contains_key(&item.chunk_index) {
-            acc.parts.insert(item.chunk_index, item.data);
+        if let std::collections::btree_map::Entry::Vacant(e) = acc.parts.entry(item.chunk_index) {
+            e.insert(item.data);
             acc.received_count += 1;
         }
     }
@@ -195,7 +198,7 @@ impl Mold for ShardAmalgam {
 
             let gap_report = ShardGapReport {
                 shard_id: key,
-                missing_indices: missing_indices,
+                missing_indices,
             };
 
             let fragmented = FragmentedEnvelope {
@@ -396,6 +399,8 @@ pub trait VideoWeaver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::judge::PayloadCipher;
+    use crate::witness::WitnessAuthority;
     use phalanx_proto::crypto::SymmetricKey;
 
     fn get_test_key() -> SymmetricKey {
@@ -418,7 +423,7 @@ mod tests {
         }
 
         let key = get_test_key();
-        shard.payload.encrypt(&key)?;
+        shard.payload.apply_encryption(&key)?;
 
         match &shard.payload {
             DataPayload::Encrypted { nonce, ciphertext } => {
@@ -429,7 +434,7 @@ mod tests {
             _ => panic!("Shard payload should be Encrypted"),
         }
 
-        let decrypted_bytes = shard.payload.decrypt(&key)?;
+        let decrypted_bytes = shard.payload.reveal(&key)?;
         let recovered_frames: Vec<Vec<u8>> = postcard::from_bytes(&decrypted_bytes)?;
         assert_eq!(recovered_frames, frames);
 
@@ -443,9 +448,9 @@ mod tests {
         let mut shard = create_audio_shard(audio_data.clone(), seq, 44100, 2, "volley_2".into())?;
 
         let key = get_test_key();
-        shard.payload.encrypt(&key)?;
+        shard.payload.apply_encryption(&key)?;
 
-        let decrypted_bytes = shard.payload.decrypt(&key)?;
+        let decrypted_bytes = shard.payload.reveal(&key)?;
         assert_eq!(decrypted_bytes, audio_data);
 
         Ok(())
@@ -473,14 +478,14 @@ mod tests {
         let mut shard = create_video_shard(frames, StorageSequence(1), 30, "v1".into())?;
         let key = get_test_key();
 
-        shard.payload.encrypt(&key)?;
+        shard.payload.apply_encryption(&key)?;
 
         let (nonce1, cipher1) = match &shard.payload {
             DataPayload::Encrypted { nonce, ciphertext } => (nonce.clone(), ciphertext.clone()),
             _ => panic!("Should be encrypted"),
         };
 
-        shard.payload.encrypt(&key)?;
+        shard.payload.apply_encryption(&key)?;
 
         match &shard.payload {
             DataPayload::Encrypted { nonce, ciphertext } => {
@@ -502,12 +507,12 @@ mod tests {
         let mut shard = create_video_shard(frames, StorageSequence(50), 60, "v_net".into())?;
         let key = get_test_key();
 
-        shard.payload.encrypt(&key)?;
+        shard.payload.apply_encryption(&key)?;
 
         let wire_data = postcard::to_allocvec(&shard)?;
         let received_shard: VideoShard = postcard::from_bytes(&wire_data)?;
 
-        let decrypted_payload = received_shard.payload.decrypt(&key)?;
+        let decrypted_payload = received_shard.payload.reveal(&key)?;
         let recovered_frames: Vec<Vec<u8>> = postcard::from_bytes(&decrypted_payload)?;
 
         assert_eq!(recovered_frames[0], vec![255, 0, 255]);
@@ -516,16 +521,7 @@ mod tests {
 
         Ok(())
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use phalanx_proto::prelude::*;
-    use phalanx_proto::shards::{
-        EnvelopeState, Evidence, HandoverProof, ShardBuffer, ShardId, StorageSequence, VolleyId,
-        WitnessEnvelope,
-    };
     use std::collections::BTreeMap;
 
     struct MockJournal;
@@ -571,8 +567,9 @@ mod tests {
         });
 
         // 2. Wrap in an envelope and sign it
-        let original_envelope = WitnessEnvelope::new(evidence, &identity, local_peer.clone(), None)
-            .expect("Failed to sign envelope");
+        let original_envelope =
+            WitnessEnvelope::sign_envelope(evidence, &identity, local_peer.clone(), None)
+                .expect("Failed to sign envelope");
 
         let serialized_envelope =
             postcard::to_allocvec(&original_envelope).expect("Failed to serialize envelope");
@@ -651,7 +648,7 @@ mod tests {
         let video_shard =
             create_video_shard(vec![vec![0xAA, 0xBB]], StorageSequence(1), 30, vid).unwrap();
 
-        let envelope = WitnessEnvelope::new(
+        let envelope = WitnessEnvelope::sign_envelope(
             Evidence::Video(video_shard),
             &identity,
             identity.to_network_id(),
@@ -704,7 +701,7 @@ mod tests {
         let shard_id = ShardId(707);
 
         // 1. Create a REAL envelope so postcard can deserialize it successfully
-        let envelope = WitnessEnvelope::new(
+        let envelope = WitnessEnvelope::sign_envelope(
             Evidence::Handover(HandoverProof {
                 volley_id: VolleyId::new("test"),
                 sequence_id: StorageSequence(0),

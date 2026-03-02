@@ -1,16 +1,19 @@
 use crate::crucible::EvidenceExt;
+use crate::witness::WitnessAuthority;
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::KeyInit;
 use chacha20poly1305::XChaCha20Poly1305;
 use chacha20poly1305::XNonce;
 use ed25519_dalek::Signer;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey}; // Crypto stays here!
+use ed25519_dalek::{Signature, VerifyingKey}; // Crypto stays here!
 use phalanx_proto::crypto::CryptoError;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::Evidence;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::PhalanxIdentity;
 use phalanx_proto::storage::HandoverProof;
+use phalanx_proto::time::{PhalanxTimestamp, TimeError};
+
 pub trait HandoverJudge {
     fn verify_signatures(&self) -> Result<SignatureHash, ShardError>;
 }
@@ -67,6 +70,54 @@ impl Decryptor for DataPayload {
     }
 }
 
+pub trait PayloadCipher {
+    fn apply_encryption(&mut self, key: &SymmetricKey) -> Result<(), CryptoError>;
+    fn reveal(&self, key: &SymmetricKey) -> Result<Vec<u8>, CryptoError>;
+}
+
+impl PayloadCipher for DataPayload {
+    fn apply_encryption(&mut self, key: &SymmetricKey) -> Result<(), CryptoError> {
+        if let DataPayload::Clear(data) = self {
+            use chacha20poly1305::KeyInit; // Local scope only
+            let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
+            let nonce_bytes = rand::random::<[u8; 24]>();
+            let x_nonce = XNonce::from_slice(&nonce_bytes);
+
+            use chacha20poly1305::aead::Aead; // Local scope only
+            let ciphertext = cipher
+                .encrypt(x_nonce, data.as_ref())
+                .map_err(|_| CryptoError::EncryptionFailure)?;
+
+            *self = DataPayload::Encrypted {
+                nonce: nonce_bytes.to_vec(),
+                ciphertext,
+            };
+            Ok(())
+        } else {
+            Err(CryptoError::EncryptionFailure)
+        }
+    }
+
+    fn reveal(&self, key: &SymmetricKey) -> Result<Vec<u8>, CryptoError> {
+        match self {
+            DataPayload::Encrypted { nonce, ciphertext } => {
+                use chacha20poly1305::KeyInit;
+                let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
+                let x_nonce = XNonce::from_slice(nonce);
+
+                use chacha20poly1305::aead::Aead;
+                let decrypted_bytes = cipher
+                    .decrypt(x_nonce, ciphertext.as_ref())
+                    .map_err(|_| CryptoError::DecryptionFailure)?;
+
+                Ok(decrypted_bytes)
+            }
+            DataPayload::Clear(data) => Ok(data.clone()),
+            _ => Err(CryptoError::DecryptionFailure),
+        }
+    }
+}
+
 pub trait JudgeExt {
     fn verify(pubkey: &[u8], msg: &[u8], sig: &[u8]) -> bool;
     fn sign(&self, msg: &[u8]) -> Signature;
@@ -98,9 +149,6 @@ impl JudgeExt for PhalanxIdentity {
         self.keypair.sign(msg)
     }
 }
-
-// crates/phalanx-forensics/src/judge.rs
-use phalanx_proto::time::{PhalanxTimestamp, TimeError};
 
 pub trait TimeJudge {
     fn verify_freshness(
@@ -145,10 +193,14 @@ impl WitnessGate for Evidence {
         peer_id: NetworkId,
         prev_hash: Option<SignatureHash>,
     ) -> Result<WitnessEnvelope, ShardError> {
-        WitnessEnvelope::new(self, identity, peer_id, prev_hash).map_err(|e| {
-            error!(event = "signing_failure", error = %e, "Witness Gate: Failed to seal unit");
-            e
-        })
+        phalanx_proto::evidence::WitnessEnvelope::sign_envelope(self, identity, peer_id, prev_hash)
+            .map_err(|_| {
+                error!(
+                    event = "signing_failure",
+                    "Witness Gate: Failed to seal unit"
+                );
+                ShardError::SigningError("Failed to seal".into())
+            })
     }
 }
 
@@ -171,7 +223,7 @@ impl IntegrityGate for WitnessEnvelope {
         now: PhalanxTimestamp,
         tolerance: u64,
     ) -> Result<Self, ShardError> {
-        if !self.verify() {
+        if !phalanx_proto::evidence::WitnessEnvelope::verify_envelope(&self) {
             error!(event = "integrity_failure", node = %node_id, peer = %self.did, "SIGNATURE_INVALID");
             return Err(ShardError::SigningError(
                 "Signature verification failed".into(),
@@ -181,8 +233,9 @@ impl IntegrityGate for WitnessEnvelope {
         match self.evidence.timestamp().verify_freshness(now, tolerance) {
             Ok(_) => Ok(self),
             Err(e) => {
-                error!(event = "temporal_failure", node = %node_id, peer = %self.did, error = %e, "TIME_INVALID");
-                Err(ShardError::TimeSource(e))
+                error!(event = "temporal_failure", node = %node_id, peer = %self.did, "TIME_INVALID");
+                // FIX: Map to String to bypass the TimeError module collision
+                Err(ShardError::InvalidConfiguration(e.to_string()))
             }
         }
     }
@@ -198,13 +251,13 @@ pub trait PrivacyGate {
 impl PrivacyGate for Evidence {
     fn safeguard(mut self, key: &SymmetricKey) -> Result<Self, ShardError> {
         let res = match &mut self {
-            Evidence::Video(s) => s.payload.encrypt(key),
-            Evidence::Audio(s) => s.payload.encrypt(key),
+            Evidence::Video(s) => s.payload.apply_encryption(key),
+            Evidence::Audio(s) => s.payload.apply_encryption(key),
             _ => Ok(()),
         };
 
         res.map(|_| self).map_err(|e| {
-            error!(event = "privacy_failure", error = %e, "Safeguarding failed");
+            tracing::error!(event = "privacy_failure", error = %e, "Safeguarding failed");
             ShardError::Encryption(e.to_string())
         })
     }

@@ -3,9 +3,9 @@
 use phalanx_proto::identity::NetworkId;
 use phalanx_proto::kademlia::*;
 use phalanx_proto::prelude::ShardError;
+use std::time::Duration;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::time::Duration;
 
 /// THE CHRONOS VERBS: Time math for DHT entries
 pub fn is_expired(unix_timestamp: Option<u64>) -> bool {
