@@ -1,5 +1,5 @@
 use crate::evidence::ForensicGap;
-use crate::WitnessEnvelope;
+use crate::evidence::WitnessEnvelope;
 use ed25519_dalek::SigningKey;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};

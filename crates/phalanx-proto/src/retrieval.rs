@@ -1,8 +1,8 @@
-use crate::WitnessEnvelope;
+use crate::evidence::WitnessEnvelope;
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::SealedLocator;
-use crate::{Did, VolleyId};
+use crate::identity::{Did, VolleyId};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolleyRequest {

@@ -1,5 +1,5 @@
-use crate::Did;
-use crate::VolleyId;
+use crate::identity::Did;
+use crate::identity::VolleyId;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::fmt;

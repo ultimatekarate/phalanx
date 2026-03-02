@@ -1,7 +1,7 @@
 use crate::identity::NetworkId;
+use crate::identity::VolleyId;
 use crate::prelude::ShardChunk;
 use crate::types::{ByteCapacity, UnitInterval, VitalityRate};
-use crate::VolleyId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]

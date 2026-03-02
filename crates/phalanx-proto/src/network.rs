@@ -1,5 +1,5 @@
 use crate::prelude::{MeshTopic, NetworkId};
-use crate::VolleyRequest;
+use crate::retrieval::VolleyRequest;
 
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {
