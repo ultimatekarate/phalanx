@@ -1,3 +1,10 @@
+use libp2p::kad::RecordKey;
+use libp2p::swarm::NetworkBehaviour;
+use libp2p::{autonat, dcutr, gossipsub, identify, kad, mdns, relay, request_response};
+use phalanx_proto::prelude::*;
+// Also, define STRONGHOLD_NAMESPACE if it was lost in the proto move:
+pub const STRONGHOLD_NAMESPACE: &[u8] = b"phalanx/stronghold";
+
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "PhalanxEvent")]
 pub struct PhalanxBehaviour {

@@ -1,8 +1,9 @@
 use async_trait::async_trait;
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::request_response;
 use libp2p::swarm::StreamProtocol;
 use phalanx_proto::{VolleyRequest, VolleyResponse, MAX_PAYLOAD_SIZE};
-use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::io;
 
 #[derive(Clone, Default)]
 pub struct PhalanxRetrievalProtocol;

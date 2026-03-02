@@ -74,7 +74,7 @@ impl NetworkTransport for Libp2pAdapter {
                     // Store the one-shot channel token
                     self.pending_responses.insert(channel_id.clone(), channel);
                     let origin = NetworkId::random(); // TODO: This is temporary.
-                    return Some(NetworkEvent::RetrievalRequested {
+                    return Some(NetworkEvent::VolleyRequested {
                         origin,
                         request,
                         channel_id,
@@ -107,19 +107,5 @@ impl NetworkTransport for Libp2pAdapter {
             .retrieval
             .send_response(channel, response)
             .map_err(|_| "Failed to push response to underlying libp2p stream".to_string())
-    }
-}
-
-/// Facilitate conversion to libp2p types within the transport layer only.
-impl From<MeshTopic> for IdentTopic {
-    fn from(topic: MeshTopic) -> Self {
-        IdentTopic::new(topic.as_str())
-    }
-}
-
-// If you need to convert back from libp2p (e.g., in event handling):
-impl From<IdentTopic> for MeshTopic {
-    fn from(topic: IdentTopic) -> Self {
-        MeshTopic::new(topic.hash().as_str())
     }
 }

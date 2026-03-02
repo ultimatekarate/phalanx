@@ -91,10 +91,10 @@ impl WitnessAuthority for WitnessEnvelope {
             .chunks(mtu)
             .enumerate()
             .map(|(i, slice)| ShardChunk {
-                shard_id: shard_id.clone(),
+                shard_id,
                 chunk_index: i as u32,
                 chunk_type: ChunkType::Witnessed,
-                total_chunks: ((full_data.len() + mtu - 1) / mtu) as u32,
+                total_chunks: full_data.len().div_ceil(mtu) as u32,
                 data: slice.to_vec(),
                 owner_did: owner_did.clone(),
             })

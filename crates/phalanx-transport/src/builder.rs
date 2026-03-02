@@ -8,7 +8,7 @@ use libp2p::{
 };
 
 use crate::behaviour::PhalanxBehaviour;
-use crate::codec::PhalanxRetrievalProtocol;
+
 use phalanx_proto::{
     constants::RETRIEVAL_PROTOCOL_ID,
     physics::{PhalanxPhysics, PowerState},
@@ -64,7 +64,7 @@ pub fn build_behaviour<S>(
     physics: &PhalanxPhysics,
     relay_client: relay::client::Behaviour,
     mut kademlia: kad::Behaviour<S>,
-) -> Result<PhalanxBehaviour<S>, Box<dyn Error>>
+) -> Result<PhalanxBehaviour, Box<dyn Error>>
 where
     S: kad::store::RecordStore + Send + Sync + 'static,
 {

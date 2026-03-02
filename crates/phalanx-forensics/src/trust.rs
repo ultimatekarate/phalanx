@@ -1,6 +1,6 @@
 use phalanx_proto::prelude::ShardError;
 use phalanx_proto::prelude::*;
-use phalanx_proto::trust::{TrustRecord, TrustRegistry}; // <-- FIX: Import the Noun
+use phalanx_proto::trust::TrustRegistry; // <-- FIX: Import the Noun
 use tracing::{info, warn};
 
 pub trait TrustAuthority {
@@ -25,10 +25,7 @@ impl TrustAuthority for TrustRegistry {
     }
 
     fn penalize_peer(&mut self, did: &Did, penalty: i64) {
-        let record = self
-            .peers
-            .entry(did.clone())
-            .or_insert_with(TrustRecord::default);
+        let record = self.peers.entry(did.clone()).or_default();
         record.reputation = record.reputation.saturating_sub(penalty);
 
         if record.reputation < 0 {

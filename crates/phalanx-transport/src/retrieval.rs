@@ -1,17 +1,18 @@
 use async_trait::async_trait;
+use futures::{AsyncRead, AsyncWrite};
 use libp2p::request_response;
 use libp2p::swarm::StreamProtocol;
-use phalanx_proto::{RetrievalRequest, RetrievalResponse, MAX_PAYLOAD_SIZE}; // MAX_PAYLOAD_SIZE from proto constants
-use tokio::io::{self, AsyncRead, AsyncWrite};
-
+use phalanx_proto::retrieval::VolleyRequest;
+use phalanx_proto::retrieval::VolleyResponse;
+use std::io;
 #[derive(Clone, Default)]
 pub struct PhalanxRetrievalCodec;
 
 #[async_trait]
 impl request_response::Codec for PhalanxRetrievalCodec {
     type Protocol = StreamProtocol;
-    type Request = RetrievalRequest;
-    type Response = RetrievalResponse;
+    type Request = VolleyRequest;
+    type Response = VolleyResponse;
 
     async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Request>
     where

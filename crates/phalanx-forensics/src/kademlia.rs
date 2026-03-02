@@ -24,7 +24,7 @@ fn instant_to_unix(instant: Option<Instant>) -> Option<u64> {
     }
 }
 
-fn unix_to_instant(unix_timestamp: Option<u64>) -> Option<Instant> {
+fn _unix_to_instant(unix_timestamp: Option<u64>) -> Option<Instant> {
     let target_unix = unix_timestamp?;
     let current_instant = Instant::now();
     let current_unix = system_time_now_unix();

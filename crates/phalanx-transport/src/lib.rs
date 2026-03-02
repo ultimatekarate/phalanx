@@ -1,5 +1,6 @@
 // crates/phalanx-transport/src/lib.rs
-
+use phalanx_proto::network::NetworkEvent;
+use phalanx_proto::prelude::*;
 pub mod adapters {
     pub mod kademlia;
     pub mod libp2p;
@@ -24,14 +25,9 @@ pub mod signaling;
 #[cfg(test)]
 pub mod mock;
 
-use crate::events::NetworkEvent;
-use phalanx_proto::prelude::*;
-use phalanx_proto::retrieval::VolleyResponse; // Resolved from Dictionary
-
 /// The Transport Prelude: Interface for the MeshSentinel to the physical wire.
 pub mod prelude {
     pub use crate::adapters::libp2p::Libp2pAdapter;
-    pub use crate::events::NetworkEvent;
     pub use crate::NetworkTransport;
     pub use crate::TransportError;
 }
