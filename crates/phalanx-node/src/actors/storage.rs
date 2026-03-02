@@ -1,3 +1,16 @@
+use phalanx_forensics::crucible::{Crucible, VolleyAmalgam};
+use phalanx_proto::prelude::*;
+
+pub struct StorageActor<J: TransientJournal> {
+    pub reassembler: Reassembler,
+    pub guardian: Guardian,
+    pub journal: J,
+    pub config: NodeConfig,
+    pub identity: PhalanxIdentity,
+    pub forensic_tx: mpsc::Sender<(NetworkId, Did, GuardianError)>,
+    pub local_peer_id: NetworkId,
+}
+
 impl<J: TransientJournal> StorageActor<J> {
     pub async fn run(mut self, mut command_rx: mpsc::Receiver<StorageCommand>) {
         tracing::info!("StorageActor: Entering forensic bootstrap phase");

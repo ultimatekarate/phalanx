@@ -24,6 +24,7 @@ pub mod prelude {
         DataPayload, EnvelopeState, FragmentedEnvelope, ShardChunk, ShardGapReport, SignatureHash,
     };
 
+    pub use crate::constants::{VOLLEY_SIZE_THRESHOLD, VOLLEY_TIME_THRESHOLD};
     // Contextual Nouns
     pub use crate::time::{PhalanxTimestamp, TrustedClock};
     pub use crate::topic::MeshTopic;

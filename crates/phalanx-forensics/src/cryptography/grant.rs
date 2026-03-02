@@ -1,14 +1,13 @@
 // crates/phalanx-forensics/src/cryptography/grant.rs
 
 use crate::cryptography::bridge::{ed_to_x25519_pk, ed_to_x25519_sk, resolve_did_pk};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
 use phalanx_proto::crypto::{CryptoError, SealedLocator};
 use phalanx_proto::prelude::*;
-use std::fmt;
+
 /// The Verb "To Authorize": Defines the forensic capability to secure and recover
 /// symmetric keys using asymmetric identities.
 pub trait GrantAuthority {
@@ -104,26 +103,10 @@ impl GrantAuthority for SealedLocator {
     }
 }
 
-// Ensure base64 is in your Cargo.toml for this formatting!
-
-impl fmt::Display for SealedLocator {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let b64_cipher = URL_SAFE_NO_PAD.encode(&self.sealed_key);
-        let b64_nonce = URL_SAFE_NO_PAD.encode(&self.nonce);
-
-        write!(
-            f,
-            "phx-grant://{}#{}@{}?n={}&p={}",
-            self.target, self.recipient, self.sender, b64_nonce, b64_cipher
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use phalanx_proto::crypto::CryptoError;
-    use phalanx_proto::prelude::*;
 
     // Notice how we simplify this helper to just return the PhalanxIdentity!
     fn generate_identity() -> PhalanxIdentity {

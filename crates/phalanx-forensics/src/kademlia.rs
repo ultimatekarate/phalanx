@@ -1,9 +1,9 @@
 // crates/phalanx-forensics/src/kademlia.rs
-use phalanx_proto::kademlia::*;
 use phalanx_proto::crypto::CryptoError;
-use std::time::{SystemTime, UNIX_EPOCH};
-use phalanx_proto::kademlia::*;
 use phalanx_proto::identity::NetworkId;
+use phalanx_proto::kademlia::*;
+use phalanx_proto::kademlia::*;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// THE CHRONOS VERBS: Time math for DHT entries
 pub fn is_expired(unix_timestamp: Option<u64>) -> bool {
@@ -39,7 +39,10 @@ fn unix_to_instant(unix_timestamp: Option<u64>) -> Option<Instant> {
 }
 
 fn system_time_now_unix() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 impl DhtPayload {
@@ -65,7 +68,7 @@ impl DhtPayload {
 
     pub fn validate(&self) -> Result<()> {
         if self.data.is_empty() {
-            return Err(Error::ValueTooLarge); 
+            return Err(Error::ValueTooLarge);
         }
 
         if self.data.len() > Self::MAX_PAYLOAD_SIZE {
@@ -74,7 +77,6 @@ impl DhtPayload {
 
         Ok(())
     }
-
 
     pub fn verify_ownership(&self, expected_owner_prefix: &str) -> bool {
         if self.data.is_empty() {
@@ -112,10 +114,10 @@ impl DhtProviderSet {
             return true;
         }
 
-        let new_entry = ProviderEntry { 
-            network_id: new_peer, 
-            expiration, 
-            reputation_score: reputation 
+        let new_entry = ProviderEntry {
+            network_id: new_peer,
+            expiration,
+            reputation_score: reputation,
         };
 
         // 3. Simple Capacity Check
@@ -125,7 +127,10 @@ impl DhtProviderSet {
         }
 
         // 4. Weighted Eviction: Find the weak link
-        let min_idx = self.providers.iter().enumerate()
+        let min_idx = self
+            .providers
+            .iter()
+            .enumerate()
             .min_by(|(_, a), (_, b)| a.reputation_score.partial_cmp(&b.reputation_score).unwrap())
             .map(|(idx, _)| idx);
 

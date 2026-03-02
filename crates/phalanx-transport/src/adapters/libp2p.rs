@@ -2,8 +2,6 @@ use phalanx_proto::topic::MeshTopic;
 // Note: libp2p must be a dependency in phalanx-transport/Cargo.toml
 use libp2p::gossipsub::IdentTopic;
 
-
-
 use async_trait::async_trait;
 use libp2p::futures::StreamExt;
 use libp2p::request_response::ResponseChannel;
@@ -111,7 +109,6 @@ impl NetworkTransport for Libp2pAdapter {
             .map_err(|_| "Failed to push response to underlying libp2p stream".to_string())
     }
 }
-
 
 /// Facilitate conversion to libp2p types within the transport layer only.
 impl From<MeshTopic> for IdentTopic {

@@ -1,5 +1,5 @@
-use phalanx_forensics::chain::VolleyAmalgam;
 use phalanx_forensics::crucible::Crucible;
+use phalanx_forensics::crucible::VolleyAmalgam;
 use phalanx_proto::prelude::*;
 use phalanx_proto::storage::GuardianError;
 use std::collections::BTreeMap;

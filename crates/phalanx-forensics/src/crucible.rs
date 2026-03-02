@@ -1,23 +1,17 @@
-use crate::storage::journal::TransientJournal;
+use phalanx_proto::evidence::Evidence;
+use phalanx_proto::evidence::ForensicGap;
+use phalanx_proto::evidence::StorageSequence;
+use phalanx_proto::evidence::WitnessEnvelope;
+use phalanx_proto::identity::Volley;
 use phalanx_proto::prelude::*;
+
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
-use std::sync::mpsc;
 use std::time::Duration;
 use tokio::time::Instant;
 use tracing::{debug, info, instrument};
 use tracing::{error, warn};
-
-pub struct StorageActor<J: TransientJournal> {
-    pub reassembler: Reassembler,
-    pub guardian: Guardian,
-    pub journal: J,
-    pub config: PhalanxConfig,
-    pub identity: PhalanxIdentity,
-    pub forensic_tx: mpsc::Sender<(NetworkId, Did, GuardianError)>,
-    pub local_peer_id: NetworkId,
-}
 
 fn default_cleanup_interval() -> Duration {
     Duration::from_secs(1)
@@ -249,6 +243,13 @@ impl<S: Mold + Default> Default for Crucible<S> {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolleyBuffer {
+    pub artifacts: BTreeMap<StorageSequence, WitnessEnvelope>,
+    pub volley_id: VolleyId,
+    pub owner_did: Did,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VolleyAmalgam;
 
@@ -355,7 +356,7 @@ impl Mold for VolleyAmalgam {
                 if expected_hash != actual_link {
                     error!(
                         volley_id = %key,
-                        seq = %current_seq,
+                        seq = %current_seq.0,
                         "VolleyAmalgam: CAUSALITY BREACH - Hash link mismatch detected"
                     );
                     // In Zero-Trust, a breach means we discard the assembly to prevent corruption

@@ -48,9 +48,9 @@ impl HeartbeatGovernor {
     /// This logic is part of the Laboratory's Governance role.
     #[must_use]
     pub fn derive_interval(
-        physics: &PhalanxPhysics, 
-        state: PowerState, 
-        load: UnitInterval
+        physics: &PhalanxPhysics,
+        state: PowerState,
+        load: UnitInterval,
     ) -> HeartbeatInterval {
         let base_latency_ms = (physics.tau_rtt / 2) as f32;
 
