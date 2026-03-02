@@ -1,4 +1,0 @@
-"Store-and-Forward" Resilience- This ensures that if the network drops, Phalanx automatically catches the falling shards in a local buffer and "bursts" them the microsecond connectivity returns.
-Opportunistic Exfiltration- get as much data out as fast as possible when it's possible
-Self-Healing Storage Grid-  No stronghold? No problem. Mobile devices can be mini stronghold until a proper one shows up on the network.
-Trickle sync- don't spam Strongholds when they come back online

@@ -1,0 +1,569 @@
+diff -ru '--exclude=*.lock' '--exclude=target' phalanx/crates/phalanx-proto/src/identity.rs phalanx-fixed/crates/phalanx-proto/src/identity.rs
+--- phalanx/crates/phalanx-proto/src/identity.rs	2026-03-02 05:38:09.000000000 +0000
++++ phalanx-fixed/crates/phalanx-proto/src/identity.rs	2026-03-02 20:58:07.086359350 +0000
+@@ -134,6 +134,13 @@
+     pub fn to_base58(&self) -> &str {
+         &self.0
+     }
++
++    /// Generates a random NetworkId for testing.
++    pub fn random() -> Self {
++        use rand::Rng;
++        let bytes: [u8; 32] = rand::rng().random();
++        Self(bs58::encode(bytes).into_string())
++    }
+ }
+ 
+ impl From<String> for NetworkId {
+diff -ru '--exclude=*.lock' '--exclude=target' phalanx/crates/phalanx-proto/src/lib.rs phalanx-fixed/crates/phalanx-proto/src/lib.rs
+--- phalanx/crates/phalanx-proto/src/lib.rs	2026-03-02 19:43:54.000000000 +0000
++++ phalanx-fixed/crates/phalanx-proto/src/lib.rs	2026-03-02 20:54:44.847444694 +0000
+@@ -32,7 +32,8 @@
+ 
+     // Error Nouns
+     pub use crate::error::{ShardError, TimeError};
+-    pub use crate::storage::{GuardianError, PendingEgress, VolleyResponse};
++    pub use crate::storage::{GuardianError, PendingEgress};
++    pub use crate::retrieval::VolleyResponse;
+ 
+     // Trust & Networking Nouns
+     pub use crate::kademlia::{DhtPayload, PayloadKind};
+@@ -41,28 +42,7 @@
+     pub use crate::vitals::ControlMessage;
+ }
+ 
+-use crate::evidence::WitnessEnvelope;
+-use crate::identity::PhalanxLocator;
+-use crate::prelude::Did;
+-use crate::prelude::VolleyId;
+-
+-use serde::{Deserialize, Serialize};
+-
+-// Nouns
+-#[derive(Debug, Clone, Serialize, Deserialize)]
+-pub struct VolleyRequest {
+-    pub target_did: Did,
+-    pub volley_id: VolleyId,
+-    pub locator: PhalanxLocator,
+-    pub signature: Vec<u8>,
+-}
+-
+-#[derive(Debug, Clone, Serialize, Deserialize)]
+-pub enum VolleyResponse {
+-    Success(Vec<WitnessEnvelope>),
+-    Throttled,
+-    NotFound,
+-    Unauthorized,
+-}
++// Re-export the canonical Retrieval Nouns from their home modules.
++pub use retrieval::{VolleyRequest, VolleyResponse};
+ 
+ pub const MAX_PAYLOAD_SIZE: usize = 10_000_000;
+diff -ru '--exclude=*.lock' '--exclude=target' phalanx/crates/phalanx-proto/src/storage.rs phalanx-fixed/crates/phalanx-proto/src/storage.rs
+--- phalanx/crates/phalanx-proto/src/storage.rs	2026-03-02 05:38:09.000000000 +0000
++++ phalanx-fixed/crates/phalanx-proto/src/storage.rs	2026-03-02 20:54:51.974441687 +0000
+@@ -58,13 +58,13 @@
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub struct PendingEgress {
+     pub channel_id: String,
+-    pub response: VolleyResponse, // Ensure VolleyResponse is defined/imported
++    pub response: StorageAck,
+     pub attempt_count: u32,
+     pub next_attempt: PhalanxTimestamp,
+ }
+ 
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+-pub enum VolleyResponse {
++pub enum StorageAck {
+     Success(VolleyId),
+     Failure(ShardError),
+ }
+diff -ru '--exclude=*.lock' '--exclude=target' phalanx/crates/phalanx-proto/src/topic.rs phalanx-fixed/crates/phalanx-proto/src/topic.rs
+--- phalanx/crates/phalanx-proto/src/topic.rs	2026-03-02 05:38:09.000000000 +0000
++++ phalanx-fixed/crates/phalanx-proto/src/topic.rs	2026-03-02 20:58:38.218346213 +0000
+@@ -27,6 +27,12 @@
+     }
+ }
+ 
++impl Default for MeshTopic {
++    fn default() -> Self {
++        Self::new("default")
++    }
++}
++
+ impl fmt::Display for MeshTopic {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         write!(f, "{}", self.0)
+diff -ru '--exclude=*.lock' '--exclude=target' phalanx/crates/phalanx-proto/src/types.rs phalanx-fixed/crates/phalanx-proto/src/types.rs
+--- phalanx/crates/phalanx-proto/src/types.rs	2026-03-02 05:38:09.000000000 +0000
++++ phalanx-fixed/crates/phalanx-proto/src/types.rs	2026-03-02 20:58:48.436341901 +0000
+@@ -14,6 +14,16 @@
+     pub energy_efficiency: UnitInterval,
+ }
+ 
++impl PhalanxPhysics {
++    /// WAN defaults: higher RTT, full energy.
++    pub fn default_wan() -> Self {
++        Self {
++            tau_rtt: 200,
++            energy_efficiency: UnitInterval(1.0),
++        }
++    }
++}
++
+ impl Default for PhalanxPhysics {
+     fn default() -> Self {
+         Self {
+diff -ru '--exclude=*.lock' '--exclude=target' phalanx/crates/phalanx-transport/src/adapters/libp2p.rs phalanx-fixed/crates/phalanx-transport/src/adapters/libp2p.rs
+--- phalanx/crates/phalanx-transport/src/adapters/libp2p.rs	2026-03-02 20:14:23.000000000 +0000
++++ phalanx-fixed/crates/phalanx-transport/src/adapters/libp2p.rs	2026-03-02 20:56:22.523403475 +0000
+@@ -95,9 +95,9 @@
+             .expect("Ingress stream has already been consumed by the Sentinel")
+     }
+ 
+-    async fn ban_peer(&self, peer: NetworkId) -> Result<(), TransportError> {
++    async fn ban_peer(&self, peer: &NetworkId) -> Result<(), TransportError> {
+         self.command_tx
+-            .send(TransportCommand::Ban(peer))
++            .send(TransportCommand::Ban(peer.clone()))
+             .await
+             .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
+     }
+diff -ru '--exclude=*.lock' '--exclude=target' phalanx/crates/phalanx-transport/src/adapters/mock.rs phalanx-fixed/crates/phalanx-transport/src/adapters/mock.rs
+--- phalanx/crates/phalanx-transport/src/adapters/mock.rs	2026-03-02 20:15:38.000000000 +0000
++++ phalanx-fixed/crates/phalanx-transport/src/adapters/mock.rs	2026-03-02 20:56:44.458394219 +0000
+@@ -1,34 +1,73 @@
+ use crate::routing::table::MeshRoutingTable;
+-use crate::signaling::NetworkEvent;
+ use async_trait::async_trait;
+ 
+ use phalanx_proto::prelude::*;
++use phalanx_proto::network::NetworkEvent;
+ use std::sync::Arc;
+-use tokio::sync::{mpsc, RwLock};
++use tokio::sync::{mpsc, RwLock, Mutex};
+ use crate::TransportAdapter;
+ use crate::TransportError;
+ 
+ pub struct MockAdapter {
+     id: NetworkId,
+-    ingress_tx: mpsc::Sender<NetworkEvent>,
+-    ingress_rx: mpsc::Receiver<NetworkEvent>,
+-    mesh_bus: Arc<RwLock<MeshRoutingTable>>, // The Simulation's shared "Ether"
++    ingress_rx: Mutex<Option<mpsc::Receiver<NetworkEvent>>>,
++    mesh_bus: Arc<RwLock<MeshRoutingTable>>,
++}
++
++impl MockAdapter {
++    pub fn new(
++        id: NetworkId,
++        ingress_rx: mpsc::Receiver<NetworkEvent>,
++        mesh_bus: Arc<RwLock<MeshRoutingTable>>,
++    ) -> Self {
++        Self {
++            id,
++            ingress_rx: Mutex::new(Some(ingress_rx)),
++            mesh_bus,
++        }
++    }
+ }
+ 
+ #[async_trait]
+ impl TransportAdapter for MockAdapter {
+-    async fn send(
+-        &self,
+-        target: &NetworkId,
+-        topic: MeshTopic,
+-        data: Vec<u8>,
+-    ) -> Result<(), TransportError> {
+-        // "Across the virtual wire..."
+-        self.mesh_bus.route_to(target, topic, data).await
++    async fn publish(&self, topic: MeshTopic, data: Vec<u8>) -> Result<(), TransportError> {
++        let table = self.mesh_bus.read().await;
++        for (_peer, sender) in &table.routes {
++            let event = NetworkEvent::DataReceived {
++                origin: self.id.clone(),
++                topic: topic.clone(),
++                data: data.clone(),
++            };
++            let _ = sender.send(event).await;
++        }
++        Ok(())
++    }
++
++    async fn send_direct(&self, target: &NetworkId, data: Vec<u8>) -> Result<(), TransportError> {
++        let table = self.mesh_bus.read().await;
++        if let Some(sender) = table.routes.get(target) {
++            let event = NetworkEvent::DataReceived {
++                origin: self.id.clone(),
++                topic: MeshTopic::default(),
++                data,
++            };
++            sender
++                .send(event)
++                .await
++                .map_err(|_| TransportError::Network("Peer channel closed".into()))?;
++        }
++        Ok(())
++    }
++
++    fn ingress_stream(&self) -> mpsc::Receiver<NetworkEvent> {
++        self.ingress_rx
++            .blocking_lock()
++            .take()
++            .expect("Ingress stream has already been consumed")
+     }
+ 
+-    async fn ingress_stream(&self) -> mpsc::Receiver<NetworkEvent> {
+-        // "Through the simulation conduit..."
+-        self.ingress_rx.clone()
++    async fn ban_peer(&self, _peer: &NetworkId) -> Result<(), TransportError> {
++        // No-op in simulation mock
++        Ok(())
+     }
+ }
+diff -ru '--exclude=*.lock' '--exclude=target' phalanx/crates/phalanx-transport/src/behaviour.rs phalanx-fixed/crates/phalanx-transport/src/behaviour.rs
+--- phalanx/crates/phalanx-transport/src/behaviour.rs	2026-03-02 20:01:37.000000000 +0000
++++ phalanx-fixed/crates/phalanx-transport/src/behaviour.rs	2026-03-02 20:55:23.183428516 +0000
+@@ -2,12 +2,14 @@
+ use libp2p::swarm::NetworkBehaviour;
+ use libp2p::{autonat, dcutr, gossipsub, identify, kad, mdns, relay, request_response};
+ use phalanx_proto::prelude::*;
+-use crate::retrieval::{PhalanxRetrievalCodec, PhalanxKadStore};
++use crate::codec::PhalanxRetrievalProtocol;
+ use crate::events::PhalanxEvent; 
+ use phalanx_proto::constants::DiscoveryError;
+ // Also, define STRONGHOLD_NAMESPACE if it was lost in the proto move:
+ pub const STRONGHOLD_NAMESPACE: &[u8] = b"phalanx/stronghold";
+ 
++pub type PhalanxKadStore = kad::store::MemoryStore;
++
+ #[derive(NetworkBehaviour)]
+ #[behaviour(out_event = "PhalanxEvent")]
+ pub struct PhalanxBehaviour {
+@@ -19,7 +21,7 @@
+     pub relay_client: relay::client::Behaviour,
+     pub dcutr: dcutr::Behaviour,
+     pub autonat: autonat::Behaviour,
+-    pub retrieval: request_response::Behaviour<PhalanxRetrievalCodec>,
++    pub retrieval: request_response::Behaviour<PhalanxRetrievalProtocol>,
+ }
+ 
+ impl PhalanxBehaviour {
+@@ -36,15 +38,19 @@
+             "Announcing local node as Stronghold provider"
+         );
+ 
+-        self.kademlia
++        let result = self.kademlia
+             .start_providing(record_key)
+-            .map_err(|_| DiscoveryError::StorageError)
+-            .gate(
+-                "dht_announce_fail",
+-                local_node_id,
+-                "DHT Announcement Failed",
+-            )
+-            .ok()
++            .map_err(|_| DiscoveryError::StorageError);
++
++        if let Err(ref e) = result {
++            tracing::warn!(
++                target: "phalanx::transport",
++                node = %local_node_id,
++                "DHT Announcement Failed: {:?}", e
++            );
++        }
++
++        result.ok()
+     }
+ 
+     pub fn find_strongholds(&mut self) -> kad::QueryId {
+diff -ru '--exclude=*.lock' '--exclude=target' phalanx/crates/phalanx-transport/src/builder.rs phalanx-fixed/crates/phalanx-transport/src/builder.rs
+--- phalanx/crates/phalanx-transport/src/builder.rs	2026-03-02 19:43:54.000000000 +0000
++++ phalanx-fixed/crates/phalanx-transport/src/builder.rs	2026-03-02 20:55:42.303420448 +0000
+@@ -6,12 +6,11 @@
+ use std::error::Error;
+ use std::time::Duration;
+ 
+-use crate::behaviour::PhalanxBehaviour;
++use crate::behaviour::{PhalanxBehaviour, PhalanxKadStore};
+ 
+ use phalanx_proto::{
+     constants::RETRIEVAL_PROTOCOL_ID,
+-    types::{PhalanxPhysics, PowerState, UnitInterval, VitalityRate},
+-    // Note: VitalityRate and UnitInterval must be imported from the appropriate proto/domain module
++    types::{PhalanxPhysics, VitalityRate},
+ };
+ 
+ /// Constructs the foundational transport stack for the node.
+@@ -56,23 +55,21 @@
+ }
+ 
+ /// Instantiates the composite network behaviour logic.
+-pub fn build_behaviour<S>(
++pub fn build_behaviour(
+     local_key: &Keypair,
+     max_chunk_size_bytes: usize,
+     protocol_version: String,
+     physics: &PhalanxPhysics,
+     relay_client: relay::client::Behaviour,
+-    mut kademlia: kad::Behaviour<S>,
++    mut kademlia: kad::Behaviour<PhalanxKadStore>,
+ ) -> Result<PhalanxBehaviour, Box<dyn Error>>
+-where
+-    S: kad::store::RecordStore + Send + Sync + 'static,
+ {
+     let local_peer_id = local_key.public().to_peer_id();
+ 
+     // Calculate gossipsub heartbeat based on physics simulation state
+     // Note: Requires VitalityRate and UnitInterval definitions to compile properly
+     let gossip_heartbeat =
+-        VitalityRate::calculate(physics, PowerState::Normal, UnitInterval::new(0.0)).as_duration();
++        VitalityRate::new(physics.tau_rtt).as_duration();
+ 
+     let gossipsub = gossipsub::Behaviour::new(
+         gossipsub::MessageAuthenticity::Signed(local_key.clone()),
+diff -ru '--exclude=*.lock' '--exclude=target' phalanx/crates/phalanx-transport/src/events.rs phalanx-fixed/crates/phalanx-transport/src/events.rs
+--- phalanx/crates/phalanx-transport/src/events.rs	2026-03-02 20:39:57.000000000 +0000
++++ phalanx-fixed/crates/phalanx-transport/src/events.rs	2026-03-02 20:55:04.546436381 +0000
+@@ -1,6 +1,6 @@
+ use libp2p::{autonat, dcutr, gossipsub, identify, kad, mdns, relay, request_response};
+ use phalanx_proto::retrieval::VolleyRequest;
+-use phalanx_proto::storage::VolleyResponse;
++use phalanx_proto::retrieval::VolleyResponse;
+ 
+ /// Enumeration of all possible events generated by the `PhalanxBehaviour`.
+ #[derive(Debug)]
+@@ -57,8 +57,8 @@
+     }
+ }
+ 
+-impl From<libp2p::request_response::Event<phalanx_proto::retrieval::VolleyRequest, phalanx_proto::storage::VolleyResponse>> for PhalanxEvent {
+-    fn from(event: libp2p::request_response::Event<phalanx_proto::retrieval::VolleyRequest, phalanx_proto::storage::VolleyResponse>) -> Self {
++impl From<request_response::Event<VolleyRequest, VolleyResponse>> for PhalanxEvent {
++    fn from(event: request_response::Event<VolleyRequest, VolleyResponse>) -> Self {
+         PhalanxEvent::Retrieval(event)
+     }
+ }
+diff -ru '--exclude=*.lock' '--exclude=target' phalanx/crates/phalanx-transport/src/identity_ext.rs phalanx-fixed/crates/phalanx-transport/src/identity_ext.rs
+--- phalanx/crates/phalanx-transport/src/identity_ext.rs	2026-03-02 20:18:12.000000000 +0000
++++ phalanx-fixed/crates/phalanx-transport/src/identity_ext.rs	2026-03-02 20:56:04.868410926 +0000
+@@ -17,7 +17,7 @@
+ 
+     fn to_network_id(&self) -> NetworkId {
+         let libp2p_key = self.to_libp2p_keypair();
+-        NetworkId(libp2p_key.public().to_peer_id())
++        NetworkId(libp2p_key.public().to_peer_id().to_string())
+     }
+ }
+ 
+diff -ru '--exclude=*.lock' '--exclude=target' phalanx/crates/phalanx-transport/src/lib.rs phalanx-fixed/crates/phalanx-transport/src/lib.rs
+--- phalanx/crates/phalanx-transport/src/lib.rs	2026-03-02 20:38:53.000000000 +0000
++++ phalanx-fixed/crates/phalanx-transport/src/lib.rs	2026-03-02 20:57:31.494374370 +0000
+@@ -6,6 +6,7 @@
+ use std::str::FromStr;
+ use tokio::sync::mpsc; // FIX: Corrected from 'use crate::mpsc'
+ use phalanx_proto::prelude::*; // Pulls in MeshTopic, VolleyResponse, NetworkEvent
++use phalanx_proto::network::NetworkEvent;
+ 
+ // 2. MODULE REGISTRY
+ pub mod adapters{
+@@ -45,8 +46,30 @@
+     /// Provides the stream of incoming network events (messages, peer joins, etc.)
+     fn ingress_stream(&self) -> mpsc::Receiver<NetworkEvent>;
+ 
+-    //async fn next_event(&mut self) -> Option<NetworkEvent>;
++    /// Sever the connection and block a peer.
++    async fn ban_peer(&self, peer: &NetworkId) -> Result<(), TransportError>;
++}
++
++// 3b. THE NETWORK TRANSPORT (THE NARRATOR'S INTERFACE)
++// This is the mutable, event-driven trait consumed by the MeshSentinel actor loop.
++// MockTransport and FailingTransport implement this for simulation.
++#[async_trait]
++pub trait NetworkTransport: Send {
++    /// Publish data to all subscribers of a topic.
++    async fn publish(&mut self, topic: &MeshTopic, data: Vec<u8>) -> Result<(), String>;
++
++    /// Poll for the next inbound network event.
++    async fn next_event(&mut self) -> Option<NetworkEvent>;
++
++    /// Ban a peer by its forensic NetworkId.
+     async fn ban_peer(&mut self, peer: &NetworkId);
++
++    /// Send a response to a specific retrieval channel.
++    async fn send_response(
++        &mut self,
++        channel_id: &str,
++        response: VolleyResponse,
++    ) -> Result<(), String>;
+ }
+ 
+ // 4. THE PEER MAPPER (THE TRANSLATOR)
+@@ -84,6 +107,7 @@
+ pub mod prelude {
+     pub use crate::adapters::libp2p::Libp2pAdapter;
+     pub use crate::TransportAdapter; 
++    pub use crate::NetworkTransport;
+     pub use crate::TransportError;
+     pub use crate::PeerMapper;
+ }
+\ No newline at end of file
+diff -ru '--exclude=*.lock' '--exclude=target' phalanx/crates/phalanx-transport/src/mock.rs phalanx-fixed/crates/phalanx-transport/src/mock.rs
+--- phalanx/crates/phalanx-transport/src/mock.rs	2026-03-02 20:16:27.000000000 +0000
++++ phalanx-fixed/crates/phalanx-transport/src/mock.rs	2026-03-02 20:57:59.305362634 +0000
+@@ -2,7 +2,9 @@
+ use std::collections::HashSet;
+ use tokio::sync::mpsc;
+ use phalanx_proto::prelude::*;
++use phalanx_proto::network::NetworkEvent;
+ use phalanx_proto::telemetry::SimEvent;
++use crate::NetworkTransport;
+ 
+ pub struct MockTransport {
+     ingress_rx: mpsc::Receiver<NetworkEvent>,
+@@ -22,7 +24,7 @@
+             ingress_rx,
+             egress_tx,
+             telemetry_tx: None,
+-            local_id: NetworkId::random(), // Ephemeral default for pure unit tests
++            local_id: NetworkId::from("mock-default"), // Ephemeral default for pure unit tests
+             captured_responses: Vec::new(),
+             banned_peers: HashSet::new(),
+         }
+@@ -60,13 +62,13 @@
+     }
+ 
+     async fn ban_peer(&mut self, peer: &NetworkId) {
+-        self.banned_peers.insert(*peer);
++        self.banned_peers.insert(peer.clone());
+ 
+         // Synthesize the telemetry event for the Simulation Harness
+         if let Some(tx) = &self.telemetry_tx {
+             let event = SimEvent::AttackAttemptBlocked {
+-                attacker: *peer,
+-                target: self.local_id,
++                attacker: peer.clone(),
++                target: self.local_id.clone(),
+                 reason: "Peer blacklisted by MockTransport policy".to_string(),
+             };
+ 
+diff -ru '--exclude=*.lock' '--exclude=target' phalanx/crates/phalanx-transport/src/retrieval.rs phalanx-fixed/crates/phalanx-transport/src/retrieval.rs
+--- phalanx/crates/phalanx-transport/src/retrieval.rs	2026-03-02 20:40:29.000000000 +0000
++++ phalanx-fixed/crates/phalanx-transport/src/retrieval.rs	2026-03-02 20:56:52.536390810 +0000
+@@ -1,75 +1,7 @@
+-use async_trait::async_trait;
+-use futures::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt}; // FIX: Use futures, not tokio::io
+-use libp2p::request_response;
+-use libp2p::StreamProtocol; // FIX: StreamProtocol requirement
+-use phalanx_proto::prelude::*;
+-use std::io;
+-use phalanx_proto::retrieval::VolleyRequest;
++// crates/phalanx-transport/src/retrieval.rs
++//
++// Retrieval-layer helpers for the Transport Hands.
++// The canonical request-response Codec is in codec.rs (PhalanxRetrievalProtocol).
++// This module hosts any additional retrieval utilities.
+ 
+-#[derive(Clone, Default)]
+-pub struct PhalanxRetrievalCodec;
+-
+-pub type PhalanxKadStore = libp2p::kad::store::MemoryStore;
+-
+-impl PhalanxRetrievalCodec {
+-    async fn read_packet<T>(&self, mut io: T) -> io::Result<Vec<u8>>
+-    where T: AsyncRead + Unpin + Send {
+-        let mut len_buf = [0u8; 4];
+-        io.read_exact(&mut len_buf).await?;
+-        let len = u32::from_le_bytes(len_buf) as usize;
+-        
+-        if len > VOLLEY_SIZE_THRESHOLD as usize {
+-            return Err(io::Error::new(io::ErrorKind::InvalidData, "Packet too large"));
+-        }
+-
+-        let mut buf = vec![0u8; len];
+-        io.read_exact(&mut buf).await?;
+-        Ok(buf)
+-    }
+-
+-    async fn write_packet<T>(&self, mut io: T, data: &[u8]) -> io::Result<()>
+-    where T: AsyncWrite + Unpin + Send {
+-        let len = data.len() as u32;
+-        io.write_all(&len.to_le_bytes()).await?;
+-        io.write_all(data).await?;
+-        Ok(())
+-    }
+-}
+-
+-#[async_trait]
+-impl request_response::Codec for PhalanxRetrievalCodec {
+-    // FIX: Must resolve strictly to libp2p::StreamProtocol
+-    type Protocol = StreamProtocol; 
+-    type Request = VolleyRequest;
+-    // Assume VolleyResponse is mapped via prelude
+-    type Response = VolleyResponse;
+-
+-    // FIX: Remove 'tokio::io::' bounds to align with libp2p trait definitions
+-    async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Request>
+-    where T: AsyncRead + Unpin + Send {
+-        let payload = self.read_packet(io).await?;
+-        postcard::from_bytes(&payload)
+-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+-    }
+-
+-    async fn read_response<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Response>
+-    where T: AsyncRead + Unpin + Send {
+-        let payload = self.read_packet(io).await?;
+-        postcard::from_bytes(&payload)
+-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+-    }
+-
+-    async fn write_request<T>(&mut self, _: &Self::Protocol, io: &mut T, req: Self::Request) -> io::Result<()>
+-    where T: AsyncWrite + Unpin + Send {
+-        let payload = postcard::to_allocvec(&req)
+-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+-        self.write_packet(io, &payload).await
+-    }
+-
+-    async fn write_response<T>(&mut self, _: &Self::Protocol, io: &mut T, res: Self::Response) -> io::Result<()>
+-    where T: AsyncWrite + Unpin + Send {
+-        let payload = postcard::to_allocvec(&res)
+-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+-        self.write_packet(io, &payload).await
+-    }
+-}
+\ No newline at end of file
++pub use crate::codec::PhalanxRetrievalProtocol;
+diff -ru '--exclude=*.lock' '--exclude=target' phalanx/crates/phalanx-transport/src/routing/table.rs phalanx-fixed/crates/phalanx-transport/src/routing/table.rs
+--- phalanx/crates/phalanx-transport/src/routing/table.rs	2026-03-02 19:43:54.000000000 +0000
++++ phalanx-fixed/crates/phalanx-transport/src/routing/table.rs	2026-03-02 20:56:58.668388222 +0000
+@@ -1,6 +1,7 @@
+ use phalanx_proto::VolleyResponse;
+ 
+ use phalanx_proto::prelude::*;
++use phalanx_proto::network::NetworkEvent;
+ use std::collections::HashMap;
+ use tokio::sync::mpsc;
+ 
+diff -ru '--exclude=*.lock' '--exclude=target' phalanx/crates/phalanx-transport/src/signaling.rs phalanx-fixed/crates/phalanx-transport/src/signaling.rs
+--- phalanx/crates/phalanx-transport/src/signaling.rs	2026-03-02 05:37:05.000000000 +0000
++++ phalanx-fixed/crates/phalanx-transport/src/signaling.rs	2026-03-02 20:58:14.530356209 +0000
+@@ -1,14 +1,5 @@
+ // crates/phalanx-transport/src/signaling.rs
+-use phalanx_proto::prelude::{MeshTopic, NetworkId};
+-
+-#[derive(Debug, Clone)]
+-pub enum NetworkEvent {
+-    DataReceived {
+-        origin: NetworkId,
+-        topic: MeshTopic,
+-        data: Vec<u8>,
+-    },
+-    PeerConnected(NetworkId),
+-    PeerDisconnected(NetworkId),
+-    TransmissionError(String),
+-}
++//
++// Re-export the canonical NetworkEvent from the Dictionary.
++// Any transport-specific signaling extensions should be added here.
++pub use phalanx_proto::network::NetworkEvent;
