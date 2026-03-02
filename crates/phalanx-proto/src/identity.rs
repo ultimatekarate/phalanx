@@ -1,11 +1,11 @@
 use crate::evidence::ForensicGap;
 use crate::WitnessEnvelope;
 use ed25519_dalek::SigningKey;
+use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-use rand::OsRng;
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize, Default,
 )]

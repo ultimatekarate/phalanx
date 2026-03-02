@@ -5,6 +5,8 @@ use crate::prelude::NetworkId;
 use crate::prelude::PhalanxIdentity;
 use crate::prelude::ShardError;
 use crate::time::PhalanxTimestamp;
+use crate::time::TrustedClock;
+use ed25519_dalek::Signature;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::BTreeMap;
@@ -205,7 +207,7 @@ impl Evidence {
             Evidence::Video(s) => s.timestamp,
             Evidence::Audio(s) => s.timestamp,
             Evidence::Gap(g) => g.detected_at,
-            Evidence::Handover(_) => PhalanxTimestamp::now(),
+            Evidence::Handover(_) => TrustedClock::now(),
         }
     }
 }

@@ -1,8 +1,9 @@
+use crate::Did;
+use crate::VolleyId;
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use thiserror;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, thiserror::Error, Serialize, Deserialize)]
 pub enum CryptoError {
     #[error("Encryption failure")]
     EncryptionFailure,
@@ -46,107 +47,6 @@ pub struct SealedLocator {
     /// Ephemeral Nonce for the encryption wrapper.
     #[serde(with = "base64_serde")]
     pub nonce: Vec<u8>,
-}
-
-impl SealedLocator {
-    /// Creates a new access grant.
-    ///
-    /// # Arguments
-    /// * `volley_id` - The ID of the evidence being shared.
-    /// * `volley_key` - The symmetric key (32 bytes) unlocking the video evidence.
-    /// * `sender_did` - Your DID.
-    /// * `sender_sk_bytes` - Your raw Ed25519 private key bytes (32 bytes).
-    /// * `recipient_did` - The Target DID.
-    #[allow(clippy::missing_errors_doc)]
-    pub fn new(
-        volley_id: VolleyId,
-        volley_key: &[u8; 32],
-        sender_did: Did,
-        sender_sk_bytes: &[u8; 32],
-        recipient_did: Did,
-    ) -> Result<Self, CryptoError> {
-        // 1. Resolve Recipient's Public Key from DID
-        let recipient_ed_pk = resolve_did_public_key(&recipient_did)?;
-        let recipient_x25519 = x25519_dalek::PublicKey::from(ed_to_x25519_pk(&recipient_ed_pk)?);
-
-        // 2. Convert Sender's Private Key to X25519
-        let sender_x25519 = ed_to_x25519_sk(sender_sk_bytes)?;
-
-        // 3. Derive Shared Secret (ECDH)
-        let shared_secret = sender_x25519.diffie_hellman(&recipient_x25519);
-
-        // 4. Encrypt the Volley Key
-        // We use XChaCha20Poly1305 for the wrapper encryption
-        let cipher = XChaCha20Poly1305::new(shared_secret.as_bytes().into());
-        let nonce_bytes = rand::random::<[u8; 24]>(); // 24-byte nonce for XChaCha
-        let nonce = XNonce::from_slice(&nonce_bytes);
-
-        let ciphertext = cipher
-            .encrypt(
-                nonce,
-                Payload {
-                    msg: volley_key,
-                    aad: sender_did.as_ref().as_bytes(), // Authenticate sender DID
-                },
-            )
-            .map_err(|_| CryptoError::EncryptionFailure)?;
-
-        Ok(Self {
-            target: volley_id,
-            recipient: recipient_did,
-            sender: sender_did,
-            sealed_key: ciphertext,
-            nonce: nonce_bytes.to_vec(),
-        })
-    }
-
-    /// Attempts to unlock the locator using the recipient's private key.
-    ///
-    /// # Arguments
-    /// * `my_sk_bytes` - The raw Ed25519 private key of the recipient.
-    pub fn unlock(&self, my_sk_bytes: &[u8; 32]) -> Result<[u8; 32], CryptoError> {
-        // 1. Resolve Sender's Public Key from DID (to complete ECDH)
-        let sender_ed_pk = resolve_did_public_key(&self.sender)?;
-        let sender_x25519_pk = x25519_dalek::PublicKey::from(ed_to_x25519_pk(&sender_ed_pk)?);
-
-        // 2. Convert My Private Key to X25519
-        let my_x25519 = ed_to_x25519_sk(my_sk_bytes)?;
-
-        // 3. Re-derive Shared Secret
-        let shared_secret = my_x25519.diffie_hellman(&sender_x25519_pk);
-
-        // 4. Decrypt
-        let cipher = XChaCha20Poly1305::new(shared_secret.as_bytes().into());
-        let nonce = XNonce::from_slice(&self.nonce);
-
-        let plaintext = cipher
-            .decrypt(
-                nonce,
-                Payload {
-                    msg: &self.sealed_key,
-                    aad: self.sender.as_ref().as_bytes(),
-                },
-            )
-            .map_err(|_| CryptoError::DecryptionFailure)?;
-
-        plaintext
-            .try_into()
-            .map_err(|_| CryptoError::InvalidKeyLength)
-    }
-}
-
-impl fmt::Display for SealedLocator {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Format: phx-grant://<ID>#<RECIPIENT>@<SENDER>:<NONCE>:<CIPHERTEXT>
-        let b64_cipher = URL_SAFE_NO_PAD.encode(&self.sealed_key);
-        let b64_nonce = URL_SAFE_NO_PAD.encode(&self.nonce);
-
-        write!(
-            f,
-            "phx-grant://{}#{}@{}?n={}&p={}",
-            self.target, self.recipient, self.sender, b64_nonce, b64_cipher
-        )
-    }
 }
 // Stub for serialization helper
 mod base64_serde {

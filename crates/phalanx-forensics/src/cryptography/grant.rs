@@ -102,3 +102,22 @@ impl GrantAuthority for SealedLocator {
             .map_err(|_| CryptoError::InvalidKeyLength)
     }
 }
+
+fn resolve_did_pk_mock(_did: &Did) -> Result<ed25519_dalek::VerifyingKey, CryptoError> {
+    // In live: extract pubkey from did:key string
+    Err(CryptoError::DidResolutionFailure)
+}
+
+impl fmt::Display for SealedLocator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Format: phx-grant://<ID>#<RECIPIENT>@<SENDER>:<NONCE>:<CIPHERTEXT>
+        let b64_cipher = URL_SAFE_NO_PAD.encode(&self.sealed_key);
+        let b64_nonce = URL_SAFE_NO_PAD.encode(&self.nonce);
+
+        write!(
+            f,
+            "phx-grant://{}#{}@{}?n={}&p={}",
+            self.target, self.recipient, self.sender, b64_nonce, b64_cipher
+        )
+    }
+}
