@@ -1,17 +1,16 @@
-use std::error::Error;
-use std::time::Duration;
-
 use futures::future::Either;
 use libp2p::{
     autonat, core::upgrade::Version, dcutr, gossipsub, identify, identity::Keypair, kad, mdns,
     noise, pnet, relay, request_response, tcp, yamux, PeerId, StreamProtocol, Transport,
 };
+use std::error::Error;
+use std::time::Duration;
 
 use crate::behaviour::PhalanxBehaviour;
 
 use phalanx_proto::{
     constants::RETRIEVAL_PROTOCOL_ID,
-    physics::{PhalanxPhysics, PowerState},
+    types::{PhalanxPhysics, PowerState, UnitInterval, VitalityRate},
     // Note: VitalityRate and UnitInterval must be imported from the appropriate proto/domain module
 };
 

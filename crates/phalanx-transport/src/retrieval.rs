@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use futures::{AsyncRead, AsyncWrite};
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::request_response;
 use libp2p::swarm::StreamProtocol;
 use phalanx_proto::retrieval::VolleyRequest;

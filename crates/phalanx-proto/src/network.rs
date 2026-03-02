@@ -9,7 +9,7 @@ pub enum NetworkEvent {
         data: Vec<u8>,
     },
     PeerDiscovered(NetworkId),
-    RetrievalRequested {
+    VolleyRequested {
         origin: NetworkId,
         request: VolleyRequest,
         channel_id: String,

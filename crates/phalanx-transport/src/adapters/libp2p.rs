@@ -1,25 +1,22 @@
-use phalanx_proto::topic::MeshTopic;
-// Note: libp2p must be a dependency in phalanx-transport/Cargo.toml
-use libp2p::gossipsub::IdentTopic;
-
+use crate::adapters::TransportAdapter;
+use crate::events::PhalanxEvent;
 use async_trait::async_trait;
 use libp2p::futures::StreamExt;
 use libp2p::request_response::ResponseChannel;
 use libp2p::swarm::{Swarm, SwarmEvent};
-use std::collections::HashMap;
-
-// Dictionary Nouns
+use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::*;
-
+use phalanx_proto::topic::MeshTopic;
+use std::collections::HashMap;
 pub struct Libp2pAdapter {
-    swarm: Swarm<crate::transport::swarm::PhalanxBehaviour>,
+    swarm: Swarm<crate::behaviour::PhalanxBehaviour>,
     // Maps domain channel IDs back to physical libp2p response tokens
     pending_responses: HashMap<String, ResponseChannel<VolleyResponse>>,
     request_counter: u64,
 }
 
 impl Libp2pAdapter {
-    pub fn new(swarm: Swarm<crate::transport::swarm::PhalanxBehaviour>) -> Self {
+    pub fn new(swarm: Swarm<crate::behaviour::PhalanxBehaviour>) -> Self {
         Self {
             swarm,
             pending_responses: HashMap::new(),
@@ -29,7 +26,7 @@ impl Libp2pAdapter {
 }
 
 #[async_trait]
-impl NetworkTransport for Libp2pAdapter {
+impl TransportAdapter for Libp2pAdapter {
     async fn publish(&mut self, topic: &MeshTopic, data: Vec<u8>) -> Result<(), String> {
         let topic_hash = libp2p::gossipsub::IdentTopic::new(topic.as_str());
         self.swarm

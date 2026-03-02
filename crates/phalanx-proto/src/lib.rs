@@ -36,6 +36,7 @@ pub mod prelude {
 
     // Trust & Networking Nouns
     pub use crate::kademlia::{DhtPayload, PayloadKind};
+    pub use crate::network::NetworkEvent;
     pub use crate::trust::{PetName, TrustLevel};
     pub use crate::vitals::ControlMessage;
 }

@@ -1,5 +1,5 @@
 // crates/phalanx-transport/src/signaling.rs
-use phalanx_proto::{MeshTopic, NetworkId};
+use phalanx_proto::prelude::{MeshTopic, NetworkId};
 
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {
