@@ -1,5 +1,6 @@
 // crates/phalanx-proto/src/storage.rs
 
+pub use crate::time::TimeError;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
@@ -37,21 +38,6 @@ pub enum ShardError {
 
     #[error("Not enough reputation")]
     Unauthorized(String),
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, thiserror::Error)]
-pub enum TimeError {
-    #[error("Clock skew detected: timestamp is in the future")]
-    FutureTimestamp,
-
-    #[error("Resource expired")]
-    Expired,
-
-    #[error("Stale: {0}ms behind")]
-    Stale(u64),
-
-    #[error("Future: {0}ms ahead")]
-    Future(u64),
 }
 
 #[derive(Debug, thiserror::Error)]

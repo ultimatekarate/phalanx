@@ -1,6 +1,6 @@
-use crate::prelude::NetworkId;
-use crate::prelude::PhalanxIdentity;
-use crate::prelude::SignatureHash;
+use crate::evidence::SignatureHash;
+use crate::identity::NetworkId;
+use crate::identity::PhalanxIdentity;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -52,16 +52,20 @@ impl CausalitySession {
     }
 }
 
-#[derive(Debug, thiserror::Error, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 pub enum TimeError {
-    #[error("System clock drift detected")]
-    ClockSkew,
-    #[error("Time synchronization lock poisoned")]
-    LockPoisoned,
+    #[error("System clock drift detected: {0}")]
+    ClockSkew(String),
+    #[error("Time synchronization lock poisoned: {0}")]
+    LockPoisoned(String),
     #[error("Timestamp is too far in the past: {0}s difference")]
     Stale(u64),
     #[error("Timestamp is in the future: {0}s difference")]
     Future(u64),
     #[error("NTP Sync failed: {0}")]
     NtpError(String),
+    #[error("Clock skew detected: timestamp is in the future")]
+    FutureTimestamp,
+    #[error("Resource expired")]
+    Expired,
 }

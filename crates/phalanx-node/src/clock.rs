@@ -61,7 +61,7 @@ impl TrustedClock {
     pub fn now(&self) -> TimeResult<PhalanxTimestamp> {
         let local = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(TimeError::ClockSkew)?
+            .map_err(|e| TimeError::ClockSkew(e.to_string()))?
             .as_secs() as i64;
 
         let offset_guard = self
@@ -89,10 +89,10 @@ impl TrustedClock {
 
     /// Performs an NTP synchronization to calculate the time offset.
     ///
-    /// # Async Deadlock Warning
-    /// This method performs blocking I/O (UDP socket operations).
-    /// If called from an async context, it **MUST** be wrapped in `tokio::task::spawn_blocking`.
-    pub fn synchronize(&self) -> TimeResult<()> {
+    /// # Async Note
+    /// This method is async because sntpc 0.8 returns a future from `get_time`.
+    /// If called from a synchronous context, wrap in a runtime block.
+    pub async fn synchronize(&self) -> TimeResult<()> {
         use std::net::ToSocketAddrs; // Required for resolution
 
         // 1. Resolve the hostname to a concrete SocketAddr
@@ -114,12 +114,12 @@ impl TrustedClock {
         let context = NtpContext::new(PhalanxNtpGenerator::default());
 
         // 3. Pass the resolved 'addr' (SocketAddr) instead of the string
-        match sntpc::get_time(addr, &socket, context) {
+        match sntpc::get_time(addr, &socket, context).await {
             Ok(time) => {
                 let ntp_sec = time.sec();
                 let system_sec = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .map_err(TimeError::ClockSkew)?
+                    .map_err(|e| TimeError::ClockSkew(e.to_string()))?
                     .as_secs();
 
                 let diff_sec = (ntp_sec as i64) - (system_sec as i64);
