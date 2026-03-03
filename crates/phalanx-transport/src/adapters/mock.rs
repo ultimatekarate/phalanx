@@ -32,7 +32,7 @@ impl MockAdapter {
 impl TransportAdapter for MockAdapter {
     async fn publish(&self, topic: MeshTopic, data: Vec<u8>) -> Result<(), TransportError> {
         let table = self.mesh_bus.read().await;
-        for (_peer, sender) in &table.routes {
+        for sender in table.routes.values() {
             let event = NetworkEvent::DataReceived {
                 origin: self.id.clone(),
                 topic: topic.clone(),

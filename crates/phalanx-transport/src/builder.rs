@@ -76,7 +76,7 @@ pub fn build_behaviour(
             .validation_mode(gossipsub::ValidationMode::Strict)
             .max_transmit_size(max_chunk_size_bytes * 2)
             .build()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+            .map_err(std::io::Error::other)?,
     )?;
 
     kademlia.set_mode(Some(kad::Mode::Server));
