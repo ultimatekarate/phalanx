@@ -471,9 +471,9 @@ mod tests {
         }
     }
 
-    // FIX: Must use tokio::test because Crucible::new() calls tokio::time::Instant::now()
-    #[tokio::test]
-    async fn test_crucible_auto_seal() {
+    // FIXED: The Lab uses std::time::Instant, not tokio. No tokio dependency needed.
+    #[test]
+    fn test_crucible_auto_seal() {
         let mut crucible = Crucible::new(SumMold, Duration::from_secs(5));
 
         // 1. Ingest 2 items (Not ready)
@@ -488,26 +488,27 @@ mod tests {
         assert!(crucible.contexts.is_empty());
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn test_crucible_flush_stale() {
-        let mut crucible = Crucible::new(SumMold, Duration::from_secs(5));
+    #[test]
+    fn test_crucible_flush_stale() {
+        // Use a very short TTL to avoid slow tests while staying tokio-free
+        let ttl = Duration::from_millis(50);
+        let mut crucible = Crucible::new(SumMold, ttl);
 
         // 1. Ingest 1 item (Stale)
         crucible.process(5);
 
-        // 2. Advance time beyond threshold
-        // Since we are paused, this explicitly moves the clock forward
-        tokio::time::advance(Duration::from_secs(10)).await;
+        // 2. Wait beyond threshold using std::thread::sleep (no tokio needed)
+        std::thread::sleep(Duration::from_millis(100));
 
-        // 3. Flush (Threshold is 5s, we waited 10s)
-        let results = crucible.flush_stale(Duration::from_secs(5));
+        // 3. Flush (TTL is 50ms, we waited 100ms)
+        let results = crucible.flush_stale(ttl);
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], "Sum: 5");
     }
 
-    #[tokio::test]
-    async fn test_crucible_flush_all() {
+    #[test]
+    fn test_crucible_flush_all() {
         let mut crucible = Crucible::new(SumMold, Duration::from_secs(5));
         crucible.process(1);
         crucible.process(2); // 2 items waiting

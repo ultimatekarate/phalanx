@@ -2,7 +2,6 @@ use crate::crucible::{Crucible, Mold};
 use crate::prelude::TransientJournal;
 use crate::ForensicError;
 use image::DynamicImage;
-use image::ImageFormat;
 use phalanx_proto::evidence::AudioShard;
 use phalanx_proto::evidence::ChunkType;
 use phalanx_proto::evidence::StorageSequence;
@@ -14,7 +13,6 @@ use phalanx_proto::prelude::*;
 use phalanx_proto::types::PowerState;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::Cursor;
 use std::time::Duration;
 use tracing::error;
 use tracing::warn;
@@ -277,13 +275,15 @@ pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<
             .ok_or("Failed to create image buffer")?,
     );
 
-    let mut jpeg_bytes = Vec::new();
-    let mut cursor = Cursor::new(&mut jpeg_bytes);
+    let _jpeg_bytes = img.to_rgb8().to_vec();
 
-    img.write_to(&mut cursor, ImageFormat::Jpeg)
+    // Use the image crate's built-in buffer writer to avoid std::io::Cursor
+    let mut output = Vec::new();
+    let encoder = image::codecs::jpeg::JpegEncoder::new(&mut output);
+    img.write_with_encoder(encoder)
         .map_err(|e| format!("Compression error: {}", e))?;
 
-    Ok(jpeg_bytes)
+    Ok(output)
 }
 
 /// Creates a video shard with safe timestamp generation.

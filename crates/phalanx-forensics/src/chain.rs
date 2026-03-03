@@ -1,5 +1,7 @@
 use phalanx_proto::prelude::*;
 use crate::crucible::Mold;
+use phalanx_proto::HandoverProof;
+use ed25519_dalek::{Verifier, Signature, VerifyingKey}; 
 
 const VOLLEY_SIZE_THRESHOLD: usize = 50;
 const VOLLEY_TIME_THRESHOLD: Duration = Duration::from_secs(1);
@@ -147,8 +149,7 @@ impl Mold for VolleyAmalgam {
 }
 
 
-use phalanx_proto::HandoverProof;
-use ed25519_dalek::{Verifier, Signature, VerifyingKey}; // Crypto stays here!
+// Crypto stays here!
 
 pub trait HandoverJudge {
     fn verify_signatures(&self) -> Result<(), String>;

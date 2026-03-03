@@ -27,6 +27,9 @@ pub mod storage {
 pub mod trust;
 pub mod vitals;
 
+#[macro_use]
+extern crate tracing;
+
 // Re-export the Narrators and Physical Hooks
 pub use actors::meshsentinel::MeshSentinel;
 pub use actors::storage::StorageActor;

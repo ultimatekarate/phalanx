@@ -1,7 +1,7 @@
 // crates/phalanx-forensics/src/lib.rs
 
 pub mod crucible;
-pub mod cryptography; // Pointing to src/cryptography/mod.rs
+pub mod cryptography;
 pub mod judge;
 pub mod kademlia;
 pub mod policy;

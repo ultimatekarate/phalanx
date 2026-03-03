@@ -135,10 +135,18 @@ impl TrustRegistry {
         let temp_path = self.storage_path.with_extension("tmp");
 
         // Asynchronous file operations
-        let mut file = File::create(&temp_path).await?;
-        file.write_all(&data).await?;
-        file.sync_all().await?; // Ensures OS buffers are flushed to disk
-        fs::rename(temp_path, &self.storage_path).await?;
+        let mut file = File::create(&temp_path)
+            .await
+            .map_err(|e| TrustError::IoError(e.to_string()))?;
+        file.write_all(&data)
+            .await
+            .map_err(|e| TrustError::IoError(e.to_string()))?;
+        file.sync_all()
+            .await
+            .map_err(|e| TrustError::IoError(e.to_string()))?; // Ensures OS buffers are flushed to disk
+        fs::rename(temp_path, &self.storage_path)
+            .await
+            .map_err(|e| TrustError::IoError(e.to_string()))?;
 
         Ok(())
     }
@@ -149,9 +157,13 @@ impl TrustRegistry {
             return Ok(());
         }
 
-        let mut file = File::open(&self.storage_path).await?;
+        let mut file = File::open(&self.storage_path)
+            .await
+            .map_err(|e| TrustError::IoError(e.to_string()))?;
         let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer).await?;
+        file.read_to_end(&mut buffer)
+            .await
+            .map_err(|e| TrustError::IoError(e.to_string()))?;
 
         let loaded: HashMap<Did, PeerRecord> = postcard::from_bytes(&buffer)
             .map_err(|e| TrustError::SerializationError(e.to_string()))?;

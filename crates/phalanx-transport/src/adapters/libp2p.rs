@@ -1,14 +1,12 @@
-use crate::TransportAdapter;
+use crate::{PeerMapper, TransportAdapter, TransportError};
 use async_trait::async_trait;
+use futures::StreamExt; // Required to bring StreamExt::select_next_some into scope
 use libp2p::swarm::Swarm;
-use std::sync::{Arc, Mutex}; // Must use std::sync::Mutex for synchronous extraction
-use tokio::sync::mpsc;
-
-// Assume these are correctly mapped in your actual prelude/dictionary
-use crate::TransportError;
 use phalanx_proto::identity::NetworkId;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::topic::MeshTopic;
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
 pub enum TransportCommand {
     Publish(MeshTopic, Vec<u8>),
@@ -28,37 +26,80 @@ impl Libp2pAdapter {
     /// The Swarm is moved into a detached Tokio task to preserve thread safety (Sync).
     pub fn new(mut swarm: Swarm<crate::behaviour::PhalanxBehaviour>) -> Self {
         let (command_tx, mut command_rx) = mpsc::channel::<TransportCommand>(128);
-        let (event_tx, event_rx) = mpsc::channel::<NetworkEvent>(1024);
+        let (_event_tx, event_rx) = mpsc::channel::<NetworkEvent>(1024);
 
-        // Detach the non-Sync Swarm into a localized actor loop.
-        // NOTE: In the full Phalanx architecture, this loop logic may be
-        // delegated to `MeshSentinel` in the `phalanx-node` crate.
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    // 1. Process outbound commands from the Handle
                     command_option = command_rx.recv() => {
                         match command_option {
                             Some(TransportCommand::Publish(topic, data)) => {
-                                // Implement swarm publish logic here
+                                let ident_topic = libp2p::gossipsub::IdentTopic::new(topic.to_string());
+                                if let Err(publish_error) = swarm.behaviour_mut().gossipsub.publish(ident_topic, data) {
+                                    tracing::error!(
+                                        target: "phalanx::transport",
+                                        "Gossipsub publish failed for topic {}: {:?}",
+                                        topic,
+                                        publish_error
+                                    );
+                                }
                             }
                             Some(TransportCommand::SendDirect(target, data)) => {
-                                // Implement swarm direct send logic here
+                                match PeerMapper::from_network_id(&target) {
+                                    Ok(peer_id) => {
+                                        match postcard::from_bytes::<phalanx_proto::retrieval::VolleyRequest>(&data) {
+                                            Ok(request) => {
+                                                swarm.behaviour_mut().retrieval.send_request(&peer_id, request);
+                                            }
+                                            Err(decode_error) => {
+                                                tracing::error!(
+                                                    target: "phalanx::transport",
+                                                    "Failed to decode VolleyRequest for {}: {:?}",
+                                                    target.0,
+                                                    decode_error
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(mapping_error) => {
+                                        tracing::error!(
+                                            target: "phalanx::transport",
+                                            "Cannot route direct message; invalid NetworkId {}: {}",
+                                            target.0,
+                                            mapping_error
+                                        );
+                                    }
+                                }
                             }
                             Some(TransportCommand::Ban(peer)) => {
-                                let _ = swarm.disconnect_peer_id(peer.into());
+                                match PeerMapper::from_network_id(&peer) {
+                                    Ok(peer_id) => {
+                                        let _ = swarm.disconnect_peer_id(peer_id);
+                                        tracing::info!(
+                                            target: "phalanx::transport",
+                                            "Administratively disconnected peer: {}",
+                                            peer.0
+                                        );
+                                    }
+                                    Err(mapping_error) => {
+                                        tracing::error!(
+                                            target: "phalanx::transport",
+                                            "Ban failed; invalid NetworkId {}: {}",
+                                            peer.0,
+                                            mapping_error
+                                        );
+                                    }
+                                }
                             }
-                            None => break, // Channel dropped, terminate task
+                            None => break, // Channel dropped; initiate actor shutdown
                         }
                     },
 
-                    // 2. Process inbound network events from the Swarm
-                    swarm_event = libp2p::futures::StreamExt::next(&mut swarm) => {
-                        if let Some(event) = swarm_event {
-                            // Translate libp2p::swarm::SwarmEvent to phalanx_proto::network::NetworkEvent
-                            // let network_event = translate_event(event);
-                            // let _ = event_tx.send(network_event).await;
-                        }
+                    _swarm_event = swarm.select_next_some() => {
+                        // Translation from libp2p::swarm::SwarmEvent to NetworkEvent goes here.
+                        // Example dispatch:
+                        // let network_event = translate_event(swarm_event);
+                        // let _ = event_tx.send(network_event).await;
                     }
                 }
             }

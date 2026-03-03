@@ -115,7 +115,7 @@ pub enum TrustError {
     #[error("The pet name '{0}' is already in use by another DID")]
     PetnameCollision(String),
     #[error("Failed to persist registry: {0}")]
-    IoError(#[from] std::io::Error),
+    IoError(String),
     #[error("Serialization error: {0}")]
     SerializationError(String),
     #[error("Invalid Pet name format: {0}")]
