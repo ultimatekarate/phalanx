@@ -1,3 +1,4 @@
+use phalanx_forensics::witness::WitnessAuthority;
 use phalanx_proto::evidence::Evidence;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::VideoShard;
@@ -9,7 +10,7 @@ use tracing::info;
 async fn test_forensic_gate_tamper_detection_v3() {
     // 1. Setup Identities & PeerId
     let witness_identity = PhalanxIdentity::new_ephemeral();
-    let witness_peer_id = witness_identity.to_network_id();
+    let witness_peer_id = witness_identity.network_id;
     let orchestrator = RetrievalOrchestrator::new();
     let vid = VolleyId::new("test_stream_01");
 
@@ -25,7 +26,7 @@ async fn test_forensic_gate_tamper_detection_v3() {
     let original_evidence = Evidence::Video(original_shard);
 
     // FIX: 4-argument constructor with 'None' for the causality anchor (start of chain)
-    let mut envelope = WitnessEnvelope::new(
+    let mut envelope = WitnessEnvelope::sign_envelope(
         original_evidence,
         &witness_identity,
         witness_peer_id.clone(),

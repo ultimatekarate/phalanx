@@ -297,7 +297,7 @@ impl TransientJournal for FileJournal {
             .map_err(ShardError::Io)?;
 
         let pending: Vec<PendingEgress> = postcard::from_bytes(&encoded)
-            .map_err(|_| ShardError::Encryption(CryptoError::DecryptionFailure))?;
+            .map_err(|e| ShardError::Encryption(e.to_string()))?;
 
         // Cleanup after recovery to prevent replay of the same retry state
         let _ = tokio::fs::remove_file(salvage_path).await;

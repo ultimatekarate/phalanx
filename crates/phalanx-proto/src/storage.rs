@@ -1,3 +1,4 @@
+use crate::VolleyResponse;
 // crates/phalanx-proto/src/storage.rs
 use crate::evidence::{SignatureHash, StorageSequence};
 use crate::identity::{Did, VolleyId};
@@ -58,7 +59,7 @@ pub struct HandoverProof {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingEgress {
     pub channel_id: String,
-    pub response: StorageAck,
+    pub response: VolleyResponse,
     pub attempt_count: u32,
     pub next_attempt: PhalanxTimestamp,
 }

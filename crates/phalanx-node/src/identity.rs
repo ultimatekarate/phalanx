@@ -1,10 +1,21 @@
 use bip39::{Language, Mnemonic};
 use ed25519_dalek::SigningKey;
 use phalanx_proto::prelude::*;
+use phalanx_proto::retrieval::VolleyRequest;
+use rand::RngCore;
 use std::{fs, path::Path};
 
-impl PhalanxIdentity {
-    pub fn generate() -> Result<(Self, String), IdentityError> {
+pub trait PhalanxNodeIdentityExt: Sized {
+    fn generate() -> Result<(Self, String), IdentityError>;
+    fn restore(phrase: &str) -> Result<Self, IdentityError>;
+    fn save_to_disk<P: AsRef<Path>>(&self, path: P) -> Result<(), IdentityError>;
+    fn load_from_disk<P: AsRef<Path>>(path: P) -> Result<Self, IdentityError>;
+    fn verify_retrieval_auth(&self, request: &VolleyRequest) -> Result<(), IdentityError>;
+    fn init<P: AsRef<Path>>(path: P) -> Result<Self, IdentityError>;
+}
+
+impl PhalanxNodeIdentityExt for PhalanxIdentity {
+    fn generate() -> Result<(Self, String), IdentityError> {
         let mut rng = rand::rng();
         let mut entropy = [0u8; 16];
         rng.fill_bytes(&mut entropy);
@@ -21,6 +32,7 @@ impl PhalanxIdentity {
 
         Ok((
             PhalanxIdentity {
+                network_id: NetworkId::random(),
                 version: IDENTITY_VERSION,
                 did: Did::placeholder(),
                 keypair: signing_key,
@@ -29,7 +41,17 @@ impl PhalanxIdentity {
         ))
     }
 
-    pub fn restore(phrase: &str) -> Result<Self, IdentityError> {
+    fn load_from_disk<P: AsRef<Path>>(path: P) -> Result<Self, IdentityError> {
+        // ... (keep your exact existing load_from_disk logic)
+        todo!()
+    }
+
+    fn init<P: AsRef<Path>>(path: P) -> Result<Self, IdentityError> {
+        // ... (keep your exact existing init logic)
+        todo!()
+    }
+
+    fn restore(phrase: &str) -> Result<Self, IdentityError> {
         let mnemonic = Mnemonic::parse_in(Language::English, phrase)
             .map_err(|e| IdentityError::MnemonicError(e.to_string()))?;
         let seed = mnemonic.to_seed("");
@@ -38,24 +60,25 @@ impl PhalanxIdentity {
             .map_err(|_| IdentityError::CryptoError("Seed fail".into()))?;
 
         Ok(PhalanxIdentity {
+            network_id: NetworkId::random(),
             version: IDENTITY_VERSION,
             did: Did::placeholder(),
             keypair: SigningKey::from_bytes(&secret_bytes),
         })
     }
 
-    pub fn save_to_disk<P: AsRef<Path>>(&self, path: P) -> Result<(), IdentityError> {
+    fn save_to_disk<P: AsRef<Path>>(&self, path: P) -> Result<(), IdentityError> {
         let bytes = postcard::to_stdvec(self)
             .map_err(|e| IdentityError::SerializationError(e.to_string()))?;
         fs::write(path, bytes).map_err(IdentityError::IoError)
     }
 
-    pub fn verify_retrieval_auth(&self, request: &VolleyRequest) -> Result<(), IdentityError> {
+    fn verify_retrieval_auth(&self, request: &VolleyRequest) -> Result<(), IdentityError> {
         // High-level node policy logic
         Ok(())
     }
 
-    pub fn init<P: AsRef<Path>>(path: P) -> Result<Self, IdentityError> {
+    fn init<P: AsRef<Path>>(path: P) -> Result<Self, IdentityError> {
         match Self::load_from_disk(&path) {
             Ok(identity) => {
                 info!(path = ?path.as_ref(), "Sovereign root: RESTORED");

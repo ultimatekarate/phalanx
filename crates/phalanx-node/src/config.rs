@@ -22,11 +22,19 @@ pub struct IdentityConfig {
     pub key_path: PathBuf,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct NetworkConfig {
-    pub listen_addr: String,
-    pub public_addr: Option<String>,
-    pub topics: Vec<MeshTopic>, // Using the Noun from proto!
+    #[serde(default = "default_protocol_version")]
+    pub protocol_version: String,
+    pub max_chunk_size_bytes: usize,
+    pub video_topic: MeshTopic,
+    pub audio_topic: MeshTopic,
+    pub control_topic: MeshTopic,
+    pub cleanup_interval_secs: u64,
+    #[serde(default)]
+    pub bootstrap_peers: Vec<String>,
+    #[serde(default = "default_service_key")]
+    pub guardian_service_key: String,
 }
 
 impl NodeConfig {

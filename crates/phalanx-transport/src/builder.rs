@@ -7,7 +7,7 @@ use libp2p::{
 use std::error::Error;
 use std::time::Duration;
 
-use crate::behaviour::{PhalanxBehaviour, PhalanxKadStore};
+use crate::behaviour::PhalanxBehaviour;
 
 use phalanx_proto::{
     constants::RETRIEVAL_PROTOCOL_ID,

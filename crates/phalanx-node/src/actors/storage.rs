@@ -125,7 +125,11 @@ impl<J: TransientJournal> StorageActor<J> {
     }
 
     async fn handle_retrieval_query(&self, query: RetrievalQuery) {
-        let result = match self.guardian.get_active_volley_shards(&query.volley_id) {
+        // Access volley_id via query.request.volley_id
+        let result = match self
+            .guardian
+            .get_active_volley_shards(&query.request.volley_id)
+        {
             Some(shard_map) => Ok(shard_map.values().cloned().collect()),
             None => Ok(Vec::new()),
         };

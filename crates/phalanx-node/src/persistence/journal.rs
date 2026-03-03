@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use tokio::io::AsyncReadExt;
 
 pub struct FileJournal {
-    file_path: PathBuf,
-    handle: tokio::fs::File,
+    pub file_path: PathBuf,
+    pub handle: tokio::fs::File,
 }
 
 impl FileJournal {
