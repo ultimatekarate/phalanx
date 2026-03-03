@@ -402,7 +402,8 @@ mod tests {
     use crate::judge::PayloadCipher;
     use crate::witness::WitnessAuthority;
     use phalanx_proto::crypto::SymmetricKey;
-
+    use phalanx_proto::evidence::Evidence;
+    use phalanx_proto::storage::HandoverProof;
     fn get_test_key() -> SymmetricKey {
         SymmetricKey([0x42; 32])
     }
@@ -522,8 +523,8 @@ mod tests {
         Ok(())
     }
 
+    use async_trait::async_trait;
     use std::collections::BTreeMap;
-
     struct MockJournal;
     #[async_trait]
     impl TransientJournal for MockJournal {
@@ -640,7 +641,7 @@ mod tests {
     #[test]
     fn test_shard_amalgam_gap_reporting() {
         // 1. Setup metadata
-        let (identity, _) = PhalanxIdentity::generate().unwrap();
+        let identity = PhalanxIdentity::new_ephemeral();
         let shard_id = ShardId(505);
         let vid = VolleyId::new("gap_test");
 
@@ -697,7 +698,7 @@ mod tests {
 
     #[test]
     fn test_shard_amalgam_full_reassembly() {
-        let (identity, _) = PhalanxIdentity::generate().unwrap();
+        let identity = PhalanxIdentity::new_ephemeral();
         let shard_id = ShardId(707);
 
         // 1. Create a REAL envelope so postcard can deserialize it successfully

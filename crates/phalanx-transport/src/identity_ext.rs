@@ -22,9 +22,12 @@ impl Libp2pExt for PhalanxIdentity {
 }
 
 mod test {
+
     #[test]
     fn test_identity_generation_and_did() {
-        let (identity, _) = PhalanxIdentity::generate().unwrap();
+        use super::*;
+        const IDENTITY_VERSION: u32 = 1;
+        let identity = PhalanxIdentity::new_ephemeral();
         assert!(!identity.did.0.starts_with("did:key:"));
         assert!(identity.did.0.len() > 40);
         assert_eq!(identity.version, IDENTITY_VERSION);

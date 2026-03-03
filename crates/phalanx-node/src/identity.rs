@@ -56,8 +56,7 @@ impl PhalanxIdentity {
     }
 
     pub fn init<P: AsRef<Path>>(path: P) -> Result<Self, IdentityError> {
-        /// THE BOOTSTRAP: Atomically ensures an identity exists at the given path.
-        /// This is the primary entry point for the Sentinel and Stronghold binaries.
+
         match Self::load_from_disk(&path) {
             Ok(identity) => {
                 info!(path = ?path.as_ref(), "Sovereign root: RESTORED");

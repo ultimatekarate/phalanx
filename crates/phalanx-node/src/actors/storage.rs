@@ -1,5 +1,13 @@
-use phalanx_forensics::crucible::{Crucible, VolleyAmalgam};
 use phalanx_proto::prelude::*;
+use phalanx_forensics::prelude::TransientJournal;
+use phalanx_proto::evidence::StorageSequence;
+use phalanx_proto::evidence::WitnessEnvelope;
+use phalanx_forensics::prelude::*;
+use std::time::{Duration};
+use tokio::time::interval;
+use crate::Guardian;
+use crate::config::NodeConfig;
+use tokio::sync::mpsc;
 
 pub struct StorageActor<J: TransientJournal> {
     pub reassembler: Reassembler,
@@ -9,6 +17,18 @@ pub struct StorageActor<J: TransientJournal> {
     pub identity: PhalanxIdentity,
     pub forensic_tx: mpsc::Sender<(NetworkId, Did, GuardianError)>,
     pub local_peer_id: NetworkId,
+}
+
+pub enum StorageCommand {
+    Ingest(ShardChunk, MeshTopic, NetworkId),
+    Retrieval(RetrievalQuery),
+    EmergencySalvage(Vec<PendingEgress>),
+    GetShard {
+        volley_id: VolleyId,
+        sequence_id: StorageSequence,
+        reply_to: tokio::sync::oneshot::Sender<Option<WitnessEnvelope>>,
+    },
+    IngestEnvelope(EnvelopeState),
 }
 
 impl<J: TransientJournal> StorageActor<J> {
