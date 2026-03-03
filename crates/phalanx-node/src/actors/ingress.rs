@@ -2,15 +2,16 @@ use std::collections::HashSet;
 use tracing::{debug, instrument};
 
 // Dictionary Nouns
+use crate::trust::TrustRegistry;
 use crate::vitals::HealthTracker;
 use crate::Guardian;
 use crate::NodeConfig;
 use phalanx_forensics::prelude::TransientJournal;
+use phalanx_forensics::trust::ReputationGate;
 use phalanx_forensics::Reassembler;
 use phalanx_forensics::TrafficGovernor;
 use phalanx_proto::prelude::*;
 use phalanx_proto::trust::Offense;
-use phalanx_proto::trust::TrustRegistry;
 use phalanx_proto::types::NodeMode;
 
 pub struct IngressContext<'a> {

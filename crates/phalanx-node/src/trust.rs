@@ -316,6 +316,14 @@ impl PeerEvaluator for TrustRegistry {
     }
 }
 
+impl ReputationGate for TrustRegistry {
+    fn is_blacklisted(&self, did: &Did) -> bool {
+        self.contacts
+            .get(did)
+            .is_some_and(|r| r.reputation.is_blacklisted)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

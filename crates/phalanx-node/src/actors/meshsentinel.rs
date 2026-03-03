@@ -12,6 +12,8 @@ use crate::StorageActor;
 use phalanx_forensics::prelude::*;
 use phalanx_proto::prelude::*;
 
+use crate::trust::TrustRegistry;
+use phalanx_forensics::trust::{PeerEvaluator, ReputationGate};
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::AudioShard;
 use phalanx_proto::evidence::Evidence;
@@ -19,7 +21,6 @@ use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::VideoShard;
 use phalanx_proto::time::CausalitySession;
 use phalanx_proto::trust::Offense;
-use phalanx_proto::trust::TrustRegistry;
 use phalanx_proto::types::NodeMode;
 use phalanx_proto::VolleyRequest;
 use phalanx_transport::NetworkTransport;
@@ -351,10 +352,9 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
 // Ephemeral Bootstrap
 impl<T: NetworkTransport> MeshSentinel<T, NoOpJournal> {
     pub async fn new_at_path(path: &str, network: T) -> Result<Self, Box<dyn Error>> {
-        let mut config = PhalanxConfig::default();
+        let mut config = NodeConfig::default();
         config.storage.vault_path = path.to_string();
-        let identity =
-            init_identity(std::path::Path::new(path).join("identity.pem")).unwrap_or_default();
+        let identity = PhalanxIdentity::new_ephemeral();
         let trust_registry = TrustRegistry::build(&config).await;
         let (discovery_tx, discovery_rx) = mpsc::channel(100);
         Self::new(
