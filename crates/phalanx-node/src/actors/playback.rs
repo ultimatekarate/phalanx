@@ -1,24 +1,12 @@
 use crate::actors::storage::StorageCommand;
-use anyhow::Result;
-use async_trait::async_trait;
 use phalanx_proto::crypto::SymmetricKey;
-use phalanx_proto::evidence::Evidence;
-use phalanx_proto::evidence::StorageSequence;
-use phalanx_proto::prelude::*;
+use phalanx_proto::evidence::{DataPayload, Evidence, StorageSequence};
+use phalanx_proto::identity::VolleyId;
+use phalanx_proto::playback::PlaybackSink;
+
+use anyhow::{Context, Result};
 use std::time::Duration;
 use tokio::sync::mpsc;
-use zeroize::Zeroize;
-
-#[async_trait]
-pub trait PlaybackSink: Send + Sync {
-    /// Handles a decrypted chunk of forensic data.
-    /// The implementation is responsible for the "Dual Exodus" logic.
-    async fn handle_chunk(&mut self, sequence_id: StorageSequence, mut data: Vec<u8>)
-        -> Result<()>;
-
-    /// Called when the playback sequence is complete or terminated.
-    async fn finalize(&mut self) -> Result<()>;
-}
 
 pub struct PlaybackCoordinator<S: PlaybackSink> {
     storage_tx: mpsc::Sender<StorageCommand>,
@@ -48,7 +36,7 @@ impl<S: PlaybackSink> PlaybackCoordinator<S> {
         loop {
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
 
-            // 2. Ask the StorageActor for the frame
+            // Ask the StorageActor for the frame
             self.storage_tx
                 .send(StorageCommand::GetShard {
                     volley_id: volley_id.clone(),
@@ -58,7 +46,7 @@ impl<S: PlaybackSink> PlaybackCoordinator<S> {
                 .await
                 .context("StorageActor mailbox closed")?;
 
-            // 3. Await the response from the StorageActor
+            // Await the response from the StorageActor
             let shard_opt = reply_rx
                 .await
                 .context("StorageActor dropped the response channel")?;

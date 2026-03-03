@@ -11,6 +11,10 @@ pub mod actors {
 pub mod artifacts;
 pub mod clock;
 pub mod config;
+
+pub mod playback {
+    pub mod sink;
+}
 pub mod hardware {
     pub mod audio;
     pub mod camera;
@@ -37,6 +41,10 @@ pub use clock::TrustedClock;
 pub use config::NodeConfig;
 pub use persistence::journal::FileJournal;
 pub use persistence::vault::Guardian;
+
+// Playback re-exports
+pub use actors::playback::PlaybackCoordinator;
+pub use playback::sink::{ArtifactSink, VideoPlayerSink};
 
 pub mod prelude {
     pub use crate::actors::meshsentinel::MeshSentinel;

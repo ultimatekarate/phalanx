@@ -7,6 +7,7 @@ pub mod evidence; // The What
 pub mod identity; // The Who
 pub mod kademlia; // The Ledger Nouns
 pub mod network;
+pub mod playback;
 pub mod retrieval;
 pub mod storage; // The Vault Nouns
 pub mod telemetry;
@@ -43,6 +44,9 @@ pub mod prelude {
     pub use crate::network::NetworkEvent;
     pub use crate::trust::{PetName, TrustLevel};
     pub use crate::vitals::ControlMessage;
+
+    // Playback Nouns
+    pub use crate::playback::PlaybackSink;
 }
 
 // Re-export the canonical Retrieval Nouns from their home modules.

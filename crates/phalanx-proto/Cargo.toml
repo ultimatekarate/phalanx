@@ -19,6 +19,8 @@ futures = "0.3.30"
 futures-channel = "0.3.30"
 # Errors & Utilities
 thiserror = "2.0.18"
+async-trait = "0.1"
+anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] } # For the "When"
 bs58 = "0.5.1"
 tracing.workspace = true

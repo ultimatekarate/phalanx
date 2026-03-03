@@ -3575,13 +3575,14 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
- "zeroize",
 ]
 
 [[package]]
 name = "phalanx-proto"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "base64",
  "blake3",
  "bs58",
