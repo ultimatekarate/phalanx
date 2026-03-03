@@ -17,7 +17,7 @@ pub struct IngressContext<'a> {
     pub config: &'a PhalanxConfig,
     pub identity: &'a PhalanxIdentity,
     pub network_id: NetworkId,
-    pub clock: &'a TrustedClock,
+    pub clock: &'a dyn TrustedClock,
     pub governor: &'a TrafficGovernor,
     pub mode: NodeMode,
 }

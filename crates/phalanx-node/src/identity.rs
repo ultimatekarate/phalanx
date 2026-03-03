@@ -56,7 +56,6 @@ impl PhalanxIdentity {
     }
 
     pub fn init<P: AsRef<Path>>(path: P) -> Result<Self, IdentityError> {
-
         match Self::load_from_disk(&path) {
             Ok(identity) => {
                 info!(path = ?path.as_ref(), "Sovereign root: RESTORED");
