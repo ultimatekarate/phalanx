@@ -1,14 +1,14 @@
-use phalanx_proto::prelude::*;
+use crate::config::NodeConfig;
+use crate::Guardian;
 use phalanx_forensics::prelude::TransientJournal;
+use phalanx_forensics::prelude::*;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::WitnessEnvelope;
-use phalanx_forensics::prelude::*;
-use std::time::{Duration};
-use tokio::time::interval;
-use crate::Guardian;
-use crate::config::NodeConfig;
+use phalanx_proto::identity::Volley;
+use phalanx_proto::prelude::*;
+use std::time::Duration;
 use tokio::sync::mpsc;
-
+use tokio::time::interval;
 pub struct StorageActor<J: TransientJournal> {
     pub reassembler: Reassembler,
     pub guardian: Guardian,
@@ -215,5 +215,16 @@ impl TransientJournal for NoOpJournal {
     }
     async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError> {
         Ok(vec![])
+    }
+    async fn persist_volley(&self, _volley: &Volley) -> Result<(), ShardError> {
+        Ok(())
+    }
+
+    async fn retrieve_volley(&self, _volley_id: &VolleyId) -> Result<Option<Volley>, ShardError> {
+        Ok(None)
+    }
+
+    async fn prune_stale(&self, _max_age: Duration) -> Result<usize, ShardError> {
+        Ok(0)
     }
 }

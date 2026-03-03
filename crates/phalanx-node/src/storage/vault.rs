@@ -1,12 +1,21 @@
+use crate::FileJournal;
+use async_trait::async_trait;
 use phalanx_forensics::crucible::Crucible;
 use phalanx_forensics::crucible::VolleyAmalgam;
+use phalanx_forensics::prelude::TransientJournal;
+use phalanx_proto::crypto::CryptoError;
+use phalanx_proto::evidence::StorageSequence;
+use phalanx_proto::evidence::WitnessEnvelope;
+use phalanx_proto::identity::Volley;
 use phalanx_proto::prelude::*;
 use phalanx_proto::storage::GuardianError;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::fs;
-use tracing::{debug, info, instrument, warn};
+use tokio::io::SeekFrom;
+use tracing::info;
 
+use crate::PhalanxConfig;
 pub struct Guardian {
     pub crucible: Crucible<VolleyAmalgam>,
     pub vault_path: String,
@@ -110,7 +119,7 @@ impl Guardian {
         );
 
         // Serialize the FragmentedEnvelope as a proof of absence
-        let gap_data = postcard::to_stdvec(&fragmented)
+        let gap_data = postcard::to_allocvec(&fragmented)
             .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
 
         let file_name = format!("{}.gap", fragmented.shard_id);
@@ -150,7 +159,7 @@ impl Guardian {
                 .map_err(|e| GuardianError::StorageFailure(e.to_string()))?;
         }
 
-        let data = postcard::to_stdvec(&volley)
+        let data = postcard::to_allocvec(&volley)
             .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
 
         fs::write(&path, data)
@@ -287,9 +296,8 @@ impl TransientJournal for FileJournal {
             .await
             .map_err(ShardError::Io)?;
 
-        let pending: Vec<PendingEgress> = postcard::from_bytes(&encoded).map_err(|_| {
-            ShardError::Encryption(crate::security::e2ee::CryptoError::DecryptionFailure)
-        })?;
+        let pending: Vec<PendingEgress> = postcard::from_bytes(&encoded)
+            .map_err(|_| ShardError::Encryption(CryptoError::DecryptionFailure))?;
 
         // Cleanup after recovery to prevent replay of the same retry state
         let _ = tokio::fs::remove_file(salvage_path).await;
@@ -301,9 +309,8 @@ impl TransientJournal for FileJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::primitives::identity::{NetworkId, PhalanxIdentity};
-    use crate::primitives::shards::{DataPayload, Evidence, StorageSequence, VideoShard, VolleyId};
-    use crate::primitives::time::PhalanxTimestamp;
+    use phalanx_proto::evidence::Evidence;
+    use phalanx_proto::evidence::VideoShard;
     use tempfile::tempdir;
 
     #[tokio::test]

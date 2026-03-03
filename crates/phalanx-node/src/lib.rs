@@ -16,7 +16,7 @@ pub mod hardware {
     pub mod camera;
 }
 pub mod identity;
-pub mod orchestrator;
+
 pub mod state;
 pub mod storage {
     pub mod journal;

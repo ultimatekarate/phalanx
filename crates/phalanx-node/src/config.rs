@@ -1,6 +1,13 @@
-use phalanx_proto::{Did, MeshTopic, NetworkId};
-use serde::Deserialize;
+use phalanx_proto::prelude::*;
+use phalanx_proto::prelude::{Did, MeshTopic, NetworkId};
+use phalanx_proto::types::{ByteCapacity, UnitInterval};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+use std::env;
+use std::fmt;
+use std::fs;
+use std::path::Path;
 
 #[derive(Debug, Deserialize)]
 pub struct NodeConfig {
@@ -31,14 +38,6 @@ impl NodeConfig {
         s.try_deserialize()
     }
 }
-
-use crate::base::types::UnitInterval;
-use crate::base::types::{ByteCapacity, MeshTopic};
-use serde::{Deserialize, Serialize};
-use std::env;
-use std::fmt;
-use std::fs;
-use std::path::Path;
 
 #[derive(Debug)]
 pub enum ConfigError {

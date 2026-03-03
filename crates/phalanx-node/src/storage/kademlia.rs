@@ -1,11 +1,13 @@
+use libp2p::kad::{ProviderRecord, Record, RecordKey};
+use libp2p::PeerId;
 use phalanx_forensics::kademlia::*;
 use phalanx_forensics::trust::PeerEvaluator;
+use phalanx_proto::kademlia::DhtProviderSet;
 use phalanx_proto::prelude::*;
 use redb::{Database, TableDefinition};
+use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
-use tracing::span::Record;
-
 pub type PhalanxKadStore = RedbStore;
 const DHT_RECORDS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dht_records");
 const DHT_RECORDS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dht_records");
