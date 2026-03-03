@@ -2,7 +2,7 @@
 
 use crate::crucible::{Crucible, Mold};
 use crate::prelude::TransientJournal;
-
+use image::DynamicImage;
 use phalanx_proto::evidence::{
     AudioShard, ChunkType, StorageSequence, VideoShard, WitnessEnvelope,
 };
@@ -14,6 +14,61 @@ use phalanx_proto::prelude::{
 use phalanx_proto::types::PowerState;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+// BRIDGE API (Restored for Hardware Drivers) ---
+
+/// RESTORED: Compresses a raw RGB frame into JPEG format.
+pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let img = DynamicImage::ImageRgb8(
+        image::ImageBuffer::from_raw(width, height, raw_data)
+            .ok_or("Failed to create image buffer")?,
+    );
+
+    let mut output = Vec::new();
+    let encoder = image::codecs::jpeg::JpegEncoder::new(&mut output);
+    img.write_with_encoder(encoder)
+        .map_err(|e| format!("JPEG Compression error: {}", e))?;
+
+    Ok(output)
+}
+
+/// RESTORED: Factory for creating a network-ready VideoShard from a batch of frames.
+pub fn create_video_shard(
+    frames: Vec<Vec<u8>>,
+    sequence: StorageSequence,
+    fps: u8,
+    volley: VolleyId,
+) -> Result<VideoShard, ShardError> {
+    let raw_bytes = postcard::to_allocvec(&frames)
+        .map_err(|e| ShardError::InvalidSize(format!("Serialization fail: {}", e)))?;
+
+    Ok(VideoShard {
+        timestamp: PhalanxTimestamp::now(),
+        sequence_id: sequence,
+        // Automatically applies the new LZ4 block compression
+        payload: DataPayload::Compressed(compress_payload(&raw_bytes)),
+        fps,
+        volley_id: volley,
+    })
+}
+
+/// RESTORED: Factory for creating a network-ready AudioShard.
+pub fn create_audio_shard(
+    data: Vec<u8>,
+    sequence: StorageSequence,
+    rate: u32,
+    channels: u8,
+    volley: VolleyId,
+) -> Result<AudioShard, ShardError> {
+    Ok(AudioShard {
+        payload: DataPayload::Compressed(compress_payload(&data)),
+        sequence_id: sequence,
+        sample_rate: rate,
+        channels,
+        volley_id: volley,
+        timestamp: PhalanxTimestamp::now(),
+    })
+}
 
 // --- BLOCK-LEVEL UTILITIES ---
 
