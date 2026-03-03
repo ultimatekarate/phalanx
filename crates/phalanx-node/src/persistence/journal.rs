@@ -3,7 +3,6 @@
 use async_trait::async_trait;
 use phalanx_proto::prelude::*;
 use std::path::PathBuf;
-use tokio::io::AsyncReadExt;
 
 pub struct FileJournal {
     pub file_path: PathBuf,

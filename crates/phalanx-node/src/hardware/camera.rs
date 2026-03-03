@@ -238,7 +238,7 @@ impl PhalanxCameraThread {
 mod tests {
     use super::*;
     use crate::config::HardwareConfig;
-    use std::sync::mpsc;
+    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_time_drift_compensation() {
@@ -275,7 +275,7 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_bridge_integration() {
         // Verifies the spawn() method correctly pumps VideoShards to the channel
-        let (tx, mut rx) = mpsc::channel();
+        let (tx, mut rx) = mpsc::channel(10);
         let config = HardwareConfig {
             camera_fps: 10, // Fast enough for test
             audio_sample_rate: 44100,

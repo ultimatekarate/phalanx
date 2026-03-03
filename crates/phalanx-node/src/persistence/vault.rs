@@ -326,7 +326,7 @@ mod tests {
         let temp_dir = tempdir().expect("Failed to create temporary directory");
         let vault_path = temp_dir.path().to_string_lossy().to_string();
 
-        let (identity, _) = PhalanxIdentity::generate().unwrap();
+        let identity = PhalanxIdentity::new_ephemeral();
         let config = NodeConfig::default();
         let mut guardian = Guardian::new(&vault_path, &config, identity.did.clone());
 
@@ -342,9 +342,13 @@ mod tests {
         };
 
         // 2. Seal the unit (The 4th argument is None for the start of the chain)
-        let envelope =
-            WitnessEnvelope::new(Evidence::Video(shard), &identity, NetworkId::random(), None)
-                .expect("WitnessEnvelope construction failed");
+        let envelope = WitnessEnvelope::sign_envelope(
+            Evidence::Video(shard),
+            &identity,
+            NetworkId::random(),
+            None,
+        )
+        .expect("WitnessEnvelope construction failed");
 
         let result = guardian
             .ingest_envelope(EnvelopeState::Intact(envelope))
@@ -371,7 +375,7 @@ mod tests {
         let temp_dir = tempdir().expect("Failed to create temporary directory");
         let vault_path = temp_dir.path().to_string_lossy().to_string();
 
-        let (identity, _) = PhalanxIdentity::generate().unwrap();
+        let identity = PhalanxIdentity::new_ephemeral();
         let config = NodeConfig::default();
         let mut guardian = Guardian::new(&vault_path, &config, identity.did.clone());
 
@@ -384,11 +388,11 @@ mod tests {
         };
 
         // FIX: Add 'None' as the 4th argument (the causality link)
-        let envelope = WitnessEnvelope::new(
+        let envelope = WitnessEnvelope::sign_envelope(
             Evidence::Video(shard),
             &identity,
             NetworkId::random(),
-            None, // Start of causality chain
+            None,
         )
         .expect("WitnessEnvelope construction failed");
 

@@ -129,9 +129,9 @@ impl PhalanxAudioThread {
                     let shard_result = create_audio_shard(
                         chunk,
                         sequence_id,
-                        hw_config.audio_sample_rate, // Arg 3
-                        hw_config.audio_channels,    // Arg 4
-                        volley_id,                   // Arg 5
+                        hw_config.audio_sample_rate,
+                        hw_config.audio_channels,
+                        volley_id,
                     );
 
                     match shard_result {
