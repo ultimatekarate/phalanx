@@ -42,7 +42,7 @@ tracing-appender = "0.2"
 bip39 = "2.0"
 ed25519-dalek = "2.0"
 rand = "0.10.0"
-sntpc = "0.8.1"
+sntpc = {version = "0.8.1", features = ["std", "utils"]}
 
 # Storage & Networking
 redb = "3.1.0"

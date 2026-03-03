@@ -152,3 +152,21 @@ impl Sub<u32> for StorageSequence {
         StorageSequence(self.0 - rhs)
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct AudioFrame {
+    pub data: Vec<u8>,  // PCM Data
+    pub timestamp: u64, // True Monotonic Network Time (ms)
+    pub sequence: u64,
+    pub sample_rate: u32,
+    pub channels: u8,
+}
+
+#[derive(Debug, Clone)]
+pub struct VideoFrame {
+    pub data: Vec<u8>,
+    pub timestamp: u64, // True Monotonic Network Time (ms)
+    pub sequence: u64,
+    pub width: u32,
+    pub height: u32,
+}

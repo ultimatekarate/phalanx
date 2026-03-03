@@ -1,9 +1,18 @@
-use phalanx_forensics::prelude::*;
+use crate::config::HardwareConfig;
+use phalanx_forensics::reassembler::create_audio_shard;
+use phalanx_proto::evidence::AudioShard;
+use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::prelude::*;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use std::time::Duration;
+use std::time::Instant;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+
+use std::thread;
 use tokio::sync::{broadcast, mpsc}; // Bring in AudioWeaver
 pub struct PhalanxAudioThread {
     sample_rate: u32,
@@ -112,8 +121,9 @@ impl PhalanxAudioThread {
                 if byte_buffer.len() >= bytes_per_sec {
                     let chunk = byte_buffer.split_off(0);
 
+                    let volley_id = VolleyId::new(volley_id);
                     // FIX: Added missing arguments (sample_rate, channels)
-                    let mut shard = shards::create_audio_shard(
+                    let mut shard = create_audio_shard(
                         chunk,
                         sequence_id,
                         hw_config.audio_sample_rate, // Arg 3
@@ -130,10 +140,20 @@ impl PhalanxAudioThread {
                     }
 
                     // D. Transmission
-                    if tx.send(shard).await.is_err() {
-                        error!("Main channel closed. Stopping Audio Processor.");
-                        self.stop();
-                        break;
+                    match shard {
+                        Ok(actual_shard) => {
+                            // 2. Now 'actual_shard' is the AudioShard type the channel expects
+                            if tx.send(actual_shard).await.is_err() {
+                                error!("Main channel closed (MeshSentinel dropped). Stopping Audio Processor.");
+                                self.stop();
+                                break; // Exit loop because the consumer is gone
+                            }
+                        }
+                        Err(e) => {
+                            // 3. Handle the ShardError without killing the whole thread
+                            error!("Transient audio encoding failure: {:?}. Skipping shard.", e);
+                            // We do NOT break here; we want to try the next shard
+                        }
                     }
 
                     sequence_id += 1;

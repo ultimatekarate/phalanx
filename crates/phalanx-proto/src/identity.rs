@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
+pub const IDENTITY_VERSION: u32 = 1;
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize, Default,
 )]
@@ -174,8 +176,6 @@ pub struct PhalanxIdentity {
 }
 
 impl PhalanxIdentity {
-    pub const CURRENT_VERSION: u32 = 1;
-
     /// Generates a new, non-persistent identity.
     ///
     /// This is a "Verb" performed within the Dictionary to initialize the "Noun."
@@ -200,7 +200,7 @@ impl PhalanxIdentity {
         let did = Did(format!("did:key:z{}", multibase_pubkey));
 
         Self {
-            version: Self::CURRENT_VERSION,
+            version: IDENTITY_VERSION,
             did,
             network_id,
             keypair: signing_key,

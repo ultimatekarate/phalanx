@@ -1,6 +1,8 @@
+use crate::behaviour::PhalanxBehaviour;
 use crate::{PeerMapper, TransportAdapter, TransportError};
 use async_trait::async_trait;
 use futures::StreamExt; // Required to bring StreamExt::select_next_some into scope
+use libp2p::kad::store::RecordStore;
 use libp2p::swarm::Swarm;
 use phalanx_proto::identity::NetworkId;
 use phalanx_proto::network::NetworkEvent;
@@ -24,7 +26,10 @@ pub struct Libp2pAdapter {
 impl Libp2pAdapter {
     /// Initializes the Actor Pattern.
     /// The Swarm is moved into a detached Tokio task to preserve thread safety (Sync).
-    pub fn new(mut swarm: Swarm<crate::behaviour::PhalanxBehaviour>) -> Self {
+    pub fn new<S>(mut swarm: Swarm<PhalanxBehaviour<S>>) -> Self
+    where
+        S: RecordStore + Send + Sync + 'static,
+    {
         let (command_tx, mut command_rx) = mpsc::channel::<TransportCommand>(128);
         let (_event_tx, event_rx) = mpsc::channel::<NetworkEvent>(1024);
 

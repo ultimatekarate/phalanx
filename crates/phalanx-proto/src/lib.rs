@@ -17,11 +17,14 @@ pub mod types;
 pub mod vitals; // The Health Nouns
 pub mod prelude {
     // Identity Nouns
-    pub use crate::identity::{Did, NetworkId, PhalanxIdentity, ShardId, VolleyId};
+    pub use crate::identity::{
+        Did, NetworkId, PhalanxIdentity, ShardId, VolleyId, IDENTITY_VERSION,
+    };
 
     // Evidence Nouns
     pub use crate::evidence::{
-        DataPayload, EnvelopeState, FragmentedEnvelope, ShardChunk, ShardGapReport, SignatureHash,
+        AudioFrame, DataPayload, EnvelopeState, FragmentedEnvelope, ShardChunk, ShardGapReport,
+        SignatureHash, VideoFrame,
     };
 
     pub use crate::constants::{VOLLEY_SIZE_THRESHOLD, VOLLEY_TIME_THRESHOLD};

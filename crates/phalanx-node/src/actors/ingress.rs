@@ -4,7 +4,7 @@ use tracing::{debug, instrument};
 // Dictionary Nouns
 use crate::vitals::HealthTracker;
 use crate::Guardian;
-use crate::PhalanxConfig;
+use crate::NodeConfig;
 use phalanx_forensics::prelude::TransientJournal;
 use phalanx_forensics::Reassembler;
 use phalanx_forensics::TrafficGovernor;
@@ -14,7 +14,7 @@ use phalanx_proto::trust::TrustRegistry;
 use phalanx_proto::types::NodeMode;
 
 pub struct IngressContext<'a> {
-    pub config: &'a PhalanxConfig,
+    pub config: &'a NodeConfig,
     pub identity: &'a PhalanxIdentity,
     pub network_id: NetworkId,
     pub clock: &'a dyn TrustedClock,

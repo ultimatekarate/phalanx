@@ -1,9 +1,9 @@
 use crate::FileJournal;
+use crate::NodeConfig;
 use async_trait::async_trait;
 use phalanx_forensics::crucible::Crucible;
 use phalanx_forensics::crucible::VolleyAmalgam;
 use phalanx_forensics::prelude::TransientJournal;
-use phalanx_proto::crypto::CryptoError;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::Volley;
@@ -15,7 +15,6 @@ use tokio::fs;
 use tokio::io::SeekFrom;
 use tracing::info;
 
-use crate::PhalanxConfig;
 pub struct Guardian {
     pub crucible: Crucible<VolleyAmalgam>,
     pub vault_path: String,
@@ -23,7 +22,7 @@ pub struct Guardian {
 }
 
 impl Guardian {
-    pub fn new(vault_path: &str, _config: &PhalanxConfig, local_did: Did) -> Self {
+    pub fn new(vault_path: &str, _config: &NodeConfig, local_did: Did) -> Self {
         Self {
             crucible: Crucible::new(VolleyAmalgam, Duration::from_secs(5)),
             vault_path: vault_path.to_string(),
@@ -296,8 +295,8 @@ impl TransientJournal for FileJournal {
             .await
             .map_err(ShardError::Io)?;
 
-        let pending: Vec<PendingEgress> = postcard::from_bytes(&encoded)
-            .map_err(|e| ShardError::Encryption(e.to_string()))?;
+        let pending: Vec<PendingEgress> =
+            postcard::from_bytes(&encoded).map_err(|e| ShardError::Encryption(e.to_string()))?;
 
         // Cleanup after recovery to prevent replay of the same retry state
         let _ = tokio::fs::remove_file(salvage_path).await;
@@ -320,7 +319,7 @@ mod tests {
         let vault_path = temp_dir.path().to_string_lossy().to_string();
 
         let (identity, _) = PhalanxIdentity::generate().unwrap();
-        let config = PhalanxConfig::default();
+        let config = NodeConfig::default();
         let mut guardian = Guardian::new(&vault_path, &config, identity.did.clone());
 
         // Define a specific VolleyId for this stream
@@ -365,7 +364,7 @@ mod tests {
         let vault_path = temp_dir.path().to_string_lossy().to_string();
 
         let (identity, _) = PhalanxIdentity::generate().unwrap();
-        let config = PhalanxConfig::default();
+        let config = NodeConfig::default();
         let mut guardian = Guardian::new(&vault_path, &config, identity.did.clone());
 
         let shard = VideoShard {
