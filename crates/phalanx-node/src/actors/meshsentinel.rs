@@ -12,6 +12,7 @@ use crate::StorageActor;
 use phalanx_forensics::prelude::*;
 use phalanx_proto::prelude::*;
 
+use crate::identity::PhalanxNodeIdentityExt;
 use crate::trust::TrustRegistry;
 use phalanx_forensics::trust::{PeerEvaluator, ReputationGate};
 use phalanx_proto::crypto::SymmetricKey;
@@ -23,6 +24,7 @@ use phalanx_proto::time::CausalitySession;
 use phalanx_proto::trust::Offense;
 use phalanx_proto::types::NodeMode;
 use phalanx_proto::VolleyRequest;
+use phalanx_transport::identity_ext::Libp2pExt;
 use phalanx_transport::NetworkTransport;
 use std::collections::VecDeque;
 use std::error::Error;
@@ -30,6 +32,13 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
+
+/// A lightweight request broadcast to the mesh when a playback gap is detected.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ShardDiscoveryRequest {
+    volley_id: VolleyId,
+    sequence_id: StorageSequence,
+}
 
 pub struct MeshSentinel<T: NetworkTransport, J: TransientJournal> {
     pub trust_registry: TrustRegistry,
@@ -138,7 +147,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                         NetworkEvent::DataReceived { origin, topic, data } => {
                             self.handle_network_ingress(origin, &data, topic).await;
                         }
-                        NetworkEvent::RetrievalRequested { origin, request, channel_id } => {
+                        NetworkEvent::VolleyRequested { origin, request, channel_id } => {
                             self.execute_secure_retrieval(origin, request, channel_id, local_network_id).await;
                         }
                         NetworkEvent::Shutdown => {
@@ -197,6 +206,26 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         }
     }
 
+    /// Processes outbound media evidence: signs, encrypts, and publishes to the mesh.
+    /// TODO: Implement full causality chain signing and encryption pipeline.
+    async fn process_media_egress(&mut self, evidence: Evidence, _local_id: NetworkId) {
+        let topic = match &evidence {
+            Evidence::Video(_) => &self.config.network.video_topic,
+            Evidence::Audio(_) => &self.config.network.audio_topic,
+        };
+
+        match postcard::to_allocvec(&evidence) {
+            Ok(data) => {
+                if let Err(e) = self.network.publish(topic, data).await {
+                    tracing::error!("Failed to publish media egress: {}", e);
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to serialize media evidence: {}", e);
+            }
+        }
+    }
+
     pub fn spawn_playback<S: PlaybackSink + 'static>(
         &self,
         volley_id: VolleyId,
@@ -244,17 +273,18 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                 .await;
             return;
         }
-        let (reply_tx, reply_rx) = oneshot::channel();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let _ = self
             .storage_tx
             .send(StorageCommand::Retrieval(RetrievalQuery {
-                volley_id: request.volley_id.clone(),
+                origin,
+                request,
                 reply_to: reply_tx,
             }))
             .await;
 
         let response = match reply_rx.await {
-            Ok(Ok(envelopes)) => {
+            Ok(envelopes) => {
                 let orchestrator = RetrievalOrchestrator::new();
                 match orchestrator.verify_mesh_egress(envelopes, &local_id).await {
                     Ok(verified) => VolleyResponse::Success(verified),
@@ -288,15 +318,34 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                     pending.attempt_count += 1;
                     if pending.attempt_count < 3 {
                         let delay = Duration::from_millis(500 * (2u64.pow(pending.attempt_count)));
-                        pending.next_attempt = PhalanxTimestamp::from_millis(
-                            now.as_millis() + delay.as_millis() as u64,
-                        );
+                        pending.next_attempt =
+                            PhalanxTimestamp::from_millis(now.0 + delay.as_millis() as u64);
                         retry_queue.push_back(pending);
                     }
                 }
             }
         }
         self.pending_egress = retry_queue;
+    }
+
+    /// Attempts to send a response over the network. On failure, enqueues
+    /// into the pending_egress retry queue for exponential-backoff redelivery.
+    async fn dispatch_resilient_response(&mut self, channel_id: String, response: VolleyResponse) {
+        if let Err(_) = self
+            .network
+            .send_response(&channel_id, response.clone())
+            .await
+        {
+            tracing::warn!(channel = %channel_id, "Response dispatch failed, queuing for retry");
+            self.pending_egress.push_back(PendingEgress {
+                channel_id,
+                response,
+                attempt_count: 1,
+                next_attempt: PhalanxTimestamp::from_millis(
+                    PhalanxTimestamp::now().0 + 1000, // First retry after 1s
+                ),
+            });
+        }
     }
 
     async fn handle_network_ingress(&mut self, peer_id: NetworkId, data: &[u8], topic: MeshTopic) {
