@@ -1,3 +1,4 @@
+use crate::behaviour::kad::store::RecordStore;
 use crate::codec::PhalanxRetrievalProtocol;
 use crate::events::PhalanxEvent;
 use libp2p::kad::RecordKey;
@@ -12,10 +13,10 @@ pub type PhalanxKadStore = kad::store::MemoryStore;
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "PhalanxEvent")]
-pub struct PhalanxBehaviour {
+pub struct PhalanxBehaviour<S: RecordStore + Send + Sync + 'static> {
     pub gossipsub: gossipsub::Behaviour,
     pub mdns: mdns::tokio::Behaviour,
-    pub kademlia: kad::Behaviour<PhalanxKadStore>,
+    pub kademlia: kad::Behaviour<S>,
     pub identify: identify::Behaviour,
     pub relay_server: relay::Behaviour,
     pub relay_client: relay::client::Behaviour,
@@ -24,7 +25,10 @@ pub struct PhalanxBehaviour {
     pub retrieval: request_response::Behaviour<PhalanxRetrievalProtocol>,
 }
 
-impl PhalanxBehaviour {
+impl<S> PhalanxBehaviour<S>
+where
+    S: RecordStore + Send + Sync + 'static,
+{
     /// Announces the local node as a Stronghold provider to the network.
     ///
     /// # Sentinel Argument

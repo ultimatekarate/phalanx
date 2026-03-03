@@ -1,3 +1,4 @@
+use crate::builder::kad::store::RecordStore;
 use futures::future::Either;
 use libp2p::{
     autonat, core::upgrade::Version, dcutr, gossipsub, identify, identity::Keypair, kad, mdns,
@@ -12,6 +13,12 @@ use phalanx_proto::{
     constants::RETRIEVAL_PROTOCOL_ID,
     types::{PhalanxPhysics, VitalityRate},
 };
+
+#[derive(Default)]
+pub struct TransportConfig {
+    pub listening_port: u16,
+    pub bootstrap_peers: Vec<String>,
+}
 
 /// Constructs the foundational transport stack for the node.
 pub fn build_base_transport(
@@ -55,14 +62,17 @@ pub fn build_base_transport(
 }
 
 /// Instantiates the composite network behaviour logic.
-pub fn build_behaviour(
+pub fn build_behaviour<S>(
     local_key: &Keypair,
     max_chunk_size_bytes: usize,
     protocol_version: String,
     physics: &PhalanxPhysics,
     relay_client: relay::client::Behaviour,
-    mut kademlia: kad::Behaviour<PhalanxKadStore>,
-) -> Result<PhalanxBehaviour, Box<dyn Error>> {
+    mut kademlia: kad::Behaviour<S>,
+) -> Result<PhalanxBehaviour<S>, Box<dyn Error>>
+where
+    S: RecordStore + Send + Sync + 'static,
+{
     let local_peer_id = local_key.public().to_peer_id();
 
     // Calculate gossipsub heartbeat based on physics simulation state
@@ -115,24 +125,44 @@ pub fn build_behaviour(
 
 #[cfg(test)]
 mod tests {
-    use crate::builder::Keypair;
+    use super::*;
+    use crate::builder::pnet::PreSharedKey;
+    use libp2p::identity::Keypair;
+    use libp2p::kad::store::MemoryStore;
     use phalanx_proto::prelude::*;
-    struct MockEvaluator;
-
-    impl PeerEvaluator for MockEvaluator {
-        fn evaluate_reputation(&self, _peer_id: &NetworkId) -> f32 {
-            1.0 // Baseline neutral for tests
-        }
-    }
-
-    fn get_test_config() -> (PhalanxConfig, PhalanxPhysics) {
-        let config = PhalanxConfig::default();
-        let physics = PhalanxPhysics::default_wan();
-        (config, physics)
-    }
+    use std::fs::{self, File};
+    use std::io::Write;
+    use std::path::Path;
+    use tempfile::tempdir;
 
     fn generate_test_identity() -> Keypair {
         Keypair::generate_ed25519()
+    }
+    pub fn generate_swarm_key(path: &str) -> std::io::Result<()> {
+        use rand::RngCore;
+        use std::fs;
+        let mut key = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+        fs::write(path, key)
+    }
+
+    pub fn load_swarm_key(path: &Path) -> Option<PreSharedKey> {
+        match fs::read(path) {
+            Ok(bytes) => {
+                if bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    Some(PreSharedKey::new(arr))
+                } else {
+                    tracing::error!(
+                        "Swarm key at {:?} is corrupt (wrong length). Ignoring.",
+                        path
+                    );
+                    None
+                }
+            }
+            Err(_) => None,
+        }
     }
 
     #[test]
@@ -162,56 +192,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_behaviour_initialization() {
+    async fn test_pure_transport_initialization() {
         let keypair = generate_test_identity();
-        let (config, physics) = get_test_config();
+        let physics = PhalanxPhysics::default_wan();
         let local_peer_id = keypair.public().to_peer_id();
 
-        // Setup ephemeral RedbStore for testing
-        let temp_dir = tempdir().unwrap();
-        let db_path = temp_dir.path().join("test_dht.redb");
-        let local_network_id = NetworkId::from(local_peer_id);
-        let store = RedbStore::new(&db_path, local_network_id, Arc::new(MockEvaluator)).unwrap();
+        // STRICT BOUNDARY: Use libp2p's built-in MemoryStore.
+        let store = MemoryStore::new(local_peer_id);
+        let kademlia = libp2p::kad::Behaviour::with_config(
+            local_peer_id,
+            store,
+            libp2p::kad::Config::default(),
+        );
+        let (_, relay_client_behaviour) = libp2p::relay::client::new(local_peer_id);
 
-        let kademlia = kad::Behaviour::with_config(local_peer_id, store, kad::Config::default());
-
-        let (_, relay_client_behaviour) = relay::client::new(local_peer_id);
-
-        // Pass the constructed kademlia
         let result = build_behaviour(
             &keypair,
-            &config,
-            &physics,
-            relay_client_behaviour,
-            kademlia,
+            1024 * 1024,                       // ARG 2: max_chunk_size_bytes
+            "/phalanx/test/1.0.0".to_string(), // ARG 3: protocol_version
+            &physics,                          // ARG 4: physics
+            relay_client_behaviour,            // ARG 5: relay_client
+            kademlia,                          // ARG 6: kademlia
         );
-
         assert!(
             result.is_ok(),
-            "PhalanxBehaviour should initialize with valid config"
+            "Unit: Pure transport behaviour failed to initialize"
         );
     }
 
-    #[test]
-    fn test_stronghold_announcement_query_generation() {
+    #[tokio::test]
+    async fn test_stronghold_announcement_query_generation() {
         let keypair = generate_test_identity();
-        let (config, physics) = get_test_config();
+        let physics = PhalanxPhysics::default_wan();
+
         let local_peer_id = keypair.public().to_peer_id();
-        let network_id = NetworkId::from(local_peer_id); // Explicit ID
-        let temp_dir = tempdir().unwrap();
-        let db_path = temp_dir.path().join("test_dht.redb");
-        let local_network_id = NetworkId::from(local_peer_id);
-        let store = RedbStore::new(&db_path, local_network_id, Arc::new(MockEvaluator)).unwrap();
+        let network_id = NetworkId(local_peer_id.to_string());
 
-        let kademlia = kad::Behaviour::with_config(local_peer_id, store, kad::Config::default());
+        // STRICT BOUNDARY: Use MemoryStore to isolate transport testing
+        let store = MemoryStore::new(local_peer_id);
+        let kademlia = libp2p::kad::Behaviour::with_config(
+            local_peer_id,
+            store,
+            libp2p::kad::Config::default(),
+        );
+        let (_, relay_client_behaviour) = libp2p::relay::client::new(local_peer_id);
 
-        let (_, relay_client_behaviour) = relay::client::new(local_peer_id);
         let mut behaviour = build_behaviour(
             &keypair,
-            &config,
-            &physics,
-            relay_client_behaviour,
-            kademlia,
+            1024 * 1024,                       // ARG 2: max_chunk_size_bytes
+            "/phalanx/test/1.0.0".to_string(), // ARG 3: protocol_version
+            &physics,                          // ARG 4: physics
+            relay_client_behaviour,            // ARG 5: relay_client
+            kademlia,                          // ARG 6: kademlia
         )
         .expect("Setup failed");
 

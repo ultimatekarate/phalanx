@@ -31,7 +31,7 @@ pub mod prelude {
     pub use crate::types::PhalanxPhysics;
 
     // Error Nouns
-    pub use crate::error::{ShardError, TimeError};
+    pub use crate::error::*;
     pub use crate::retrieval::VolleyResponse;
     pub use crate::storage::{GuardianError, PendingEgress};
 

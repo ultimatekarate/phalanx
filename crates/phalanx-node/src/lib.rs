@@ -41,6 +41,7 @@ pub use storage::vault::Guardian;
 pub mod prelude {
     pub use crate::actors::meshsentinel::MeshSentinel;
     pub use crate::clock::TrustedClock;
+    pub use crate::config::NodeConfig;
     pub use crate::storage::journal::FileJournal;
     pub use crate::storage::vault::Guardian;
     pub use crate::NodeResult;

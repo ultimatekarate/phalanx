@@ -2,7 +2,10 @@ use crate::clock::TrustedClock; // Node Hands: The actual Clock
 use phalanx_forensics::judge::IntegrityGate; // Verbs: The Integrity Gate (Gate 3)
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*; // Nouns: NetworkId, ShardError, WitnessEnvelope
+use phalanx_proto::VolleyRequest;
+use tokio::sync::oneshot;
 use tracing::info;
+
 pub struct RetrievalOrchestrator {
     pub clock: TrustedClock,
 }
@@ -41,4 +44,18 @@ impl RetrievalOrchestrator {
         );
         Ok(verified)
     }
+}
+
+/// Encapsulates an external request for forensic evidence, bridging the
+/// network boundary to the internal storage engine.
+pub struct RetrievalQuery {
+    /// The forensic identity of the node requesting the data.
+    pub origin: NetworkId,
+
+    /// The strongly-typed parameters of the requested evidence.
+    pub request: VolleyRequest,
+
+    /// The return channel to dispatch the result back to the Sentinel
+    /// for network routing.
+    pub reply_to: oneshot::Sender<VolleyResponse>,
 }

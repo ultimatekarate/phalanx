@@ -11,7 +11,6 @@ use std::path::Path;
 
 #[derive(Debug, Deserialize)]
 pub struct NodeConfig {
-    pub identity: IdentityConfig,
     pub storage: StorageConfig,
     pub network: NetworkConfig,
     pub hardware: HardwareConfig,
@@ -136,11 +135,11 @@ impl Default for HardwareConfig {
     }
 }
 
-impl PhalanxConfig {
+impl NodeConfig {
     #[allow(clippy::missing_errors_doc)]
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let content = fs::read_to_string(path)?;
-        let config: PhalanxConfig = toml::from_str(&content)?;
+        let config: NodeConfig = toml::from_str(&content)?;
         Ok(config)
     }
 
@@ -178,7 +177,7 @@ impl PhalanxConfig {
     }
 }
 
-impl Default for PhalanxConfig {
+impl Default for NodeConfig {
     /// Provides the standard clinical default configuration.
     fn default() -> Self {
         Self {

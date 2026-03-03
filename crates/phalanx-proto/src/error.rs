@@ -53,3 +53,17 @@ pub enum TimeError {
     #[error("Future: {0}ms ahead")]
     Future(u64),
 }
+
+#[derive(Debug, thiserror::Error)]
+pub enum IdentityError {
+    #[error("Entropy generation failed: {0}")]
+    EntropyError(String),
+    #[error("Mnemonic parsing failed: {0}")]
+    MnemonicError(String),
+    #[error("Cryptographic derivation failed: {0}")]
+    CryptoError(String),
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
+    #[error("Identity data corruption: {0}")]
+    Corruption(String),
+}

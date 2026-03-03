@@ -1,3 +1,4 @@
+use crate::actors::retrieval::RetrievalQuery;
 use crate::config::NodeConfig;
 use crate::Guardian;
 use phalanx_forensics::prelude::TransientJournal;
@@ -9,6 +10,7 @@ use phalanx_proto::prelude::*;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::interval;
+
 pub struct StorageActor<J: TransientJournal> {
     pub reassembler: Reassembler,
     pub guardian: Guardian,
