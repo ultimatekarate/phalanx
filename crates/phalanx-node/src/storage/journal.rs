@@ -1,20 +1,11 @@
 // crates/phalanx-node/src/storage/journal.rs
 
 use async_trait::async_trait;
-use phalanx_forensics::reassembler::TransientJournal; // The Concept
 use phalanx_proto::prelude::*;
-use std::io::SeekFrom;
-use std::path::PathBuf;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tracing::{info, warn};
 
 use async_trait::async_trait;
-use phalanx_forensics::reassembler::TransientJournal;
-use phalanx_proto::prelude::*;
-use std::io::SeekFrom;
 use std::path::PathBuf;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tracing::{info, warn};
+use tokio::io::AsyncReadExt;
 
 pub struct FileJournal {
     file_path: PathBuf,

@@ -1,3 +1,10 @@
+use phalanx_proto::crypto::SymmetricKey;
+use phalanx_proto::evidence::Evidence;
+use phalanx_proto::evidence::StorageSequence;
+use phalanx_proto::prelude::*;
+use std::sync::mpsc;
+use std::time::Duration;
+
 pub struct PlaybackCoordinator<S: PlaybackSink> {
     storage_tx: mpsc::Sender<StorageCommand>,
     decryption_key: Option<SymmetricKey>,

@@ -1,13 +1,17 @@
+use phalanx_forensics::Reassembler;
+use phalanx_proto::evidence::ChunkType;
+use phalanx_proto::evidence::Evidence;
+use phalanx_proto::evidence::StorageSequence;
+use phalanx_proto::evidence::VideoShard;
+use phalanx_proto::evidence::WitnessEnvelope;
+use phalanx_proto::prelude::*;
+use phalanx_proto::prelude::{EnvelopeState, PhalanxIdentity, ShardChunk, ShardId};
+
 fn create_mock_chunks(
     identity: &PhalanxIdentity,
     shard_id: ShardId,
     total: u32,
 ) -> Vec<ShardChunk> {
-    use phalanx_core::primitives::shards::{
-        DataPayload, Evidence, StorageSequence, VideoShard, VolleyId,
-    };
-    use phalanx_core::primitives::time::PhalanxTimestamp;
-
     // 1. Create a REAL WitnessEnvelope
     let evidence = Evidence::Video(VideoShard {
         timestamp: PhalanxTimestamp::now(),
@@ -18,10 +22,10 @@ fn create_mock_chunks(
     });
 
     let envelope =
-        WitnessEnvelope::new(evidence, identity, identity.to_network_id(), None).unwrap();
+        WitnessEnvelope::seal(evidence, identity, identity.to_network_id(), None).unwrap();
 
     // 2. Serialize it to actual bytes
-    let full_bytes = postcard::to_stdvec(&envelope).unwrap();
+    let full_bytes = postcard::to_vec(&envelope).unwrap();
 
     // 3. Split those bytes into chunks
     let chunk_size = (full_bytes.len() + total as usize - 1) / total as usize;
@@ -37,7 +41,7 @@ fn create_mock_chunks(
                 chunk_index: i,
                 total_chunks: total,
                 owner_did: identity.did.clone(),
-                chunk_type: phalanx_core::primitives::shards::ChunkType::Witnessed,
+                chunk_type: ChunkType::Witnessed,
                 data,
             }
         })
@@ -47,7 +51,7 @@ fn create_mock_chunks(
 #[tokio::test]
 async fn test_reliability_swiss_cheese_recovery() {
     // 1. Setup Context Dependencies
-    let (identity, _) = PhalanxIdentity::generate().unwrap();
+    let identity = PhalanxIdentity::new_ephemeral();
     let mut journal = NoOpJournal; // Use a No-Op journal for simple logic tests
 
     let mut reassembler = Reassembler::new();
@@ -81,7 +85,7 @@ async fn test_reliability_swiss_cheese_recovery() {
 
 #[tokio::test]
 async fn test_reliability_deduplication_gate() {
-    let (identity, _) = PhalanxIdentity::generate().unwrap();
+    let identity = PhalanxIdentity::new_ephemeral();
     let mut reassembler = Reassembler::new();
     let mut journal = NoOpJournal;
     let shard_id = ShardId(202);

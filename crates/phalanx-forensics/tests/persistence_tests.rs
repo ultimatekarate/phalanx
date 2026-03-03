@@ -1,16 +1,14 @@
-use phalanx_core::primitives::identity::PhalanxIdentity;
-use phalanx_core::primitives::shards::{
-    DataPayload, Evidence, StorageSequence, VideoShard, VolleyId, WitnessEnvelope,
-};
-use phalanx_core::primitives::time::PhalanxTimestamp;
-use phalanx_core::security::retrieval::RetrievalOrchestrator;
-
+use phalanx_proto::evidence::Evidence;
+use phalanx_proto::evidence::StorageSequence;
+use phalanx_proto::evidence::VideoShard;
+use phalanx_proto::evidence::WitnessEnvelope;
+use phalanx_proto::prelude::*;
 use tracing::info;
 
 #[tokio::test]
 async fn test_forensic_gate_tamper_detection_v3() {
     // 1. Setup Identities & PeerId
-    let (witness_identity, _) = PhalanxIdentity::generate().unwrap();
+    let witness_identity = PhalanxIdentity::new_ephemeral();
     let witness_peer_id = witness_identity.to_network_id();
     let orchestrator = RetrievalOrchestrator::new();
     let vid = VolleyId::new("test_stream_01");

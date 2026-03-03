@@ -2,14 +2,16 @@ use std::collections::HashSet;
 use tracing::{debug, instrument};
 
 // Dictionary Nouns
-use phalanx_proto::prelude::*;
-// Forensic Verbs
-use phalanx_forensics::reassembler::{Reassembler, TransientJournal};
-// Node Hands & State
-use crate::clock::TrustedClock;
-use crate::storage::vault::{Guardian, GuardianError};
-use crate::trust::{Offense, TrustLevel, TrustRegistry};
 use crate::vitals::HealthTracker;
+use crate::Guardian;
+use crate::PhalanxConfig;
+use phalanx_forensics::prelude::TransientJournal;
+use phalanx_forensics::Reassembler;
+use phalanx_forensics::TrafficGovernor;
+use phalanx_proto::prelude::*;
+use phalanx_proto::trust::Offense;
+use phalanx_proto::trust::TrustRegistry;
+use phalanx_proto::types::NodeMode;
 
 pub struct IngressContext<'a> {
     pub config: &'a PhalanxConfig,
@@ -27,7 +29,7 @@ pub struct SecurityPipeline<'a, J: TransientJournal> {
     pub trust_registry: &'a mut TrustRegistry,
     pub health_tracker: &'a mut HealthTracker,
     // Deduplication gate
-    pub seen_cache: &'a mut HashSet<(crate::primitives::shards::ShardId, u32)>,
+    pub seen_cache: &'a mut HashSet<(ShardId, u32)>,
 }
 
 #[derive(Debug, thiserror::Error)]

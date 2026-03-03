@@ -115,12 +115,8 @@ pub fn build_behaviour(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::primitives::identity::NetworkId;
-    use libp2p::identity::Keypair;
-    use std::fs::File;
-    use std::io::Write;
-    use tempfile::tempdir;
+    use crate::builder::Keypair;
+    use phalanx_proto::prelude::*;
     struct MockEvaluator;
 
     impl PeerEvaluator for MockEvaluator {
