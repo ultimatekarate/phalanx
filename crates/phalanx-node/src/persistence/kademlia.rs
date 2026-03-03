@@ -5,11 +5,12 @@ use phalanx_forensics::kademlia::*;
 use phalanx_forensics::trust::PeerEvaluator;
 use phalanx_proto::kademlia::DhtProviderSet;
 use phalanx_proto::prelude::*;
-use redb::{Database, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tracing::instrument;
 pub type PhalanxKadStore = RedbStore;
 const DHT_RECORDS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dht_records");
 const DHT_RECORDS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dht_records");
@@ -212,7 +213,7 @@ impl RecordStore for RedbStore {
 
         let typed_payload = DhtPayload::new(record.value, variant, record.expires);
 
-        let payload_bytes = typed_payload.encode()?;
+        let payload_bytes = typed_payload.encode().map_err(|_| Error::ValueTooLarge)?;
 
         self.persist_record_safely(typed_key, &payload_bytes)?;
 
@@ -264,7 +265,7 @@ impl RecordStore for RedbStore {
     fn add_provider(&mut self, provider_record: ProviderRecord) -> Result<()> {
         let typed_key = DhtRecordKey::new(&provider_record.key);
         let peer_id = provider_record.provider;
-        let network_id = NetworkId::from(peer_id);
+        let network_id = NetworkId::from(peer_id.to_string());
 
         // ARCHITECTURAL UPDATE: Read `self.local_peer_id` to bypass reputation gate
         // for self-published provider records.
@@ -300,7 +301,7 @@ impl RecordStore for RedbStore {
                     providers: Vec::new(),
                 });
 
-            if provider_set.try_insert_weighted(peer_id, expiration, reputation_score) {
+            if provider_set.try_insert_weighted(network_id.clone(), expiration, reputation_score) {
                 table
                     .insert(typed_key.as_bytes(), provider_set.encode().as_slice())
                     .map_err(|_| Error::ValueTooLarge)?;
@@ -338,7 +339,7 @@ impl RecordStore for RedbStore {
         };
 
         match DhtProviderSet::decode(&existing_bytes) {
-            Ok(set) => set.into_records(key.clone()),
+            Ok(set) => provider_set_to_records(set, key.clone()),
             Err(_) => Vec::new(),
         }
     }
@@ -363,7 +364,7 @@ impl RecordStore for RedbStore {
                 }
 
                 if let Ok(mut provider_set) = DhtProviderSet::decode(&existing_bytes) {
-                    if provider_set.remove(provider) {
+                    if provider_set.remove_by_id(&provider.to_string()) {
                         let updated_bytes = provider_set.encode();
                         if updated_bytes.is_empty() {
                             let _ = table.remove(typed_key.as_bytes());
@@ -376,6 +377,34 @@ impl RecordStore for RedbStore {
             let _ = write_txn.commit();
         }
     }
+}
+
+fn provider_set_to_records(set: DhtProviderSet, key: RecordKey) -> Vec<ProviderRecord> {
+    set.providers
+        .into_iter()
+        .filter_map(|entry| {
+            let peer_id: PeerId = entry.network_id.to_string().parse().ok()?;
+            let expiration_instant = {
+                let now_unix = system_time_now_unix();
+                let now_instant = Instant::now();
+                if entry.expiration > now_unix {
+                    now_instant.checked_add(Duration::from_secs(
+                        entry.expiration.saturating_sub(now_unix),
+                    ))
+                } else {
+                    now_instant.checked_sub(Duration::from_secs(
+                        now_unix.saturating_sub(entry.expiration),
+                    ))
+                }
+            };
+            Some(ProviderRecord {
+                key: key.clone(),
+                provider: peer_id,
+                expires: expiration_instant,
+                addresses: Vec::new(),
+            })
+        })
+        .collect()
 }
 
 fn unix_to_instant(unix_timestamp: Option<u64>) -> Option<Instant> {

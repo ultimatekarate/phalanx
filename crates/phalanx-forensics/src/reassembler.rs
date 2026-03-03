@@ -1,23 +1,32 @@
+// crates/phalanx-forensics/src/reassembler.rs
+
 use crate::crucible::{Crucible, Mold};
 use crate::prelude::TransientJournal;
-use crate::ForensicError;
-use image::DynamicImage;
-use phalanx_proto::evidence::AudioShard;
-use phalanx_proto::evidence::ChunkType;
-use phalanx_proto::evidence::StorageSequence;
-use phalanx_proto::evidence::VideoShard;
-use phalanx_proto::evidence::WitnessEnvelope;
+
+use phalanx_proto::evidence::{
+    AudioShard, ChunkType, StorageSequence, VideoShard, WitnessEnvelope,
+};
 use phalanx_proto::identity::{Did, ShardId};
-use phalanx_proto::prelude::DataPayload;
-use phalanx_proto::prelude::*;
+use phalanx_proto::prelude::{
+    DataPayload, EnvelopeState, FragmentedEnvelope, PhalanxTimestamp, ShardChunk, ShardError,
+    ShardGapReport, VolleyId,
+};
 use phalanx_proto::types::PowerState;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::time::Duration;
-use tracing::error;
-use tracing::warn;
+
+// --- BLOCK-LEVEL UTILITIES ---
+
+pub fn decompress_payload(data: &[u8]) -> Result<Vec<u8>, String> {
+    lz4_flex::decompress_size_prepended(data).map_err(|e| format!("LZ4 Decompression error: {}", e))
+}
+
+pub fn compress_payload(data: &[u8]) -> Vec<u8> {
+    lz4_flex::compress_prepend_size(data)
+}
 
 // --- THE REASSEMBLER ---
+
 pub struct Reassembler {
     pub active_shards: Crucible<ShardMold>,
     pub power_state: PowerState,
@@ -37,25 +46,20 @@ impl Reassembler {
         }
     }
 
-    /// Primary entry point for the IngressOrchestrator.
-    /// Manages the Write-Ahead Log (WAL) and the in-memory reassembly.
     pub async fn ingest_chunk<J: TransientJournal>(
         &mut self,
         chunk: ShardChunk,
         journal: &mut J,
     ) -> Result<Option<EnvelopeState>, ShardError> {
-        // 1. Forensic Persistence (The WAL)
         journal.record_chunk(&chunk).await?;
         journal.sync().await?;
 
         let shard_id = chunk.shard_id;
         let owner_did = chunk.owner_did.clone();
 
-        // 2. Delegate to the Crucible Engine
         match self.active_shards.process(chunk) {
             Some(envelope) => Ok(Some(EnvelopeState::Intact(envelope))),
             None => {
-                // If not ready, return a "Swiss Cheese" gap report
                 let buffer = self.active_shards.get(&shard_id).unwrap();
                 Ok(Some(EnvelopeState::Fragmented(FragmentedEnvelope {
                     shard_id,
@@ -69,20 +73,28 @@ impl Reassembler {
             }
         }
     }
+}
 
-    pub async fn recover_from_journal<J: TransientJournal>(
-        &mut self,
-        journal: &mut J,
-    ) -> Result<(), ShardError> {
-        let chunks = journal.read_all_chunks().await?;
-        for chunk in chunks {
-            self.active_shards.process(chunk);
-        }
-        Ok(())
+// --- THE SHARD BUFFER (Evolution of ReassemblyBuffer) ---
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ShardBuffer {
+    pub total_chunks: u32,
+    pub received_count: u32,
+    pub parts: BTreeMap<u32, Vec<u8>>,
+    pub owner_did: Did,
+}
+
+impl ShardBuffer {
+    pub fn missing_indices(&self) -> Vec<u32> {
+        (0..self.total_chunks)
+            .filter(|i| !self.parts.contains_key(i))
+            .collect()
     }
 }
 
-// --- THE SHARD MOLD (The Strategy) ---
+// --- THE SHARD MOLD ---
+
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ShardMold;
 
@@ -101,7 +113,6 @@ impl Mold for ShardMold {
             total_chunks: item.total_chunks,
             received_count: 0,
             parts: BTreeMap::new(),
-            estimated_chunk_size: 0,
             owner_did: item.owner_did.clone(),
         }
     }
@@ -126,110 +137,69 @@ impl Mold for ShardMold {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ShardBuffer {
-    pub total_chunks: u32,
-    pub received_count: u32,
-    pub parts: BTreeMap<u32, Vec<u8>>,
-    pub estimated_chunk_size: usize,
-    pub owner_did: Did,
+// --- WEAVER TRAITS ---
+
+pub trait AudioWeaver {
+    fn weave_audio(
+        &self,
+        sequence: StorageSequence,
+        rate: u32,
+        channels: u8,
+        volley: VolleyId,
+    ) -> AudioShard;
 }
 
-impl ShardBuffer {
-    pub fn missing_indices(&self) -> Vec<u32> {
-        (0..self.total_chunks)
-            .filter(|i| !self.parts.contains_key(i))
-            .collect()
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ShardAmalgam;
-
-impl Mold for ShardAmalgam {
-    type Input = ShardChunk;
-    type Output = EnvelopeState;
-    type Key = ShardId;
-    type Accumulator = ShardBuffer;
-
-    fn get_key(item: &Self::Input) -> Self::Key {
-        item.shard_id
-    }
-
-    fn init_accumulator(item: &Self::Input) -> Self::Accumulator {
-        let mut parts = BTreeMap::new();
-        parts.insert(item.chunk_index, item.data.clone());
-        ShardBuffer {
-            total_chunks: item.total_chunks,
-            received_count: 1,
-            parts,
-            estimated_chunk_size: item.data.len(),
-            owner_did: item.owner_did.clone(),
-        }
-    }
-
-    fn ingest(acc: &mut Self::Accumulator, item: Self::Input) {
-        if !acc.parts.contains_key(&item.chunk_index) {
-            if item.data.len() > acc.estimated_chunk_size {
-                acc.estimated_chunk_size = item.data.len();
-            }
-            acc.parts.insert(item.chunk_index, item.data);
-            acc.received_count += 1;
-        }
-    }
-
-    fn is_ready(acc: &Self::Accumulator, _elapsed: Duration) -> bool {
-        acc.received_count == acc.total_chunks
-    }
-
-    fn assemble(&self, key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output> {
-        // Incomplete or fragmented data - triggered by flush_stale/flush_all
-        if acc.received_count != acc.total_chunks {
-            warn!(?key, received=%acc.received_count, total=%acc.total_chunks, "ShardAmalgam: Incomplete shard, transitioning to Fragmented state");
-
-            let mut missing_indices = Vec::new();
-            for i in 0..acc.total_chunks {
-                if !acc.parts.contains_key(&i) {
-                    missing_indices.push(i);
-                }
-            }
-
-            let gap_report = ShardGapReport {
-                shard_id: key,
-                missing_indices,
-            };
-
-            let fragmented = FragmentedEnvelope {
-                shard_id: key,
-                owner_did: acc.owner_did,
-                gap_report,
-                partial_data: acc.parts,
-            };
-
-            return Some(EnvelopeState::Fragmented(fragmented));
-        }
-
-        // Case 2: Happy path, every is there.
-        let mut full_data = Vec::new();
-        for i in 0..acc.total_chunks {
-            if let Some(part) = acc.parts.get(&i) {
-                full_data.extend_from_slice(part);
-            } else {
-                error!(?key, chunk_index=%i, "ShardAmalgam: Illegal internal state, missing chunk despite count match");
-                return None;
-            }
-        }
-
-        match postcard::from_bytes(&full_data) {
-            Ok(env) => Some(EnvelopeState::Intact(env)),
-            Err(e) => {
-                error!(?key, error=%e, "ShardAmalgam: Deserialization failed on complete shard");
-                None
-            }
+impl AudioWeaver for Vec<u8> {
+    fn weave_audio(
+        &self,
+        sequence: StorageSequence,
+        rate: u32,
+        channels: u8,
+        volley: VolleyId,
+    ) -> AudioShard {
+        AudioShard {
+            payload: DataPayload::Compressed(compress_payload(self)),
+            sequence_id: sequence,
+            sample_rate: rate,
+            channels,
+            volley_id: volley,
+            timestamp: PhalanxTimestamp::now(),
         }
     }
 }
 
+pub trait VideoWeaver {
+    fn weave_video(
+        &self,
+        frames: Vec<Vec<u8>>,
+        sequence: StorageSequence,
+        fps: u8,
+        volley: VolleyId,
+    ) -> VideoShard;
+}
+
+impl VideoWeaver for Vec<u8> {
+    fn weave_video(
+        &self,
+        frames: Vec<Vec<u8>>,
+        sequence: StorageSequence,
+        fps: u8,
+        volley: VolleyId,
+    ) -> VideoShard {
+        let raw_bytes = postcard::to_allocvec(&frames).unwrap_or_default();
+        VideoShard {
+            timestamp: PhalanxTimestamp::now(),
+            sequence_id: sequence,
+            payload: DataPayload::Compressed(compress_payload(&raw_bytes)),
+            fps,
+            volley_id: volley,
+        }
+    }
+}
+
+// crates/phalanx-forensics/src/reassembler.rs
+
+/// The formal trait for slicing forensic evidence into network packets.
 pub trait Chunkifier {
     fn chunkify(
         &self,
@@ -248,151 +218,32 @@ impl Chunkifier for Vec<u8> {
         chunk_size: usize,
         chunk_type: ChunkType,
     ) -> Result<Vec<ShardChunk>, ShardError> {
-        if self.is_empty() || chunk_size == 0 {
+        // 1. Safety check for empty data or invalid chunk sizes
+        if self.is_empty() {
             return Ok(Vec::new());
         }
+        if chunk_size == 0 {
+            return Err(ShardError::InvalidSize("Chunk size cannot be zero".into()));
+        }
 
+        // 2. Calculate the "Forensic Bound" (Total Chunks)
         let total_chunks = (self.len() as f32 / chunk_size as f32).ceil() as u32;
 
-        Ok(self
+        // 3. Slice and Map
+        // We use the standard library's .chunks() for memory-efficient slicing
+        let chunks = self
             .chunks(chunk_size)
             .enumerate()
-            .map(|(i, data)| ShardChunk {
+            .map(|(index, data)| ShardChunk {
                 shard_id,
-                chunk_index: i as u32,
+                chunk_index: index as u32,
                 total_chunks,
-                data: data.to_vec(),
+                data: data.to_vec(), // Convert slice to owned Vec for transport
                 owner_did: owner_did.clone(),
                 chunk_type,
             })
-            .collect())
+            .collect();
+
+        Ok(chunks)
     }
-}
-
-pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let img = DynamicImage::ImageRgb8(
-        image::ImageBuffer::from_raw(width, height, raw_data)
-            .ok_or("Failed to create image buffer")?,
-    );
-
-    let _jpeg_bytes = img.to_rgb8().to_vec();
-
-    // Use the image crate's built-in buffer writer to avoid std::io::Cursor
-    let mut output = Vec::new();
-    let encoder = image::codecs::jpeg::JpegEncoder::new(&mut output);
-    img.write_with_encoder(encoder)
-        .map_err(|e| format!("Compression error: {}", e))?;
-
-    Ok(output)
-}
-
-/// Creates a video shard with safe timestamp generation.
-pub fn create_video_shard(
-    frames: Vec<Vec<u8>>,
-    sequence_id: StorageSequence,
-    fps: u8,
-    volley_id: VolleyId,
-) -> Result<VideoShard, ShardError> {
-    let now = PhalanxTimestamp::now();
-
-    let raw_bytes = postcard::to_allocvec(&frames)
-        .map_err(|e| ShardError::SerializationError(e.to_string()))?;
-
-    Ok(VideoShard {
-        timestamp: now,
-        sequence_id,
-        payload: DataPayload::Clear(raw_bytes),
-        fps,
-        volley_id,
-    })
-}
-
-/// Creates an audio shard with safe timestamp generation.
-pub fn create_audio_shard(
-    audio_data: Vec<u8>,
-    sequence_id: StorageSequence,
-    sample_rate: u32,
-    channels: u8,
-    volley_id: VolleyId,
-) -> Result<AudioShard, ShardError> {
-    let now = PhalanxTimestamp::now(); // FIX: Remove the ? and TrustedClock
-
-    Ok(AudioShard {
-        timestamp: now,
-        sequence_id,
-        payload: DataPayload::Clear(audio_data),
-        sample_rate,
-        channels,
-        volley_id,
-    })
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReassemblyBuffer {
-    pub chunks: Vec<Option<Vec<u8>>>,
-    pub total_chunks: usize,
-    #[serde(skip, default = "std::time::Instant::now")]
-    pub last_activity: std::time::Instant,
-}
-
-impl ReassemblyBuffer {
-    #[must_use]
-    #[allow(clippy::missing_errors_doc)]
-    pub fn new(total_chunks: usize) -> Self {
-        Self {
-            chunks: vec![None; total_chunks],
-            total_chunks,
-            last_activity: std::time::Instant::now(),
-        }
-    }
-
-    #[must_use]
-    pub fn is_complete(&self) -> bool {
-        self.chunks.iter().all(|c| c.is_some())
-    }
-
-    /// Concatenates chunks into a single byte vector. Assumes is_complete() is true.
-    #[must_use]
-    pub fn assemble(&self) -> Vec<u8> {
-        self.chunks.iter().flatten().flatten().cloned().collect()
-    }
-}
-
-pub trait AudioWeaver {
-    /// The "Birth" Verb for audio data.
-    fn weave_audio(
-        &self,
-        sequence: StorageSequence,
-        rate: u32,
-        channels: u8,
-        volley: VolleyId,
-    ) -> AudioShard;
-}
-
-impl AudioWeaver for Vec<u8> {
-    fn weave_audio(
-        &self,
-        sequence: StorageSequence,
-        rate: u32,
-        channels: u8,
-        volley: VolleyId,
-    ) -> AudioShard {
-        // This is where shards::create_audio_shard logic now lives
-        AudioShard {
-            payload: DataPayload::Clear(self.clone()),
-            sequence_id: sequence,
-            sample_rate: rate,
-            channels,
-            volley_id: volley,
-            timestamp: PhalanxTimestamp::now(),
-        }
-    }
-}
-
-pub trait VideoWeaver {
-    /// The "Transformation" Verb: Compresses raw RGB/YUV data.
-    fn compress_frame(data: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, ForensicError>;
-
-    /// The "Birth" Verb: Packages frames into a VideoShard.
-    fn weave_video(&self, sequence: StorageSequence, fps: u8, volley: VolleyId) -> VideoShard;
 }

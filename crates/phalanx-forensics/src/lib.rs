@@ -21,9 +21,7 @@ pub use crucible::{Crucible, Mold, VolleyAmalgam};
 pub use cryptography::{decrypt_bytes, encrypt_bytes, generate_session_key};
 pub use judge::{Decryptor, HandoverJudge};
 pub use policy::TrafficGovernor;
-pub use reassembler::{
-    AudioWeaver, Chunkifier, Reassembler, ReassemblyBuffer, ShardAmalgam, ShardMold, VideoWeaver,
-};
+pub use reassembler::{AudioWeaver, Chunkifier, Reassembler, ShardMold, VideoWeaver};
 pub use trust::{PeerEvaluator, ReputationGate};
 
 /// The Laboratory Prelude: Bringing the Verbs into scope for the Actors.
@@ -32,7 +30,7 @@ pub mod prelude {
     pub use crate::cryptography::{decrypt_bytes, encrypt_bytes};
     pub use crate::judge::{Decryptor, HandoverJudge};
     pub use crate::policy::TrafficGovernor;
-    pub use crate::reassembler::{Reassembler, ShardAmalgam, ShardMold};
+    pub use crate::reassembler::{Reassembler, ShardMold};
     pub use crate::storage::journal::TransientJournal;
     pub use crate::trust::PeerEvaluator;
     pub use crate::ForensicError;

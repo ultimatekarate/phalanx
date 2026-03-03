@@ -7,7 +7,7 @@ use crate::vitals::HealthTracker;
 use crate::Guardian;
 use crate::NodeConfig;
 use phalanx_forensics::prelude::TransientJournal;
-use phalanx_forensics::trust::ReputationGate;
+
 use phalanx_forensics::Reassembler;
 use phalanx_forensics::TrafficGovernor;
 use phalanx_proto::prelude::*;

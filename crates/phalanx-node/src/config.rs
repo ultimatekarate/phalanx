@@ -1,3 +1,5 @@
+// crates/phalanx-node/src/config.rs
+
 use phalanx_proto::prelude::{Did, MeshTopic};
 use phalanx_proto::types::ByteCapacity;
 use serde::Deserialize;
@@ -8,7 +10,7 @@ use std::fmt;
 use std::fs;
 use std::path::Path;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct NodeConfig {
     pub storage: StorageConfig,
     pub network: NetworkConfig,
@@ -37,7 +39,8 @@ pub struct NetworkConfig {
 }
 
 impl NodeConfig {
-    pub fn load(path: PathBuf) -> Result<Self, config::ConfigError> {
+    // FIX: Renamed to avoid collision with the generic `load` method below
+    pub fn load_from_config_crate(path: PathBuf) -> Result<Self, config::ConfigError> {
         let s = config::Config::builder()
             .add_source(config::File::from(path))
             .add_source(config::Environment::with_prefix("PHALANX"))

@@ -38,6 +38,9 @@ pub enum ShardError {
 
     #[error("Not enough reputation")]
     Unauthorized(String),
+
+    #[error("Size cannot be 0")]
+    InvalidSize(String),
 }
 
 #[derive(Debug, thiserror::Error)]

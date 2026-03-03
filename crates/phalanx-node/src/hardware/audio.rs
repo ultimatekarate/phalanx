@@ -1,3 +1,5 @@
+// crates/phalanx-node/src/hardware/audio.rs
+
 use crate::config::HardwareConfig;
 use phalanx_forensics::reassembler::create_audio_shard;
 use phalanx_proto::evidence::AudioShard;
@@ -14,6 +16,7 @@ use std::time::UNIX_EPOCH;
 
 use std::thread;
 use tokio::sync::{broadcast, mpsc}; // Bring in AudioWeaver
+
 pub struct PhalanxAudioThread {
     sample_rate: u32,
     channels: u8,
@@ -121,38 +124,38 @@ impl PhalanxAudioThread {
                 if byte_buffer.len() >= bytes_per_sec {
                     let chunk = byte_buffer.split_off(0);
 
-                    let volley_id = VolleyId::new(volley_id);
+                    let volley_id = VolleyId::new(volley_id.clone());
                     // FIX: Added missing arguments (sample_rate, channels)
-                    let mut shard = create_audio_shard(
+                    let shard_result = create_audio_shard(
                         chunk,
                         sequence_id,
                         hw_config.audio_sample_rate, // Arg 3
                         hw_config.audio_channels,    // Arg 4
-                        volley_id.clone(),           // Arg 5
+                        volley_id,                   // Arg 5
                     );
 
-                    // C. Encryption
-                    if let Some(key) = secret_key {
-                        if let Err(e) = shard.encrypt(&key) {
-                            error!("Encryption failed for audio seq {}: {}", sequence_id, e);
-                            continue;
-                        }
-                    }
+                    match shard_result {
+                        Ok(mut actual_shard) => {
+                            // C. Encryption
+                            if let Some(key) = secret_key {
+                                if let Err(e) = actual_shard.encrypt(&key) {
+                                    error!(
+                                        "Encryption failed for audio seq {}: {}",
+                                        sequence_id, e
+                                    );
+                                    continue;
+                                }
+                            }
 
-                    // D. Transmission
-                    match shard {
-                        Ok(actual_shard) => {
-                            // 2. Now 'actual_shard' is the AudioShard type the channel expects
+                            // D. Transmission
                             if tx.send(actual_shard).await.is_err() {
                                 error!("Main channel closed (MeshSentinel dropped). Stopping Audio Processor.");
                                 self.stop();
-                                break; // Exit loop because the consumer is gone
+                                break;
                             }
                         }
                         Err(e) => {
-                            // 3. Handle the ShardError without killing the whole thread
                             error!("Transient audio encoding failure: {:?}. Skipping shard.", e);
-                            // We do NOT break here; we want to try the next shard
                         }
                     }
 

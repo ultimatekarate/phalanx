@@ -1,10 +1,10 @@
 // crates/phalanx-proto/src/evidence.rs
-
 use crate::identity::{Did, NetworkId, ShardId, VolleyId};
 use crate::storage::HandoverProof;
 use crate::time::PhalanxTimestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::ops::{Add, AddAssign, Deref, Sub};
 
 /// The Forensic Payload: Represents the state of data within a shard.
@@ -107,6 +107,12 @@ pub struct ForensicGap {
 )]
 #[serde(transparent)]
 pub struct StorageSequence(pub u32);
+
+impl fmt::Display for StorageSequence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 // --- Traits & Helper Nouns ---
 

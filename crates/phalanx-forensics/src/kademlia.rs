@@ -112,6 +112,15 @@ pub trait ProviderAuthority {
         expiration: u64,
         reputation: f32,
     ) -> bool;
+
+    fn decode(bytes: &[u8]) -> std::result::Result<Self, ShardError>
+    where
+        Self: Sized;
+
+    fn encode(&self) -> Vec<u8>;
+
+    /// Remove a provider by its string representation. Returns true if a provider was removed.
+    fn remove_by_id(&mut self, provider_id: &str) -> bool;
 }
 
 impl ProviderAuthority for DhtProviderSet {
@@ -160,6 +169,26 @@ impl ProviderAuthority for DhtProviderSet {
             }
         }
         false
+    }
+
+    fn decode(bytes: &[u8]) -> std::result::Result<Self, ShardError> {
+        if bytes.is_empty() {
+            return Ok(DhtProviderSet {
+                providers: Vec::new(),
+            });
+        }
+        postcard::from_bytes(bytes).map_err(|e| ShardError::SerializationError(e.to_string()))
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        postcard::to_allocvec(self).unwrap_or_default()
+    }
+
+    fn remove_by_id(&mut self, provider_id: &str) -> bool {
+        let initial_len = self.providers.len();
+        self.providers
+            .retain(|p| p.network_id.to_string() != provider_id);
+        self.providers.len() < initial_len
     }
 }
 

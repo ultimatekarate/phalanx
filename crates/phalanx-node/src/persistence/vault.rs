@@ -3,7 +3,9 @@ use crate::NodeConfig;
 use async_trait::async_trait;
 use phalanx_forensics::crucible::Crucible;
 use phalanx_forensics::crucible::VolleyAmalgam;
+use phalanx_forensics::crucible::{EnvelopeHashExt, EvidenceExt};
 use phalanx_forensics::prelude::TransientJournal;
+use phalanx_forensics::witness::WitnessAuthority;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::Volley;
@@ -12,7 +14,7 @@ use phalanx_proto::storage::GuardianError;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::fs;
-use tokio::io::SeekFrom;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tracing::info;
 
 pub struct Guardian {
@@ -37,7 +39,7 @@ impl Guardian {
         match state {
             EnvelopeState::Intact(envelope) => {
                 // 1. Cryptographic Verification
-                if !envelope.verify() {
+                if !envelope.verify_envelope() {
                     return Err(GuardianError::VerificationFailed(
                         "Witness signature mismatch".into(),
                     ));
@@ -113,7 +115,7 @@ impl Guardian {
     ) -> Result<(), GuardianError> {
         tracing::warn!(
             shard_id = %fragmented.shard_id,
-            missing_chunks = fragmented.gap_report.missing_chunk_indices.len(),
+            missing_chunks = fragmented.gap_report.missing_indices.len(),
             "Guardian: Committing forensic gap record to disk"
         );
 
@@ -195,20 +197,26 @@ impl TransientJournal for FileJournal {
         self.handle
             .write_all(&length_bytes)
             .await
-            .map_err(ShardError::Io)?;
+            .map_err(|e| ShardError::Io(e.to_string()))?;
         self.handle
             .write_all(&payload)
             .await
-            .map_err(ShardError::Io)?;
+            .map_err(|e| ShardError::Io(e.to_string()))?;
 
         // 4. Flush data to disk (excluding metadata for performance)
-        self.handle.sync_data().await.map_err(ShardError::Io)?;
+        self.handle
+            .sync_data()
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
 
         Ok(())
     }
 
     async fn sync(&mut self) -> Result<(), ShardError> {
-        self.handle.sync_all().await.map_err(ShardError::Io)
+        self.handle
+            .sync_all()
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))
     }
 
     async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
@@ -218,7 +226,7 @@ impl TransientJournal for FileJournal {
         self.handle
             .seek(SeekFrom::Start(0))
             .await
-            .map_err(ShardError::Io)?;
+            .map_err(|e| ShardError::Io(e.to_string()))?;
 
         // 2. Stream chunks sequentially using the 4-byte length prefix
         loop {
@@ -226,7 +234,7 @@ impl TransientJournal for FileJournal {
             match self.handle.read_exact(&mut len_buf).await {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break, // Deterministic EOF
-                Err(e) => return Err(ShardError::Io(e)),
+                Err(e) => return Err(ShardError::Io(e.to_string())),
             }
 
             let payload_len = u32::from_le_bytes(len_buf);
@@ -240,7 +248,7 @@ impl TransientJournal for FileJournal {
                     );
                     break;
                 }
-                Err(e) => return Err(ShardError::Io(e)),
+                Err(e) => return Err(ShardError::Io(e.to_string())),
             }
 
             if let Ok(chunk) = postcard::from_bytes::<ShardChunk>(&payload) {
@@ -255,7 +263,7 @@ impl TransientJournal for FileJournal {
         self.handle
             .seek(SeekFrom::End(0))
             .await
-            .map_err(ShardError::Io)?;
+            .map_err(|e| ShardError::Io(e.to_string()))?;
 
         Ok(chunks)
     }
@@ -266,7 +274,7 @@ impl TransientJournal for FileJournal {
             .truncate(true)
             .open(&self.file_path)
             .await
-            .map_err(ShardError::Io)?;
+            .map_err(|e| ShardError::Io(e.to_string()))?;
         Ok(())
     }
 
@@ -279,7 +287,7 @@ impl TransientJournal for FileJournal {
 
         tokio::fs::write(&salvage_path, encoded)
             .await
-            .map_err(ShardError::Io)?;
+            .map_err(|e| ShardError::Io(e.to_string()))?;
 
         info!(path = ?salvage_path, "Egress Salvage: State persisted to journal");
         Ok(())
@@ -293,7 +301,7 @@ impl TransientJournal for FileJournal {
 
         let encoded = tokio::fs::read(&salvage_path)
             .await
-            .map_err(ShardError::Io)?;
+            .map_err(|e| ShardError::Io(e.to_string()))?;
 
         let pending: Vec<PendingEgress> =
             postcard::from_bytes(&encoded).map_err(|e| ShardError::Encryption(e.to_string()))?;

@@ -1,3 +1,5 @@
+// crates/phalanx-node/src/actors/playback.rs
+
 use crate::actors::storage::StorageCommand;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{DataPayload, Evidence, StorageSequence};
@@ -72,6 +74,11 @@ impl<S: PlaybackSink> PlaybackCoordinator<S> {
                         DataPayload::Missing(_) => {
                             self.current_sequence.0 += 1;
                             continue;
+                        }
+                        // FIX: Added exhaustive match arm for Compressed payloads
+                        DataPayload::Compressed(compressed_data) => {
+                            phalanx_forensics::reassembler::decompress_payload(compressed_data)
+                                .context("Failed to decompress LZ4 payload")?
                         }
                     };
 
