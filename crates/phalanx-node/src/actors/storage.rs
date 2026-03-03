@@ -39,7 +39,7 @@ impl<J: TransientJournal> StorageActor<J> {
         // Hydrate the Reassembler state from the TransientJournal (WAL) before opening the command gate.
         match self
             .reassembler
-            .recover_from_journal(&mut self.journal, self.local_peer_id)
+            .recover_from_journal(&mut self.journal)
             .await
         {
             Ok(recovered_states) => {

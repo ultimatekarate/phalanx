@@ -1,7 +1,7 @@
 use phalanx_proto::prelude::*;
-use phalanx_proto::prelude::{Did, MeshTopic, NetworkId};
-use phalanx_proto::types::{ByteCapacity, UnitInterval};
-use serde::{Deserialize, Serialize};
+use phalanx_proto::prelude::{Did, MeshTopic};
+use phalanx_proto::types::ByteCapacity;
+use serde::Deserialize;
 use std::path::PathBuf;
 
 use std::env;
@@ -14,6 +14,7 @@ pub struct NodeConfig {
     pub identity: IdentityConfig,
     pub storage: StorageConfig,
     pub network: NetworkConfig,
+    pub hardware: HardwareConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,13 +60,6 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 /// The Root Configuration for the Phalanx Engine.
-#[derive(Debug, Deserialize, Clone)]
-pub struct PhalanxConfig {
-    pub network: NetworkConfig,
-    pub storage: StorageConfig,
-    pub hardware: HardwareConfig,
-}
-
 #[derive(Debug, Deserialize, Clone)]
 pub struct StorageConfig {
     pub vault_path: String,

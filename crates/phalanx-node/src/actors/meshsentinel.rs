@@ -1,4 +1,5 @@
 use crate::actors::playback::PlaybackCoordinator;
+use crate::config::NodeConfig;
 use crate::state::SyncReputationCache;
 use crate::vitals::HealthTracker;
 use crate::Guardian;
@@ -33,7 +34,7 @@ pub struct MeshSentinel<T: NetworkTransport, J: TransientJournal> {
     pub mode: NodeMode,
     pub config: PhalanxConfig,
     pub identity: Arc<PhalanxIdentity>,
-    pub clock: TrustedClock,
+    pub clock: dyn TrustedClock,
     pub network: T,
     pub video_rx: mpsc::Receiver<VideoShard>,
     pub audio_rx: mpsc::Receiver<AudioShard>,
@@ -51,7 +52,7 @@ pub struct MeshSentinel<T: NetworkTransport, J: TransientJournal> {
 
 impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, J> {
     pub async fn new(
-        config: PhalanxConfig,
+        config: NodeConfig,
         identity: PhalanxIdentity,
         network: T,
         mut journal: J,

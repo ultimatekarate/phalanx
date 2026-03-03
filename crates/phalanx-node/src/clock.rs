@@ -1,9 +1,14 @@
+use phalanx_proto::prelude::*;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[derive(Clone, Debug)]
 pub struct TrustedClock {
     /// The difference between Local System Time and True Network Time in milliseconds.
     /// Positive = Local is behind. Negative = Local is ahead.
     offset_ms: Arc<RwLock<i64>>,
 }
+
+pub type TimeResult<T> = Result<T, TimeError>;
 
 impl TrustedClock {
     #[must_use]

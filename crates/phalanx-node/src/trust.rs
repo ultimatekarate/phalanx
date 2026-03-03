@@ -1,7 +1,9 @@
 use crate::clock::TrustedClock;
-use crate::config::PhalanxConfig;
+use crate::NodeConfig;
 use phalanx_forensics::trust::{PeerEvaluator, ReputationGate};
 use phalanx_proto::prelude::*;
+use phalanx_proto::trust::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::fs::{self, File};
@@ -21,7 +23,7 @@ pub struct TrustRegistry {
 
 impl TrustRegistry {
     /// Asynchronous initialization to prevent blocking the executor on node startup.
-    pub async fn build(config: &PhalanxConfig) -> Self {
+    pub async fn build(config: &NodeConfig) -> Self {
         let vault = PathBuf::from(&config.storage.vault_path);
 
         // Non-blocking directory verification
@@ -129,7 +131,7 @@ impl TrustRegistry {
 
     /// Performs a non-blocking write to the WAL/storage path.
     async fn save(&self) -> Result<(), TrustError> {
-        let data = postcard::to_stdvec(&self.contacts)
+        let data = postcard::to_allocvec(&self.contacts)
             .map_err(|e| TrustError::SerializationError(e.to_string()))?;
 
         let temp_path = self.storage_path.with_extension("tmp");
@@ -317,12 +319,10 @@ impl PeerEvaluator for TrustRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base::config::PhalanxConfig;
-    use crate::primitives::time::TrustedClock;
 
     #[tokio::test]
     async fn test_aliasing() {
-        let config = PhalanxConfig::test_defaults();
+        let config = NodeConfig::test_defaults();
         let mut registry = TrustRegistry::build(&config).await;
 
         let did1 = Did::from("did:phx:user_one");

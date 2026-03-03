@@ -1,3 +1,4 @@
+use libp2p::kad::store::{Error, RecordStore, Result};
 use libp2p::kad::{ProviderRecord, Record, RecordKey};
 use libp2p::PeerId;
 use phalanx_forensics::kademlia::*;
@@ -8,6 +9,7 @@ use redb::{Database, TableDefinition};
 use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub type PhalanxKadStore = RedbStore;
 const DHT_RECORDS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dht_records");
 const DHT_RECORDS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dht_records");
@@ -374,4 +376,27 @@ impl RecordStore for RedbStore {
             let _ = write_txn.commit();
         }
     }
+}
+
+fn unix_to_instant(unix_timestamp: Option<u64>) -> Option<Instant> {
+    let target_unix = unix_timestamp?;
+    let current_instant = Instant::now();
+    let current_unix = system_time_now_unix();
+
+    if target_unix > current_unix {
+        current_instant.checked_add(Duration::from_secs(
+            target_unix.saturating_sub(current_unix),
+        ))
+    } else {
+        current_instant.checked_sub(Duration::from_secs(
+            current_unix.saturating_sub(target_unix),
+        ))
+    }
+}
+
+fn system_time_now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }

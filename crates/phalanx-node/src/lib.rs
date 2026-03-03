@@ -34,7 +34,7 @@ extern crate tracing;
 pub use actors::meshsentinel::MeshSentinel;
 pub use actors::storage::StorageActor;
 pub use clock::TrustedClock;
-pub use config::PhalanxConfig;
+pub use config::NodeConfig;
 pub use storage::journal::FileJournal;
 pub use storage::vault::Guardian;
 

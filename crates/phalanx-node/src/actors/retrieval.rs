@@ -28,9 +28,11 @@ impl RetrievalOrchestrator {
         local_id: &NetworkId,
     ) -> Result<Vec<WitnessEnvelope>, ShardError> {
         let mut verified = Vec::with_capacity(envelopes.len());
+
+        let now = PhalanxTimestamp::now();
         for env in envelopes {
             // Apply Gate 3: Integrity verification
-            let validated = env.check_integrity(local_id, &self.clock, 10)?;
+            let validated = env.check_integrity(local_id, now, 10)?;
             verified.push(validated);
         }
         info!(

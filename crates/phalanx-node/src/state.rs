@@ -1,3 +1,6 @@
+use phalanx_proto::prelude::NetworkId;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 #[derive(Clone, Default)]
 pub struct SyncReputationCache {
     pub scores: Arc<RwLock<HashMap<NetworkId, f32>>>,
