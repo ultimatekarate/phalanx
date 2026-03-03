@@ -1,4 +1,3 @@
-use phalanx_proto::prelude::*;
 use phalanx_proto::prelude::{Did, MeshTopic};
 use phalanx_proto::types::ByteCapacity;
 use serde::Deserialize;

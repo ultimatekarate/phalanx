@@ -3373,6 +3373,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "oneshot"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe21416a02c693fb9f980befcb230ecc70b0b3d1cc4abf88b9675c4c1457f0c"
+
+[[package]]
 name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3545,6 +3551,7 @@ dependencies = [
 name = "phalanx-node"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "bip39",
  "clap",
@@ -3552,6 +3559,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "libp2p",
+ "oneshot",
  "phalanx-forensics",
  "phalanx-proto",
  "phalanx-transport",
@@ -3567,6 +3575,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]

@@ -1,12 +1,14 @@
 use crate::actors::playback::PlaybackCoordinator;
+use crate::actors::retrieval::RetrievalOrchestrator;
+use crate::actors::retrieval::RetrievalQuery;
 use crate::actors::storage::NoOpJournal;
+use crate::actors::storage::StorageCommand;
+use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
 use crate::state::SyncReputationCache;
 use crate::vitals::HealthTracker;
 use crate::Guardian;
 use crate::StorageActor;
-
-use crate::actors::storage::{RetrievalQuery, StorageCommand};
 use phalanx_forensics::prelude::*;
 use phalanx_proto::prelude::*;
 
@@ -36,7 +38,7 @@ pub struct MeshSentinel<T: NetworkTransport, J: TransientJournal> {
     pub mode: NodeMode,
     pub config: NodeConfig,
     pub identity: Arc<PhalanxIdentity>,
-    pub clock: dyn TrustedClock,
+    pub clock: TrustedClock,
     pub network: T,
     pub video_rx: mpsc::Receiver<VideoShard>,
     pub audio_rx: mpsc::Receiver<AudioShard>,

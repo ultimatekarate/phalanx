@@ -1,3 +1,4 @@
+use phalanx_forensics::witness::WitnessAuthority;
 use phalanx_forensics::Reassembler;
 use phalanx_proto::evidence::ChunkType;
 use phalanx_proto::evidence::Evidence;
@@ -22,7 +23,7 @@ fn create_mock_chunks(
     });
 
     let envelope =
-        WitnessEnvelope::seal(evidence, identity, identity.to_network_id(), None).unwrap();
+        WitnessEnvelope::sign_envelope(evidence, identity, identity.network_id, None).unwrap();
 
     // 2. Serialize it to actual bytes
     let full_bytes = postcard::to_vec(&envelope).unwrap();
