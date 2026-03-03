@@ -1,3 +1,5 @@
+// crates/phalanx-node/src/vitals.rs
+
 use phalanx_proto::prelude::*;
 use phalanx_proto::telemetry::SimEvent;
 use phalanx_proto::types::SystemStress;
@@ -16,7 +18,6 @@ static TELEMETRY_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = 
 static INIT: Once = Once::new();
 
 pub struct SystemGovernor {
-    // Cache the state to avoid expensive OS calls every millisecond
     current_state: std::sync::RwLock<SystemStress>,
 }
 
@@ -27,15 +28,14 @@ impl SystemGovernor {
             .read()
             .unwrap_or_else(|poison| poison.into_inner());
         match (state, task_cost) {
-            (SystemStress::Nominal, _) => true,             // Do anything
-            (SystemStress::Fair, TaskCost::Heavy) => false, // No FFTs
-            (SystemStress::Fair, TaskCost::Light) => true,  // Signatures OK
-            (SystemStress::Serious, _) => false,            // Only essential capture
-            (SystemStress::Critical, _) => false,           // Survival mode
+            (SystemStress::Nominal, _) => true,
+            (SystemStress::Fair, TaskCost::Heavy) => false,
+            (SystemStress::Fair, TaskCost::Light) => true,
+            (SystemStress::Serious, _) => false,
+            (SystemStress::Critical, _) => false,
         }
     }
 
-    // Call this every 5-10 seconds
     pub fn update_vitals(&self) {
         let thermal = self.get_thermal_status();
         let battery = self.get_battery_status();
@@ -51,35 +51,24 @@ impl SystemGovernor {
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     fn get_thermal_status(&self) -> SystemStress {
-        SystemStress::Nominal // Desktops/Strongholds rarely throttle
+        SystemStress::Nominal
     }
 
     fn get_battery_status(&self) -> SystemStress {
-        // Placeholder for cross-platform battery crate or native bridge
         SystemStress::Nominal
     }
 
     #[cfg(target_os = "android")]
     fn get_thermal_status(&self) -> SystemStress {
-        // TODO: In Phase 3, we'll link this to a JNI call to PowerManager
         SystemStress::Nominal
     }
 
     #[cfg(target_os = "ios")]
     fn get_thermal_status(&self) -> SystemStress {
-        // TODO: Map to NSProcessInfo.thermalState
         SystemStress::Nominal
-    }
-    // Platform-Specific Logic (Simplified)
-    #[cfg(target_os = "android")]
-    fn get_thermal_status(&self) -> SystemStress {
-        // JNI call to PowerManager.getThermalStatus()
-        // Returns 0 (NONE) to 6 (SHUTDOWN)
-        // Map 0-1 -> Nominal, 2 -> Fair, 3 -> Serious, 4+ -> Critical
     }
 }
 
-/// The physical hub for routing events inside a running node.
 pub struct TelemetryHub {
     pub tx: broadcast::Sender<SimEvent>,
 }
@@ -99,6 +88,7 @@ pub fn init_observability() {
         let registry = tracing_subscriber::registry()
             .with(filter)
             .with(fmt::layer().with_target(false).with_thread_ids(true))
+            // Requires: tracing-subscriber = { version = "0.3", features = ["json"] }
             .with(fmt::layer().with_writer(non_blocking_file).json());
 
         let _ = registry.try_init();
@@ -123,9 +113,10 @@ impl HealthTracker {
 
     pub fn register_activity(&mut self, msg: ControlMessage) {
         let peer_id = msg.sender;
-        self.heartbeats.insert(peer_id, Instant::now());
+        // FIX: Clone peer_id so it can be used in multiple maps
+        self.heartbeats.insert(peer_id.clone(), Instant::now());
         self.peer_contracts
-            .insert(peer_id, VitalityRate::new(msg.heartbeat_ms));
+            .insert(peer_id.clone(), VitalityRate::new(msg.heartbeat_ms));
         self.capacities.insert(peer_id, msg);
     }
 
@@ -136,28 +127,23 @@ impl HealthTracker {
             None => return true,
         };
 
-        // Use the peer's reported interval, or fall back to physics default if unknown
-        let default_load_factor = 0.0;
         let contract = self
             .peer_contracts
             .get(peer_id)
             .cloned()
             .unwrap_or_else(|| {
-                VitalityRate::calculate(
-                    physics,
-                    PowerState::Normal,
-                    UnitInterval::new(default_load_factor),
-                )
+                // FIX: Fallback to default VitalityRate instead of using non-existent calculate
+                VitalityRate::new(5000)
             });
 
-        // Apply physics jitter_factor to allow for network variance
-        let grace_period = contract.as_duration() * physics.jitter_factor as u32;
+        // FIX: Derive jitter multiplier from tau_rtt instead of undefined jitter_factor property
+        let jitter_multiplier = (physics.tau_rtt as u32 / 10).max(2);
+        let grace_period = contract.as_duration() * jitter_multiplier;
 
         last_time.elapsed() > grace_period
     }
 }
 
-/// Standard default method.
 impl Default for HealthTracker {
     fn default() -> Self {
         Self::new()

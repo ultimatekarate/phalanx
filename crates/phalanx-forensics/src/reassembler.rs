@@ -73,6 +73,18 @@ impl Reassembler {
             }
         }
     }
+
+    pub async fn recover_from_journal<J: TransientJournal>(
+        &mut self,
+        journal: &mut J,
+    ) -> Result<(), ShardError> {
+        let chunks = journal.read_all_chunks().await?;
+        for chunk in chunks {
+            // Replay the WAL chunks through the Crucible engine
+            self.active_shards.process(chunk);
+        }
+        Ok(())
+    }
 }
 
 // --- THE SHARD BUFFER (Evolution of ReassemblyBuffer) ---
