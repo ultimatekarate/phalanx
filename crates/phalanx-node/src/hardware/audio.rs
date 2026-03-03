@@ -1,7 +1,9 @@
 // crates/phalanx-node/src/hardware/audio.rs
 
 use crate::config::HardwareConfig;
+use phalanx_forensics::judge::PayloadCipher;
 use phalanx_forensics::reassembler::create_audio_shard;
+use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::AudioShard;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::prelude::*;
@@ -138,7 +140,9 @@ impl PhalanxAudioThread {
                         Ok(mut actual_shard) => {
                             // C. Encryption
                             if let Some(key) = secret_key {
-                                if let Err(e) = actual_shard.encrypt(&key) {
+                                if let Err(e) =
+                                    actual_shard.payload.apply_encryption(&SymmetricKey(key))
+                                {
                                     error!(
                                         "Encryption failed for audio seq {}: {}",
                                         sequence_id, e

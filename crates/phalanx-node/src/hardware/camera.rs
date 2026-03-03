@@ -1,8 +1,10 @@
 // crates/phalanx-node/src/hardware/camera.rs
 
 use crate::config::HardwareConfig;
+use phalanx_forensics::judge::PayloadCipher;
 use phalanx_forensics::reassembler::compress_frame;
 use phalanx_forensics::reassembler::create_video_shard;
+use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::VideoShard;
 use std::sync::{
@@ -209,7 +211,9 @@ impl PhalanxCameraThread {
                         Ok(mut actual_shard) => {
                             // C. Encryption
                             if let Some(key) = secret_key {
-                                if let Err(e) = actual_shard.encrypt(&key) {
+                                if let Err(e) =
+                                    actual_shard.payload.apply_encryption(&SymmetricKey(key))
+                                {
                                     error!("Encryption failed for seq {}: {}", sequence_id, e);
                                     continue; // Skip secure frames if encryption fails
                                 }

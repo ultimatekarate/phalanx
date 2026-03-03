@@ -19,7 +19,7 @@ pub mod storage {
 
 pub use crucible::{Crucible, Mold, VolleyAmalgam};
 pub use cryptography::{decrypt_bytes, encrypt_bytes, generate_session_key};
-pub use judge::{Decryptor, HandoverJudge};
+pub use judge::{Decryptor, HandoverJudge, PayloadCipher};
 pub use policy::TrafficGovernor;
 pub use reassembler::{AudioWeaver, Chunkifier, Reassembler, ShardMold, VideoWeaver};
 pub use trust::{PeerEvaluator, ReputationGate};
@@ -28,7 +28,7 @@ pub use trust::{PeerEvaluator, ReputationGate};
 pub mod prelude {
     pub use crate::crucible::{Crucible, Mold, VolleyAmalgam};
     pub use crate::cryptography::{decrypt_bytes, encrypt_bytes};
-    pub use crate::judge::{Decryptor, HandoverJudge};
+    pub use crate::judge::{Decryptor, HandoverJudge, PayloadCipher};
     pub use crate::policy::TrafficGovernor;
     pub use crate::reassembler::{Reassembler, ShardMold};
     pub use crate::storage::journal::TransientJournal;

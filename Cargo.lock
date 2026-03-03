@@ -3564,6 +3564,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bip39",
+ "bs58",
  "clap",
  "config",
  "ed25519-dalek",

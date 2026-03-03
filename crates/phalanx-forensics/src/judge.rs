@@ -77,25 +77,28 @@ pub trait PayloadCipher {
 
 impl PayloadCipher for DataPayload {
     fn apply_encryption(&mut self, key: &SymmetricKey) -> Result<(), CryptoError> {
-        if let DataPayload::Clear(data) = self {
-            use chacha20poly1305::KeyInit; // Local scope only
-            let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
-            let nonce_bytes = rand::random::<[u8; 24]>();
-            let x_nonce = XNonce::from_slice(&nonce_bytes);
+        let plaintext = match self {
+            DataPayload::Clear(data) => data.clone(),
+            DataPayload::Compressed(data) => data.clone(),
+            DataPayload::Encrypted { .. } => return Ok(()), // Already encrypted; idempotent
+            DataPayload::Missing(_) => return Err(CryptoError::EncryptionFailure),
+        };
 
-            use chacha20poly1305::aead::Aead; // Local scope only
-            let ciphertext = cipher
-                .encrypt(x_nonce, data.as_ref())
-                .map_err(|_| CryptoError::EncryptionFailure)?;
+        use chacha20poly1305::KeyInit; // Local scope only
+        let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
+        let nonce_bytes = rand::random::<[u8; 24]>();
+        let x_nonce = XNonce::from_slice(&nonce_bytes);
 
-            *self = DataPayload::Encrypted {
-                nonce: nonce_bytes.to_vec(),
-                ciphertext,
-            };
-            Ok(())
-        } else {
-            Err(CryptoError::EncryptionFailure)
-        }
+        use chacha20poly1305::aead::Aead; // Local scope only
+        let ciphertext = cipher
+            .encrypt(x_nonce, plaintext.as_ref())
+            .map_err(|_| CryptoError::EncryptionFailure)?;
+
+        *self = DataPayload::Encrypted {
+            nonce: nonce_bytes.to_vec(),
+            ciphertext,
+        };
+        Ok(())
     }
 
     fn reveal(&self, key: &SymmetricKey) -> Result<Vec<u8>, CryptoError> {

@@ -5,7 +5,6 @@ use phalanx_proto::telemetry::SimEvent;
 use phalanx_proto::types::SystemStress;
 use phalanx_proto::types::TaskCost;
 use phalanx_proto::types::VitalityRate;
-use phalanx_proto::types::{PowerState, UnitInterval};
 use phalanx_proto::vitals::ControlMessage;
 use std::collections::HashMap;
 use std::sync::{Once, OnceLock};

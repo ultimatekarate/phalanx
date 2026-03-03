@@ -1,9 +1,6 @@
 use ed25519_dalek::SigningKey;
 use phalanx_proto::evidence::ForensicGap;
 use phalanx_proto::evidence::WitnessEnvelope;
-use phalanx_proto::prelude::IdentityError;
-use phalanx_proto::prelude::*;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -169,7 +166,7 @@ impl fmt::Display for NetworkId {
 pub struct SignatureHash(pub [u8; 32]);
 
 /// The sovereign cryptographic root for a Phalanx Node.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PhalanxIdentity {
     pub version: u32,
     pub did: Did,
@@ -224,100 +221,6 @@ impl std::fmt::Debug for PhalanxIdentity {
             .field("network_id", &self.network_id)
             .field("keypair", &"[REDACTED]")
             .finish()
-    }
-}
-
-pub trait PhalanxNodeIdentityExt: Sized {
-    fn generate() -> Result<(Self, String), IdentityError>;
-    fn restore(phrase: &str) -> Result<Self, IdentityError>;
-    fn save_to_disk<P: AsRef<Path>>(&self, path: P) -> Result<(), IdentityError>;
-    fn load_from_disk<P: AsRef<Path>>(path: P) -> Result<Self, IdentityError>;
-    fn verify_retrieval_auth(&self, request: &VolleyRequest) -> Result<(), IdentityError>;
-    fn init<P: AsRef<Path>>(path: P) -> Result<Self, IdentityError>;
-}
-
-impl PhalanxNodeIdentityExt for PhalanxIdentity {
-    fn generate() -> Result<(Self, String), IdentityError> {
-        let mut rng = rand::thread_rng();
-        let mut entropy = [0u8; 16];
-        rng.fill_bytes(&mut entropy);
-
-        let mnemonic = Mnemonic::from_entropy(&entropy, Language::English)
-            .map_err(|e| IdentityError::EntropyError(e.to_string()))?;
-        let phrase = mnemonic.phrase().to_string();
-        let seed = mnemonic.to_seed("");
-
-        let secret_bytes: [u8; 32] = seed[0..32]
-            .try_into()
-            .map_err(|_| IdentityError::CryptoError("Seed fail".into()))?;
-
-        let signing_key = SigningKey::from_bytes(&secret_bytes);
-
-        Ok((
-            PhalanxIdentity {
-                network_id: NetworkId::random(),
-                version: IDENTITY_VERSION,
-                did: Did::from("did:key:anonymous"), // FIX: Replaced placeholder
-                keypair: signing_key,
-            },
-            phrase,
-        ))
-    }
-
-    fn restore(phrase: &str) -> Result<Self, IdentityError> {
-        let mnemonic = Mnemonic::from_phrase(phrase, Language::English)
-            .map_err(|e| IdentityError::MnemonicError(e.to_string()))?;
-        let seed = mnemonic.to_seed("");
-        let secret_bytes: [u8; 32] = seed[0..32]
-            .try_into()
-            .map_err(|_| IdentityError::CryptoError("Seed fail".into()))?;
-
-        Ok(PhalanxIdentity {
-            network_id: NetworkId::random(),
-            version: IDENTITY_VERSION,
-            did: Did::from("did:key:anonymous"), // FIX: Replaced placeholder
-            keypair: SigningKey::from_bytes(&secret_bytes),
-        })
-    }
-
-    fn save_to_disk<P: AsRef<Path>>(&self, path: P) -> Result<(), IdentityError> {
-        let bytes = postcard::to_allocvec(self)
-            .map_err(|e| IdentityError::SerializationError(e.to_string()))?;
-        fs::write(path, bytes).map_err(|e| IdentityError::Corruption(e.to_string()))
-    }
-
-    fn load_from_disk<P: AsRef<Path>>(path: P) -> Result<Self, IdentityError> {
-        let bytes = fs::read(path).map_err(|e| IdentityError::Corruption(e.to_string()))?;
-        postcard::from_bytes(&bytes).map_err(|e| IdentityError::SerializationError(e.to_string()))
-    }
-
-    fn verify_retrieval_auth(&self, _request: &VolleyRequest) -> Result<(), IdentityError> {
-        Ok(())
-    }
-
-    fn init<P: AsRef<Path>>(path: P) -> Result<Self, IdentityError> {
-        // FIX: Replaced IoError match with an explicit path check
-        if !path.as_ref().exists() {
-            tracing::warn!("Sovereign root: NOT FOUND. Initiating Genesis...");
-
-            let (new_identity, mnemonic) = Self::generate()?;
-            tracing::info!("!!! GENESIS SUCCESSFUL !!!");
-            tracing::info!("RESTORE PHRASE: {}", mnemonic);
-
-            new_identity.save_to_disk(&path)?;
-            return Ok(new_identity);
-        }
-
-        match Self::load_from_disk(&path) {
-            Ok(identity) => {
-                tracing::info!(path = ?path.as_ref(), "Sovereign root: RESTORED");
-                Ok(identity)
-            }
-            Err(err) => {
-                tracing::error!(error = %err, "Sovereign root: CORRUPTED or UNREADABLE");
-                Err(err)
-            }
-        }
     }
 }
 
