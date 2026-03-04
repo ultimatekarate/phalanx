@@ -3,6 +3,7 @@
 use phalanx_proto::prelude::*;
 use sntpc::{NtpContext, NtpTimestampGenerator, NtpUdpSocket};
 use std::net::SocketAddr;
+use std::net::ToSocketAddrs;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -16,17 +17,11 @@ struct TokioNtpSocket(tokio::net::UdpSocket);
 
 impl NtpUdpSocket for TokioNtpSocket {
     async fn send_to(&self, buf: &[u8], addr: SocketAddr) -> sntpc::Result<usize> {
-        self.0
-            .send_to(buf, addr)
-            .await
-            .map_err(|e| sntpc::Error::from(e))
+        self.0.send_to(buf, addr).await
     }
 
     async fn recv_from(&self, buf: &mut [u8]) -> sntpc::Result<(usize, SocketAddr)> {
-        self.0
-            .recv_from(buf)
-            .await
-            .map_err(|e| sntpc::Error::from(e))
+        self.0.recv_from(buf).await
     }
 }
 

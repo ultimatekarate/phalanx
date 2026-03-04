@@ -5,6 +5,7 @@ use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::IdentityError;
 use phalanx_proto::VolleyRequest;
 
+use rand::RngCore;
 use rand::RngExt;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
