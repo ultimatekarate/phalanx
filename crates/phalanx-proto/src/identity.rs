@@ -167,7 +167,7 @@ impl fmt::Display for NetworkId {
 pub struct SignatureHash(pub [u8; 32]);
 
 /// The sovereign cryptographic root for a Phalanx Node.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PhalanxIdentity {
     pub version: u32,
     pub did: Did,

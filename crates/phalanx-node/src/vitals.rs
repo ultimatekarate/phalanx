@@ -111,7 +111,7 @@ impl HealthTracker {
     }
 
     pub fn register_activity(&mut self, msg: ControlMessage) {
-        let peer_id = msg.sender;
+        let peer_id = msg.sender.clone();
         // FIX: Clone peer_id so it can be used in multiple maps
         self.heartbeats.insert(peer_id.clone(), Instant::now());
         self.peer_contracts

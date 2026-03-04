@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use tracing::{debug, instrument};
 
 // Dictionary Nouns
+use crate::clock::TrustedClock;
 use crate::trust::TrustRegistry;
 use crate::vitals::HealthTracker;
 use crate::Guardian;
@@ -18,7 +19,7 @@ pub struct IngressContext<'a> {
     pub config: &'a NodeConfig,
     pub identity: &'a PhalanxIdentity,
     pub network_id: NetworkId,
-    pub clock: &'a dyn TrustedClock,
+    pub clock: &'a TrustedClock,
     pub governor: &'a TrafficGovernor,
     pub mode: NodeMode,
 }

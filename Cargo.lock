@@ -3576,6 +3576,7 @@ dependencies = [
  "phalanx-transport",
  "postcard",
  "rand 0.10.0",
+ "rand_core 0.6.4",
  "redb",
  "serde",
  "sntpc",

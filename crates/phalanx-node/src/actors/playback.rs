@@ -78,7 +78,9 @@ impl<S: PlaybackSink> PlaybackCoordinator<S> {
                         // FIX: Added exhaustive match arm for Compressed payloads
                         DataPayload::Compressed(compressed_data) => {
                             phalanx_forensics::reassembler::decompress_payload(compressed_data)
-                                .context("Failed to decompress LZ4 payload")?
+                                .map_err(|e| {
+                                    anyhow::anyhow!("Failed to decompress LZ4 payload: {}", e)
+                                })?
                         }
                     };
 

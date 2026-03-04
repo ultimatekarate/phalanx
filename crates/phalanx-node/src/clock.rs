@@ -1,9 +1,34 @@
 // crates/phalanx-node/src/clock.rs
 
 use phalanx_proto::prelude::*;
-use sntpc::{NtpContext, NtpTimestampGenerator};
+use sntpc::{NtpContext, NtpTimestampGenerator, NtpUdpSocket};
+use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+// ============================================================================
+// Async UDP Socket Adapter for sntpc 0.8
+// ============================================================================
+
+/// Wraps a `tokio::net::UdpSocket` to satisfy sntpc's `NtpUdpSocket` trait.
+/// This adapter lives in The Hands where async IO is permitted.
+struct TokioNtpSocket(tokio::net::UdpSocket);
+
+impl NtpUdpSocket for TokioNtpSocket {
+    async fn send_to(&self, buf: &[u8], addr: SocketAddr) -> sntpc::Result<usize> {
+        self.0
+            .send_to(buf, addr)
+            .await
+            .map_err(|e| sntpc::Error::from(e))
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> sntpc::Result<(usize, SocketAddr)> {
+        self.0
+            .recv_from(buf)
+            .await
+            .map_err(|e| sntpc::Error::from(e))
+    }
+}
 
 // ============================================================================
 // NTP Generator Helper
@@ -93,8 +118,6 @@ impl TrustedClock {
     /// This method is async because sntpc 0.8 returns a future from `get_time`.
     /// If called from a synchronous context, wrap in a runtime block.
     pub async fn synchronize(&self) -> TimeResult<()> {
-        use std::net::ToSocketAddrs; // Required for resolution
-
         // 1. Resolve the hostname to a concrete SocketAddr
         // NTP always uses port 123
         let addr = "pool.ntp.org:123"
@@ -103,13 +126,12 @@ impl TrustedClock {
             .next()
             .ok_or_else(|| TimeError::NtpError("No address found for NTP pool".into()))?;
 
-        // 2. Setup the socket
-        let socket = std::net::UdpSocket::bind("0.0.0.0:0")
-            .map_err(|e| TimeError::NtpError(format!("UDP Bind failed: {}", e)))?;
-
-        socket
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .map_err(|e| TimeError::NtpError(format!("Socket config failed: {}", e)))?;
+        // 2. Setup the async socket via the Tokio adapter
+        let socket = TokioNtpSocket(
+            tokio::net::UdpSocket::bind("0.0.0.0:0")
+                .await
+                .map_err(|e| TimeError::NtpError(format!("UDP Bind failed: {}", e)))?,
+        );
 
         let context = NtpContext::new(PhalanxNtpGenerator::default());
 

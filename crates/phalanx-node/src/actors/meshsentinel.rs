@@ -101,14 +101,14 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             config: config.clone(),
             identity: identity.clone(),
             forensic_tx,
-            local_peer_id: local_network_id,
+            local_peer_id: local_network_id.clone(),
         };
 
         let storage_task = tokio::spawn(async move {
             storage_actor.run(storage_rx).await;
         });
-        let arc_identity = Arc::new(identity);
-        let session = CausalitySession::new(arc_identity.clone(), local_network_id);
+        let arc_identity = Arc::new(identity.clone());
+        let session = CausalitySession::new(arc_identity.clone(), local_network_id.clone());
 
         Ok(Self {
             config,
@@ -148,7 +148,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                             self.handle_network_ingress(origin, &data, topic).await;
                         }
                         NetworkEvent::VolleyRequested { origin, request, channel_id } => {
-                            self.execute_secure_retrieval(origin, request, channel_id, local_network_id).await;
+                            self.execute_secure_retrieval(origin, request, channel_id, &local_network_id).await;
                         }
                         NetworkEvent::Shutdown => {
                             info!("Engine: Initiating emergency salvage");
@@ -161,10 +161,10 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                     }
                 }
                 Some(shard) = self.video_rx.recv() => {
-                    self.process_media_egress(Evidence::Video(shard), local_network_id).await;
+                    self.process_media_egress(Evidence::Video(shard), &local_network_id).await;
                 }
                 Some(shard) = self.audio_rx.recv() => {
-                    self.process_media_egress(Evidence::Audio(shard), local_network_id).await;
+                    self.process_media_egress(Evidence::Audio(shard), &local_network_id).await;
                 }
                 Some((peer_id, owner_did, err)) = self.forensic_rx.recv() => {
                     self.handle_forensic_violation(peer_id, owner_did, err).await;
@@ -208,10 +208,14 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
 
     /// Processes outbound media evidence: signs, encrypts, and publishes to the mesh.
     /// TODO: Implement full causality chain signing and encryption pipeline.
-    async fn process_media_egress(&mut self, evidence: Evidence, _local_id: NetworkId) {
+    async fn process_media_egress(&mut self, evidence: Evidence, _local_id: &NetworkId) {
         let topic = match &evidence {
             Evidence::Video(_) => &self.config.network.video_topic,
             Evidence::Audio(_) => &self.config.network.audio_topic,
+            Evidence::Gap(_) | Evidence::Handover(_) => {
+                tracing::warn!("Unexpected evidence type for media egress");
+                return;
+            }
         };
 
         match postcard::to_allocvec(&evidence) {
@@ -251,9 +255,9 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         origin: NetworkId,
         request: VolleyRequest,
         channel_id: String,
-        local_id: NetworkId,
+        local_id: &NetworkId,
     ) {
-        if self.identity.verify_retrieval_auth(&request).is_err() {
+        if PhalanxNodeIdentityExt::verify_retrieval_auth(&*self.identity, &request).is_err() {
             warn!(
                 peer = %origin,
                 volley = %request.volley_id,
@@ -284,9 +288,9 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             .await;
 
         let response = match reply_rx.await {
-            Ok(envelopes) => {
+            Ok(VolleyResponse::Success(envelopes)) => {
                 let orchestrator = RetrievalOrchestrator::new();
-                match orchestrator.verify_mesh_egress(envelopes, &local_id).await {
+                match orchestrator.verify_mesh_egress(envelopes, local_id).await {
                     Ok(verified) => VolleyResponse::Success(verified),
                     Err(_) => VolleyResponse::NotFound,
                 }
@@ -390,7 +394,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                 .scores
                 .write()
                 .unwrap()
-                .insert(peer_id, score);
+                .insert(peer_id.clone(), score);
             if self.trust_registry.is_blacklisted(&owner_did) {
                 self.network.ban_peer(&peer_id).await;
             }
