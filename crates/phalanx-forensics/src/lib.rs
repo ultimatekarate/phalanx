@@ -2,6 +2,7 @@
 
 pub mod crucible;
 pub mod cryptography;
+pub mod gate;
 pub mod identity;
 pub mod judge;
 pub mod kademlia;

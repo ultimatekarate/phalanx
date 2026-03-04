@@ -1,5 +1,3 @@
-use crate::crucible::EvidenceExt;
-use crate::witness::WitnessAuthority;
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::KeyInit;
 use chacha20poly1305::XChaCha20Poly1305;
@@ -8,9 +6,10 @@ use ed25519_dalek::Signer;
 use ed25519_dalek::{Signature, VerifyingKey}; // Crypto stays here!
 use phalanx_proto::crypto::CryptoError;
 use phalanx_proto::crypto::SymmetricKey;
-use phalanx_proto::evidence::Evidence;
-use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::PhalanxIdentity;
+use phalanx_proto::prelude::DataPayload;
+use phalanx_proto::prelude::ShardError;
+use phalanx_proto::prelude::SignatureHash;
 use phalanx_proto::storage::HandoverProof;
 use phalanx_proto::time::{PhalanxTimestamp, TimeError};
 
@@ -176,133 +175,11 @@ impl TimeJudge for PhalanxTimestamp {
     }
 }
 
-use phalanx_proto::prelude::*;
-use tracing::{error, warn};
-
-/// Gate 1: The Witnessing Gate
-pub trait WitnessGate {
-    fn seal(
-        self,
-        identity: &PhalanxIdentity,
-        peer_id: NetworkId,
-        prev_hash: Option<SignatureHash>,
-    ) -> Result<WitnessEnvelope, ShardError>;
-}
-
-impl WitnessGate for Evidence {
-    fn seal(
-        self,
-        identity: &PhalanxIdentity,
-        peer_id: NetworkId,
-        prev_hash: Option<SignatureHash>,
-    ) -> Result<WitnessEnvelope, ShardError> {
-        phalanx_proto::evidence::WitnessEnvelope::sign_envelope(self, identity, peer_id, prev_hash)
-            .map_err(|_| {
-                error!(
-                    event = "signing_failure",
-                    "Witness Gate: Failed to seal unit"
-                );
-                ShardError::SigningError("Failed to seal".into())
-            })
-    }
-}
-
-/// Gate 3: The Integrity Gate (Reception Side)
-pub trait IntegrityGate {
-    fn check_integrity(
-        self,
-        node_id: &NetworkId,
-        now: PhalanxTimestamp, // Pass timestamp directly to decouple from Clock impl
-        tolerance: u64,
-    ) -> Result<Self, ShardError>
-    where
-        Self: Sized;
-}
-
-impl IntegrityGate for WitnessEnvelope {
-    fn check_integrity(
-        self,
-        node_id: &NetworkId,
-        now: PhalanxTimestamp,
-        tolerance: u64,
-    ) -> Result<Self, ShardError> {
-        if !phalanx_proto::evidence::WitnessEnvelope::verify_envelope(&self) {
-            error!(event = "integrity_failure", node = %node_id, peer = %self.did, "SIGNATURE_INVALID");
-            return Err(ShardError::SigningError(
-                "Signature verification failed".into(),
-            ));
-        }
-
-        match self.evidence.timestamp().verify_freshness(now, tolerance) {
-            Ok(_) => Ok(self),
-            Err(e) => {
-                error!(event = "temporal_failure", node = %node_id, peer = %self.did, "TIME_INVALID");
-                // FIX: Map to String to bypass the TimeError module collision
-                Err(ShardError::InvalidConfiguration(e.to_string()))
-            }
-        }
-    }
-}
-
-/// Gate 4: The Privacy Gate (Egress)
-pub trait PrivacyGate {
-    fn safeguard(self, key: &SymmetricKey) -> Result<Self, ShardError>
-    where
-        Self: Sized;
-}
-
-impl PrivacyGate for Evidence {
-    fn safeguard(mut self, key: &SymmetricKey) -> Result<Self, ShardError> {
-        let res = match &mut self {
-            Evidence::Video(s) => s.payload.apply_encryption(key),
-            Evidence::Audio(s) => s.payload.apply_encryption(key),
-            _ => Ok(()),
-        };
-
-        res.map(|_| self).map_err(|e| {
-            tracing::error!(event = "privacy_failure", error = %e, "Safeguarding failed");
-            ShardError::Encryption(e.to_string())
-        })
-    }
-}
-
-/// Gate 5: The Capacity Gate (Ingress)
-pub trait CapacityGate {
-    fn check_capacity(
-        self,
-        peer: &NetworkId,
-        pending: usize,
-        limit: usize,
-    ) -> Result<Self, ShardError>
-    where
-        Self: Sized;
-}
-
-impl CapacityGate for WitnessEnvelope {
-    fn check_capacity(
-        self,
-        peer: &NetworkId,
-        pending: usize,
-        limit: usize,
-    ) -> Result<Self, ShardError> {
-        if pending > limit {
-            warn!(event = "capacity_shedding", peer = %peer, "Node saturated");
-            return Err(ShardError::CapacityExceeded(pending as u64));
-        }
-        Ok(self)
-    }
-}
-
-/// Monadic Observation Extension
-pub trait ForensicGate<T, E> {
-    fn gate(self, event: &str, node: &NetworkId, msg: &str) -> Result<T, E>;
-}
-
-impl<T, E: std::fmt::Display> ForensicGate<T, E> for Result<T, E> {
-    fn gate(self, event: &str, node: &NetworkId, msg: &str) -> Result<T, E> {
-        if let Err(ref e) = self {
-            error!(event = event, node = %node, error = %e, "{msg}");
-        }
-        self
-    }
-}
+// Gate traits (WitnessGate, IntegrityGate, PrivacyGate, CapacityGate,
+// ForensicGate) live in crate::gate — re-exported here for backwards
+// compatibility so existing `use phalanx_forensics::judge::IntegrityGate`
+// paths continue to resolve.
+pub use crate::gate::{
+    BufferCapacityGate, CapacityGate, ChronosGate, ForensicGate, IntegrityGate, PrivacyGate,
+    WitnessGate,
+};
