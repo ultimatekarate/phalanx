@@ -1,6 +1,7 @@
 // crates/phalanx-node/src/clock.rs
 
 use phalanx_proto::prelude::*;
+use sntpc::{Error as NtpError, Result as NtpResult};
 use sntpc::{NtpContext, NtpTimestampGenerator, NtpUdpSocket};
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
@@ -16,12 +17,22 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 struct TokioNtpSocket(tokio::net::UdpSocket);
 
 impl NtpUdpSocket for TokioNtpSocket {
-    async fn send_to(&self, buf: &[u8], addr: SocketAddr) -> sntpc::Result<usize> {
-        self.0.send_to(buf, addr).await
+    async fn send_to(
+        &self,
+        outbound_buffer: &[u8],
+        target_address: SocketAddr,
+    ) -> NtpResult<usize> {
+        self.0
+            .send_to(outbound_buffer, target_address)
+            .await
+            .map_err(|_io_failure| NtpError::Network)
     }
 
-    async fn recv_from(&self, buf: &mut [u8]) -> sntpc::Result<(usize, SocketAddr)> {
-        self.0.recv_from(buf).await
+    async fn recv_from(&self, inbound_buffer: &mut [u8]) -> NtpResult<(usize, SocketAddr)> {
+        self.0
+            .recv_from(inbound_buffer)
+            .await
+            .map_err(|_io_failure| NtpError::Network)
     }
 }
 
@@ -41,7 +52,7 @@ impl NtpTimestampGenerator for PhalanxNtpGenerator {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::from_secs(0))
-            .as_secs() as u64
+            .as_secs()
     }
 
     fn timestamp_subsec_micros(&self) -> u32 {
@@ -128,7 +139,7 @@ impl TrustedClock {
                 .map_err(|e| TimeError::NtpError(format!("UDP Bind failed: {}", e)))?,
         );
 
-        let context = NtpContext::new(PhalanxNtpGenerator::default());
+        let context = NtpContext::new(PhalanxNtpGenerator);
 
         // 3. Pass the resolved 'addr' (SocketAddr) instead of the string
         match sntpc::get_time(addr, &socket, context).await {

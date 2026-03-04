@@ -7,40 +7,30 @@ use serde::{Deserialize, Serialize};
 pub enum ShardError {
     #[error("Dataset capacity exceeded: {0} exceeds u32 limit")]
     CapacityExceeded(u64),
-
     #[error("Invalid shard configuration: {0}")]
     InvalidConfiguration(String),
-
     #[error("Serialization failed: {0}")]
     SerializationError(String),
-
     #[error("Time source error: {0}")]
-    TimeSource(#[from] TimeError), // TimeError must now be serializable too!
-
+    TimeSource(#[from] TimeError),
     #[error("Cryptographic signing failed: {0}")]
     SigningError(String),
-
     #[error("Encryption error: {0}")]
     Encryption(String),
-
-    // THE FIX: We store the string representation for serialization
     #[error("Disk I/O failed: {0}")]
     Io(String),
-
     #[error("Decompression Error: {0}")]
     DecompressionFailure(String),
-
     #[error("Invalid Signature: {0}")]
     InvalidSignature(String),
-
-    #[error("Salvage operation failed: {0}")] // Fixed duplicate error message
+    #[error("Salvage operation failed: {0}")]
     SalvageError(String),
-
     #[error("Not enough reputation")]
     Unauthorized(String),
-
     #[error("Size cannot be 0")]
     InvalidSize(String),
+    #[error("Shard verification failed")]
+    VerificationFailed,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -55,4 +45,26 @@ pub enum IdentityError {
     SerializationError(String),
     #[error("Identity data corruption: {0}")]
     Corruption(String),
+}
+
+#[derive(Debug, thiserror::Error, Serialize, Deserialize)]
+pub enum LocatorError {
+    #[error("Locator input is malformed or incorrectly delimited")]
+    MalformedInput,
+    #[error("Locator is missing the required author/signer field")]
+    MissingAuthor,
+    #[error("Locator scheme is unsupported or invalid: {0}")]
+    InvalidScheme(String),
+    #[error("Locator payload exceeds maximum forensic length: {0}")]
+    PayloadTooLarge(usize),
+    #[error("Cryptographic signature in locator failed verification")]
+    SignatureMismatch,
+    #[error("Internal encoding error: {0}")]
+    Encoding(String),
+    #[error("Missing fragment (Decryption Key)")]
+    MissingKey,
+    #[error("Malformatted component")]
+    ParseError,
+    #[error("Locator is missing a recipient.")]
+    MissingRecipient,
 }

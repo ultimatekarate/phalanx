@@ -13,14 +13,8 @@ pub const IDENTITY_VERSION: u32 = 1;
 )]
 pub struct ShardId(pub u32);
 
-impl fmt::Display for ShardId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "shard:{}", self.0)
-    }
-}
-
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
-pub struct VolleyId(String);
+pub struct VolleyId(pub String);
 
 impl VolleyId {
     pub fn new(id: impl Into<String>) -> Self {
@@ -30,12 +24,6 @@ impl VolleyId {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl fmt::Display for VolleyId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
     }
 }
 

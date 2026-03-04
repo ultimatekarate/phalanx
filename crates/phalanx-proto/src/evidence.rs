@@ -189,3 +189,33 @@ pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
 }
+
+impl fmt::Display for ShardId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "shard:{}", self.0)
+    }
+}
+
+impl fmt::Display for VolleyId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Forensic unit for session handovers between nodes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoverShard {
+    pub previous_node: NetworkId,
+    pub next_node: NetworkId,
+    pub session_transfer_token: Vec<u8>,
+}
+
+/// The stateful reassembly container for a complete forensic session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Volley {
+    pub volley_id: VolleyId,
+    pub author_did: Did,
+    pub start_time: PhalanxTimestamp,
+    pub sequence_count: u64,
+    pub is_finalized: bool,
+}
