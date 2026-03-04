@@ -11,9 +11,11 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
-use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
-use phalanx_core::security::telemetry::{ChaosMode, NodeRole};
-use phalanx_core::simulation::SimulationHarness;
+use phalanx_node::config::NodeConfig;
+use phalanx_proto::identity::NodeRole;
+use phalanx_proto::telemetry::ChaosMode;
+use phalanx_sim::physics::PhalanxPhysics;
+use phalanx_sim::SimulationHarness;
 
 use crate::state::DashboardState;
 use crate::ui::render_dashboard;
@@ -26,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let config = PhalanxConfig::test_defaults();
+    let config = NodeConfig::test_defaults();
     let physics = PhalanxPhysics::test_profile();
 
     let (mut harness, mut telemetry_rx) = SimulationHarness::init_mesh(config, physics);
@@ -41,7 +43,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .resolve_did(&did_alpha)
         .await
         .expect("Resolution failed");
-    state.node_roles.insert(net_alpha, NodeRole::Guardian);
+    state
+        .node_roles
+        .insert(net_alpha.clone(), NodeRole::Guardian);
 
     let did_beta = harness
         .spawn_node("Beta", NodeRole::Guardian)
@@ -51,7 +55,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .resolve_did(&did_beta)
         .await
         .expect("Resolution failed");
-    state.node_roles.insert(net_beta, NodeRole::Guardian);
+    state
+        .node_roles
+        .insert(net_beta.clone(), NodeRole::Guardian);
 
     let did_gamma = harness
         .spawn_node("Gamma", NodeRole::Guardian)
@@ -61,7 +67,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .resolve_did(&did_gamma)
         .await
         .expect("Resolution failed");
-    state.node_roles.insert(net_gamma, NodeRole::Guardian);
+    state
+        .node_roles
+        .insert(net_gamma.clone(), NodeRole::Guardian);
 
     let did_bastion = harness
         .spawn_node("Bastion", NodeRole::Stronghold)
@@ -83,21 +91,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         state.current_scenario = "Alpha: Packet Loss".to_string();
                         state
                             .node_modes
-                            .insert(net_alpha, ChaosMode::PacketLoss(0.5));
+                            .insert(net_alpha.clone(), ChaosMode::PacketLoss(0.5));
                         harness
                             .inject_chaos(&did_alpha, ChaosMode::PacketLoss(0.5))
                             .await;
                     }
                     KeyCode::Char('2') => {
                         state.current_scenario = "Beta: Vampire Attack".to_string();
-                        state.node_modes.insert(net_beta, ChaosMode::Hyperactive);
+                        state
+                            .node_modes
+                            .insert(net_beta.clone(), ChaosMode::Hyperactive);
                         harness
                             .inject_chaos(&did_beta, ChaosMode::Hyperactive)
                             .await;
                     }
                     KeyCode::Char('3') => {
                         state.current_scenario = "Gamma: Byzantine Fault".to_string();
-                        state.node_modes.insert(net_gamma, ChaosMode::Byzantine);
+                        state
+                            .node_modes
+                            .insert(net_gamma.clone(), ChaosMode::Byzantine);
                         harness.inject_chaos(&did_gamma, ChaosMode::Byzantine).await;
                     }
                     KeyCode::Char('0') => {

@@ -1,4 +1,5 @@
-use serde::{Serialize, Deserialize};
+use phalanx_proto::types::UnitInterval;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PowerState {

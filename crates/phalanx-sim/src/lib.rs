@@ -1,6 +1,7 @@
 pub mod chaos;
 pub mod clock; // The "Tense Control": Management of virtual time
 pub mod harness; // The "Pen": Your API for writing simulation scripts
+pub mod physics; // The Physical Laws of the Simulation
 pub mod world; // The "Ether": Shared state where nodes meet // The "Adverbs": Logic for dropping/delaying packets
 
 pub use clock::VirtualClock;

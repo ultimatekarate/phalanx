@@ -40,7 +40,8 @@ pub enum SimEvent {
     PeerDiscovered {
         peer: NetworkId,
         source: DiscoverySource,
-    }, // Note: Role handled by Identity
+        role: crate::identity::NodeRole,
+    }, // Note: Role included for dashboard telemetry
     ShardProcessed {
         peer_id: NetworkId,
         byte_size: ByteCapacity,

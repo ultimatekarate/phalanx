@@ -145,6 +145,14 @@ impl From<&str> for NetworkId {
     }
 }
 
+impl FromStr for NetworkId {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(s.to_string()))
+    }
+}
+
 impl fmt::Display for NetworkId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -213,7 +221,7 @@ impl std::fmt::Debug for PhalanxIdentity {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum NodeRole {
     Guardian,
     Stronghold,

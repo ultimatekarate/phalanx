@@ -9,6 +9,41 @@ pub struct SimConfig;
 /// TODO: Implement node spawning, chaos injection, and telemetry collection.
 pub struct SimulationHarness;
 
+impl SimulationHarness {
+    pub fn init_mesh(
+        _config: phalanx_node::config::NodeConfig,
+        _physics: crate::physics::PhalanxPhysics,
+    ) -> (
+        Self,
+        tokio::sync::mpsc::Receiver<phalanx_proto::telemetry::SimEvent>,
+    ) {
+        todo!("SimulationHarness::init_mesh")
+    }
+
+    pub async fn spawn_node(
+        &mut self,
+        _name: &str,
+        _role: phalanx_proto::identity::NodeRole,
+    ) -> Result<phalanx_proto::prelude::Did, Box<dyn std::error::Error + Send + Sync>> {
+        todo!("SimulationHarness::spawn_node")
+    }
+
+    pub async fn resolve_did(
+        &self,
+        _did: &phalanx_proto::prelude::Did,
+    ) -> Result<phalanx_proto::identity::NetworkId, Box<dyn std::error::Error + Send + Sync>> {
+        todo!("SimulationHarness::resolve_did")
+    }
+
+    pub async fn inject_chaos(
+        &mut self,
+        _did: &phalanx_proto::prelude::Did,
+        _mode: phalanx_proto::telemetry::ChaosMode,
+    ) {
+        todo!("SimulationHarness::inject_chaos")
+    }
+}
+
 struct RecoveryJournal(Vec<PendingEgress>);
 
 #[async_trait::async_trait]

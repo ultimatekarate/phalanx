@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use phalanx_core::primitives::identity::NetworkId;
+use phalanx_proto::identity::NetworkId;
 use std::time::Instant;
 
 use crate::state::DashboardState;
@@ -34,7 +34,7 @@ fn render_radar(f: &mut Frame, state: &DashboardState, area: ratatui::layout::Re
     let peer_list: Vec<(NetworkId, Instant)> = state
         .active_peers
         .iter()
-        .map(|(id, timestamp)| (*id, *timestamp))
+        .map(|(id, timestamp)| ((id.clone()), *timestamp))
         .collect();
 
     let widget_vectors = state.generate_widget_vectors();

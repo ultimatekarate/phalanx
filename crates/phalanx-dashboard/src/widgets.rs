@@ -1,7 +1,7 @@
 // crates/phalanx-dashboard/src/widgets.rs
 
-use phalanx_core::primitives::identity::NetworkId;
-use phalanx_core::security::telemetry::{ChaosMode, NodeRole};
+use phalanx_proto::identity::{NetworkId, NodeRole};
+use phalanx_proto::telemetry::ChaosMode;
 use ratatui::widgets::canvas::{Canvas, Context, Line as CanvasLine, Points, Rectangle};
 use ratatui::{
     layout::Rect,
@@ -59,7 +59,7 @@ impl<'a> Widget for NetworkRadar<'a> {
 
 impl<'a> NetworkRadar<'a> {
     fn get_coords(net_id: &NetworkId) -> (f64, f64) {
-        let bytes = net_id.0.to_bytes();
+        let bytes = net_id.0.as_bytes();
         let len = bytes.len();
 
         let b_x = if len > 0 { bytes[len - 1] } else { 0 };

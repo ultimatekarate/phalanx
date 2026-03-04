@@ -1,8 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use phalanx_core::primitives::identity::NetworkId;
-use phalanx_core::security::telemetry::{ChaosMode, NodeRole, SimEvent};
+use phalanx_proto::identity::{NetworkId, NodeRole};
+use phalanx_proto::telemetry::{ChaosMode, SimEvent};
 
 use crate::widgets::{TrafficVector, VectorStyle};
 
@@ -99,13 +99,15 @@ impl DashboardState {
                     .owner_did
                     .to_string()
                     .parse::<NetworkId>()
-                    .unwrap_or(origin);
+                    .unwrap_or(origin.clone());
                 let target_role = self.node_roles.get(&target).unwrap_or(&NodeRole::Guardian);
 
                 if *target_role == NodeRole::Stronghold {
                     self.push_log(format!(
                         "[ARCHIVE] {} -> {}: {} bytes",
-                        origin, target, size
+                        origin.clone(),
+                        target,
+                        size
                     ));
                 }
 
@@ -123,8 +125,8 @@ impl DashboardState {
                 }
             }
             SimEvent::PeerDiscovered { peer, role, .. } => {
-                self.active_peers.insert(peer, Instant::now());
-                self.node_roles.insert(peer, role);
+                self.active_peers.insert(peer.clone(), Instant::now());
+                self.node_roles.insert(peer.clone(), role);
             }
             SimEvent::Shutdown => {
                 self.push_log("Simulated Node Shutdown Detected".to_string());
@@ -140,8 +142,8 @@ impl DashboardState {
         self.active_vectors
             .iter()
             .map(|v| TrafficVector {
-                from: v.origin,
-                to: v.target,
+                from: v.origin.clone(),
+                to: v.target.clone(),
                 age_seconds: v.timestamp.elapsed().as_secs_f32(),
                 style: match v.style {
                     VectorStyle::Standard => VectorStyle::Standard,
