@@ -1,3 +1,7 @@
+use phalanx_proto::network::NetworkEvent;
+use phalanx_proto::prelude::{MeshTopic, NetworkId, VolleyResponse};
+use phalanx_transport::NetworkTransport;
+
 struct FailingTransport;
 
 #[async_trait::async_trait]

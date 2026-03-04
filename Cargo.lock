@@ -3687,6 +3687,7 @@ dependencies = [
  "postcard",
  "rand 0.8.5",
  "serde",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
