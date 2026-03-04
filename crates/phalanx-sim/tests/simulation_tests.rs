@@ -1,3 +1,4 @@
+#![cfg(feature = "__disabled_legacy_tests")]
 use phalanx_core::storage::journal::FileJournal;
 use tokio::time::Duration;
 

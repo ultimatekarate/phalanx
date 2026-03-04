@@ -1,17 +1,22 @@
-use phalanx_core::base::config::PhalanxConfig;
-use phalanx_core::primitives::identity::{NetworkId, PhalanxIdentity};
-use phalanx_core::primitives::shards::{
-    create_video_shard, EnvelopeState, Evidence, HandoverProof, StorageSequence, Volley, VolleyId,
-    WitnessEnvelope,
-};
-use phalanx_core::storage::vault::Guardian;
+use phalanx_node::config::NodeConfig;
+use phalanx_node::identity::PhalanxNodeIdentityExt;
+use phalanx_node::persistence::vault::Guardian;
+use phalanx_node::vitals::init_observability;
+use phalanx_proto::evidence::{EnvelopeState, Evidence, StorageSequence, WitnessEnvelope};
+use phalanx_proto::identity::{NetworkId, PhalanxIdentity, Volley, VolleyId};
+use phalanx_proto::storage::HandoverProof;
+// Extension traits needed for method resolution
+use phalanx_forensics::crucible::EnvelopeHashExt;
+use phalanx_forensics::reassembler::create_video_shard;
+use phalanx_forensics::storage::handover::HandoverAuthority;
+use phalanx_forensics::witness::WitnessAuthority;
 
 #[tokio::test]
 async fn test_legal_identity_handover() {
-    let _ = phalanx_core::security::telemetry::init_observability();
+    init_observability();
 
     let temp_dir = tempfile::tempdir().unwrap();
-    let config = PhalanxConfig::test_defaults();
+    let config = NodeConfig::test_defaults();
 
     // 1. Setup Identities (The Relay and the Target)
     let (identity_a, _) = PhalanxIdentity::generate().expect("Failed to generate Old DID");
@@ -27,49 +32,41 @@ async fn test_legal_identity_handover() {
         identity_a.did.clone(),
     );
 
-    // ----------------------------------------------------------------------
     // PHASE 1: Identity A owns the stream
-    // ----------------------------------------------------------------------
     let shard_1 =
         create_video_shard(vec![vec![0x01]], StorageSequence(1), 30, vid.clone()).unwrap();
-    let env_1 =
-        WitnessEnvelope::new(Evidence::Video(shard_1), &identity_a, peer_id.clone(), None).unwrap();
-
-    // We must capture the hash to anchor the next unit
+    let env_1 = WitnessEnvelope::sign_envelope(
+        Evidence::Video(shard_1),
+        &identity_a,
+        peer_id.clone(),
+        None,
+    )
+    .unwrap();
     let hash_1 = env_1.signature_hash();
 
-    // ----------------------------------------------------------------------
     // PHASE 2: The Cryptographic Handover (The Bridge)
-    // ----------------------------------------------------------------------
-    // TARGET API: HandoverProof::generate(...) requires both keys to sign a common payload
     let handover_proof = HandoverProof::generate(
         &identity_a,
         &identity_b,
         vid.clone(),
         StorageSequence(2),
-        hash_1, // Anchored to Identity A's last frame
+        hash_1,
     )
     .expect("Failed to generate dual-signed HandoverProof");
 
-    // Identity A seals the handover as their final act in this timeline
-    let env_2 = WitnessEnvelope::new(
+    let env_2 = WitnessEnvelope::sign_envelope(
         Evidence::Handover(handover_proof),
         &identity_a,
         peer_id.clone(),
         Some(hash_1),
     )
     .unwrap();
-
     let hash_2 = env_2.signature_hash();
 
-    // ----------------------------------------------------------------------
     // PHASE 3: Identity B takes over seamlessly
-    // ----------------------------------------------------------------------
     let shard_3 =
         create_video_shard(vec![vec![0x03]], StorageSequence(3), 30, vid.clone()).unwrap();
-
-    // Identity B seals the next unit, anchoring it to the Handover envelope!
-    let env_3 = WitnessEnvelope::new(
+    let env_3 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_3),
         &identity_b,
         peer_id.clone(),
@@ -77,10 +74,7 @@ async fn test_legal_identity_handover() {
     )
     .unwrap();
 
-    // ----------------------------------------------------------------------
     // VERIFICATION
-    // ----------------------------------------------------------------------
-    // The Guardian should ingest all three without throwing a Causality Breach
     assert!(guardian
         .ingest_envelope(EnvelopeState::Intact(env_1))
         .await
@@ -94,13 +88,11 @@ async fn test_legal_identity_handover() {
         .await
         .is_ok());
 
-    // Force salvage to verify the Volley state
     guardian.salvage().await.expect("Salvage failed");
 
-    // Read the file to ensure the ownership successfully transferred
     let expected_path = temp_dir
         .path()
-        .join(identity_b.did.to_safe_name()) // It should now live in Identity B's folder!
+        .join(identity_b.did.to_safe_name())
         .join("handover_stream_01.volley");
 
     assert!(
@@ -129,22 +121,23 @@ async fn test_illegal_identity_swap_rejected() {
     let peer_id = NetworkId::random();
     let vid = VolleyId::new("illegal_stream");
 
-    let config = PhalanxConfig::test_defaults();
+    let config = NodeConfig::test_defaults();
     let mut guardian = Guardian::new("sim_vault/illegal_test", &config, identity_a.did.clone());
 
-    // Identity A creates frame 1
     let shard_1 =
         create_video_shard(vec![vec![0x01]], StorageSequence(1), 30, vid.clone()).unwrap();
-    let env_1 =
-        WitnessEnvelope::new(Evidence::Video(shard_1), &identity_a, peer_id.clone(), None).unwrap();
+    let env_1 = WitnessEnvelope::sign_envelope(
+        Evidence::Video(shard_1),
+        &identity_a,
+        peer_id.clone(),
+        None,
+    )
+    .unwrap();
     let hash_1 = env_1.signature_hash();
 
-    // Identity B tries to hijack the stream WITHOUT a HandoverProof
     let shard_2 =
         create_video_shard(vec![vec![0x02]], StorageSequence(2), 30, vid.clone()).unwrap();
-
-    // B anchors to A's hash, but signs with B's key
-    let env_2 = WitnessEnvelope::new(
+    let env_2 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_2),
         &identity_b,
         peer_id.clone(),
@@ -156,15 +149,11 @@ async fn test_illegal_identity_swap_rejected() {
         .ingest_envelope(EnvelopeState::Intact(env_1))
         .await
         .unwrap();
-
-    // This should fail silently or return an error depending on your Guardian pipeline,
-    // but the Crucible should DEFINITELY drop it.
     guardian
         .ingest_envelope(EnvelopeState::Intact(env_2))
         .await
         .unwrap();
 
-    // Verify the Crucible refused to append env_2
     let active_session = guardian.get_active_volley_shards(&vid).unwrap();
     assert_eq!(
         active_session.len(),

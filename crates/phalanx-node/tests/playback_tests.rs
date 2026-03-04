@@ -1,17 +1,19 @@
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 
-use phalanx_core::base::config::PhalanxConfig;
-use phalanx_core::base::engine::StorageCommand;
-use phalanx_core::playback::coordinator::PlaybackCoordinator;
-use phalanx_core::playback::sink::VideoPlayerSink;
-use phalanx_core::primitives::identity::NetworkId;
-use phalanx_core::primitives::shards::{
-    DataPayload, EnvelopeState, Evidence, StorageSequence, VideoShard, VolleyId, WitnessEnvelope,
+use phalanx_forensics::crucible::EnvelopeHashExt;
+use phalanx_forensics::witness::WitnessAuthority;
+use phalanx_node::actors::playback::PlaybackCoordinator;
+use phalanx_node::actors::storage::StorageCommand;
+use phalanx_node::config::NodeConfig;
+use phalanx_node::identity::PhalanxNodeIdentityExt;
+use phalanx_node::persistence::vault::Guardian;
+use phalanx_node::playback::sink::VideoPlayerSink;
+use phalanx_proto::evidence::{
+    DataPayload, EnvelopeState, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
 };
-use phalanx_core::primitives::time::PhalanxTimestamp;
-use phalanx_core::storage::vault::Guardian;
-use phalanx_core::PhalanxIdentity;
+use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
+use phalanx_proto::time::PhalanxTimestamp;
 
 #[tokio::test]
 async fn test_exodus_resurrection_logic() {
@@ -19,13 +21,12 @@ async fn test_exodus_resurrection_logic() {
     let vault_path = temp_dir.path().to_string_lossy().to_string();
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let config = PhalanxConfig::default();
+    let config = NodeConfig::default();
 
     let (storage_tx, mut storage_rx) = mpsc::channel::<StorageCommand>(100);
     let (disc_tx, mut disc_rx) = mpsc::channel(1);
     let (ui_tx, mut ui_rx) = mpsc::channel(10);
 
-    // Spawn Test Storage Actor
     let identity_clone = identity.clone();
     tokio::spawn(async move {
         let mut guardian = Guardian::new(&vault_path, &config, identity_clone.did);
@@ -52,10 +53,8 @@ async fn test_exodus_resurrection_logic() {
 
     let sink = VideoPlayerSink::new(ui_tx);
     let volley_id = VolleyId::new("v_exodus_test");
-
     let mut coordinator = PlaybackCoordinator::new(storage_tx.clone(), None, sink, disc_tx);
 
-    // Pre-load Shard 1
     let shard_1 = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
@@ -63,7 +62,7 @@ async fn test_exodus_resurrection_logic() {
         volley_id: volley_id.clone(),
         payload: DataPayload::Clear(b"Frame 1".to_vec()),
     };
-    let envelope_1 = WitnessEnvelope::new(
+    let envelope_1 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_1),
         &identity,
         NetworkId::random(),
@@ -72,30 +71,27 @@ async fn test_exodus_resurrection_logic() {
     .unwrap();
     let hash_1 = envelope_1.signature_hash();
 
-    let state_1 = EnvelopeState::Intact(envelope_1);
     storage_tx
-        .send(StorageCommand::IngestEnvelope(state_1))
+        .send(StorageCommand::IngestEnvelope(EnvelopeState::Intact(
+            envelope_1,
+        )))
         .await
         .unwrap();
 
-    // Start Coordinator
     let v_id_clone = volley_id.clone();
     let _handle = tokio::spawn(async move {
         coordinator.run(v_id_clone).await.unwrap();
     });
 
-    // Verify Immediate Resurrection (Shard 1)
     let frame = ui_rx.recv().await.expect("Should receive Frame 1");
     assert_eq!(frame, b"Frame 1");
 
-    // Verify Gap Discovery
     let (volley_id, missing_id) = disc_rx
         .recv()
         .await
         .expect("Should signal discovery for Shard 2");
     assert_eq!(missing_id, StorageSequence(2));
 
-    // Mesh provides Shard 2
     let shard_2 = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(2),
@@ -103,7 +99,7 @@ async fn test_exodus_resurrection_logic() {
         volley_id: volley_id.clone(),
         payload: DataPayload::Clear(b"Frame 2".to_vec()),
     };
-    let envelope_2 = WitnessEnvelope::new(
+    let envelope_2 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_2),
         &identity,
         NetworkId::random(),
@@ -111,9 +107,10 @@ async fn test_exodus_resurrection_logic() {
     )
     .unwrap();
 
-    let state_2 = EnvelopeState::Intact(envelope_2);
     storage_tx
-        .send(StorageCommand::IngestEnvelope(state_2))
+        .send(StorageCommand::IngestEnvelope(EnvelopeState::Intact(
+            envelope_2,
+        )))
         .await
         .unwrap();
 
@@ -126,13 +123,12 @@ async fn test_playback_resurrection_with_mesh_gap() {
     let temp_dir = tempdir().expect("Failed to create temporary directory");
     let vault_path = temp_dir.path().to_string_lossy().to_string();
     let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let config = PhalanxConfig::default();
+    let config = NodeConfig::default();
 
     let (storage_tx, mut storage_rx) = mpsc::channel::<StorageCommand>(100);
     let (disc_tx, mut disc_rx) = mpsc::channel::<(VolleyId, StorageSequence)>(100);
     let (ui_tx, mut ui_rx) = mpsc::channel(10);
 
-    // 1. Storage Actor (Resilient Mock)
     let identity_clone = identity.clone();
     tokio::spawn(async move {
         let mut guardian = Guardian::new(&vault_path, &config, identity_clone.did);
@@ -146,7 +142,6 @@ async fn test_playback_resurrection_with_mesh_gap() {
                     let _ = reply_to.send(guardian.get_shard(&volley_id, sequence_id));
                 }
                 StorageCommand::IngestEnvelope(state) => {
-                    // Graceful handling prevents the test actor from panicking
                     if let Err(e) = guardian.ingest_envelope(state).await {
                         tracing::error!("Test Ingestion Error: {:?}", e);
                     }
@@ -158,10 +153,8 @@ async fn test_playback_resurrection_with_mesh_gap() {
 
     let sink = VideoPlayerSink::new(ui_tx);
     let volley_id = VolleyId::new("v_resurrection");
-
     let mut coordinator = PlaybackCoordinator::new(storage_tx.clone(), None, sink, disc_tx);
 
-    // 2. CHAINING: Create Shard 1
     let shard_1 = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
@@ -169,14 +162,14 @@ async fn test_playback_resurrection_with_mesh_gap() {
         volley_id: volley_id.clone(),
         payload: DataPayload::Clear(b"Frame 1 Data".to_vec()),
     };
-    let envelope_1 = WitnessEnvelope::new(
+    let envelope_1 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_1),
         &identity,
         NetworkId::random(),
         None,
     )
     .unwrap();
-    let hash_1 = envelope_1.signature_hash(); // Capture hash for chaining
+    let hash_1 = envelope_1.signature_hash();
 
     storage_tx
         .send(StorageCommand::IngestEnvelope(EnvelopeState::Intact(
@@ -185,33 +178,28 @@ async fn test_playback_resurrection_with_mesh_gap() {
         .await
         .unwrap();
 
-    // 3. Start Coordinator
     let v_id_clone = volley_id.clone();
     tokio::spawn(async move {
         let _ = coordinator.run(v_id_clone).await;
     });
 
-    // Verify Frame 1
     let frame_1 = ui_rx
         .recv()
         .await
         .expect("Playback should start with Frame 1");
     assert_eq!(frame_1, b"Frame 1 Data");
 
-    // Verify Gap Signal
-    let (v_id, missing_seq) = disc_rx.recv().await.expect("Should signal for Shard 2");
+    let (_v_id, missing_seq) = disc_rx.recv().await.expect("Should signal for Shard 2");
     assert_eq!(missing_seq, StorageSequence(2));
 
-    // 4. CHAINING: Create Shard 2 pointing to Shard 1
     let shard_2 = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(2),
         fps: 30,
-        volley_id: v_id,
+        volley_id: _v_id,
         payload: DataPayload::Clear(b"Frame 2 Data".to_vec()),
     };
-    // CRITICAL FIX: Pass Some(hash_1)
-    let envelope_2 = WitnessEnvelope::new(
+    let envelope_2 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_2),
         &identity,
         NetworkId::random(),
@@ -225,7 +213,6 @@ async fn test_playback_resurrection_with_mesh_gap() {
         .await
         .unwrap();
 
-    // Verify Resumption
     let frame_2 = ui_rx
         .recv()
         .await
@@ -238,7 +225,7 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
     let temp_dir = tempdir().expect("Failed to create temporary directory");
     let vault_path = temp_dir.path().to_string_lossy().to_string();
     let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let config = PhalanxConfig::default();
+    let config = NodeConfig::default();
 
     let (storage_tx, mut storage_rx) = mpsc::channel::<StorageCommand>(100);
     let (disc_tx, mut disc_rx) = mpsc::channel::<(VolleyId, StorageSequence)>(100);
@@ -266,7 +253,6 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
     let (identity_main, _) = PhalanxIdentity::generate().unwrap();
     let volley_id = VolleyId::new("v_chaos_monkey");
 
-    // 1. Pre-calculate the entire cryptographic chain 1..10
     let mut chain = std::collections::HashMap::new();
     let mut last_hash = None;
 
@@ -278,7 +264,7 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
             volley_id: volley_id.clone(),
             payload: DataPayload::Clear(format!("Frame {}", i).into_bytes()),
         };
-        let envelope = WitnessEnvelope::new(
+        let envelope = WitnessEnvelope::sign_envelope(
             Evidence::Video(shard),
             &identity_main,
             NetworkId::random(),
@@ -289,7 +275,6 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
         chain.insert(i, envelope);
     }
 
-    // 2. Pre-load Sequence 1 and 10 (Swiss Cheese)
     storage_tx
         .send(StorageCommand::IngestEnvelope(EnvelopeState::Intact(
             chain.get(&1).unwrap().clone(),
@@ -303,7 +288,6 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
         .await
         .unwrap();
 
-    // 3. Chaos Monkey: Heals by providing the missing pieces from our pre-calculated chain
     let chaos_storage_tx = storage_tx.clone();
     tokio::spawn(async move {
         while let Some((_, missing_seq)) = disc_rx.recv().await {
@@ -318,7 +302,6 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
         }
     });
 
-    // 4. Run Coordinator
     let mut coordinator = PlaybackCoordinator::new(
         storage_tx.clone(),
         None,
@@ -330,7 +313,6 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
         let _ = coordinator.run(v_id_clone).await;
     });
 
-    // 5. Assert 1..10 in order
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         for i in 1..=10 {
             let frame = ui_rx.recv().await.unwrap();

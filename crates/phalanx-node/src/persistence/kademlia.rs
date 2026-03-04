@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::instrument;
 pub type PhalanxKadStore = RedbStore;
-const DHT_RECORDS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dht_records");
+const _DHT_RECORDS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dht_records");
 const DHT_RECORDS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dht_records");
 const DHT_PROVIDERS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("dht_providers");
 

@@ -1,16 +1,29 @@
+use phalanx_forensics::crucible::EnvelopeHashExt;
+use phalanx_forensics::witness::WitnessAuthority;
+use phalanx_node::config::NodeConfig;
+use phalanx_node::identity::PhalanxNodeIdentityExt;
+use phalanx_node::persistence::vault::Guardian;
+use phalanx_proto::evidence::{
+    DataPayload, EnvelopeState, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
+};
+use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
+use phalanx_proto::storage::GuardianError;
+use phalanx_proto::time::PhalanxTimestamp;
+use tempfile::tempdir;
+use tracing::info;
+
 #[tokio::test]
 async fn test_reliability_timeline_integrity() {
     let temp_dir = tempdir().expect("Failed to create temporary directory");
     let vault_path = temp_dir.path().to_string_lossy().to_string();
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let config = PhalanxConfig::default();
+    let config = NodeConfig::default();
 
-    // Test the Guardian directly to assert exact Error enums
     let mut guardian = Guardian::new(&vault_path, &config, identity.did.clone());
     let volley_id = VolleyId::new("v_timeline");
 
-    // 1. ANCHOR: Establish the legitimate start of the timeline (Sequence 1)
+    // 1. ANCHOR: Establish the legitimate start of the timeline
     let anchor_shard = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
@@ -18,14 +31,14 @@ async fn test_reliability_timeline_integrity() {
         volley_id: volley_id.clone(),
         payload: DataPayload::Clear(b"Anchor Frame".to_vec()),
     };
-    let anchor_envelope = WitnessEnvelope::new(
+    let anchor_envelope = WitnessEnvelope::sign_envelope(
         Evidence::Video(anchor_shard),
         &identity,
         NetworkId::random(),
         None,
     )
     .unwrap();
-    let anchor_hash = anchor_envelope.signature_hash(); // Get the true hash
+    let anchor_hash = anchor_envelope.signature_hash();
 
     guardian
         .ingest_envelope(EnvelopeState::Intact(anchor_envelope))
@@ -37,10 +50,9 @@ async fn test_reliability_timeline_integrity() {
         sequence_id: StorageSequence(2),
         fps: 30,
         volley_id: volley_id.clone(),
-        payload: DataPayload::Clear(b"Hijacked Frame".to_vec()),
+        payload: DataPayload::Clear(b"Valid Frame".to_vec()),
     };
-
-    let valid_envelope = WitnessEnvelope::new(
+    let valid_envelope = WitnessEnvelope::sign_envelope(
         Evidence::Video(valid_shard),
         &identity,
         NetworkId::random(),
@@ -48,13 +60,12 @@ async fn test_reliability_timeline_integrity() {
     )
     .unwrap();
 
-    // verify guardian doesn't just reject everything
     guardian
         .ingest_envelope(EnvelopeState::Intact(valid_envelope.clone()))
         .await
         .expect("Guardian should accept a valid cryptographic link");
 
-    // THE ATTACK: Attempt a "Hash Link Collision" on Sequence 2
+    // THE ATTACK: Attempt a "Hash Link Collision" on Sequence 3
     let bogus_shard = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(3),
@@ -62,9 +73,8 @@ async fn test_reliability_timeline_integrity() {
         volley_id: volley_id.clone(),
         payload: DataPayload::Clear(b"Hijacked Frame".to_vec()),
     };
-
-    // We intentionally forge the causality chain by pointing to a bogus hash instead of anchor_hash
-    let hijacked_envelope = WitnessEnvelope::new(
+    // Intentionally forge the causality chain by pointing to anchor_hash instead of valid_envelope's hash
+    let hijacked_envelope = WitnessEnvelope::sign_envelope(
         Evidence::Video(bogus_shard),
         &identity,
         NetworkId::random(),
@@ -72,17 +82,15 @@ async fn test_reliability_timeline_integrity() {
     )
     .unwrap();
 
-    // 3. VERIFICATION: The Guardian MUST catch the chain break.
+    // VERIFICATION: The Guardian MUST catch the chain break
     let attack_result = guardian
         .ingest_envelope(EnvelopeState::Intact(hijacked_envelope))
         .await;
 
     match attack_result {
-        // Match the specific variant directly
         Err(GuardianError::ChainIntegrityViolation) => {
             info!("Reliability: Guardian successfully detected and rejected timeline hijack.");
         }
-        // Fallback for debugging if the variant is wrapped
         Err(e) if format!("{:?}", e).contains("ChainIntegrity") => {
             info!("Reliability: Guardian rejected via debug match.");
         }

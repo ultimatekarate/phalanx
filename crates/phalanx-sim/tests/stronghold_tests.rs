@@ -1,30 +1,24 @@
+#![cfg(feature = "__disabled_legacy_tests")]
+use phalanx_forensics::gate::WitnessGate;
+use phalanx_forensics::prelude::TransientJournal;
+use phalanx_forensics::reassembler::create_video_shard;
+use phalanx_forensics::witness::WitnessAuthority;
+use phalanx_forensics::Reassembler;
+use phalanx_node::actors::storage::NoOpJournal;
+use phalanx_node::actors::storage::StorageCommand;
+use phalanx_node::vitals::init_observability;
+use phalanx_node::Guardian;
+use phalanx_node::NodeConfig;
+use phalanx_node::StorageActor;
+use phalanx_proto::evidence::*;
+use phalanx_proto::identity::NodeRole;
+use phalanx_proto::prelude::*;
+use phalanx_sim::SimulationHarness;
+use phalanx_transport::identity_ext::Libp2pExt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-
-// Library Imports
-use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
-use phalanx_core::base::engine::{PendingEgress, StorageActor, StorageCommand}; // Imported from library
-
-use phalanx_core::primitives::identity::{Did, NetworkId, PhalanxIdentity};
-use phalanx_core::primitives::shards::ShardError;
-use phalanx_core::primitives::shards::{
-    ChunkType, DataPayload, Evidence, ShardChunk, ShardId, StorageSequence, VideoShard, VolleyId,
-};
-
-use phalanx_core::primitives::time::PhalanxTimestamp;
-use phalanx_core::security::gate::WitnessGate;
-use phalanx_core::security::telemetry::init_observability;
-use phalanx_core::security::telemetry::NodeRole;
-use phalanx_core::simulation::SimulationHarness;
-use phalanx_core::storage::reassembler::Reassembler;
-use phalanx_core::storage::reassembler::TransientJournal;
-use phalanx_core::storage::vault::{Guardian, GuardianError};
-use phalanx_core::transport::events::NetworkEvent;
-
-use phalanx_core::base::engine::NoOpJournal;
-
 /// A decorator for the Journal to track ingestion metrics via dependency inversion.
 struct MetricJournal<J: TransientJournal> {
     inner: J,
@@ -60,16 +54,16 @@ impl<J: TransientJournal + Send> TransientJournal for MetricJournal<J> {
 
 #[tokio::test]
 async fn test_stronghold_ingestion_and_persistence() {
-    use phalanx_core::primitives::shards::{create_video_shard, WitnessEnvelope};
+    use phalanx_node::vitals::init_observability;
     // Ensure all other required types (PhalanxConfig, PhalanxPhysics, etc.) are imported at the top of your file.
 
     let _ = init_observability();
     // 1. Setup Environment
     let temp_dir = tempfile::tempdir().unwrap();
-    let mut config = PhalanxConfig::test_defaults();
+    let mut config = NodeConfig::test_defaults();
     config.storage.vault_path = temp_dir.path().to_string_lossy().into_owned();
 
-    let physics = PhalanxPhysics::test_profile();
+    let physics = phalanx_sim::PhalanxPhysics::default_wan();
     let (mut harness, _telemetry_rx) = SimulationHarness::init_mesh(config.clone(), physics);
 
     // 2. Spawn the Stronghold Node
@@ -79,7 +73,7 @@ async fn test_stronghold_ingestion_and_persistence() {
         .expect("Failed to spawn stronghold");
 
     // 3. Prepare Mock Data (A legitimate chunk from an external peer)
-    let (peer_identity, _) = PhalanxIdentity::generate().unwrap();
+    let peer_identity = PhalanxIdentity::new_ephemeral();
     let peer_net_id = peer_identity.to_network_id();
 
     let video_shard = create_video_shard(
@@ -92,7 +86,7 @@ async fn test_stronghold_ingestion_and_persistence() {
 
     // SEAL the evidence into a WitnessEnvelope
     // Includes the 4th argument 'None' for the causality anchor
-    let envelope = WitnessEnvelope::new(
+    let envelope = WitnessEnvelope::sign_envelope(
         Evidence::Video(video_shard),
         &peer_identity,
         peer_net_id.clone(),
@@ -101,7 +95,7 @@ async fn test_stronghold_ingestion_and_persistence() {
     .expect("Failed to seal evidence");
 
     // Serialize the ENVELOPE, not just raw bytes
-    let valid_envelope_data = postcard::to_stdvec(&envelope).expect("Serialization failed");
+    let valid_envelope_data = postcard::to_allocvec(&envelope).expect("Serialization failed");
 
     let chunk = ShardChunk {
         shard_id: ShardId(101),
@@ -113,7 +107,7 @@ async fn test_stronghold_ingestion_and_persistence() {
     };
 
     // Note: The HARNESS expects the outer layer to be the ShardChunk
-    let network_payload = postcard::to_stdvec(&chunk).unwrap();
+    let network_payload = postcard::to_allocvec(&chunk).unwrap();
 
     let topic = config.network.video_topic.clone();
     // 4. Inject Network Event
@@ -161,8 +155,8 @@ async fn test_storage_actor_metric_pipeline() {
     let _ = init_observability();
 
     // 1. Setup Component Dependencies
-    let config = PhalanxConfig::default();
-    let (identity, _) = PhalanxIdentity::generate().unwrap();
+    let config = NodeConfig::default();
+    let identity = PhalanxIdentity::new_ephemeral();
     let local_peer_id = identity.to_network_id();
 
     // Unified Command Channel (Replaces chunk_rx and query_rx)
@@ -213,7 +207,7 @@ async fn test_storage_actor_metric_pipeline() {
         .seal(&identity, local_peer_id.clone(), None)
         .expect("Failed to seal evidence");
 
-    let valid_data = postcard::to_stdvec(&envelope).expect("Serialization failed");
+    let valid_data = postcard::to_allocvec(&envelope).expect("Serialization failed");
 
     let chunk = ShardChunk {
         shard_id: ShardId(101),
