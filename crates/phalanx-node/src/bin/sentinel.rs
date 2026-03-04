@@ -5,14 +5,14 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 // Internal Modules from Workspace
-use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
-use phalanx_core::base::engine::{PhalanxEngine, SyncReputationCache};
-use phalanx_core::primitives::identity::init_identity;
-use phalanx_core::security::telemetry;
-use phalanx_core::security::trust::TrustRegistry;
-use phalanx_core::storage::journal::FileJournal;
-use phalanx_core::transport::libp2p_adapter::Libp2pAdapter;
-use phalanx_core::transport::swarm::{load_swarm_key, setup_phalanx_swarm};
+use phalanx_node::config::NodeConfig; // Replaced PhalanxConfig
+use phalanx_node::state::SyncReputationCache;
+use phalanx_node::trust::TrustRegistry;
+use phalanx_node::vitals::init_observability;
+use phalanx_node::FileJournal;
+use phalanx_proto::prelude::PhalanxPhysics;
+use phalanx_transport::identity_ext::Libp2pExt;
+use phalanx_transport::prelude::Libp2pAdapter;
 
 /// The entry point for the Phalanx Sentinel binary.
 ///
@@ -21,11 +21,11 @@ use phalanx_core::transport::swarm::{load_swarm_key, setup_phalanx_swarm};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // 1. Telemetry & Initialization
-    telemetry::init_observability();
+    init_observability();
     setup_shutdown_handler();
 
     // 2. Configuration Loading
-    let config = PhalanxConfig::load_from_env();
+    let config = NodeConfig::load_from_env();
     let physics = PhalanxPhysics::default_wan();
 
     // 3. Identity & Security Setup
