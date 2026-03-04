@@ -314,3 +314,343 @@ impl Chunkifier for Vec<u8> {
         Ok(chunks)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::judge::PayloadCipher;
+    use crate::witness::WitnessAuthority;
+    use phalanx_proto::crypto::SymmetricKey;
+    use phalanx_proto::evidence::{Evidence, SignatureHash};
+    use phalanx_proto::identity::PhalanxIdentity;
+    use phalanx_proto::prelude::PendingEgress;
+    use phalanx_proto::storage::HandoverProof;
+
+    fn get_test_key() -> SymmetricKey {
+        SymmetricKey([0x42; 32])
+    }
+
+    struct MockJournal;
+
+    #[async_trait::async_trait]
+    impl TransientJournal for MockJournal {
+        async fn record_chunk(&mut self, _chunk: &ShardChunk) -> Result<(), ShardError> {
+            Ok(())
+        }
+        async fn sync(&mut self) -> Result<(), ShardError> {
+            Ok(())
+        }
+        async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
+            Ok(vec![])
+        }
+        async fn clear(&mut self) -> Result<(), ShardError> {
+            Ok(())
+        }
+        async fn record_pending_egress(
+            &mut self,
+            _pending: &[PendingEgress],
+        ) -> Result<(), ShardError> {
+            Ok(())
+        }
+        async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError> {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn test_video_shard_encryption_cycle() -> Result<(), Box<dyn std::error::Error>> {
+        let frames = vec![vec![1, 2, 3], vec![4, 5, 6]];
+        let seq = StorageSequence(100);
+
+        let mut shard = create_video_shard(frames.clone(), seq, 30, "volley_1".into())?;
+
+        // create_video_shard produces Compressed payload
+        if let DataPayload::Compressed(data) = &shard.payload {
+            let decompressed = decompress_payload(data).expect("Decompression failed");
+            let deserialized_frames: Vec<Vec<u8>> = postcard::from_bytes(&decompressed)?;
+            assert_eq!(deserialized_frames, frames);
+        } else {
+            panic!("Newly created shard should be DataPayload::Compressed");
+        }
+
+        let key = get_test_key();
+        shard.payload.apply_encryption(&key)?;
+
+        match &shard.payload {
+            DataPayload::Encrypted { nonce, ciphertext } => {
+                assert_eq!(nonce.len(), 24, "XChaCha20Poly1305 requires 24-byte nonce");
+                assert!(!ciphertext.is_empty(), "Ciphertext should not be empty");
+            }
+            _ => panic!("Shard payload should be Encrypted"),
+        }
+
+        // reveal() returns the compressed bytes; decompress to recover frames
+        let decrypted_bytes = shard.payload.reveal(&key)?;
+        let decompressed = decompress_payload(&decrypted_bytes).expect("Decompression failed");
+        let recovered_frames: Vec<Vec<u8>> = postcard::from_bytes(&decompressed)?;
+        assert_eq!(recovered_frames, frames);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_audio_shard_encryption_cycle() -> Result<(), Box<dyn std::error::Error>> {
+        let audio_data = vec![10, 20, 30, 40];
+        let seq = StorageSequence(200);
+        let mut shard = create_audio_shard(audio_data.clone(), seq, 44100, 2, "volley_2".into())?;
+
+        let key = get_test_key();
+        shard.payload.apply_encryption(&key)?;
+
+        // reveal() returns compressed bytes; decompress to recover audio
+        let decrypted_bytes = shard.payload.reveal(&key)?;
+        let decompressed = decompress_payload(&decrypted_bytes).expect("Decompression failed");
+        assert_eq!(decompressed, audio_data);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_double_encryption_idempotency() -> Result<(), Box<dyn std::error::Error>> {
+        let frames = vec![vec![1]];
+        let mut shard = create_video_shard(frames, StorageSequence(1), 30, "v1".into())?;
+        let key = get_test_key();
+
+        shard.payload.apply_encryption(&key)?;
+
+        let (nonce1, cipher1) = match &shard.payload {
+            DataPayload::Encrypted { nonce, ciphertext } => (nonce.clone(), ciphertext.clone()),
+            _ => panic!("Should be encrypted"),
+        };
+
+        // Second call should be idempotent (already encrypted)
+        shard.payload.apply_encryption(&key)?;
+
+        match &shard.payload {
+            DataPayload::Encrypted { nonce, ciphertext } => {
+                assert_eq!(nonce, &nonce1, "Nonce changed on second encrypt call");
+                assert_eq!(
+                    ciphertext, &cipher1,
+                    "Ciphertext changed on second encrypt call"
+                );
+            }
+            _ => panic!("Should remain encrypted"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_serialization_roundtrip_encrypted() -> Result<(), Box<dyn std::error::Error>> {
+        let frames = vec![vec![255, 0, 255]];
+        let mut shard = create_video_shard(frames, StorageSequence(50), 60, "v_net".into())?;
+        let key = get_test_key();
+
+        shard.payload.apply_encryption(&key)?;
+
+        let wire_data = postcard::to_allocvec(&shard)?;
+        let received_shard: VideoShard = postcard::from_bytes(&wire_data)?;
+
+        let decrypted_payload = received_shard.payload.reveal(&key)?;
+        let decompressed = decompress_payload(&decrypted_payload).expect("Decompression failed");
+        let recovered_frames: Vec<Vec<u8>> = postcard::from_bytes(&decompressed)?;
+
+        assert_eq!(recovered_frames[0], vec![255, 0, 255]);
+        assert_eq!(received_shard.sequence_id.0, 50);
+        assert_eq!(received_shard.volley_id, "v_net".into());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_reassembler_chunk_reassembly() {
+        let identity = PhalanxIdentity::new_ephemeral();
+        let mut reassembler = Reassembler::new();
+        let mut journal = MockJournal;
+        let local_peer = identity.network_id.clone();
+
+        // 1. Create a valid, fully-populated VideoShard
+        let evidence = Evidence::Video(VideoShard {
+            timestamp: PhalanxTimestamp::now(),
+            sequence_id: StorageSequence(1),
+            fps: 30,
+            volley_id: VolleyId::new("id"),
+            payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        });
+
+        // 2. Wrap in an envelope and sign it
+        let original_envelope =
+            WitnessEnvelope::sign_envelope(evidence, &identity.clone(), local_peer.clone(), None)
+                .expect("Failed to sign envelope");
+
+        let serialized_envelope =
+            postcard::to_allocvec(&original_envelope).expect("Failed to serialize envelope");
+
+        // 3. Shard the serialized bytes into two halves
+        let mid = serialized_envelope.len() / 2;
+        let (part1, part2) = serialized_envelope.split_at(mid);
+
+        let chunk_1 = ShardChunk {
+            shard_id: ShardId(99),
+            chunk_index: 0,
+            total_chunks: 2,
+            data: part1.to_vec(),
+            owner_did: identity.did.clone(),
+            chunk_type: ChunkType::Witnessed,
+        };
+
+        let chunk_2 = ShardChunk {
+            shard_id: ShardId(99),
+            chunk_index: 1,
+            total_chunks: 2,
+            data: part2.to_vec(),
+            owner_did: identity.did.clone(),
+            chunk_type: ChunkType::Witnessed,
+        };
+
+        // 4. First chunk: returns Fragmented (not yet complete)
+        let result_1 = reassembler
+            .ingest_chunk(chunk_1, &mut journal)
+            .await
+            .expect("ingest_chunk failed");
+
+        assert!(
+            matches!(result_1, Some(EnvelopeState::Fragmented(_))),
+            "Buffer should return Fragmented state after first chunk"
+        );
+
+        // 5. Second chunk: completes reassembly
+        let result_2 = reassembler
+            .ingest_chunk(chunk_2, &mut journal)
+            .await
+            .expect("ingest_chunk failed");
+
+        assert!(result_2.is_some(), "Reassembly should be complete");
+        let recovered_envelope = match result_2.unwrap() {
+            EnvelopeState::Intact(env) => env,
+            EnvelopeState::Fragmented(gap) => {
+                panic!(
+                    "Expected Intact envelope, but received Fragmented state: {:?}",
+                    gap
+                );
+            }
+        };
+
+        // Assert cryptographic integrity survived the sharding/ingestion process
+        assert_eq!(
+            recovered_envelope.witness_signature,
+            original_envelope.witness_signature
+        );
+        assert_eq!(
+            reassembler.active_shards.active_count(),
+            0,
+            "Memory leak: Buffer not cleared"
+        );
+    }
+
+    #[test]
+    fn test_shard_mold_gap_reporting() {
+        // 1. Setup metadata
+        let identity = PhalanxIdentity::new_ephemeral();
+        let shard_id = ShardId(505);
+        let vid = VolleyId::new("gap_test");
+
+        // 2. Create a real WitnessEnvelope to simulate serialized data
+        let video_shard =
+            create_video_shard(vec![vec![0xAA, 0xBB]], StorageSequence(1), 30, vid).unwrap();
+
+        let envelope = WitnessEnvelope::sign_envelope(
+            Evidence::Video(video_shard),
+            &identity.clone(),
+            identity.network_id.clone(),
+            None,
+        )
+        .unwrap();
+
+        let full_serialized_data = postcard::to_allocvec(&envelope).unwrap();
+
+        // Split data into 3 mock chunks
+        let chunk_size = (full_serialized_data.len() / 3) + 1;
+        let mut parts = BTreeMap::new();
+        parts.insert(0, full_serialized_data[0..chunk_size].to_vec());
+        // We SKIP index 1 to simulate a network drop
+        parts.insert(2, full_serialized_data[(chunk_size * 2)..].to_vec());
+
+        // 3. Manually populate the Accumulator (ShardBuffer)
+        let acc = ShardBuffer {
+            total_chunks: 3,
+            received_count: 2, // 0 and 2 arrived, 1 is missing
+            parts,
+            owner_did: identity.did.clone(),
+        };
+
+        // 4. EXECUTE ASSEMBLE (The Triage Path)
+        let strategy = ShardMold;
+        // assemble returns None when parts are missing (can't concatenate with gaps)
+        let result = strategy.assemble(shard_id, acc);
+
+        // ShardMold::assemble returns None when a chunk is missing because
+        // the loop `acc.parts.get(&i)?` short-circuits. Verify the buffer's
+        // gap detection works correctly instead.
+        assert!(
+            result.is_none(),
+            "Assemble should return None when chunks are missing"
+        );
+
+        // Verify the gap reporting logic independently
+        let mut parts2 = BTreeMap::new();
+        parts2.insert(0, vec![1]);
+        parts2.insert(2, vec![3]);
+        let buffer = ShardBuffer {
+            total_chunks: 3,
+            received_count: 2,
+            parts: parts2,
+            owner_did: identity.did.clone(),
+        };
+        assert_eq!(buffer.missing_indices(), vec![1]);
+    }
+
+    #[test]
+    fn test_shard_mold_full_reassembly() {
+        let identity = PhalanxIdentity::new_ephemeral();
+        let shard_id = ShardId(707);
+
+        // 1. Create a REAL envelope so postcard can deserialize it successfully
+        use ed25519_dalek::Signer;
+        let envelope = WitnessEnvelope::sign_envelope(
+            Evidence::Handover(HandoverProof {
+                volley_id: VolleyId::new("test"),
+                sequence_id: StorageSequence(0),
+                old_did: identity.did.clone(),
+                new_did: identity.did.clone(),
+                anchor_hash: SignatureHash([0; 32]),
+                old_signature: identity.keypair.sign(b"test"),
+                new_signature: identity.keypair.sign(b"test"),
+            }),
+            &identity,
+            identity.network_id.clone(),
+            None,
+        )
+        .unwrap();
+
+        let data = postcard::to_allocvec(&envelope).unwrap();
+
+        let mut parts = BTreeMap::new();
+        parts.insert(0, data.clone());
+
+        let acc = ShardBuffer {
+            total_chunks: 1,
+            received_count: 1,
+            parts,
+            owner_did: identity.did.clone(),
+        };
+
+        let strategy = ShardMold;
+        let result = strategy
+            .assemble(shard_id, acc)
+            .expect("Should assemble successfully");
+
+        // Verify the reassembled envelope matches the original
+        assert_eq!(result.witness_signature, envelope.witness_signature);
+    }
+}

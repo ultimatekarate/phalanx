@@ -24,7 +24,6 @@ pub fn ed_to_x25519_pk(ed_key: &VerifyingKey) -> Result<[u8; 32], CryptoError> {
 /// THE BRIDGE VERB: Ed25519 SK -> X25519 SK
 pub fn ed_to_x25519_sk(ed_key: &SigningKey) -> Result<x25519_dalek::StaticSecret, CryptoError> {
     let mut hasher = Sha512::new();
-    // FIX: Pass the bytes, not the struct reference
     hasher.update(ed_key.to_bytes());
     let hash_result = hasher.finalize();
 
@@ -35,14 +34,28 @@ pub fn ed_to_x25519_sk(ed_key: &SigningKey) -> Result<x25519_dalek::StaticSecret
     Ok(x25519_dalek::StaticSecret::from(x25519_bytes))
 }
 
-/// Mock resolution for the DID-to-Key mapping.
-/// In a live system, this queries the Kademlia DHT or a local TrustRegistry.
+/// Resolves a `did:key:z...` DID to an Ed25519 VerifyingKey.
+///
+/// The DID format is: `did:key:z<bs58(0xed01 ++ ed25519_public_key)>`
+/// This function reverses that encoding to recover the public key.
 pub fn resolve_did_pk(did: &Did) -> Result<VerifyingKey, CryptoError> {
-    // FIX: Mock logic that compiles until you hook up your DHT
     let did_str = did.as_ref();
-    if did_str.starts_with("did:key:z") {
-        Err(CryptoError::DidResolutionFailure)
-    } else {
-        Err(CryptoError::DidResolutionFailure)
+    let multibase_str = did_str
+        .strip_prefix("did:key:z")
+        .ok_or(CryptoError::DidResolutionFailure)?;
+
+    let decoded = bs58::decode(multibase_str)
+        .into_vec()
+        .map_err(|_| CryptoError::DidResolutionFailure)?;
+
+    // Expect 2-byte multicodec prefix (0xed, 0x01) + 32-byte Ed25519 public key
+    if decoded.len() != 34 || decoded[0] != 0xed || decoded[1] != 0x01 {
+        return Err(CryptoError::DidResolutionFailure);
     }
+
+    let key_bytes: [u8; 32] = decoded[2..34]
+        .try_into()
+        .map_err(|_| CryptoError::DidResolutionFailure)?;
+
+    VerifyingKey::from_bytes(&key_bytes).map_err(|_| CryptoError::DidResolutionFailure)
 }

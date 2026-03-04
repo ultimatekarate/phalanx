@@ -20,27 +20,3 @@ pub enum SimError {
     #[error("Internal transport failure: {0}")]
     Transport(String),
 }
-
-// TODO: Rewrite tests for the MeshSentinel API once SimulationHarness is fully implemented.
-// The two test functions below (`test_pillar_retry_logic_and_backoff` and
-// `test_pillar_salvage_intent`) reference the old PhalanxEngine API which no longer exists.
-// They have been moved to a gated module to unblock compilation.
-#[cfg(test)]
-#[cfg(feature = "__disabled_legacy_tests")]
-mod legacy_tests {
-    use std::sync::Arc;
-    use std::time::Duration;
-    use tokio::sync::mpsc;
-
-    #[tokio::test]
-    async fn test_pillar_retry_logic_and_backoff() {
-        // Requires PhalanxEngine → MeshSentinel rewrite
-        unimplemented!("Legacy test: awaiting MeshSentinel migration");
-    }
-
-    #[tokio::test]
-    async fn test_pillar_salvage_intent() {
-        // Requires PhalanxEngine → MeshSentinel rewrite
-        unimplemented!("Legacy test: awaiting MeshSentinel migration");
-    }
-}

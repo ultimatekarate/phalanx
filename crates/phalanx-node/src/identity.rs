@@ -44,12 +44,19 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
             .map_err(|_| IdentityError::CryptoError("Seed fail".into()))?;
 
         let signing_key = SigningKey::from_bytes(&secret_bytes);
+        let verifying_key = signing_key.verifying_key();
+        let public_key_bytes = verifying_key.to_bytes();
+
+        // Derive did:key using Ed25519 multicodec prefix (0xed, 0x01)
+        let mut multicodec_payload = vec![0xed, 0x01];
+        multicodec_payload.extend_from_slice(&public_key_bytes);
+        let multibase_pubkey = bs58::encode(multicodec_payload).into_string();
 
         Ok((
             PhalanxIdentity {
                 network_id: NetworkId::random(),
                 version: IDENTITY_VERSION,
-                did: Did::from("did:key:anonymous"), // FIX: Replaced placeholder
+                did: Did::from(format!("did:key:z{}", multibase_pubkey)),
                 keypair: signing_key,
             },
             phrase,
@@ -64,11 +71,19 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
             .try_into()
             .map_err(|_| IdentityError::CryptoError("Seed fail".into()))?;
 
+        let signing_key = SigningKey::from_bytes(&secret_bytes);
+        let verifying_key = signing_key.verifying_key();
+        let public_key_bytes = verifying_key.to_bytes();
+
+        let mut multicodec_payload = vec![0xed, 0x01];
+        multicodec_payload.extend_from_slice(&public_key_bytes);
+        let multibase_pubkey = bs58::encode(multicodec_payload).into_string();
+
         Ok(PhalanxIdentity {
             network_id: NetworkId::random(),
             version: IDENTITY_VERSION,
-            did: Did::from("did:key:anonymous"), // FIX: Replaced placeholder
-            keypair: SigningKey::from_bytes(&secret_bytes),
+            did: Did::from(format!("did:key:z{}", multibase_pubkey)),
+            keypair: signing_key,
         })
     }
 
