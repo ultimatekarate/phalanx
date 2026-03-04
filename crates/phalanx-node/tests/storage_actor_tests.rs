@@ -2,18 +2,23 @@ use std::time::Duration;
 
 use phalanx_forensics::gate::WitnessGate;
 use phalanx_forensics::prelude::TransientJournal;
-
+use phalanx_forensics::reassembler::Chunkifier;
+use phalanx_forensics::witness::WitnessAuthority;
 use phalanx_forensics::Reassembler;
 use phalanx_node::actors::storage::{NoOpJournal, StorageActor, StorageCommand};
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
+use phalanx_node::persistence::journal::FileJournal;
 use phalanx_node::persistence::vault::Guardian;
-use phalanx_proto::evidence::{ChunkType, DataPayload, Evidence, StorageSequence, VideoShard};
+use phalanx_proto::evidence::{
+    ChunkType, DataPayload, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
+};
 use phalanx_proto::identity::{Did, NetworkId, PhalanxIdentity, ShardId, VolleyId};
 use phalanx_proto::prelude::{PendingEgress, ShardChunk, ShardError};
 use phalanx_proto::retrieval::VolleyResponse;
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::PhalanxTimestamp;
+use phalanx_proto::topic::MeshTopic;
 use phalanx_transport::identity_ext::Libp2pExt;
 use tokio::sync::mpsc;
 
@@ -218,4 +223,153 @@ async fn test_reputation_gate_signature_mismatch() {
             error
         ),
     }
+}
+
+#[tokio::test]
+async fn test_salvage_on_node_death() {
+    let temp = tempfile::tempdir().unwrap();
+    let wal_path = temp.path().join("storage.wal");
+    let vault_path = temp.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("Failed to create test vault");
+
+    let mut config = NodeConfig::test_salvage_on_node_death();
+    config.storage.vault_path = vault_path.to_string_lossy().into_owned();
+
+    let (identity, _) = PhalanxIdentity::generate().unwrap();
+    let identity_did = identity.did.clone();
+    let topic = config.network.video_topic.clone();
+
+    // 1. Create a valid envelope and chunkify it into 4 pieces
+    let real_shard = VideoShard {
+        timestamp: PhalanxTimestamp::now(),
+        sequence_id: StorageSequence(999),
+        fps: 30,
+        volley_id: VolleyId::new("salvage_volley_01"),
+        payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+    };
+
+    let envelope = WitnessEnvelope::sign_envelope(
+        Evidence::Video(real_shard),
+        &identity,
+        NetworkId::random(),
+        None,
+    )
+    .unwrap();
+
+    let serialized_envelope = postcard::to_allocvec(&envelope).unwrap();
+    let chunk_size = serialized_envelope.len().div_ceil(4);
+    let chunks = serialized_envelope
+        .chunkify(
+            ShardId(999),
+            identity_did.clone(),
+            chunk_size,
+            ChunkType::Witnessed,
+        )
+        .unwrap();
+    assert_eq!(chunks.len(), 4, "Expected exactly 4 chunks");
+
+    // 2. PHASE 1: First actor ingests 3 of 4 chunks, then "dies"
+    {
+        let journal = FileJournal::new(&wal_path).await.unwrap();
+        let guardian = Guardian::new(&vault_path.to_string_lossy(), &config, identity.did.clone());
+
+        let (storage_tx, storage_rx) = mpsc::channel::<StorageCommand>(10);
+        let (forensic_tx, _) = mpsc::channel::<(NetworkId, Did, GuardianError)>(1);
+
+        let actor = StorageActor {
+            reassembler: Reassembler::new(),
+            guardian,
+            journal,
+            config: config.clone(),
+            identity: identity.clone(),
+            forensic_tx,
+            local_peer_id: identity.to_network_id(),
+        };
+
+        // Start actor in background
+        let actor_handle = tokio::spawn(async move {
+            actor.run(storage_rx).await;
+        });
+
+        // Send 3 of 4 chunks
+        for chunk in chunks.iter().take(3) {
+            storage_tx
+                .send(StorageCommand::Ingest(
+                    chunk.clone(),
+                    topic.clone(),
+                    NetworkId::random(),
+                ))
+                .await
+                .unwrap();
+        }
+
+        // Give the actor time to process and write to WAL
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Simulate death: drop the sender and abort the actor
+        drop(storage_tx);
+        actor_handle.abort();
+        let _ = actor_handle.await;
+    }
+    // Actor is now dead. WAL should contain 3 chunks on disk.
+
+    // 3. PHASE 2: "Reboot" — new actor recovers from WAL, receives final chunk
+    {
+        let journal2 = FileJournal::new(&wal_path).await.unwrap();
+        let guardian2 = Guardian::new(&vault_path.to_string_lossy(), &config, identity.did.clone());
+
+        let (storage_tx2, storage_rx2) = mpsc::channel::<StorageCommand>(10);
+        let (forensic_tx2, _) = mpsc::channel::<(NetworkId, Did, GuardianError)>(1);
+
+        let actor2 = StorageActor {
+            reassembler: Reassembler::new(),
+            guardian: guardian2,
+            journal: journal2,
+            config: config.clone(),
+            identity: identity.clone(),
+            forensic_tx: forensic_tx2,
+            local_peer_id: identity.to_network_id(),
+        };
+
+        let actor_handle2 = tokio::spawn(async move {
+            // run() calls recover_from_journal internally during bootstrap
+            actor2.run(storage_rx2).await;
+        });
+
+        // Send the 4th and final chunk
+        storage_tx2
+            .send(StorageCommand::Ingest(
+                chunks[3].clone(),
+                topic.clone(),
+                NetworkId::random(),
+            ))
+            .await
+            .unwrap();
+
+        // Give time for reassembly + Guardian flush (crucible TTL is 1s for test config)
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+
+        drop(storage_tx2);
+        actor_handle2.abort();
+        let _ = actor_handle2.await;
+    }
+
+    // 4. VERIFICATION: Check that the volley was committed to disk
+    let evidence_dir = vault_path.join(identity_did.to_safe_name());
+    let mut found_file = false;
+    if evidence_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&evidence_dir) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().ends_with(".volley") {
+                    found_file = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    assert!(
+        found_file,
+        "Salvage failed: Node rebooted but failed to finish reassembly from the FileJournal WAL."
+    );
 }
