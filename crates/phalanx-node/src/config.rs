@@ -39,7 +39,6 @@ pub struct NetworkConfig {
 }
 
 impl NodeConfig {
-    // FIX: Renamed to avoid collision with the generic `load` method below
     pub fn load_from_config_crate(path: PathBuf) -> Result<Self, config::ConfigError> {
         let s = config::Config::builder()
             .add_source(config::File::from(path))

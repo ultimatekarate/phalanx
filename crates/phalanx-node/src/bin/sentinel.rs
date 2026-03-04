@@ -5,19 +5,24 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 // Internal Modules from Workspace
-use phalanx_node::config::NodeConfig; // Replaced PhalanxConfig
+use phalanx_node::config::NodeConfig;
+use phalanx_node::identity::PhalanxNodeIdentityExt;
+use phalanx_node::network::bridge::Libp2pBridge;
+use phalanx_node::network::orchestrator::setup_phalanx_swarm;
+use phalanx_node::psk::load_swarm_key;
 use phalanx_node::state::SyncReputationCache;
 use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::init_observability;
 use phalanx_node::FileJournal;
-use phalanx_proto::prelude::PhalanxPhysics;
+use phalanx_node::MeshSentinel;
+use phalanx_proto::prelude::{PhalanxIdentity, PhalanxPhysics};
 use phalanx_transport::identity_ext::Libp2pExt;
 use phalanx_transport::prelude::Libp2pAdapter;
 
 /// The entry point for the Phalanx Sentinel binary.
 ///
 /// Behavior: This function initializes the logging sub-system, loads system
-/// configuration, configures the production network adapter, and boots the `PhalanxEngine`.
+/// configuration, configures the production network adapter, and boots the MeshSentinel.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // 1. Telemetry & Initialization
@@ -29,7 +34,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let physics = PhalanxPhysics::default_wan();
 
     // 3. Identity & Security Setup
-    let my_identity = init_identity("identity.bin")?;
+    let my_identity = PhalanxIdentity::init("identity.bin")?;
     let psk_path = Path::new("swarm.key");
     let psk = load_swarm_key(psk_path);
 
@@ -57,15 +62,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         reputation_cache.clone(),
     )?;
 
-    // Wrap the standard library/libp2p I/O inside the domain-compliant adapter
-    let network_adapter = Libp2pAdapter::new(swarm);
+    // Wrap the libp2p swarm in the channel-based adapter, then bridge to NetworkTransport
+    let adapter = Libp2pAdapter::new(swarm);
+    let network = Libp2pBridge::new(adapter);
+
     let (discovery_tx, discovery_rx) = mpsc::channel(100);
     // 5. Engine Initialization
-    // The engine is now completely agnostic to libp2p and simply consumes the NetworkTransport trait
-    let mut engine = PhalanxEngine::new(
+    // The engine is completely agnostic to libp2p and simply consumes the NetworkTransport trait
+    let mut engine: MeshSentinel<Libp2pBridge, FileJournal> = MeshSentinel::new(
         config,
         my_identity,
-        network_adapter,
+        network,
         journal,
         trust_registry,
         reputation_cache,
