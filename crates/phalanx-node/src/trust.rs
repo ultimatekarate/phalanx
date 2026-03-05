@@ -87,6 +87,10 @@ impl TrustRegistry {
             }
         }
 
+        if level == TrustLevel::Blocked {
+            existing_reputation.is_blacklisted = true;
+        }
+
         let timestamp = clock.now()?;
 
         let original_added_at = self
