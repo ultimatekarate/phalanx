@@ -20,7 +20,6 @@ use phalanx_proto::prelude::{PendingEgress, ShardChunk, ShardError};
 use phalanx_proto::retrieval::VolleyResponse;
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::PhalanxTimestamp;
-use phalanx_proto::topic::MeshTopic;
 use phalanx_transport::identity_ext::Libp2pExt;
 use tokio::sync::mpsc;
 

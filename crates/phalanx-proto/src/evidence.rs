@@ -137,6 +137,7 @@ pub struct FragmentedEnvelope {
     pub partial_data: BTreeMap<u32, Vec<u8>>,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EnvelopeState {
     Intact(WitnessEnvelope),

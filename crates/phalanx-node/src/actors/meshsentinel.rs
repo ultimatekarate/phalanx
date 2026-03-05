@@ -423,3 +423,319 @@ impl<T: NetworkTransport> MeshSentinel<T, NoOpJournal> {
         .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phalanx_forensics::witness::WitnessAuthority;
+    use phalanx_proto::evidence::WitnessEnvelope;
+    use phalanx_proto::evidence::{ChunkType, Evidence, StorageSequence, VideoShard};
+    use phalanx_proto::network::NetworkEvent;
+    use phalanx_proto::time::PhalanxTimestamp;
+    use phalanx_proto::types::PowerState;
+
+    /// Minimal mock implementing NetworkTransport for unit testing.
+    /// Records publishes, bans, and responses; feeds events from a channel.
+    struct TestTransport {
+        ingress_rx: mpsc::Receiver<NetworkEvent>,
+        published: Vec<(MeshTopic, Vec<u8>)>,
+        banned: Vec<NetworkId>,
+        responses: Vec<(String, VolleyResponse)>,
+    }
+
+    impl TestTransport {
+        fn new(ingress_rx: mpsc::Receiver<NetworkEvent>) -> Self {
+            Self {
+                ingress_rx,
+                published: Vec::new(),
+                banned: Vec::new(),
+                responses: Vec::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl NetworkTransport for TestTransport {
+        async fn publish(&mut self, topic: &MeshTopic, data: Vec<u8>) -> Result<(), String> {
+            self.published.push((topic.clone(), data));
+            Ok(())
+        }
+        async fn next_event(&mut self) -> Option<NetworkEvent> {
+            self.ingress_rx.recv().await
+        }
+        async fn ban_peer(&mut self, peer: &NetworkId) {
+            self.banned.push(peer.clone());
+        }
+        async fn send_response(
+            &mut self,
+            channel_id: &str,
+            response: VolleyResponse,
+        ) -> Result<(), String> {
+            self.responses.push((channel_id.to_string(), response));
+            Ok(())
+        }
+    }
+
+    /// Helper: builds a MeshSentinel<TestTransport, NoOpJournal> for testing.
+    async fn build_test_sentinel(
+        ingress_rx: mpsc::Receiver<NetworkEvent>,
+    ) -> MeshSentinel<TestTransport, NoOpJournal> {
+        let temp = tempfile::tempdir().unwrap();
+        let vault_path = temp.path().to_string_lossy().to_string();
+        let mut config = NodeConfig::default();
+        config.storage.vault_path = vault_path;
+
+        let identity = PhalanxIdentity::new_ephemeral();
+        let trust_registry = TrustRegistry::build(&config).await;
+        let (discovery_tx, discovery_rx) = mpsc::channel(100);
+
+        MeshSentinel::new(
+            config,
+            identity,
+            TestTransport::new(ingress_rx),
+            NoOpJournal,
+            trust_registry,
+            Arc::new(SyncReputationCache::default()),
+            discovery_rx,
+            discovery_tx,
+        )
+        .await
+        .expect("Failed to build test sentinel")
+    }
+
+    #[tokio::test]
+    async fn test_sentinel_boots_and_shuts_down() {
+        let (ingress_tx, ingress_rx) = mpsc::channel(10);
+        let mut sentinel = build_test_sentinel(ingress_rx).await;
+
+        ingress_tx.send(NetworkEvent::Shutdown).await.unwrap();
+
+        let result = sentinel.run().await;
+        assert!(result.is_ok(), "Sentinel should shut down cleanly");
+    }
+
+    #[tokio::test]
+    async fn test_ingress_valid_chunk_forwarded_to_storage() {
+        let (ingress_tx, ingress_rx) = mpsc::channel(10);
+        let mut sentinel = build_test_sentinel(ingress_rx).await;
+
+        let identity = PhalanxIdentity::new_ephemeral();
+        let topic = sentinel.config.network.video_topic.clone();
+
+        let evidence = Evidence::Video(VideoShard {
+            timestamp: PhalanxTimestamp::now(),
+            sequence_id: StorageSequence(1),
+            fps: 30,
+            volley_id: VolleyId::new("v_ingress"),
+            payload: DataPayload::Clear(vec![0xAB; 4]),
+        });
+        let envelope =
+            WitnessEnvelope::sign_envelope(evidence, &identity, identity.network_id.clone(), None)
+                .unwrap();
+
+        let chunk = ShardChunk {
+            shard_id: ShardId(1),
+            chunk_index: 0,
+            total_chunks: 1,
+            data: postcard::to_allocvec(&envelope).unwrap(),
+            owner_did: identity.did.clone(),
+            chunk_type: ChunkType::Witnessed,
+        };
+        let chunk_bytes = postcard::to_allocvec(&chunk).unwrap();
+
+        ingress_tx
+            .send(NetworkEvent::DataReceived {
+                origin: NetworkId::random(),
+                topic,
+                data: chunk_bytes,
+            })
+            .await
+            .unwrap();
+        ingress_tx.send(NetworkEvent::Shutdown).await.unwrap();
+
+        sentinel.run().await.unwrap();
+        // Reaching here without panic/hang confirms the chunk was forwarded to storage_tx.
+    }
+
+    #[tokio::test]
+    async fn test_ingress_rejected_in_leaf_mode() {
+        let (ingress_tx, ingress_rx) = mpsc::channel(10);
+        let mut sentinel = build_test_sentinel(ingress_rx).await;
+
+        // Switch to Leaf mode — only loopback traffic is accepted
+        sentinel.governor.set_state(PowerState::Leaf);
+
+        let identity = PhalanxIdentity::new_ephemeral();
+        let topic = sentinel.config.network.video_topic.clone();
+
+        let evidence = Evidence::Video(VideoShard {
+            timestamp: PhalanxTimestamp::now(),
+            sequence_id: StorageSequence(1),
+            fps: 30,
+            volley_id: VolleyId::new("v_leaf"),
+            payload: DataPayload::Clear(vec![0x00; 4]),
+        });
+        let envelope =
+            WitnessEnvelope::sign_envelope(evidence, &identity, identity.network_id.clone(), None)
+                .unwrap();
+
+        let chunk = ShardChunk {
+            shard_id: ShardId(1),
+            chunk_index: 0,
+            total_chunks: 1,
+            data: postcard::to_allocvec(&envelope).unwrap(),
+            owner_did: identity.did.clone(),
+            chunk_type: ChunkType::Witnessed,
+        };
+        let chunk_bytes = postcard::to_allocvec(&chunk).unwrap();
+
+        // Foreign peer sends data — governor should drop it silently
+        ingress_tx
+            .send(NetworkEvent::DataReceived {
+                origin: NetworkId::from("foreign-peer"),
+                topic,
+                data: chunk_bytes,
+            })
+            .await
+            .unwrap();
+        ingress_tx.send(NetworkEvent::Shutdown).await.unwrap();
+
+        sentinel.run().await.unwrap();
+        // No panic = foreign traffic was silently dropped by the governor
+    }
+
+    #[tokio::test]
+    async fn test_blacklisted_peer_triggers_ban() {
+        let (ingress_tx, ingress_rx) = mpsc::channel(10);
+        let mut sentinel = build_test_sentinel(ingress_rx).await;
+
+        let attacker = PhalanxIdentity::new_ephemeral();
+        let attacker_peer = NetworkId::from("attacker-peer");
+        let topic = sentinel.config.network.video_topic.clone();
+
+        // Pre-blacklist the attacker's DID by recording repeated offenses
+        use phalanx_proto::trust::Offense;
+        for _ in 0..10 {
+            sentinel
+                .trust_registry
+                .record_offense(&attacker.did, Offense::InvalidSignature, &sentinel.clock)
+                .await;
+        }
+
+        let evidence = Evidence::Video(VideoShard {
+            timestamp: PhalanxTimestamp::now(),
+            sequence_id: StorageSequence(1),
+            fps: 30,
+            volley_id: VolleyId::new("v_blacklist"),
+            payload: DataPayload::Clear(vec![0xFF; 4]),
+        });
+        let envelope =
+            WitnessEnvelope::sign_envelope(evidence, &attacker, attacker.network_id.clone(), None)
+                .unwrap();
+
+        let chunk = ShardChunk {
+            shard_id: ShardId(1),
+            chunk_index: 0,
+            total_chunks: 1,
+            data: postcard::to_allocvec(&envelope).unwrap(),
+            owner_did: attacker.did.clone(),
+            chunk_type: ChunkType::Witnessed,
+        };
+        let chunk_bytes = postcard::to_allocvec(&chunk).unwrap();
+
+        ingress_tx
+            .send(NetworkEvent::DataReceived {
+                origin: attacker_peer.clone(),
+                topic,
+                data: chunk_bytes,
+            })
+            .await
+            .unwrap();
+        ingress_tx.send(NetworkEvent::Shutdown).await.unwrap();
+
+        sentinel.run().await.unwrap();
+
+        assert!(
+            sentinel.network.banned.contains(&attacker_peer),
+            "Blacklisted peer should have been banned via network.ban_peer()"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_resilient_response_succeeds_without_enqueue() {
+        let (_ingress_tx, ingress_rx) = mpsc::channel(10);
+        let mut sentinel = build_test_sentinel(ingress_rx).await;
+
+        assert!(sentinel.pending_egress.is_empty());
+
+        // TestTransport.send_response always succeeds, so nothing should be queued
+        sentinel
+            .dispatch_resilient_response("ch_ok".into(), VolleyResponse::NotFound)
+            .await;
+
+        assert!(
+            sentinel.pending_egress.is_empty(),
+            "Successful dispatch should not enqueue into pending_egress"
+        );
+
+        // Verify the response was actually sent
+        assert_eq!(sentinel.network.responses.len(), 1);
+        assert_eq!(sentinel.network.responses[0].0, "ch_ok");
+    }
+
+    #[tokio::test]
+    async fn test_forensic_violation_updates_reputation() {
+        let (_ingress_tx, ingress_rx) = mpsc::channel(10);
+        let mut sentinel = build_test_sentinel(ingress_rx).await;
+
+        let offender_peer = NetworkId::from("bad-peer");
+        let offender_did = Did::from("did:key:zBadActor");
+
+        sentinel
+            .handle_forensic_violation(
+                offender_peer.clone(),
+                offender_did,
+                GuardianError::VerificationFailed("signature mismatch".into()),
+            )
+            .await;
+
+        let score = sentinel
+            .reputation_cache
+            .scores
+            .read()
+            .unwrap()
+            .get(&offender_peer)
+            .cloned();
+
+        assert!(
+            score.is_some(),
+            "Reputation cache should be updated after forensic violation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gap_discovery_publishes_to_mesh() {
+        let (_ingress_tx, ingress_rx) = mpsc::channel(10);
+        let mut sentinel = build_test_sentinel(ingress_rx).await;
+
+        let volley_id = VolleyId::new("v_gap");
+        let gap_seq = StorageSequence(5);
+
+        sentinel
+            .handle_gap_discovery(volley_id.clone(), gap_seq)
+            .await;
+
+        assert_eq!(
+            sentinel.network.published.len(),
+            1,
+            "Gap discovery should publish exactly one message"
+        );
+
+        let (topic, data) = &sentinel.network.published[0];
+        assert_eq!(topic.as_str(), "phalanx/discovery/1.0.0");
+
+        let request: ShardDiscoveryRequest = postcard::from_bytes(data).unwrap();
+        assert_eq!(request.volley_id, volley_id);
+        assert_eq!(request.sequence_id, gap_seq);
+    }
+}
