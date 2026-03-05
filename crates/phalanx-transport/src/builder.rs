@@ -10,7 +10,7 @@ use std::time::Duration;
 use crate::behaviour::PhalanxBehaviour;
 
 use phalanx_proto::{
-    constants::RETRIEVAL_PROTOCOL_ID,
+    network::RETRIEVAL_PROTOCOL_ID,
     types::{PhalanxPhysics, VitalityRate},
 };
 

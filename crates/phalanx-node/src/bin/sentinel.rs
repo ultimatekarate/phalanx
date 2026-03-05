@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 // Internal Modules from Workspace
+use phalanx_node::actors::meshsentinel::SentinelDependencies;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::network::bridge::Libp2pBridge;
@@ -19,10 +20,6 @@ use phalanx_proto::prelude::{PhalanxIdentity, PhalanxPhysics};
 use phalanx_transport::identity_ext::Libp2pExt;
 use phalanx_transport::prelude::Libp2pAdapter;
 
-/// The entry point for the Phalanx Sentinel binary.
-///
-/// Behavior: This function initializes the logging sub-system, loads system
-/// configuration, configures the production network adapter, and boots the MeshSentinel.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // 1. Telemetry & Initialization
@@ -48,7 +45,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let journal = FileJournal::new("sentinel_transient_wal.bin").await?;
 
     // --- ZERO-TRUST DEPENDENCY GRAPH ---
-    // Initialize the asynchronous trust registry and the synchronous cache boundary.
     let trust_registry = TrustRegistry::build(&config).await;
     let reputation_cache = Arc::new(SyncReputationCache::default());
 
@@ -62,24 +58,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         reputation_cache.clone(),
     )?;
 
-    // Wrap the libp2p swarm in the channel-based adapter, then bridge to NetworkTransport
     let adapter = Libp2pAdapter::new(swarm);
     let network = Libp2pBridge::new(adapter);
 
     let (discovery_tx, discovery_rx) = mpsc::channel(100);
-    // 5. Engine Initialization
-    // The engine is completely agnostic to libp2p and simply consumes the NetworkTransport trait
-    let mut engine: MeshSentinel<Libp2pBridge, FileJournal> = MeshSentinel::new(
+
+    // 5. Engine Initialization via Parameter Object
+    let deps = SentinelDependencies {
         config,
-        my_identity,
+        identity: my_identity,
         network,
         journal,
         trust_registry,
         reputation_cache,
         discovery_rx,
         discovery_tx,
-    )
-    .await?;
+    };
+
+    let mut engine: MeshSentinel<Libp2pBridge, FileJournal> = MeshSentinel::new(deps).await?;
 
     println!("--- PHALANX SENSOR: ONLINE (WAN + LAN) ---");
 
@@ -89,10 +85,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Configures global signal handlers for clean system termination.
-///
-/// Behavior: Ensures that the Guardian seals the vault and flushes the
-/// Write-Ahead Log (WAL) before the process exits.
 fn setup_shutdown_handler() {
     ctrlc::set_handler(move || {
         println!("\n[PHALANX] Shutdown initiated. Sealing vault...");

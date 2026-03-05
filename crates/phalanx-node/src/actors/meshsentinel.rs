@@ -40,6 +40,17 @@ struct ShardDiscoveryRequest {
     sequence_id: StorageSequence,
 }
 
+pub struct SentinelDependencies<T: NetworkTransport, J: TransientJournal> {
+    pub config: NodeConfig,
+    pub identity: PhalanxIdentity,
+    pub network: T,
+    pub journal: J,
+    pub trust_registry: TrustRegistry,
+    pub reputation_cache: Arc<SyncReputationCache>,
+    pub discovery_rx: mpsc::Receiver<(VolleyId, StorageSequence)>,
+    pub discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
+}
+
 pub struct MeshSentinel<T: NetworkTransport, J: TransientJournal> {
     pub trust_registry: TrustRegistry,
     pub reputation_cache: Arc<SyncReputationCache>,
@@ -65,30 +76,25 @@ pub struct MeshSentinel<T: NetworkTransport, J: TransientJournal> {
 }
 
 impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, J> {
-    pub async fn new(
-        config: NodeConfig,
-        identity: PhalanxIdentity,
-        network: T,
-        mut journal: J,
-        trust_registry: TrustRegistry,
-        reputation_cache: Arc<SyncReputationCache>,
-        discovery_rx: mpsc::Receiver<(VolleyId, StorageSequence)>,
-        discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
-    ) -> Result<Self, Box<dyn Error>> {
-        let local_did = identity.did.clone();
-        let local_network_id = identity.to_network_id();
+    pub async fn new(mut deps: SentinelDependencies<T, J>) -> Result<Self, Box<dyn Error>> {
+        let local_did = deps.identity.did.clone();
+        let local_network_id = deps.identity.to_network_id();
         let reassembler = Reassembler::new();
-        let guardian = Guardian::new(&config.storage.vault_path, &config, local_did);
+        let guardian = Guardian::new(&deps.config.storage.vault_path, &deps.config, local_did);
 
-        let (_, video_rx) = mpsc::channel(config.storage.max_video_buffer);
-        let (_, audio_rx) = mpsc::channel(config.storage.max_audio_buffer);
+        let (_, video_rx) = mpsc::channel(deps.config.storage.max_video_buffer);
+        let (_, audio_rx) = mpsc::channel(deps.config.storage.max_audio_buffer);
         let (storage_tx, storage_rx) = mpsc::channel(1024);
         let (forensic_tx, forensic_rx) = mpsc::channel(100);
 
         // Stateless Recovery: Pull salvaged egress from the journal
-        let salvaged_queue = journal.read_all_pending_egress().await.unwrap_or_default();
+        let salvaged_queue = deps
+            .journal
+            .read_all_pending_egress()
+            .await
+            .unwrap_or_default();
         if !salvaged_queue.is_empty() {
-            info!(
+            tracing::info!(
                 count = salvaged_queue.len(),
                 "Engine Bootstrap: Recovered salvaged egress records"
             );
@@ -97,9 +103,9 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         let storage_actor = StorageActor {
             reassembler,
             guardian,
-            journal,
-            config: config.clone(),
-            identity: identity.clone(),
+            journal: deps.journal,
+            config: deps.config.clone(),
+            identity: deps.identity.clone(),
             forensic_tx,
             local_peer_id: local_network_id.clone(),
         };
@@ -107,16 +113,17 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         let storage_task = tokio::spawn(async move {
             storage_actor.run(storage_rx).await;
         });
-        let arc_identity = Arc::new(identity.clone());
+
+        let arc_identity = Arc::new(deps.identity.clone());
         let session = CausalitySession::new(arc_identity.clone(), local_network_id.clone());
 
         Ok(Self {
-            config,
+            config: deps.config,
             identity: arc_identity,
             clock: TrustedClock::new(),
-            network,
-            trust_registry,
-            reputation_cache,
+            network: deps.network,
+            trust_registry: deps.trust_registry,
+            reputation_cache: deps.reputation_cache,
             health_tracker: HealthTracker::new(),
             governor: TrafficGovernor::new(),
             mode: NodeMode::Standard,
@@ -130,8 +137,8 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             _journal_phantom: std::marker::PhantomData,
             session,
             pending_egress: VecDeque::from(salvaged_queue),
-            discovery_rx,
-            discovery_tx,
+            discovery_rx: deps.discovery_rx,
+            discovery_tx: deps.discovery_tx,
         })
     }
 
@@ -151,7 +158,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                             self.execute_secure_retrieval(origin, request, channel_id, &local_network_id).await;
                         }
                         NetworkEvent::Shutdown => {
-                            info!("Engine: Initiating emergency salvage");
+                            tracing::info!("Engine: Initiating emergency salvage");
                             let payload = self.pending_egress.drain(..).collect();
                             let _ = self.storage_tx.send(StorageCommand::EmergencySalvage(payload)).await;
                             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -170,7 +177,6 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                     self.handle_forensic_violation(peer_id, owner_did, err).await;
                 }
                 Some((volley_id, gap_sequence)) = self.discovery_rx.recv() => {
-                    tracing::info!("Mesh heal triggered for sequence {:?}", gap_sequence);
                     self.handle_gap_discovery(volley_id, gap_sequence).await;
                 }
             }
@@ -335,10 +341,11 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
     /// Attempts to send a response over the network. On failure, enqueues
     /// into the pending_egress retry queue for exponential-backoff redelivery.
     async fn dispatch_resilient_response(&mut self, channel_id: String, response: VolleyResponse) {
-        if let Err(_) = self
+        if self
             .network
             .send_response(&channel_id, response.clone())
             .await
+            .is_err()
         {
             tracing::warn!(channel = %channel_id, "Response dispatch failed, queuing for retry");
             self.pending_egress.push_back(PendingEgress {
@@ -410,17 +417,19 @@ impl<T: NetworkTransport> MeshSentinel<T, NoOpJournal> {
         let identity = PhalanxIdentity::new_ephemeral();
         let trust_registry = TrustRegistry::build(&config).await;
         let (discovery_tx, discovery_rx) = mpsc::channel(100);
-        Self::new(
+
+        let deps = SentinelDependencies {
             config,
             identity,
             network,
-            NoOpJournal,
+            journal: NoOpJournal,
             trust_registry,
-            Arc::new(SyncReputationCache::default()),
+            reputation_cache: Arc::new(SyncReputationCache::default()),
             discovery_rx,
             discovery_tx,
-        )
-        .await
+        };
+
+        Self::new(deps).await
     }
 }
 
@@ -481,26 +490,27 @@ mod tests {
         ingress_rx: mpsc::Receiver<NetworkEvent>,
     ) -> MeshSentinel<TestTransport, NoOpJournal> {
         let temp = tempfile::tempdir().unwrap();
-        let vault_path = temp.path().to_string_lossy().to_string();
         let mut config = NodeConfig::default();
-        config.storage.vault_path = vault_path;
+        config.storage.vault_path = temp.path().to_string_lossy().to_string();
 
         let identity = PhalanxIdentity::new_ephemeral();
         let trust_registry = TrustRegistry::build(&config).await;
         let (discovery_tx, discovery_rx) = mpsc::channel(100);
 
-        MeshSentinel::new(
+        let deps = SentinelDependencies {
             config,
             identity,
-            TestTransport::new(ingress_rx),
-            NoOpJournal,
+            network: TestTransport::new(ingress_rx),
+            journal: NoOpJournal,
             trust_registry,
-            Arc::new(SyncReputationCache::default()),
-            discovery_rx,
+            reputation_cache: Arc::new(SyncReputationCache::default()),
             discovery_tx,
-        )
-        .await
-        .expect("Failed to build test sentinel")
+            discovery_rx,
+        };
+
+        MeshSentinel::new(deps)
+            .await
+            .expect("Failed to build test sentinel")
     }
 
     #[tokio::test]
@@ -732,7 +742,7 @@ mod tests {
         );
 
         let (topic, data) = &sentinel.network.published[0];
-        assert_eq!(topic.as_str(), "phalanx/discovery/1.0.0");
+        assert_eq!(topic.as_str(), DISCOVERY_TOPIC_ID);
 
         let request: ShardDiscoveryRequest = postcard::from_bytes(data).unwrap();
         assert_eq!(request.volley_id, volley_id);

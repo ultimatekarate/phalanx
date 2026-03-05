@@ -1,3 +1,4 @@
+use phalanx_node::actors::meshsentinel::SentinelDependencies;
 use phalanx_node::network::bridge::Libp2pBridge;
 use phalanx_node::network::orchestrator::setup_phalanx_swarm;
 use phalanx_node::state::SyncReputationCache;
@@ -22,7 +23,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let physics = PhalanxPhysics::default_wan();
 
     // --- ZERO-TRUST DEPENDENCY GRAPH ---
-    // Initialize the asynchronous trust registry and the synchronous cache boundary.
     let trust_registry = TrustRegistry::build(&config).await;
     let reputation_cache = Arc::new(SyncReputationCache::default());
 
@@ -34,17 +34,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         reputation_cache.clone(),
     )?;
 
-    // Subscription and DHT logic remains here to keep Engine transport-agnostic
     swarm.listen_on("/ip4/0.0.0.0/tcp/4001".parse()?)?;
 
-    // Wrap the libp2p swarm in the channel-based adapter, then bridge to NetworkTransport
     let adapter = Libp2pAdapter::new(swarm);
     let network = Libp2pBridge::new(adapter);
 
     let journal = FileJournal::new("crucible_wal.bin").await?;
     let (discovery_tx, discovery_rx) = mpsc::channel(100);
-    // Instantiate the unified engine
-    let mut engine: MeshSentinel<Libp2pBridge, FileJournal> = MeshSentinel::new(
+
+    // 5. Engine Initialization via Parameter Object
+    let deps = SentinelDependencies {
         config,
         identity,
         network,
@@ -53,8 +52,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         reputation_cache,
         discovery_rx,
         discovery_tx,
-    )
-    .await?;
+    };
+
+    let mut engine: MeshSentinel<Libp2pBridge, FileJournal> = MeshSentinel::new(deps).await?;
 
     engine.run().await
 }
