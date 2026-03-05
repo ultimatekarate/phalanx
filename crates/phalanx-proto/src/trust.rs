@@ -66,6 +66,19 @@ pub struct PeerRecord {
     pub reputation: PeerReputation,
 }
 
+impl Default for PeerRecord {
+    fn default() -> Self {
+        Self {
+            did: Did::default(),
+            pet_name: PetName("Unknown".to_string()),
+            level: TrustLevel::default(),
+            added_at: PhalanxTimestamp::default(),
+            last_interaction: PhalanxTimestamp::default(),
+            reputation: PeerReputation::default(),
+        }
+    }
+}
+
 /// A user-defined local identifier for a DID (Pet name).
 ///
 /// Constraints:
