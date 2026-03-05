@@ -1,10 +1,10 @@
-use crate::judge::IntegrityGate;
 use phalanx_proto::evidence::Evidence;
 use phalanx_proto::evidence::ForensicGap;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::Volley;
 use phalanx_proto::prelude::*;
+use phalanx_proto::types::{ForensicUnit, Verified};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::btree_map::Entry;
@@ -304,30 +304,30 @@ pub struct VolleyBuffer {
 pub struct VolleyAmalgam;
 
 impl Mold for VolleyAmalgam {
-    type Input = WitnessEnvelope;
+    type Input = ForensicUnit<WitnessEnvelope, Verified>;
     type Output = Volley;
     type Key = VolleyId;
     type Accumulator = VolleyBuffer;
 
     fn get_key(item: &Self::Input) -> Self::Key {
-        item.evidence.volley_id().clone()
+        item.data.evidence.volley_id().clone()
     }
 
     fn init_accumulator(item: &Self::Input) -> Self::Accumulator {
         let mut artifacts = BTreeMap::new();
-        artifacts.insert(item.evidence.sequence_id(), item.clone());
+        artifacts.insert(item.data.evidence.sequence_id(), item.data.clone());
 
         VolleyBuffer {
             artifacts,
-            volley_id: item.evidence.volley_id().clone(),
-            owner_did: item.did.clone(),
+            volley_id: item.data.evidence.volley_id().clone(),
+            owner_did: item.data.did.clone(),
         }
     }
 
     fn ingest(acc: &mut Self::Accumulator, item: Self::Input) {
-        let seq = item.evidence.sequence_id();
+        let seq = item.data.evidence.sequence_id();
 
-        match &item.evidence {
+        match &item.data.evidence {
             Evidence::Handover(proof) => {
                 // 1. Verify the bridge connects to the CURRENT legal owner
                 if proof.old_did == acc.owner_did {
@@ -338,7 +338,7 @@ impl Mold for VolleyAmalgam {
 
                     // Transfer legal ownership of the active buffer
                     acc.owner_did = proof.new_did.clone();
-                    acc.artifacts.insert(seq, item);
+                    acc.artifacts.insert(seq, item.data);
                 } else {
                     tracing::warn!(
                         volley = %acc.volley_id,
@@ -348,8 +348,8 @@ impl Mold for VolleyAmalgam {
             }
             _ => {
                 // 2. Standard Frame Verification
-                if item.did == acc.owner_did {
-                    acc.artifacts.insert(seq, item);
+                if item.data.did == acc.owner_did {
+                    acc.artifacts.insert(seq, item.data);
                 } else {
                     // ZERO-TRUST DROP: Prevent buffer bloat from malicious peers
                     tracing::warn!(
@@ -413,27 +413,10 @@ impl Mold for VolleyAmalgam {
                 }
             }
 
-            // 3. INTEGRITY GATE (Ingress)
-            // Verify the envelope is authentic before accepting it into the Volley.
-            // Uses Sticky Trust: if linked to previous valid frame, skip crypto.
-            let node_id = env.witness_peer_id.clone();
-            let validated = match env.check_integrity(&node_id, now, 10_000, last_signature_hash) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!(
-                        volley_id = %key,
-                        seq = %current_seq.0,
-                        error = %e,
-                        "VolleyAmalgam: INTEGRITY BREACH - Signature verification failed"
-                    );
-                    return None;
-                }
-            };
-
             // Update state for next iteration
             expected_seq = Some(current_seq + 1);
-            last_signature_hash = Some(validated.signature_hash());
-            sorted_envelopes.push(validated);
+            last_signature_hash = Some(env.signature_hash());
+            sorted_envelopes.push(env);
         }
 
         info!(

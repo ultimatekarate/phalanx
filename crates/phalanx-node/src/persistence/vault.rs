@@ -4,13 +4,14 @@ use async_trait::async_trait;
 use phalanx_forensics::crucible::Crucible;
 use phalanx_forensics::crucible::VolleyAmalgam;
 use phalanx_forensics::crucible::{EnvelopeHashExt, EvidenceExt};
-use phalanx_forensics::judge::{ContinuityGate, IntegrityGate};
+use phalanx_forensics::gate::PromotionGate;
 use phalanx_forensics::prelude::TransientJournal;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::Volley;
 use phalanx_proto::prelude::*;
 use phalanx_proto::storage::GuardianError;
+use phalanx_proto::types::ForensicUnit;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::fs;
@@ -51,28 +52,18 @@ impl Guardian {
                     }
                 }
 
-                // 1. Integrity Gate (Signature + Time + Sticky Trust)
+                // 1. Promotion Gate (Integrity + Continuity + Time)
                 let node_id = envelope.witness_peer_id.clone();
                 let now = PhalanxTimestamp::now();
-                let envelope = envelope
-                    .check_integrity(&node_id, now, 10_000, anchor)
+
+                let unit = ForensicUnit::new(envelope);
+                let verified_unit = unit
+                    .promote(&node_id, now, 10_000, anchor)
                     .map_err(|e| GuardianError::VerificationFailed(e.to_string()))?;
 
-                // 2. Continuity Gate (Chain Enforcement)
-                if let Some(ref a) = anchor {
-                    if envelope.clone().verify_link(a).is_err() {
-                        tracing::error!(
-                            "TIMELINE HIJACK DETECTED: Volley {} Seq {} points to invalid hash.",
-                            volley_id,
-                            seq.0
-                        );
-                        return Err(GuardianError::ChainIntegrityViolation);
-                    }
-                }
-
                 // 2. Volley Aggregation
-                // The Crucible (bound to VolleyAmalgam) handles sequence-ordering
-                if let Some(volley) = self.crucible.process(envelope) {
+                // The Crucible now accepts only Verified units
+                if let Some(volley) = self.crucible.process(verified_unit) {
                     self.commit_volley_to_disk(&volley).await?;
                 }
             }
