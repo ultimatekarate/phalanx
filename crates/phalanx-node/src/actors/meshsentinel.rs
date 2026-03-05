@@ -514,7 +514,7 @@ mod tests {
     /// Helper: builds a MeshSentinel<TestTransport, NoOpJournal> for testing.
     async fn build_test_sentinel(
         ingress_rx: mpsc::Receiver<NetworkEvent>,
-    ) -> MeshSentinel<TestTransport, NoOpJournal> {
+    ) -> (MeshSentinel<TestTransport, NoOpJournal>, tempfile::TempDir) {
         let temp = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::default();
         config.storage.vault_path = temp.path().to_string_lossy().to_string();
@@ -534,21 +534,29 @@ mod tests {
             discovery_rx,
         };
 
-        MeshSentinel::new(deps)
-            .await
-            .expect("Failed to build test sentinel")
+        (
+            MeshSentinel::new(deps)
+                .await
+                .expect("Failed to build test sentinel"),
+            temp,
+        )
     }
 
     #[tokio::test]
     async fn test_handle_network_ingress_enforces_trust_registry() {
         // 1. Initialize the test environment using the provided helper
         let (_ingress_tx, ingress_rx) = mpsc::channel(10);
-        let mut sentinel = build_test_sentinel(ingress_rx).await;
+        let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
+
+        // Intercept storage commands to verify routing
+        let (mock_storage_tx, mut mock_storage_rx) = mpsc::channel(10);
+        sentinel.storage_tx = mock_storage_tx;
 
         // Setup shared test variables
         let topic = MeshTopic::new("phalanx/test/1.0.0");
         let valid_peer = NetworkId::random();
         let bad_peer = NetworkId::random();
+        let bad_peer_petname = PetName::new("bad_actor".to_string()).expect("Invalid pet name");
         let valid_did = Did("did:phalanx:trusted".to_string());
         let bad_did = Did("did:phalanx:malicious".to_string());
 
@@ -556,11 +564,17 @@ mod tests {
         // Note: Replace this with your exact TrustRegistry mutator method if
         // direct HashMap access to `contacts` is encapsulated.
         let mut bad_record = PeerRecord::default();
-        bad_record.is_blacklisted = true;
+        bad_record.reputation.is_blacklisted = true;
         sentinel
             .trust_registry
-            .contacts
-            .insert(bad_did.clone(), bad_record);
+            .set_peer(
+                &bad_did.clone(),
+                &bad_peer_petname,
+                TrustLevel::Blocked,
+                &TrustedClock::new(),
+            )
+            .await
+            .expect("Failed to set peer");
 
         // 2. Test Blacklisted Peer Rejection
         let mut bad_chunk = ShardChunk::default();
@@ -580,7 +594,7 @@ mod tests {
 
         // Verify the storage subsystem channel remains empty
         assert!(
-            sentinel.discovery_rx.try_recv().is_err(),
+            mock_storage_rx.try_recv().is_err(),
             "Blacklisted chunk bypassed the network edge filter"
         );
 
@@ -602,7 +616,7 @@ mod tests {
         );
 
         // Verify the storage channel received the Ingest command
-        match sentinel.discovery_rx.try_recv() {
+        match mock_storage_rx.try_recv() {
             Ok(StorageCommand::Ingest(chunk, _, _)) => {
                 assert_eq!(chunk.owner_did, valid_chunk.owner_did);
             }
@@ -613,7 +627,7 @@ mod tests {
     #[tokio::test]
     async fn test_sentinel_boots_and_shuts_down() {
         let (ingress_tx, ingress_rx) = mpsc::channel(10);
-        let mut sentinel = build_test_sentinel(ingress_rx).await;
+        let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
 
         ingress_tx.send(NetworkEvent::Shutdown).await.unwrap();
 
@@ -624,7 +638,7 @@ mod tests {
     #[tokio::test]
     async fn test_ingress_valid_chunk_forwarded_to_storage() {
         let (ingress_tx, ingress_rx) = mpsc::channel(10);
-        let mut sentinel = build_test_sentinel(ingress_rx).await;
+        let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
 
         let identity = PhalanxIdentity::new_ephemeral();
         let topic = sentinel.config.network.video_topic.clone();
@@ -667,7 +681,7 @@ mod tests {
     #[tokio::test]
     async fn test_ingress_rejected_in_leaf_mode() {
         let (ingress_tx, ingress_rx) = mpsc::channel(10);
-        let mut sentinel = build_test_sentinel(ingress_rx).await;
+        let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
 
         // Switch to Leaf mode — only loopback traffic is accepted
         sentinel.governor.set_state(PowerState::Leaf);
@@ -714,7 +728,7 @@ mod tests {
     #[tokio::test]
     async fn test_blacklisted_peer_triggers_ban() {
         let (ingress_tx, ingress_rx) = mpsc::channel(10);
-        let mut sentinel = build_test_sentinel(ingress_rx).await;
+        let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
 
         let attacker = PhalanxIdentity::new_ephemeral();
         let attacker_peer = NetworkId::from("attacker-peer");
@@ -771,7 +785,7 @@ mod tests {
     #[tokio::test]
     async fn test_dispatch_resilient_response_succeeds_without_enqueue() {
         let (_ingress_tx, ingress_rx) = mpsc::channel(10);
-        let mut sentinel = build_test_sentinel(ingress_rx).await;
+        let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
 
         assert!(sentinel.pending_egress.is_empty());
 
@@ -793,7 +807,7 @@ mod tests {
     #[tokio::test]
     async fn test_forensic_violation_updates_reputation() {
         let (_ingress_tx, ingress_rx) = mpsc::channel(10);
-        let mut sentinel = build_test_sentinel(ingress_rx).await;
+        let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
 
         let offender_peer = NetworkId::from("bad-peer");
         let offender_did = Did::from("did:key:zBadActor");
@@ -823,7 +837,7 @@ mod tests {
     #[tokio::test]
     async fn test_gap_discovery_publishes_to_mesh() {
         let (_ingress_tx, ingress_rx) = mpsc::channel(10);
-        let mut sentinel = build_test_sentinel(ingress_rx).await;
+        let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
 
         let volley_id = VolleyId::new("v_gap");
         let gap_seq = StorageSequence(5);

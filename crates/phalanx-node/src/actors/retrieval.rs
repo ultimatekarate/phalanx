@@ -1,5 +1,6 @@
 use crate::clock::TrustedClock; // Node Hands: The actual Clock
 use phalanx_forensics::judge::IntegrityGate; // Verbs: The Integrity Gate (Gate 3)
+use phalanx_forensics::witness::WitnessAuthority;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*; // Nouns: NetworkId, ShardError, WitnessEnvelope
 use phalanx_proto::VolleyRequest;
@@ -31,11 +32,13 @@ impl RetrievalOrchestrator {
         local_id: &NetworkId,
     ) -> Result<Vec<WitnessEnvelope>, ShardError> {
         let mut verified = Vec::with_capacity(envelopes.len());
+        let mut anchor = None;
 
         let now = PhalanxTimestamp::now();
         for env in envelopes {
             // Apply Gate 3: Integrity verification
-            let validated = env.check_integrity(local_id, now, 10)?;
+            let validated = env.check_integrity(local_id, now, 10, anchor)?;
+            anchor = Some(validated.calculate_anchor());
             verified.push(validated);
         }
         info!(

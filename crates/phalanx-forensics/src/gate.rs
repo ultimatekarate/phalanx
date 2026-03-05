@@ -92,13 +92,12 @@ impl IntegrityGate for WitnessEnvelope {
         // the expensive signature verification. This is the "Fast" path.
         let is_anchored = anchor.is_some() && anchor == self.prev_hash;
 
-        if !is_anchored
-            && !self.verify_envelope() {
-                error!(event = "integrity_failure", node = %node_id, peer = %self.did, "SIGNATURE_INVALID");
-                return Err(ShardError::SigningError(
-                    "Signature verification failed".into(),
-                ));
-            }
+        if !is_anchored && !self.verify_envelope() {
+            error!(event = "integrity_failure", node = %node_id, peer = %self.did, "SIGNATURE_INVALID");
+            return Err(ShardError::SigningError(
+                "Signature verification failed".into(),
+            ));
+        }
 
         match self.evidence.timestamp().verify_freshness(now, tolerance) {
             Ok(_) => Ok(self),
