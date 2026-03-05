@@ -35,21 +35,4 @@ pub mod prelude {
     pub use crate::reassembler::{Reassembler, ShardMold};
     pub use crate::storage::journal::TransientJournal;
     pub use crate::trust::PeerEvaluator;
-    pub use crate::ForensicError;
-}
-
-/// A common error type for Forensic operations
-#[derive(Debug, thiserror::Error)]
-pub enum ForensicError {
-    #[error("Assembly failure: {0}")]
-    Assembly(String),
-
-    #[error("Integrity failure: {0}")]
-    Validation(String),
-
-    #[error("Cryptographic failure: {0}")]
-    Crypto(String),
-
-    #[error("Decompression failure: {0}")]
-    Decompression(String),
 }
