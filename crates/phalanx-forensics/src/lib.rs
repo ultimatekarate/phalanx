@@ -1,5 +1,4 @@
 // crates/phalanx-forensics/src/lib.rs
-
 pub mod crucible;
 pub mod cryptography;
 pub mod gate;

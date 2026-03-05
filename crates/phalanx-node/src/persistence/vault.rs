@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use phalanx_forensics::crucible::Crucible;
 use phalanx_forensics::crucible::VolleyAmalgam;
 use phalanx_forensics::crucible::{EnvelopeHashExt, EvidenceExt};
+use phalanx_forensics::judge::{ContinuityGate, IntegrityGate};
 use phalanx_forensics::prelude::TransientJournal;
-use phalanx_forensics::witness::WitnessAuthority;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::Volley;
@@ -38,37 +38,38 @@ impl Guardian {
 
         match state {
             EnvelopeState::Intact(envelope) => {
-                // 1. Cryptographic Verification
-                if !envelope.verify_envelope() {
-                    return Err(GuardianError::VerificationFailed(
-                        "Witness signature mismatch".into(),
-                    ));
-                }
-
                 let seq = envelope.evidence.sequence_id();
-                let volley_id = envelope.evidence.volley_id();
+                let volley_id = envelope.evidence.volley_id().clone();
+                let mut anchor = None;
 
                 if seq.0 > 1 {
                     let prev_seq = StorageSequence(seq.0 - 1);
 
                     // Look up the previous anchor in the vault
-                    if let Some(prev_envelope) = self.get_shard(volley_id, prev_seq) {
-                        let actual_hash = prev_envelope.signature_hash();
-
-                        // Verify the cryptographic link
-                        if envelope.prev_hash != Some(actual_hash) {
-                            tracing::error!(
-                                "TIMELINE HIJACK DETECTED: Volley {} Seq {} points to invalid hash.",
-                                volley_id, seq.0
-                            );
-                            return Err(GuardianError::ChainIntegrityViolation);
-                        }
-                    } else {
-                        // OPTIONAL: Strict Contiguous Check
-                        // If you want to reject sequence 2 if sequence 1 isn't here yet:
-                        // return Err(GuardianError::MissingCausalityAnchor);
+                    if let Some(prev_envelope) = self.get_shard(&volley_id, prev_seq) {
+                        anchor = Some(prev_envelope.signature_hash());
                     }
                 }
+
+                // 1. Integrity Gate (Signature + Time + Sticky Trust)
+                let node_id = envelope.witness_peer_id.clone();
+                let now = PhalanxTimestamp::now();
+                let envelope = envelope
+                    .check_integrity(&node_id, now, 10_000, anchor)
+                    .map_err(|e| GuardianError::VerificationFailed(e.to_string()))?;
+
+                // 2. Continuity Gate (Chain Enforcement)
+                if let Some(ref a) = anchor {
+                    if envelope.clone().verify_link(a).is_err() {
+                        tracing::error!(
+                            "TIMELINE HIJACK DETECTED: Volley {} Seq {} points to invalid hash.",
+                            volley_id,
+                            seq.0
+                        );
+                        return Err(GuardianError::ChainIntegrityViolation);
+                    }
+                }
+
                 // 2. Volley Aggregation
                 // The Crucible (bound to VolleyAmalgam) handles sequence-ordering
                 if let Some(volley) = self.crucible.process(envelope) {
@@ -316,6 +317,7 @@ impl TransientJournal for FileJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phalanx_forensics::witness::WitnessAuthority;
     use phalanx_proto::evidence::Evidence;
     use phalanx_proto::evidence::VideoShard;
     use tempfile::tempdir;

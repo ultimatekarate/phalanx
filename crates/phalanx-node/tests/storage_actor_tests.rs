@@ -210,7 +210,7 @@ async fn test_reputation_gate_signature_mismatch() {
     match error {
         GuardianError::VerificationFailed(ref msg) => {
             assert!(
-                msg.contains("signature mismatch"),
+                msg.contains("Signature verification failed"),
                 "Unexpected verification error: {}",
                 msg
             );
