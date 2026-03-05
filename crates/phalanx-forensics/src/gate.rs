@@ -73,6 +73,7 @@ pub trait IntegrityGate {
         node_id: &NetworkId,
         now: PhalanxTimestamp,
         tolerance: u64,
+        anchor: Option<SignatureHash>,
     ) -> Result<Self, ShardError>
     where
         Self: Sized;
@@ -84,13 +85,20 @@ impl IntegrityGate for WitnessEnvelope {
         node_id: &NetworkId,
         now: PhalanxTimestamp,
         tolerance: u64,
+        anchor: Option<SignatureHash>,
     ) -> Result<Self, ShardError> {
-        if !self.verify_envelope() {
-            error!(event = "integrity_failure", node = %node_id, peer = %self.did, "SIGNATURE_INVALID");
-            return Err(ShardError::SigningError(
-                "Signature verification failed".into(),
-            ));
-        }
+        // Sticky Trust Pipeline:
+        // If the envelope's prev_hash matches the trusted anchor, we skip
+        // the expensive signature verification. This is the "Fast" path.
+        let is_anchored = anchor.is_some() && anchor == self.prev_hash;
+
+        if !is_anchored
+            && !self.verify_envelope() {
+                error!(event = "integrity_failure", node = %node_id, peer = %self.did, "SIGNATURE_INVALID");
+                return Err(ShardError::SigningError(
+                    "Signature verification failed".into(),
+                ));
+            }
 
         match self.evidence.timestamp().verify_freshness(now, tolerance) {
             Ok(_) => Ok(self),
@@ -228,5 +236,27 @@ impl CoastingGate for WitnessEnvelope {
         }
 
         Ok(self)
+    }
+}
+
+// In crates/phalanx-forensics/src/gate.rs
+
+pub trait ContinuityGate {
+    fn verify_link(self, last_known_hash: &SignatureHash) -> Result<Self, ShardError>
+    where
+        Self: Sized;
+}
+
+impl ContinuityGate for WitnessEnvelope {
+    fn verify_link(self, last_known_hash: &SignatureHash) -> Result<Self, ShardError> {
+        if let Some(ref link) = self.prev_hash {
+            if link == last_known_hash {
+                return Ok(self); // The chain is unbroken; trust is inherited.
+            }
+        }
+
+        Err(ShardError::InvalidConfiguration(
+            "Causality Break: Hash mismatch".into(),
+        ))
     }
 }

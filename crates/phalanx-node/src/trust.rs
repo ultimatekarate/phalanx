@@ -301,6 +301,43 @@ impl TrustRegistry {
             .get_mut(did)
             .map(|record| &mut record.reputation)
     }
+
+    /// Inserts a new peer into the registry, failing if the peer already exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TrustError::PeerAlreadyExists` if the `did` is already tracked,
+    /// or `TrustError::PetnameCollision` if the `pet_name` is in use by another peer.
+    pub async fn insert_peer(
+        &mut self,
+        did: &Did,
+        pet_name: &PetName,
+        level: TrustLevel,
+        clock: &TrustedClock,
+    ) -> Result<(), TrustError> {
+        if self.contacts.contains_key(did) {
+            return Err(TrustError::PeerAlreadyExists(did.clone()));
+        }
+
+        if self.pet_name_index.contains_key(pet_name) {
+            return Err(TrustError::PetnameCollision(pet_name.to_string()));
+        }
+
+        let timestamp = clock.now()?;
+        let record = PeerRecord {
+            did: did.clone(),
+            pet_name: pet_name.clone(),
+            level,
+            added_at: timestamp,
+            last_interaction: timestamp,
+            reputation: PeerReputation::default(),
+        };
+
+        self.contacts.insert(did.clone(), record);
+        self.pet_name_index.insert(pet_name.clone(), did.clone());
+
+        self.save().await
+    }
 }
 
 impl PeerEvaluator for TrustRegistry {

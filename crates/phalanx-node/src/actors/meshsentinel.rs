@@ -464,7 +464,10 @@ mod tests {
     use phalanx_proto::evidence::{ChunkType, Evidence, StorageSequence, VideoShard};
     use phalanx_proto::network::NetworkEvent;
     use phalanx_proto::time::PhalanxTimestamp;
+    use phalanx_proto::trust::PeerRecord;
     use phalanx_proto::types::PowerState;
+
+    use tokio::sync::mpsc;
 
     /// Minimal mock implementing NetworkTransport for unit testing.
     /// Records publishes, bans, and responses; feeds events from a channel.
@@ -508,8 +511,6 @@ mod tests {
         }
     }
 
-    use tokio::sync::mpsc;
-
     /// Helper: builds a MeshSentinel<TestTransport, NoOpJournal> for testing.
     async fn build_test_sentinel(
         ingress_rx: mpsc::Receiver<NetworkEvent>,
@@ -536,6 +537,77 @@ mod tests {
         MeshSentinel::new(deps)
             .await
             .expect("Failed to build test sentinel")
+    }
+
+    #[tokio::test]
+    async fn test_handle_network_ingress_enforces_trust_registry() {
+        // 1. Initialize the test environment using the provided helper
+        let (_ingress_tx, ingress_rx) = mpsc::channel(10);
+        let mut sentinel = build_test_sentinel(ingress_rx).await;
+
+        // Setup shared test variables
+        let topic = MeshTopic::new("phalanx/test/1.0.0");
+        let valid_peer = NetworkId::random();
+        let bad_peer = NetworkId::random();
+        let valid_did = Did("did:phalanx:trusted".to_string());
+        let bad_did = Did("did:phalanx:malicious".to_string());
+
+        // Force the bad_did into a blacklisted state within the trust registry.
+        // Note: Replace this with your exact TrustRegistry mutator method if
+        // direct HashMap access to `contacts` is encapsulated.
+        let mut bad_record = PeerRecord::default();
+        bad_record.is_blacklisted = true;
+        sentinel
+            .trust_registry
+            .contacts
+            .insert(bad_did.clone(), bad_record);
+
+        // 2. Test Blacklisted Peer Rejection
+        let mut bad_chunk = ShardChunk::default();
+        bad_chunk.owner_did = bad_did.clone();
+
+        let bad_data = postcard::to_allocvec(&bad_chunk).expect("Failed to serialize bad chunk");
+
+        sentinel
+            .handle_network_ingress(bad_peer.clone(), &bad_data, topic.clone())
+            .await;
+
+        // Verify the transport layer explicitly banned the malicious peer
+        assert!(
+            sentinel.network.banned.contains(&bad_peer),
+            "Expected the malicious peer to be explicitly banned in TestTransport"
+        );
+
+        // Verify the storage subsystem channel remains empty
+        assert!(
+            sentinel.discovery_rx.try_recv().is_err(),
+            "Blacklisted chunk bypassed the network edge filter"
+        );
+
+        // 3. Test Valid Peer Promotion
+        let mut valid_chunk = ShardChunk::default();
+        valid_chunk.owner_did = valid_did;
+
+        let valid_data =
+            postcard::to_allocvec(&valid_chunk).expect("Failed to serialize valid chunk");
+
+        sentinel
+            .handle_network_ingress(valid_peer.clone(), &valid_data, topic)
+            .await;
+
+        // Verify the valid peer was NOT banned
+        assert!(
+            !sentinel.network.banned.contains(&valid_peer),
+            "Valid peer was incorrectly banned"
+        );
+
+        // Verify the storage channel received the Ingest command
+        match sentinel.discovery_rx.try_recv() {
+            Ok(StorageCommand::Ingest(chunk, _, _)) => {
+                assert_eq!(chunk.owner_did, valid_chunk.owner_did);
+            }
+            _ => panic!("Expected valid chunk to be successfully routed to the storage subsystem"),
+        }
     }
 
     #[tokio::test]

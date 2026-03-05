@@ -112,6 +112,8 @@ impl fmt::Display for PetName {
 
 #[derive(Debug, Error)]
 pub enum TrustError {
+    #[error("Peer with DID {0} already exists")]
+    PeerAlreadyExists(Did),
     #[error("The pet name '{0}' is already in use by another DID")]
     PetnameCollision(String),
     #[error("Failed to persist registry: {0}")]
