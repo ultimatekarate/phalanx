@@ -1,0 +1,13 @@
+# OBEY THE RULES OR ELSE
+[bans]
+multiple-versions = "deny"
+
+# ENFORCEMENT: Forbidden crates in the Lab/Dictionary
+[[bans.skip-tree]]
+name = "tokio"
+# Allow tokio in the Hands, but ban it from Forensics
+unless = ["phalanx-node", "phalanx-transport"] 
+
+[[bans.skip-tree]]
+name = "libp2p"
+unless = ["phalanx-node", "phalanx-transport"]

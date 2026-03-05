@@ -30,7 +30,7 @@ impl TrustManager {
             let mut registry = self.registry.write().await;
 
             // Invoke the Lab's pure logic
-            TrustArbiter::apply_decay(
+            TrustArbiter::accumulate_reputation(
                 &mut registry,
                 now,
                 60, // 1 minute interval

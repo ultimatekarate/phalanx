@@ -11,12 +11,14 @@ pub struct TrustArbiter;
 
 impl TrustArbiter {
     /// Pure, deterministic recovery logic.
-    pub fn apply_decay(
+    pub fn accumulate_reputation(
         registry: &mut TrustRegistry,
         now: MonotonicClock,
         interval_secs: u64,
         recovery_step: i64,
     ) {
+        const MAX_REPUTATION: i64 = 100; // The ceiling of trust
+
         for record in registry.peers.values_mut() {
             if record.is_banned {
                 continue;
@@ -24,14 +26,19 @@ impl TrustArbiter {
 
             // last_update is now also a MonotonicClock
             let elapsed = now.elapsed_since(record.last_update_secs);
+            let intervals = elapsed / interval_secs;
 
-            if elapsed >= interval_secs {
-                let cycles = elapsed / interval_secs;
-                if record.reputation < 100 {
-                    record.reputation =
-                        (record.reputation + (cycles as i64 * recovery_step)).min(100);
-                    record.last_update_secs = now;
+            if intervals > 0 {
+                let total_recovery = (intervals as i64) * recovery_step;
+
+                // ENFORCEMENT: Reputation cannot exceed the ceiling
+                record.reputation = (record.reputation + total_recovery).min(MAX_REPUTATION);
+
+                if record.reputation < 0 {
+                    record.is_banned = true;
                 }
+
+                record.last_update_secs = now;
             }
         }
     }
@@ -154,7 +161,7 @@ mod tests {
 
         // 2. Advance time by half an interval (No recovery expected)
         clock.tick(30);
-        TrustArbiter::apply_decay(&mut registry, clock.now(), 60, 10);
+        TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
         assert_eq!(
             registry.peers[&peer_did].reputation, 50,
             "Should not recover before interval"
@@ -162,7 +169,7 @@ mod tests {
 
         // 3. Advance time past the full interval (Recovery: 50 -> 60)
         clock.tick(31); // Total 61s elapsed
-        TrustArbiter::apply_decay(&mut registry, clock.now(), 60, 10);
+        TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
         assert_eq!(
             registry.peers[&peer_did].reputation, 60,
             "Reputation should have increased by recovery_step"
@@ -170,7 +177,7 @@ mod tests {
 
         // 4. Advance time by multiple intervals (Recovery: 60 -> 90)
         clock.tick(120); // 2 more intervals
-        TrustArbiter::apply_decay(&mut registry, clock.now(), 60, 10);
+        TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
         assert_eq!(
             registry.peers[&peer_did].reputation, 80,
             "Reputation should follow multi-cycle recovery"
@@ -178,7 +185,7 @@ mod tests {
 
         // 5. Ensure it caps at the baseline (100)
         clock.tick(600);
-        TrustArbiter::apply_decay(&mut registry, clock.now(), 60, 10);
+        TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
         assert_eq!(
             registry.peers[&peer_did].reputation, 100,
             "Reputation must not exceed 100"
@@ -201,7 +208,7 @@ mod tests {
         );
 
         clock.tick(3600); // 1 hour later
-        TrustArbiter::apply_decay(&mut registry, clock.now(), 60, 10);
+        TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
 
         assert!(registry.peers[&peer_did].is_banned);
         assert_eq!(
