@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use phalanx_forensics::gate::WitnessGate;
@@ -18,6 +20,7 @@ use phalanx_proto::prelude::{PendingEgress, ShardChunk, ShardError};
 use phalanx_proto::retrieval::VolleyResponse;
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::PhalanxTimestamp;
+use phalanx_proto::topic::MeshTopic;
 use phalanx_transport::identity_ext::Libp2pExt;
 use tokio::sync::mpsc;
 
@@ -370,5 +373,223 @@ async fn test_salvage_on_node_death() {
     assert!(
         found_file,
         "Salvage failed: Node rebooted but failed to finish reassembly from the FileJournal WAL."
+    );
+}
+
+#[tokio::test]
+async fn test_stronghold_ingestion_and_persistence() {
+    // 1. Setup Environment
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut config = NodeConfig::test_defaults();
+    config.storage.vault_path = temp_dir.path().to_string_lossy().into_owned();
+
+    let (identity, _) = PhalanxIdentity::generate().unwrap();
+    let topic = config.network.video_topic.clone();
+
+    // 2. Prepare Mock Data (A legitimate chunk from an external peer)
+    let (peer_identity, _) = PhalanxIdentity::generate().unwrap();
+    let peer_net_id = peer_identity.to_network_id();
+
+    let video_shard = phalanx_forensics::reassembler::create_video_shard(
+        vec![vec![0xDE, 0xAD, 0xBE, 0xEF]],
+        StorageSequence(1),
+        30,
+        VolleyId::new("v1"),
+    )
+    .expect("Failed to create video shard");
+
+    let envelope = WitnessEnvelope::sign_envelope(
+        Evidence::Video(video_shard),
+        &peer_identity,
+        peer_net_id.clone(),
+        None,
+    )
+    .expect("Failed to seal evidence");
+
+    // Serialize the envelope into a single-chunk ShardChunk
+    let valid_envelope_data = postcard::to_allocvec(&envelope).expect("Serialization failed");
+
+    let chunk = ShardChunk {
+        shard_id: ShardId(101),
+        chunk_index: 0,
+        total_chunks: 1,
+        data: valid_envelope_data,
+        owner_did: peer_identity.did.clone(),
+        chunk_type: ChunkType::Witnessed,
+    };
+
+    // 3. Wire up a StorageActor directly (no harness needed)
+    let guardian = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
+
+    let (storage_tx, storage_rx) = mpsc::channel::<StorageCommand>(10);
+    let (forensic_tx, _) = mpsc::channel::<(NetworkId, Did, GuardianError)>(1);
+
+    let actor = StorageActor {
+        reassembler: Reassembler::new(),
+        guardian,
+        journal: NoOpJournal,
+        config,
+        identity: identity.clone(),
+        forensic_tx,
+        local_peer_id: identity.to_network_id(),
+    };
+
+    let actor_handle = tokio::spawn(async move {
+        actor.run(storage_rx).await;
+    });
+
+    // 4. Inject the chunk via StorageCommand::Ingest
+    storage_tx
+        .send(StorageCommand::Ingest(chunk, topic, peer_net_id))
+        .await
+        .expect("Injection failed");
+
+    // 5. Wait for the Crucible TTL to flush the volley to disk
+    // test_defaults uses cleanup_interval_secs=5, but the crucible has a 1s internal TTL
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+
+    drop(storage_tx);
+    actor_handle.abort();
+
+    // 6. Verify the .volley file was written to disk
+    fn find_file_recursive(path: &std::path::Path, target: &str) -> bool {
+        if path.is_file() {
+            return path.file_name().map(|n| n == target).unwrap_or(false);
+        }
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                if find_file_recursive(&entry.path(), target) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    assert!(
+        find_file_recursive(temp_dir.path(), "v1.volley"),
+        "Stronghold failed to create persistent shard in vault within the flush window"
+    );
+}
+
+#[tokio::test]
+async fn test_storage_actor_metric_pipeline() {
+    // --- MetricJournal: A decorator that counts record_chunk calls ---
+    struct MetricJournal<J: TransientJournal> {
+        inner: J,
+        counter: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl<J: TransientJournal + Send> TransientJournal for MetricJournal<J> {
+        async fn record_chunk(&mut self, chunk: &ShardChunk) -> Result<(), ShardError> {
+            self.inner.record_chunk(chunk).await?;
+            self.counter.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn sync(&mut self) -> Result<(), ShardError> {
+            self.inner.sync().await
+        }
+        async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
+            self.inner.read_all_chunks().await
+        }
+        async fn clear(&mut self) -> Result<(), ShardError> {
+            self.inner.clear().await
+        }
+        async fn record_pending_egress(
+            &mut self,
+            pending: &[PendingEgress],
+        ) -> Result<(), ShardError> {
+            self.inner.record_pending_egress(pending).await
+        }
+        async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError> {
+            self.inner.read_all_pending_egress().await
+        }
+    }
+
+    // 1. Setup Component Dependencies
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = NodeConfig::default();
+    config.storage.vault_path = temp.path().to_string_lossy().into_owned();
+
+    let (identity, _) = PhalanxIdentity::generate().unwrap();
+    let local_peer_id = identity.to_network_id();
+
+    let (command_tx, command_rx) = mpsc::channel::<StorageCommand>(100);
+    let (forensic_tx, _forensic_rx) = mpsc::channel::<(NetworkId, Did, GuardianError)>(10);
+
+    let storage_load = Arc::new(AtomicUsize::new(0));
+
+    // 2. MetricJournal Wrapper
+    let journal = MetricJournal {
+        inner: NoOpJournal,
+        counter: Arc::clone(&storage_load),
+    };
+
+    let guardian = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
+
+    // 3. Initialize StorageActor
+    let storage_actor = StorageActor {
+        reassembler: Reassembler::new(),
+        guardian,
+        journal,
+        config: config.clone(),
+        identity: identity.clone(),
+        forensic_tx,
+        local_peer_id: local_peer_id.clone(),
+    };
+
+    let actor_handle = tokio::spawn(async move {
+        storage_actor.run(command_rx).await;
+    });
+
+    assert_eq!(storage_load.load(Ordering::Relaxed), 0);
+
+    // 4. Generate and Sign Test Evidence
+    let video_shard = VideoShard {
+        timestamp: PhalanxTimestamp::now(),
+        sequence_id: StorageSequence(1),
+        fps: 30,
+        volley_id: VolleyId::new("v1"),
+        payload: DataPayload::Clear(vec![0xBA, 0xAD, 0xF0, 0x0D]),
+    };
+
+    // Seal via WitnessGate
+    let envelope = Evidence::Video(video_shard)
+        .seal(&identity, local_peer_id.clone(), None)
+        .expect("Failed to seal evidence");
+
+    let valid_data = postcard::to_allocvec(&envelope).expect("Serialization failed");
+
+    let chunk = ShardChunk {
+        shard_id: ShardId(101),
+        chunk_index: 0,
+        total_chunks: 1,
+        data: valid_data,
+        owner_did: identity.did.clone(),
+        chunk_type: ChunkType::Witnessed,
+    };
+
+    let topic = config.network.video_topic;
+
+    // 5. Inject via Ingest Command
+    command_tx
+        .send(StorageCommand::Ingest(chunk, topic, local_peer_id))
+        .await
+        .unwrap();
+
+    // 6. Wait for reassembly and journal commit
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let final_load = storage_load.load(Ordering::SeqCst);
+
+    // Cleanup
+    actor_handle.abort();
+
+    // 7. Assert metric update
+    assert!(
+        final_load > 0,
+        "StorageActor failed to update metric via the Journal conduit. Load: {}",
+        final_load
     );
 }
