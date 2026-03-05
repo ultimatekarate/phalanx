@@ -42,7 +42,7 @@ pub mod prelude {
     // Trust & Networking Nouns
     pub use crate::kademlia::{DhtPayload, PayloadKind};
     pub use crate::network::{NetworkEvent, DISCOVERY_TOPIC_ID, RETRIEVAL_PROTOCOL_ID};
-    pub use crate::trust::{PetName, TrustLevel};
+    pub use crate::trust::{MonotonicClock, PetName, TrustLevel};
     pub use crate::vitals::ControlMessage;
 
     // Playback Nouns

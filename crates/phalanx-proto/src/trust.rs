@@ -27,7 +27,7 @@ pub enum TrustLevel {
 pub struct TrustRecord {
     pub reputation: i64,
     pub is_banned: bool,
-    pub last_seen: PhalanxTimestamp,
+    pub last_update_secs: MonotonicClock,
 }
 
 impl Default for TrustRecord {
@@ -35,7 +35,7 @@ impl Default for TrustRecord {
         Self {
             reputation: 100, // Default starting trust score
             is_banned: false,
-            last_seen: PhalanxTimestamp::now(),
+            last_update_secs: MonotonicClock(0),
         }
     }
 }
@@ -122,4 +122,24 @@ pub enum TrustError {
     InvalidPetName(String),
     #[error("Trusted clock failure: {0}")]
     TimeSource(#[from] TimeError),
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct MonotonicClock(pub u64);
+
+impl MonotonicClock {
+    pub fn elapsed_since(&self, earlier: Self) -> u64 {
+        self.0.saturating_sub(earlier.0)
+    }
 }

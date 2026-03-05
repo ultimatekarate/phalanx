@@ -212,8 +212,6 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         }
     }
 
-    /// Processes outbound media evidence: signs, encrypts, and publishes to the mesh.
-    /// TODO: Implement full causality chain signing and encryption pipeline.
     async fn process_media_egress(&mut self, evidence: Evidence, _local_id: &NetworkId) {
         let topic = match &evidence {
             Evidence::Video(_) => &self.config.network.video_topic,
@@ -366,16 +364,41 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         {
             return;
         }
-        if let Ok(chunk) = postcard::from_bytes::<ShardChunk>(data) {
-            let sender_did = chunk.owner_did.clone();
-            if self.trust_registry.is_blacklisted(&sender_did) {
-                self.network.ban_peer(&peer_id).await;
-                return;
+
+        match postcard::from_bytes::<ShardChunk>(data) {
+            Ok(chunk) => {
+                let sender_did = chunk.owner_did.clone();
+
+                let record = self
+                    .trust_registry
+                    .get_reputation_mut(&sender_did)
+                    .cloned()
+                    .unwrap_or_default();
+
+                if record.is_blacklisted {
+                    self.network.ban_peer(&peer_id).await;
+                    return;
+                }
+
+                // Explicit error handling for the internal channel I/O operation
+                if let Err(err) = self
+                    .storage_tx
+                    .send(StorageCommand::Ingest(chunk, topic, peer_id))
+                    .await
+                {
+                    tracing::error!(
+                        error = %err,
+                        "CRITICAL: Failed to route ingress chunk to storage subsystem"
+                    );
+                }
             }
-            let _ = self
-                .storage_tx
-                .send(StorageCommand::Ingest(chunk, topic, peer_id))
-                .await;
+            Err(err) => {
+                tracing::warn!(
+                    peer = %peer_id,
+                    error = %err,
+                    "Dropped malformed ShardChunk payload at network edge"
+                );
+            }
         }
     }
 
@@ -484,6 +507,8 @@ mod tests {
             Ok(())
         }
     }
+
+    use tokio::sync::mpsc;
 
     /// Helper: builds a MeshSentinel<TestTransport, NoOpJournal> for testing.
     async fn build_test_sentinel(

@@ -32,15 +32,20 @@ impl WitnessAuthority for WitnessEnvelope {
         peer_id: NetworkId,
         prev_hash: Option<SignatureHash>,
     ) -> Result<Self, ShardError> {
-        // 1. Deterministic Serialization (2026 Postcard standard)
         let data_to_sign = postcard::to_allocvec(&evidence)
             .map_err(|e| ShardError::SerializationError(e.to_string()))?;
 
-        // 2. Cryptographic Signature
+        // 1. Compute the fast hash
+        let mut hasher = sha2::Sha256::new();
+        sha2::Digest::update(&mut hasher, &data_to_sign);
+        let evidence_hash: [u8; 32] = hasher.finalize().into();
+
+        // 2. Sign the hash (or data_to_sign)
         let signature = identity.keypair.sign(&data_to_sign);
 
         Ok(Self {
             evidence,
+            evidence_hash,
             witness_peer_id: peer_id,
             witness_signature: signature.to_bytes().to_vec(),
             did: identity.did.clone(),

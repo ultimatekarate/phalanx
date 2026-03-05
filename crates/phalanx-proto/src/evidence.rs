@@ -50,6 +50,7 @@ pub struct ShardChunk {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WitnessEnvelope {
     pub evidence: Evidence,
+    pub evidence_hash: [u8; 32],
     pub witness_peer_id: NetworkId,
     pub witness_signature: Vec<u8>,
     pub did: Did,

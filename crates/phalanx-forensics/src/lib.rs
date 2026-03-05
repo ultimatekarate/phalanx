@@ -8,6 +8,7 @@ pub mod judge;
 pub mod kademlia;
 pub mod policy;
 pub mod reassembler;
+pub mod test_utils;
 pub mod trust;
 pub mod witness;
 

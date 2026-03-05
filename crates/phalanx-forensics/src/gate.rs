@@ -15,6 +15,7 @@ use crate::crucible::{EnvelopeHashExt, EvidenceExt};
 use crate::judge::{PayloadCipher, TimeJudge};
 use crate::witness::WitnessAuthority;
 
+use sha2::{Digest, Sha256};
 /// Gate 1: The Witnessing Gate
 pub trait WitnessGate {
     fn seal(
@@ -193,5 +194,39 @@ impl<T, E: std::fmt::Display> ForensicGate<T, E> for Result<T, E> {
             error!(event = event, node = %node, error = %e, "{msg}");
         }
         self
+    }
+}
+
+// In crates/phalanx-forensics/src/gate.rs
+
+/// Gate 7: The Coasting Gate (Probabilistic Integrity)
+pub trait CoastingGate {
+    fn verify_fast_hash(self, peer_id: &NetworkId) -> Result<Self, ShardError>
+    where
+        Self: Sized;
+}
+
+impl CoastingGate for WitnessEnvelope {
+    fn verify_fast_hash(self, peer_id: &NetworkId) -> Result<Self, ShardError> {
+        // Serialize evidence to compute actual hash
+        let actual_bytes = postcard::to_allocvec(&self.evidence)
+            .map_err(|e| ShardError::SerializationError(e.to_string()))?;
+
+        let mut hasher = Sha256::new();
+        sha2::Digest::update(&mut hasher, &actual_bytes);
+        let computed_hash: [u8; 32] = hasher.finalize().into();
+
+        if computed_hash != self.evidence_hash {
+            tracing::error!(
+                event = "integrity_failure",
+                peer = %peer_id,
+                "Coasting Gate: Fast hash mismatch detected"
+            );
+            return Err(ShardError::InvalidConfiguration(
+                "Payload hash does not match declared evidence_hash".into(),
+            ));
+        }
+
+        Ok(self)
     }
 }

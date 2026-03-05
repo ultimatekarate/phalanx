@@ -2,13 +2,31 @@ use crate::clock::TrustedClock;
 use crate::NodeConfig;
 use phalanx_forensics::trust::{PeerEvaluator, ReputationGate};
 use phalanx_proto::prelude::*;
+use phalanx_proto::trust::MonotonicClock;
 use phalanx_proto::trust::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+pub trait ClockProvider {
+    fn current_monotonic(&self) -> MonotonicClock;
+}
+
+/// Real-world implementation for the node.
+pub struct SystemClock;
+
+impl ClockProvider for SystemClock {
+    fn current_monotonic(&self) -> MonotonicClock {
+        let start = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time moved backwards")
+            .as_secs();
+        MonotonicClock(start)
+    }
+}
 /// Manages the "Social Graph" of the node with bi-directional lookup.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TrustRegistry {
