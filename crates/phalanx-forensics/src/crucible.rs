@@ -1,3 +1,4 @@
+use crate::judge::IntegrityGate;
 use phalanx_proto::evidence::Evidence;
 use phalanx_proto::evidence::ForensicGap;
 use phalanx_proto::evidence::StorageSequence;
@@ -412,10 +413,27 @@ impl Mold for VolleyAmalgam {
                 }
             }
 
+            // 3. INTEGRITY GATE (Ingress)
+            // Verify the envelope is authentic before accepting it into the Volley.
+            // Uses Sticky Trust: if linked to previous valid frame, skip crypto.
+            let node_id = env.witness_peer_id.clone();
+            let validated = match env.check_integrity(&node_id, now, 10, last_signature_hash) {
+                Ok(v) => v,
+                Err(e) => {
+                    error!(
+                        volley_id = %key,
+                        seq = %current_seq.0,
+                        error = %e,
+                        "VolleyAmalgam: INTEGRITY BREACH - Signature verification failed"
+                    );
+                    return None;
+                }
+            };
+
             // Update state for next iteration
             expected_seq = Some(current_seq + 1);
-            last_signature_hash = Some(env.signature_hash());
-            sorted_envelopes.push(env);
+            last_signature_hash = Some(validated.signature_hash());
+            sorted_envelopes.push(validated);
         }
 
         info!(

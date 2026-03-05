@@ -22,7 +22,7 @@ This document establishes the "Linguistic Model" of Phalanx. All code must be pa
 
 * **crucible.rs:** The Verb "To Stage." A generic engine for data aggregation.
 * **reassembler.rs:** The Verb "To Assemble." Logic for turning Chunks into Envelopes.
-* **chain.rs:** The Verb "To Verify." Logic for Shard and Volley Amalgams (Causality).
+* **judge.rs:** The Verb "To Verify." Logic for Shard and Volley Amalgams (Causality).
 * **policy.rs:** The Verb "To Govern." Traffic governors and power state logic.
 
 ## III. THE HANDS (phalanx-node & phalanx-transport)
