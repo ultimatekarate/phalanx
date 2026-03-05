@@ -238,8 +238,6 @@ impl CoastingGate for WitnessEnvelope {
     }
 }
 
-// In crates/phalanx-forensics/src/gate.rs
-
 pub trait ContinuityGate {
     fn verify_link(self, last_known_hash: &SignatureHash) -> Result<Self, ShardError>
     where
@@ -257,5 +255,45 @@ impl ContinuityGate for WitnessEnvelope {
         Err(ShardError::InvalidConfiguration(
             "Causality Break: Hash mismatch".into(),
         ))
+    }
+}
+
+use phalanx_proto::types::{ForensicUnit, Unverified, Verified};
+
+/// Trait for promoting a ForensicUnit from Unverified to Verified state.
+pub trait PromotionGate {
+    fn promote(
+        self,
+        node_id: &NetworkId,
+        now: PhalanxTimestamp,
+        tolerance: u64,
+        anchor: Option<SignatureHash>,
+    ) -> Result<ForensicUnit<WitnessEnvelope, Verified>, ShardError>;
+}
+
+impl PromotionGate for ForensicUnit<WitnessEnvelope, Unverified> {
+    /// The Gate Entrance: Orchestrates the gauntlet.
+    ///
+    /// This method consumes an `Unverified` unit and returns a `Verified` unit
+    /// only if all forensic gates (Integrity, Continuity, Time) are passed.
+    fn promote(
+        self,
+        node_id: &NetworkId,
+        now: PhalanxTimestamp,
+        tolerance: u64,
+        anchor: Option<SignatureHash>,
+    ) -> Result<ForensicUnit<WitnessEnvelope, Verified>, ShardError> {
+        // 1. Integrity Gate (Signature + Time + Sticky Trust)
+        let mut envelope = self.data.check_integrity(node_id, now, tolerance, anchor)?;
+
+        // 2. Continuity Gate (Chain Enforcement)
+        if let Some(ref a) = anchor {
+            envelope = envelope.verify_link(a)?;
+        }
+
+        Ok(ForensicUnit {
+            data: envelope,
+            _state: std::marker::PhantomData,
+        })
     }
 }

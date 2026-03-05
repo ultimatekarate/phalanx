@@ -249,3 +249,26 @@ pub enum PowerState {
     /// Focus strictly on self-preservation: Only accept local data
     Leaf,
 }
+
+pub trait ValidationState {}
+
+pub struct Unverified; // Data just off the wire
+pub struct Verified; // Data that has passed the Gates
+
+impl ValidationState for Unverified {}
+impl ValidationState for Verified {}
+
+pub struct ForensicUnit<T, S: ValidationState> {
+    pub data: T,
+    pub _state: std::marker::PhantomData<S>,
+}
+
+impl<T> ForensicUnit<T, Unverified> {
+    /// Create a new unit from raw bytes or a packet.
+    pub fn new(data: T) -> Self {
+        Self {
+            data,
+            _state: std::marker::PhantomData,
+        }
+    }
+}
