@@ -37,7 +37,7 @@ impl RetrievalOrchestrator {
         let now = PhalanxTimestamp::now();
         for env in envelopes {
             // Apply Gate 3: Integrity verification
-            let validated = env.check_integrity(local_id, now, 10, anchor)?;
+            let validated = env.check_integrity(local_id, now, 10_000, anchor)?;
             anchor = Some(validated.calculate_anchor());
             verified.push(validated);
         }

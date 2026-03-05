@@ -417,7 +417,7 @@ impl Mold for VolleyAmalgam {
             // Verify the envelope is authentic before accepting it into the Volley.
             // Uses Sticky Trust: if linked to previous valid frame, skip crypto.
             let node_id = env.witness_peer_id.clone();
-            let validated = match env.check_integrity(&node_id, now, 10, last_signature_hash) {
+            let validated = match env.check_integrity(&node_id, now, 10_000, last_signature_hash) {
                 Ok(v) => v,
                 Err(e) => {
                     error!(

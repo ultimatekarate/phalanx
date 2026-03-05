@@ -9,6 +9,8 @@ pub trait TrustAuthority {
 
     /// The Verb "To Penalize": Drops the reputation of a peer for bad behavior.
     fn penalize_peer(&mut self, did: &Did, penalty: i64);
+
+    fn assess_violation_penalty(err: &ShardError) -> i64;
 }
 
 impl TrustAuthority for TrustRegistry {
@@ -31,6 +33,21 @@ impl TrustAuthority for TrustRegistry {
         if record.reputation < 0 {
             record.is_banned = true;
             info!(peer = %did, "Peer has been banned due to negative trust score");
+        }
+    }
+
+    fn assess_violation_penalty(err: &ShardError) -> i64 {
+        match err {
+            // High severity: Cryptographic failures or chain breakage
+            ShardError::SigningError(_) => 100,
+            ShardError::InvalidConfiguration(msg) if msg.contains("Causality") => 100,
+
+            // Medium severity: Resource abuse
+            ShardError::CapacityExceeded(_) => 25,
+
+            // Low severity: Routine network noise or malformed data
+            ShardError::SerializationError(_) => 5,
+            _ => 10, // Default penalty
         }
     }
 }

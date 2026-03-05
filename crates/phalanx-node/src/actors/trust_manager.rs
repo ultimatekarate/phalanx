@@ -26,8 +26,7 @@ impl TrustManager {
         loop {
             tick_rate.tick().await;
 
-            let clock = SystemClock;
-            let now = clock.current_monotonic();
+            let now = self.clock.current_monotonic();
             let mut registry = self.registry.write().await;
 
             // Invoke the Lab's pure logic
