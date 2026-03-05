@@ -2,7 +2,19 @@ use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::{MeshTopic, NetworkId, VolleyResponse};
 use phalanx_transport::NetworkTransport;
 
-struct FailingTransport;
+pub struct FailingTransport;
+
+impl Default for FailingTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FailingTransport {
+    pub fn new() -> Self {
+        Self
+    }
+}
 
 #[async_trait::async_trait]
 impl NetworkTransport for FailingTransport {
