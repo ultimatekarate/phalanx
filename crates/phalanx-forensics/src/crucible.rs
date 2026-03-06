@@ -162,6 +162,7 @@ impl<S: Mold> Crucible<S> {
     pub fn process(&mut self, item: S::Input) -> Option<S::Output> {
         self.perform_cleanup();
         let key = S::get_key(&item);
+        let active_contexts = self.contexts.len();
 
         let (is_ready_now, elapsed) = match self.contexts.entry(key.clone()) {
             Entry::Occupied(mut entry) => {
@@ -172,7 +173,7 @@ impl<S: Mold> Crucible<S> {
                 (S::is_ready(&ctx.accumulator, el), el)
             }
             Entry::Vacant(entry) => {
-                if self.contexts.len() >= self.max_capacity {
+                if active_contexts >= self.max_capacity {
                     warn!("Crucible capacity exceeded. Dropping item.");
                     return None;
                 }

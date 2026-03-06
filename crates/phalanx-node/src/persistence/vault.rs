@@ -27,7 +27,7 @@ pub struct Guardian {
 impl Guardian {
     pub fn new(vault_path: &str, _config: &NodeConfig, local_did: Did) -> Self {
         Self {
-            crucible: Crucible::new(VolleyAmalgam, Duration::from_secs(5)),
+            crucible: Crucible::new(VolleyAmalgam, Duration::from_secs(5), 1000),
             vault_path: vault_path.to_string(),
             local_did,
         }

@@ -19,6 +19,7 @@ pub mod playback {
 pub mod hardware {
     pub mod audio;
     pub mod camera;
+    pub mod discovery;
 }
 pub mod identity;
 
