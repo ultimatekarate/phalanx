@@ -1,10 +1,14 @@
+use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*;
 use phalanx_proto::trust::PeerRecord;
 use phalanx_proto::trust::{MonotonicClock, TrustRegistry};
+use phalanx_proto::types::ForensicUnit;
 use phalanx_proto::types::PhalanxPhysics;
 use phalanx_proto::types::PowerState;
+use phalanx_proto::types::Sealed;
 use phalanx_proto::types::SystemStress;
 use phalanx_proto::types::UnitInterval;
+use phalanx_proto::types::Verified;
 use phalanx_proto::vitals::HeartbeatInterval;
 use rand::Rng;
 use std::collections::HashMap;
@@ -177,6 +181,42 @@ impl IngressGovernor {
         } else {
             Err("Capacity Exceeded: No lower-trust peers to preempt")
         }
+    }
+}
+
+pub struct EgressGovernor;
+
+impl EgressGovernor {
+    /// Evaluates physical and social constraints to determine if a verified unit
+    /// is authorized to be promoted for mesh egress.
+    pub fn authorize(
+        unit: ForensicUnit<WitnessEnvelope, Verified>,
+        trust: &TrustLevel,
+        stress: &SystemStress,
+    ) -> Result<ForensicUnit<WitnessEnvelope, Sealed>, GuardianError> {
+        // 1. Physical Constraint: Hardware Preservation
+        // Prevent heavy network egress if the device battery is dying or thermal throttling.
+        if matches!(stress, SystemStress::Critical | SystemStress::Serious) {
+            return Err(GuardianError::VerificationFailed(
+                "Egress blocked: System stress exceeds safe operational limits".into(),
+            ));
+        }
+
+        // 2. Social Constraint: Zero-Trust Reputation
+        // Prevent data exfiltration by untrusted, ignored, or actively malicious peers.
+        if matches!(trust, TrustLevel::Blocked | TrustLevel::Ignored) {
+            return Err(GuardianError::VerificationFailed(
+                "Egress blocked: Requester lacks sufficient trust clearance".into(),
+            ));
+        }
+
+        // Optional: If you want to restrict egress to ONLY explicitly Verified/Ally peers,
+        // you could also block TrustLevel::Unknown here. For now, we block the known-bad.
+
+        // 3. Typestate Promotion (The core architectural lock)
+        // This is the ONLY place in the entire codebase where .seal() is called,
+        // physically proving to the compiler that the data passed the policy gates.
+        Ok(unit.seal())
     }
 }
 

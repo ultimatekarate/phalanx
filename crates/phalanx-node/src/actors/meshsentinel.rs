@@ -1,8 +1,6 @@
 // --- crates/phalanx-node/src/actors/meshsentinel.rs ---
 
 use crate::actors::playback::PlaybackCoordinator;
-use crate::actors::retrieval::RetrievalOrchestrator;
-use crate::actors::retrieval::RetrievalQuery;
 use crate::actors::storage::NoOpJournal;
 use crate::actors::storage::StorageCommand;
 use crate::clock::TrustedClock;
@@ -12,24 +10,25 @@ use crate::vitals::HealthTracker;
 use crate::vitals::SystemGovernor;
 use crate::Guardian;
 use crate::StorageActor;
-use phalanx_forensics::policy::IngressGovernor;
+use phalanx_forensics::judge::IntegrityGate;
+use phalanx_forensics::policy::{EgressGovernor, IngressGovernor};
 use phalanx_forensics::prelude::*;
+use phalanx_forensics::ReputationGate;
 use phalanx_proto::prelude::*;
-use phalanx_proto::storage::StorageAck;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::identity::PhalanxNodeIdentityExt;
 use crate::trust::TrustRegistry;
-use phalanx_forensics::trust::ReputationGate;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::AudioShard;
 use phalanx_proto::evidence::Evidence;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::VideoShard;
+use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::time::CausalitySession;
 use phalanx_proto::trust::Offense;
-use phalanx_proto::types::NodeMode;
+use phalanx_proto::types::{ForensicUnit, NodeMode, TaskCost, Verified};
 use phalanx_proto::VolleyRequest;
 use phalanx_transport::identity_ext::Libp2pExt;
 use phalanx_transport::NetworkTransport;
@@ -71,7 +70,6 @@ pub struct MeshSentinel<T: NetworkTransport, J: TransientJournal> {
     pub audio_rx: mpsc::Receiver<AudioShard>,
     pub seq_counter: u64,
     pub network_key: SymmetricKey,
-    pub forensic_rx: mpsc::Receiver<(NetworkId, Did, GuardianError)>,
     pub storage_task: JoinHandle<()>,
     pub storage_tx: mpsc::Sender<StorageCommand>,
     pub _journal_phantom: std::marker::PhantomData<J>,
@@ -81,7 +79,6 @@ pub struct MeshSentinel<T: NetworkTransport, J: TransientJournal> {
     pub discovery_rx: mpsc::Receiver<(VolleyId, StorageSequence)>,
     pub ingress_governor: IngressGovernor,
     pub system_governor: Arc<SystemGovernor>,
-    pub ack_rx: mpsc::Receiver<StorageAck>,
 }
 
 impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, J> {
@@ -94,12 +91,8 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         let (_, video_rx) = mpsc::channel(deps.config.storage.max_video_buffer);
         let (_, audio_rx) = mpsc::channel(deps.config.storage.max_audio_buffer);
 
-        // IWFQ: Hard cap channel capacity to 10 slots
+        // Vault Interface
         let (storage_tx, storage_rx) = mpsc::channel(10);
-        let (forensic_tx, forensic_rx) = mpsc::channel(100);
-
-        // Causal Backpressure: MeshSentinel owns the creation of the loop
-        let (ack_tx, ack_rx) = mpsc::channel(10);
         let ingress_governor = IngressGovernor::new(10);
 
         // Stateless Recovery: Pull salvaged egress from the journal
@@ -116,15 +109,13 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             );
         }
 
+        // Vault instantiation (Pure IO configuration)
         let storage_actor = StorageActor {
             reassembler,
             guardian,
             journal: deps.journal,
             config: deps.config.clone(),
             identity: deps.identity.clone(),
-            forensic_tx,
-            local_peer_id: local_network_id.clone(),
-            ack_tx, // Hand the transmitter down to the StorageActor
         };
 
         let storage_task = tokio::spawn(async move {
@@ -148,7 +139,6 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             audio_rx,
             seq_counter: 0,
             network_key: SymmetricKey([0x42; 32]),
-            forensic_rx,
             storage_task,
             storage_tx,
             _journal_phantom: std::marker::PhantomData,
@@ -158,7 +148,6 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             discovery_tx: deps.discovery_tx,
             ingress_governor,
             system_governor: deps.system_governor,
-            ack_rx,
         })
     }
 
@@ -193,19 +182,8 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                 Some(shard) = self.audio_rx.recv() => {
                     self.process_media_egress(Evidence::Audio(shard), &local_network_id).await;
                 }
-                Some((peer_id, owner_did, err)) = self.forensic_rx.recv() => {
-                    self.handle_forensic_violation(peer_id, owner_did, err).await;
-                }
                 Some((volley_id, gap_sequence)) = self.discovery_rx.recv() => {
                     self.handle_gap_discovery(volley_id, gap_sequence).await;
-                }
-                Some(ack) = self.ack_rx.recv() => {
-                    // Causal Backpressure Release Loop
-                    let peer_id = match ack {
-                        StorageAck::Success(_, peer_id) => peer_id,
-                        StorageAck::Failure(_, peer_id) => peer_id,
-                    };
-                    self.ingress_governor.release_slot(&peer_id);
                 }
             }
         }
@@ -274,6 +252,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         })
     }
 
+    /// Handles outbound data requests from the mesh, applying integrity and policy gates.
     async fn execute_secure_retrieval(
         &mut self,
         origin: NetworkId,
@@ -281,42 +260,81 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         channel_id: String,
         local_id: &NetworkId,
     ) {
-        if PhalanxNodeIdentityExt::verify_retrieval_auth(&*self.identity, &request).is_err() {
-            tracing::warn!(
-                peer = %origin,
-                volley = %request.volley_id,
-                "Privacy Gate: Unauthorized retrieval attempt blocked"
-            );
-
-            self.trust_registry
-                .record_offense(&request.target_did, Offense::InvalidSignature, &self.clock)
-                .await;
-
+        // 1. EARLY RESOURCE SHEDDING (Physical Gate)
+        if !self.system_governor.check_permission(TaskCost::Heavy) {
+            tracing::warn!(target: "phalanx::egress", "Retrieval rejected: System thermal/battery limits exceeded");
             self.dispatch_resilient_response(channel_id, VolleyResponse::Unauthorized)
                 .await;
             return;
         }
 
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let _ = self
-            .storage_tx
-            .send(StorageCommand::Retrieval(RetrievalQuery {
-                origin,
-                request,
-                reply_to: reply_tx,
-            }))
-            .await;
+        // 2. PRIVACY GATE
+        if PhalanxNodeIdentityExt::verify_retrieval_auth(&*self.identity, &request).is_err() {
+            tracing::warn!(peer = %origin, volley = %request.volley_id, "Privacy Gate: Unauthorized retrieval attempt blocked");
+            self.trust_registry
+                .record_offense(&request.target_did, Offense::InvalidSignature, &self.clock)
+                .await;
+            self.dispatch_resilient_response(channel_id, VolleyResponse::Unauthorized)
+                .await;
+            return;
+        }
 
-        let response = match reply_rx.await {
-            Ok(VolleyResponse::Success(envelopes)) => {
-                let orchestrator = RetrievalOrchestrator::new();
-                match orchestrator.verify_mesh_egress(envelopes, local_id).await {
-                    Ok(verified) => VolleyResponse::Success(verified),
-                    Err(_) => VolleyResponse::NotFound,
+        // 3. FETCH FROM PURE VAULT
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if self
+            .storage_tx
+            .send(StorageCommand::Retrieval {
+                volley_id: request.volley_id.clone(),
+                reply_to: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            self.dispatch_resilient_response(channel_id, VolleyResponse::NotFound)
+                .await;
+            return;
+        }
+
+        let raw_envelopes = reply_rx.await.unwrap_or_default();
+
+        // 4. INTEGRITY & POLICY GATES
+        let mut sealed_units = Vec::new();
+        let current_stress = self.system_governor.current_stress();
+        let target_trust = self.trust_registry.check_trust(&request.target_did);
+        let now = PhalanxTimestamp::now();
+
+        for env in raw_envelopes {
+            // Safe extraction of sequence_id for logging
+            let sequence_id = match &env.evidence {
+                Evidence::Video(shard) => shard.sequence_id,
+                Evidence::Audio(shard) => shard.sequence_id,
+                Evidence::Gap(gap) => gap.start_seq,
+                Evidence::Handover(_) => StorageSequence(0),
+            };
+
+            // GATE 3: Cryptographic Integrity Validation (Data-at-rest becoming Data-in-motion)
+            if let Ok(valid_env) = env.check_integrity(local_id, now, 10_000, None) {
+                // GATE 4: Typestate Promotion via Egress Policy
+                let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
+
+                if let Ok(sealed) = EgressGovernor::authorize(unit, &target_trust, &current_stress)
+                {
+                    sealed_units.push(sealed);
+                } else {
+                    tracing::warn!(seq = %sequence_id, "Egress denied by policy");
                 }
+            } else {
+                tracing::error!(seq = %sequence_id, "CRITICAL: Integrity validation failed for local vault data");
             }
-            _ => VolleyResponse::NotFound,
+        }
+
+        // 5. DISPATCH TO NETWORK
+        let response = if sealed_units.is_empty() {
+            VolleyResponse::NotFound
+        } else {
+            VolleyResponse::Success(sealed_units)
         };
+
         self.dispatch_resilient_response(channel_id, response).await;
     }
 
@@ -369,7 +387,17 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         }
     }
 
+    /// Handles inbound data from the wire, applying routing and ingress quotas before hitting the vault.
     async fn handle_network_ingress(&mut self, peer_id: NetworkId, data: &[u8], topic: MeshTopic) {
+        // 1. TOPIC ROUTING (Edge Filtering)
+        let topic_str = topic.as_str();
+        if topic_str != self.config.network.video_topic
+            && topic_str != self.config.network.audio_topic
+        {
+            tracing::warn!("Sentinel dropped chunk: Invalid topic {}", topic_str);
+            return;
+        }
+
         if !self
             .governor
             .should_accept(&peer_id, &self.identity.to_network_id())
@@ -386,45 +414,62 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                     return;
                 }
 
-                // 1. Evaluate Current Device Physics & Trust Level
+                // 2. RESOURCE QUOTAS (IWFQ Allocation)
                 let trust_level = self.trust_registry.check_trust(&sender_did);
                 let stress = self.system_governor.current_stress();
 
-                // 2. IWFQ Quota Verification
                 match self
                     .ingress_governor
                     .try_allocate(peer_id.clone(), trust_level, stress)
                 {
                     Ok(Some(evicted_peer)) => {
-                        // Preemption execution
                         tracing::warn!(%evicted_peer, "Preempted IWFQ slot for higher-trust peer");
                         self.network.ban_peer(&evicted_peer).await;
                     }
-                    Ok(None) => {} // Slot granted normally
-                    Err(_) => {
-                        // Causal backpressure limit reached or thermal limit hit.
-                        // Drop silently. The physical socket will block and apply backpressure to the peer.
-                        return;
-                    }
+                    Ok(None) => {}    // Slot granted
+                    Err(_) => return, // Silent drop (Backpressure)
                 }
 
+                // 3. DISPATCH TO PURE VAULT
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                 if let Err(err) = self
                     .storage_tx
-                    .send(StorageCommand::Ingest(chunk, topic, peer_id))
+                    .send(StorageCommand::Ingest {
+                        chunk,
+                        reply_to: reply_tx,
+                    })
                     .await
                 {
-                    tracing::error!(
-                        error = %err,
-                        "CRITICAL: Failed to route ingress chunk to storage subsystem"
-                    );
+                    tracing::error!(error = %err, "CRITICAL: Failed to route chunk to vault");
+                    self.ingress_governor.release_slot(&peer_id);
+                    return;
+                }
+
+                // 4. VAULT RESPONSE & CAUSAL BACKPRESSURE RELEASE
+                match reply_rx.await {
+                    Ok(Ok(())) => {
+                        // Success: Release slot
+                        self.ingress_governor.release_slot(&peer_id);
+                    }
+                    Ok(Err(GuardianError::VerificationFailed(err))) => {
+                        // POISON: Trigger forensic violation
+                        tracing::error!("Sentinel escalating forensic violation: {}", err);
+                        self.handle_forensic_violation(
+                            peer_id.clone(),
+                            sender_did,
+                            GuardianError::VerificationFailed(err),
+                        )
+                        .await;
+                        self.ingress_governor.release_slot(&peer_id);
+                    }
+                    _ => {
+                        // General storage failure
+                        self.ingress_governor.release_slot(&peer_id);
+                    }
                 }
             }
             Err(err) => {
-                tracing::warn!(
-                    peer = %peer_id,
-                    error = %err,
-                    "Dropped malformed ShardChunk payload at network edge"
-                );
+                tracing::warn!(peer = %peer_id, error = %err, "Dropped malformed payload at edge");
             }
         }
     }
@@ -435,14 +480,13 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         owner_did: Did,
         err: GuardianError,
     ) {
-        // Map the forensic outcome to the deterministic Offense Noun
         let offense = match err {
             GuardianError::VerificationFailed(_) | GuardianError::InvalidSignature(_) => {
                 Some(Offense::InvalidSignature)
             }
             GuardianError::QuotaExceeded(_) => Some(Offense::QuotaExceeded),
             GuardianError::ReplayDetected(_) => Some(Offense::ReplayAttack),
-            _ => None, // System/Disk IO errors do not penalize the peer
+            _ => None,
         };
 
         if let Some(offense_type) = offense {
@@ -459,16 +503,15 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                 tracing::warn!(
                     %peer_id,
                     %owner_did,
-                    "CRITICAL: Peer blacklisted. Severing connection and releasing IWFQ slot."
+                    "CRITICAL: Peer blacklisted. Severing connection."
                 );
-
-                // ATOMIC EXECUTION: Sever connection and immediately clear the Zombie Slot
                 self.network.ban_peer(&peer_id).await;
-                self.ingress_governor.release_slot(&peer_id);
             }
         }
     }
 }
+
+// ... Ephemeral Bootstrap and Tests omitted for brevity, logic remains identical ...
 
 // Ephemeral Bootstrap
 impl<T: NetworkTransport> MeshSentinel<T, NoOpJournal> {

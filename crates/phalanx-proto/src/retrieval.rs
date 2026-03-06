@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::SealedLocator;
 use crate::identity::{Did, VolleyId};
+use crate::types::{ForensicUnit, Sealed};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolleyRequest {
@@ -14,7 +15,7 @@ pub struct VolleyRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VolleyResponse {
-    Success(Vec<WitnessEnvelope>),
+    Success(Vec<ForensicUnit<WitnessEnvelope, Sealed>>),
     Busy,         // Resource-based shedding
     NotFound,     // Data missing from local Guardian
     Unauthorized, // Cryptographic proof failed
