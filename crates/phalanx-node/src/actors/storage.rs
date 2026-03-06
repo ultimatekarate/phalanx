@@ -40,7 +40,6 @@ impl<J: TransientJournal> StorageActor<J> {
         tracing::info!("StorageActor: Entering forensic bootstrap phase");
 
         // Hydrate the Reassembler state from the TransientJournal (WAL)
-        // FIX: matched Ok(()) since recover_from_journal populates internal state
         match self
             .reassembler
             .recover_from_journal(&mut self.journal)
@@ -121,7 +120,7 @@ impl<J: TransientJournal> StorageActor<J> {
             None => Err(()),
         };
 
-        // FIX: Mapped query result to expected VolleyResponse type
+        // Mapped query result to expected VolleyResponse type
         let response = match result {
             Ok(envelopes) => VolleyResponse::Success(envelopes),
             Err(_) => VolleyResponse::NotFound,
