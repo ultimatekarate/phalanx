@@ -23,6 +23,36 @@ use phalanx_proto::time::PhalanxTimestamp;
 use phalanx_transport::identity_ext::Libp2pExt;
 use tokio::sync::mpsc;
 
+fn build_test_actor<J: TransientJournal + Send + 'static>(
+    config: NodeConfig,
+    identity: PhalanxIdentity,
+    journal: J,
+    guardian: Guardian,
+) -> (
+    StorageActor<J>,
+    mpsc::Receiver<StorageCommand>,
+    mpsc::Sender<StorageCommand>,
+    mpsc::Receiver<(NetworkId, Did, GuardianError)>,
+    mpsc::Receiver<StorageAck>,
+) {
+    let (storage_tx, storage_rx) = mpsc::channel::<StorageCommand>(10);
+    let (forensic_tx, forensic_rx) = mpsc::channel::<(NetworkId, Did, GuardianError)>(10);
+    let (ack_tx, ack_rx) = mpsc::channel::<StorageAck>(10);
+
+    let actor = StorageActor {
+        reassembler: Reassembler::new(),
+        guardian,
+        journal,
+        config: config.clone(),
+        identity: identity.clone(),
+        forensic_tx,
+        local_peer_id: identity.to_network_id(),
+        ack_tx,
+    };
+
+    (actor, storage_rx, storage_tx, forensic_rx, ack_rx)
+}
+
 #[tokio::test]
 async fn test_pillar_salvage_under_disk_pressure() {
     // --- CLINICAL MOCK: THE CRUMBLING JOURNAL ---
@@ -78,19 +108,8 @@ async fn test_pillar_salvage_under_disk_pressure() {
         identity.did.clone(),
     );
 
-    let (storage_tx, storage_rx) = mpsc::channel::<StorageCommand>(10);
-    let (forensic_tx, _forensic_rx) = mpsc::channel::<(NetworkId, Did, GuardianError)>(1);
-    let (ack_tx, _ack_rx) = mpsc::channel::<StorageAck>(10);
-    let actor = StorageActor {
-        reassembler: Reassembler::new(),
-        guardian,
-        journal: BrokenJournal,
-        config: config.clone(),
-        identity: identity.clone(),
-        forensic_tx,
-        local_peer_id: identity.to_network_id(),
-        ack_tx,
-    };
+    let (actor, storage_rx, storage_tx, _forensic_rx, _ack_rx) =
+        build_test_actor(config.clone(), identity.clone(), BrokenJournal, guardian);
 
     // 4. Trigger Salvage with Evidence
     let salvage_data = vec![PendingEgress {
@@ -160,23 +179,13 @@ async fn test_reputation_gate_signature_mismatch() {
     };
 
     // 3. Setup Channels and Actor
-    let (storage_tx, storage_rx) = mpsc::channel::<StorageCommand>(10);
-    let (forensic_tx, mut forensic_rx) = mpsc::channel::<(NetworkId, Did, GuardianError)>(10);
-    let (ack_tx, _ack_rx) = mpsc::channel::<StorageAck>(10);
-    let actor = StorageActor {
-        reassembler: Reassembler::new(),
-        guardian: Guardian::new(
-            &temp.path().to_string_lossy(),
-            &config,
-            my_identity.did.clone(),
-        ),
-        journal: NoOpJournal,
-        config,
-        identity: my_identity,
-        forensic_tx,
-        local_peer_id: NetworkId::random(),
-        ack_tx,
-    };
+    let guardian = Guardian::new(
+        &temp.path().to_string_lossy(),
+        &config,
+        my_identity.did.clone(),
+    );
+    let (actor, storage_rx, storage_tx, mut forensic_rx, _ack_rx) =
+        build_test_actor(config.clone(), my_identity.clone(), NoOpJournal, guardian);
 
     // 4. Inject Poisoned Chunk via Ingest Command
     storage_tx
@@ -276,19 +285,8 @@ async fn test_salvage_on_node_death() {
         let journal = FileJournal::new(&wal_path).await.unwrap();
         let guardian = Guardian::new(&vault_path.to_string_lossy(), &config, identity.did.clone());
 
-        let (storage_tx, storage_rx) = mpsc::channel::<StorageCommand>(10);
-        let (forensic_tx, _) = mpsc::channel::<(NetworkId, Did, GuardianError)>(1);
-        let (ack_tx, _ack_rx) = mpsc::channel::<StorageAck>(10);
-        let actor = StorageActor {
-            reassembler: Reassembler::new(),
-            guardian,
-            journal,
-            config: config.clone(),
-            identity: identity.clone(),
-            forensic_tx,
-            local_peer_id: identity.to_network_id(),
-            ack_tx,
-        };
+        let (actor, storage_rx, storage_tx, _, _) =
+            build_test_actor(config.clone(), identity.clone(), journal, guardian);
 
         // Start actor in background
         let actor_handle = tokio::spawn(async move {
@@ -322,19 +320,8 @@ async fn test_salvage_on_node_death() {
         let journal2 = FileJournal::new(&wal_path).await.unwrap();
         let guardian2 = Guardian::new(&vault_path.to_string_lossy(), &config, identity.did.clone());
 
-        let (storage_tx2, storage_rx2) = mpsc::channel::<StorageCommand>(10);
-        let (forensic_tx2, _) = mpsc::channel::<(NetworkId, Did, GuardianError)>(1);
-        let (ack_tx2, _ack_rx2) = mpsc::channel::<StorageAck>(10);
-        let actor2 = StorageActor {
-            reassembler: Reassembler::new(),
-            guardian: guardian2,
-            journal: journal2,
-            config: config.clone(),
-            identity: identity.clone(),
-            forensic_tx: forensic_tx2,
-            local_peer_id: identity.to_network_id(),
-            ack_tx: ack_tx2,
-        };
+        let (actor2, storage_rx2, storage_tx2, _, _) =
+            build_test_actor(config.clone(), identity.clone(), journal2, guardian2);
 
         let actor_handle2 = tokio::spawn(async move {
             // run() calls recover_from_journal internally during bootstrap
@@ -424,19 +411,8 @@ async fn test_stronghold_ingestion_and_persistence() {
     // 3. Wire up a StorageActor directly (no harness needed)
     let guardian = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
 
-    let (storage_tx, storage_rx) = mpsc::channel::<StorageCommand>(10);
-    let (forensic_tx, _) = mpsc::channel::<(NetworkId, Did, GuardianError)>(1);
-    let (ack_tx, _ack_rx) = mpsc::channel::<StorageAck>(10);
-    let actor = StorageActor {
-        reassembler: Reassembler::new(),
-        guardian,
-        journal: NoOpJournal,
-        config,
-        identity: identity.clone(),
-        forensic_tx,
-        local_peer_id: identity.to_network_id(),
-        ack_tx,
-    };
+    let (actor, storage_rx, storage_tx, _, _) =
+        build_test_actor(config.clone(), identity.clone(), NoOpJournal, guardian);
 
     let actor_handle = tokio::spawn(async move {
         actor.run(storage_rx).await;
@@ -519,9 +495,6 @@ async fn test_storage_actor_metric_pipeline() {
     let (identity, _) = PhalanxIdentity::generate().unwrap();
     let local_peer_id = identity.to_network_id();
 
-    let (command_tx, command_rx) = mpsc::channel::<StorageCommand>(100);
-    let (forensic_tx, _forensic_rx) = mpsc::channel::<(NetworkId, Did, GuardianError)>(10);
-
     let storage_load = Arc::new(AtomicUsize::new(0));
 
     // 2. MetricJournal Wrapper
@@ -531,18 +504,9 @@ async fn test_storage_actor_metric_pipeline() {
     };
 
     let guardian = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
-    let (ack_tx, _ack_rx) = mpsc::channel::<StorageAck>(10);
     // 3. Initialize StorageActor
-    let storage_actor = StorageActor {
-        reassembler: Reassembler::new(),
-        guardian,
-        journal,
-        config: config.clone(),
-        identity: identity.clone(),
-        forensic_tx,
-        local_peer_id: local_peer_id.clone(),
-        ack_tx,
-    };
+    let (storage_actor, command_rx, command_tx, _, _) =
+        build_test_actor(config.clone(), identity.clone(), journal, guardian);
 
     let actor_handle = tokio::spawn(async move {
         storage_actor.run(command_rx).await;
