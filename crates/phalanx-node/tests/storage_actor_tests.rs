@@ -200,9 +200,10 @@ async fn test_reputation_gate_signature_mismatch() {
 
     // 4. Inject Poisoned Chunk via Ingest Command
     let (reply_tx, reply_rx) = oneshot::channel();
+    let unit = ForensicUnit::<_, Verified>::new_verified(chunk);
     storage_tx
         .send(StorageCommand::Ingest {
-            chunk,
+            unit,
             reply_to: reply_tx,
         })
         .await
@@ -300,11 +301,9 @@ async fn test_salvage_on_node_death() {
         // Send 3 of 4 chunks
         for chunk in chunks.iter().take(3) {
             let (tx, _) = oneshot::channel();
+            let unit = ForensicUnit::<_, Verified>::new_verified(chunk.clone());
             storage_tx
-                .send(StorageCommand::Ingest {
-                    chunk: chunk.clone(),
-                    reply_to: tx,
-                })
+                .send(StorageCommand::Ingest { unit, reply_to: tx })
                 .await
                 .unwrap();
         }
@@ -334,11 +333,9 @@ async fn test_salvage_on_node_death() {
 
         // Send the 4th and final chunk
         let (tx, _) = oneshot::channel();
+        let unit = ForensicUnit::<_, Verified>::new_verified(chunks[3].clone());
         storage_tx2
-            .send(StorageCommand::Ingest {
-                chunk: chunks[3].clone(),
-                reply_to: tx,
-            })
+            .send(StorageCommand::Ingest { unit, reply_to: tx })
             .await
             .unwrap();
 
@@ -419,11 +416,9 @@ async fn test_stronghold_ingestion_and_persistence() {
 
     // 4. Inject the chunk via StorageCommand::Ingest
     let (tx, _) = oneshot::channel();
+    let unit = ForensicUnit::<_, Verified>::new_verified(chunk);
     storage_tx
-        .send(StorageCommand::Ingest {
-            chunk,
-            reply_to: tx,
-        })
+        .send(StorageCommand::Ingest { unit, reply_to: tx })
         .await
         .expect("Injection failed");
 
@@ -544,11 +539,9 @@ async fn test_storage_actor_metric_pipeline() {
 
     // 5. Inject via Ingest Command
     let (tx, _) = oneshot::channel();
+    let unit = ForensicUnit::<_, Verified>::new_verified(chunk);
     command_tx
-        .send(StorageCommand::Ingest {
-            chunk,
-            reply_to: tx,
-        })
+        .send(StorageCommand::Ingest { unit, reply_to: tx })
         .await
         .unwrap();
 
@@ -637,11 +630,12 @@ async fn test_pure_vault_ingest_contract() {
     };
 
     let (reply_tx, reply_rx) = oneshot::channel();
+    let unit = ForensicUnit::<_, Verified>::new_verified(chunk);
 
     // 3. Send and Await
     cmd_tx
         .send(StorageCommand::Ingest {
-            chunk,
+            unit,
             reply_to: reply_tx,
         })
         .await
@@ -652,4 +646,85 @@ async fn test_pure_vault_ingest_contract() {
         .expect("Vault died - check for panic in reassembler.rs");
 
     assert!(result.is_ok(), "Vault failed ingestion: {:?}", result.err());
+}
+
+#[cfg(test)]
+mod ingress_boundary_tests {
+    use super::*;
+    use phalanx_forensics::witness::WitnessAuthority;
+    use phalanx_proto::evidence::{
+        DataPayload, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
+    };
+    use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
+    use phalanx_proto::prelude::ShardChunk;
+    use phalanx_proto::time::PhalanxTimestamp;
+    use phalanx_proto::types::{ForensicUnit, Unverified, Verified};
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn test_vault_rejects_unverified_ingress_by_design() {
+        let (actor, cmd_rx, cmd_tx, _temp) = setup_mock_storage().await;
+
+        tokio::spawn(async move {
+            actor.run(cmd_rx).await;
+        });
+
+        // 1. Create a valid Forensic Payload
+        let (identity, _) = PhalanxIdentity::generate().unwrap();
+        let video_shard = VideoShard {
+            timestamp: PhalanxTimestamp::now(),
+            sequence_id: StorageSequence(1),
+            fps: 30,
+            volley_id: VolleyId::new("v_secure_ingress"),
+            payload: DataPayload::Clear(vec![0xAA, 0xBB, 0xCC]),
+        };
+
+        let envelope = WitnessEnvelope::sign_envelope(
+            Evidence::Video(video_shard),
+            &identity,
+            NetworkId::random(),
+            None,
+        )
+        .expect("Failed to seal evidence");
+
+        let valid_data = postcard::to_allocvec(&envelope).expect("Serialization failed");
+
+        // 2. The Raw Data off the wire
+        let raw_chunk = ShardChunk {
+            shard_id: ShardId(1),
+            chunk_index: 0,
+            total_chunks: 1,
+            data: valid_data,
+            owner_did: identity.did.clone(),
+            chunk_type: ChunkType::Witnessed,
+        };
+
+        // 3. SENTINEL BOUNDARY: Wrap as Unverified
+        let unverified_unit = ForensicUnit::<_, Unverified>::new(raw_chunk);
+
+        // --- COMPILER ENFORCEMENT ZONE ---
+        // If you uncomment the following line, the test WILL NOT COMPILE:
+        // let BAD_COMMAND = StorageCommand::Ingest { unit: unverified_unit.clone(), reply_to: ... };
+        // ---------------------------------
+
+        // 4. THE PROMOTION: Simulate passing the Reputation & Quota gates
+        let verified_unit = ForensicUnit::<_, Verified>::new_verified(unverified_unit.unpack());
+
+        // 5. THE VAULT: Now it mathematically accepts the command
+        let (reply_tx, reply_rx) = oneshot::channel();
+        cmd_tx
+            .send(StorageCommand::Ingest {
+                unit: verified_unit,
+                reply_to: reply_tx,
+            })
+            .await
+            .expect("Failed to send verified chunk to Vault");
+
+        // 6. VERIFICATION
+        let result = reply_rx.await.expect("Vault died during secure ingest");
+        assert!(
+            result.is_ok(),
+            "Vault rejected a cryptographically valid, typestate-verified chunk"
+        );
+    }
 }

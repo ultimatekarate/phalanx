@@ -1,5 +1,4 @@
 // --- crates/phalanx-node/src/actors/meshsentinel.rs ---
-
 use crate::actors::playback::PlaybackCoordinator;
 use crate::actors::storage::NoOpJournal;
 use crate::actors::storage::StorageCommand;
@@ -15,6 +14,7 @@ use phalanx_forensics::policy::{EgressGovernor, IngressGovernor};
 use phalanx_forensics::prelude::*;
 use phalanx_forensics::ReputationGate;
 use phalanx_proto::prelude::*;
+use phalanx_proto::types::Unverified;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -419,8 +419,10 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         }
 
         match postcard::from_bytes::<ShardChunk>(data) {
-            Ok(chunk) => {
-                let sender_did = chunk.owner_did.clone();
+            Ok(raw_chunk) => {
+                let unverified = ForensicUnit::<_, Unverified>::new(raw_chunk);
+
+                let sender_did = unverified.data.owner_did.clone();
 
                 if self.trust_registry.is_blacklisted(&sender_did) {
                     self.network.ban_peer(&peer_id).await;
@@ -443,12 +445,14 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                     Err(_) => return, // Silent drop (Backpressure)
                 }
 
+                let verified_unit = ForensicUnit::<_, Verified>::new_verified(unverified.unpack());
+
                 // 3. DISPATCH TO PURE VAULT
                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                 if let Err(err) = self
                     .storage_tx
                     .send(StorageCommand::Ingest {
-                        chunk,
+                        unit: verified_unit,
                         reply_to: reply_tx,
                     })
                     .await

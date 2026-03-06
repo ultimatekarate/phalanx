@@ -302,8 +302,9 @@ impl<T> ForensicUnit<T, Verified> {
     }
 }
 
-impl<T> ForensicUnit<T, Sealed> {
-    /// Consumes the wrapper to retrieve the raw data at the network edge.
+impl<T, S: ValidationState> ForensicUnit<T, S> {
+    /// Consumes the wrapper to retrieve the raw data.
+    /// Used by the Vault (to unpack Verified ingress) and the Network (to unpack Sealed egress).
     pub fn unpack(self) -> T {
         self.data
     }

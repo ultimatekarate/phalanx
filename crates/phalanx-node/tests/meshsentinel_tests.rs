@@ -214,8 +214,8 @@ async fn test_handle_network_ingress_enforces_trust_registry() {
 
     // 2. ACT AS THE VAULT: Intercept the message and send the 'Ok' reply
     match tokio::time::timeout(Duration::from_millis(500), mock_storage_rx.recv()).await {
-        Ok(Some(StorageCommand::Ingest { chunk, reply_to })) => {
-            assert_eq!(chunk.owner_did, valid_chunk.owner_did);
+        Ok(Some(StorageCommand::Ingest { unit, reply_to })) => {
+            assert_eq!(unit.data.owner_did, valid_chunk.owner_did);
             let _ = reply_to.send(Ok(())); // UNBLOCKS THE SENTINEL
         }
         _ => panic!("Sentinel failed to route valid chunk to storage or timed out"),

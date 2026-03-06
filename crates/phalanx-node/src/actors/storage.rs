@@ -10,6 +10,8 @@ use phalanx_proto::identity::PhalanxIdentity;
 use phalanx_proto::identity::VolleyId;
 use phalanx_proto::prelude::{PendingEgress, ShardChunk, ShardError};
 use phalanx_proto::storage::GuardianError;
+use phalanx_proto::types::ForensicUnit;
+use phalanx_proto::types::Verified;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::interval;
@@ -27,7 +29,7 @@ pub struct StorageActor<J: TransientJournal> {
 pub enum StorageCommand {
     /// Pure ingestion. No routing logic or network ACKs.
     Ingest {
-        chunk: ShardChunk,
+        unit: ForensicUnit<ShardChunk, Verified>,
         reply_to: oneshot::Sender<Result<(), GuardianError>>,
     },
     /// Pure retrieval. Returns raw envelopes directly from the vault.
@@ -80,8 +82,8 @@ impl<J: TransientJournal> StorageActor<J> {
                 res = command_rx.recv() => {
                     match res {
                         Some(cmd) => match cmd {
-                            StorageCommand::Ingest { chunk, reply_to } => {
-                                let _ = reply_to.send(self.handle_ingest(chunk).await);
+                            StorageCommand::Ingest { unit, reply_to } => {
+                                let _ = reply_to.send(self.handle_ingest(unit).await);
                             }
                             StorageCommand::Retrieval { volley_id, reply_to } => {
                                 self.handle_retrieval(volley_id, reply_to).await;
@@ -111,8 +113,12 @@ impl<J: TransientJournal> StorageActor<J> {
     }
 
     /// Handles data ingestion purely from a forensic and storage perspective.
-    async fn handle_ingest(&mut self, chunk: ShardChunk) -> Result<(), GuardianError> {
-        // CORRECTED: Uses Reassembler::ingest_chunk which requires mutable journal access
+    async fn handle_ingest(
+        &mut self,
+        unit: ForensicUnit<ShardChunk, Verified>,
+    ) -> Result<(), GuardianError> {
+        let chunk = unit.unpack();
+
         let reassembly_result = self
             .reassembler
             .ingest_chunk(chunk, &mut self.journal)
