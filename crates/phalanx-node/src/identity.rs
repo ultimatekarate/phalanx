@@ -98,8 +98,29 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         postcard::from_bytes(&bytes).map_err(|e| IdentityError::SerializationError(e.to_string()))
     }
 
-    fn verify_retrieval_auth(&self, _request: &VolleyRequest) -> Result<(), IdentityError> {
-        Ok(())
+    fn verify_retrieval_auth(&self, request: &VolleyRequest) -> Result<(), IdentityError> {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+        // 1. Resolve the public key of the claimed recipient (the requester)
+        let pk_bytes =
+            phalanx_forensics::identity::resolve_did_public_key(&request.locator.recipient)
+                .map_err(|_| IdentityError::CryptoError("DID Resolution Failed".into()))?;
+
+        let verifying_key = VerifyingKey::from_bytes(&pk_bytes)
+            .map_err(|e| IdentityError::CryptoError(format!("Invalid Public Key: {}", e)))?;
+
+        // 2. Reconstruct the signed message payload
+        let signed_data = (&request.target_did, &request.volley_id, &request.locator);
+        let msg = postcard::to_allocvec(&signed_data)
+            .map_err(|e| IdentityError::SerializationError(e.to_string()))?;
+
+        // 3. Verify the signature
+        let signature = Signature::from_slice(&request.signature)
+            .map_err(|e| IdentityError::CryptoError(format!("Invalid Signature: {}", e)))?;
+
+        verifying_key
+            .verify(&msg, &signature)
+            .map_err(|_| IdentityError::CryptoError("Signature Verification Failed".into()))
     }
 
     fn init<P: AsRef<Path>>(path: P) -> Result<Self, IdentityError> {

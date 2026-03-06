@@ -1,8 +1,7 @@
 use phalanx_proto::crypto::CryptoError;
 use phalanx_proto::prelude::*;
 
-#[allow(dead_code)]
-fn resolve_did_public_key(did: &Did) -> Result<[u8; 32], CryptoError> {
+pub fn resolve_did_public_key(did: &Did) -> Result<[u8; 32], CryptoError> {
     // 1. Safe Prefix Handling (Zero-Panic)
     // Replaces: let multibase_str = &s["did:key:".len()..];
     let multibase_str = did

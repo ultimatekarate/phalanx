@@ -18,6 +18,10 @@ fn default_cleanup_interval() -> Duration {
     Duration::from_secs(1)
 }
 
+fn default_capacity() -> usize {
+    1000
+}
+
 pub trait EnvelopeHashExt {
     fn signature_hash(&self) -> SignatureHash;
 }
@@ -123,6 +127,9 @@ pub struct Crucible<S: Mold> {
 
     #[serde(skip, default = "default_cleanup_interval")]
     pub cleanup_interval: Duration,
+
+    #[serde(skip, default = "default_capacity")]
+    pub max_capacity: usize,
 }
 // --- THE WRAPPER (The Work Unit) ---
 // Wraps the raw data (Accumulator) with metadata (Time)
@@ -136,12 +143,13 @@ pub struct WorkContext<A> {
 
 impl<S: Mold> Crucible<S> {
     #[must_use]
-    pub fn new(strategy: S, _cleanup_interval: Duration) -> Self {
+    pub fn new(strategy: S, cleanup_interval: Duration, max_capacity: usize) -> Self {
         Self {
             strategy,
             contexts: std::collections::BTreeMap::new(),
             last_cleanup: std::time::Instant::now(),
-            cleanup_interval: Duration::from_secs(1),
+            cleanup_interval,
+            max_capacity,
         }
     }
 
@@ -164,6 +172,11 @@ impl<S: Mold> Crucible<S> {
                 (S::is_ready(&ctx.accumulator, el), el)
             }
             Entry::Vacant(entry) => {
+                if self.contexts.len() >= self.max_capacity {
+                    warn!("Crucible capacity exceeded. Dropping item.");
+                    return None;
+                }
+
                 // Initialize the empty accumulator
                 let mut acc = S::init_accumulator(&item);
 
@@ -289,7 +302,7 @@ impl<S: Mold + Default> Default for Crucible<S> {
     /// Initializes a default Crucible workbench with a standard 1-second cleanup interval.
     fn default() -> Self {
         // Use the strategy's default and our standard 1s interval
-        Self::new(S::default(), Duration::from_secs(1))
+        Self::new(S::default(), Duration::from_secs(1), default_capacity())
     }
 }
 
@@ -479,7 +492,7 @@ mod tests {
     // FIXED: The Lab uses std::time::Instant, not tokio. No tokio dependency needed.
     #[test]
     fn test_crucible_auto_seal() {
-        let mut crucible = Crucible::new(SumMold, Duration::from_secs(5));
+        let mut crucible = Crucible::new(SumMold, Duration::from_secs(5), 100);
 
         // 1. Ingest 2 items (Not ready)
         assert!(crucible.process(10).is_none());
@@ -497,7 +510,7 @@ mod tests {
     fn test_crucible_flush_stale() {
         // Use a very short TTL to avoid slow tests while staying tokio-free
         let ttl = Duration::from_millis(50);
-        let mut crucible = Crucible::new(SumMold, ttl);
+        let mut crucible = Crucible::new(SumMold, ttl, 100);
 
         // 1. Ingest 1 item (Stale)
         crucible.process(5);
@@ -514,7 +527,7 @@ mod tests {
 
     #[test]
     fn test_crucible_flush_all() {
-        let mut crucible = Crucible::new(SumMold, Duration::from_secs(5));
+        let mut crucible = Crucible::new(SumMold, Duration::from_secs(5), 100);
         crucible.process(1);
         crucible.process(2); // 2 items waiting
 

@@ -300,9 +300,7 @@ mod tests {
     use phalanx_proto::trust::TrustLevel;
     use phalanx_proto::types::SystemStress;
 
-    fn mock_peer(id: u8) -> NetworkId {
-        let mut bytes = [0u8; 32];
-        bytes[0] = id;
+    fn mock_peer() -> NetworkId {
         NetworkId::random()
     }
 
@@ -313,17 +311,17 @@ mod tests {
 
         // 1. Fill 10 slots with low-trust peers
         for i in 0..10 {
-            let res = gov.try_allocate(mock_peer(i), TrustLevel::Ignored, stress);
+            let res = gov.try_allocate(mock_peer(), TrustLevel::Ignored, stress);
             assert!(res.is_ok(), "Failed to fill slot {}", i);
         }
 
         // 2. Verify the 11th low-trust peer is REJECTED (Backpressure)
-        let rejected_peer = mock_peer(11);
+        let rejected_peer = mock_peer();
         let res = gov.try_allocate(rejected_peer, TrustLevel::Ignored, stress);
         assert!(res.is_err(), "11th Ignored peer should have been rejected");
 
         // 3. Verify a high-trust ALLY peer PREEMPTS a low-trust peer
-        let ally_peer = mock_peer(99);
+        let ally_peer = mock_peer();
         match gov.try_allocate(ally_peer.clone(), TrustLevel::Ally, stress) {
             Ok(Some(evicted)) => {
                 // Assert that one of the Ignored peers (0-9) was kicked out
@@ -343,21 +341,21 @@ mod tests {
         let stress = SystemStress::Serious;
 
         // 1. Verify Ignored peers are blocked regardless of capacity
-        let res = gov.try_allocate(mock_peer(1), TrustLevel::Ignored, stress);
+        let res = gov.try_allocate(mock_peer(), TrustLevel::Ignored, stress);
         assert!(
             res.is_err(),
             "Ignored peer should be blocked during Serious stress"
         );
 
         // 2. Verify Ally peer can still take the single remaining slot
-        let res = gov.try_allocate(mock_peer(2), TrustLevel::Ally, stress);
+        let res = gov.try_allocate(mock_peer(), TrustLevel::Ally, stress);
         assert!(
             res.is_ok(),
             "Ally should be allowed 1 slot during Serious stress"
         );
 
         // 3. Verify second Ally is blocked (Capacity = 1)
-        let res = gov.try_allocate(mock_peer(3), TrustLevel::Ally, stress);
+        let res = gov.try_allocate(mock_peer(), TrustLevel::Ally, stress);
         assert!(
             res.is_err(),
             "Second Ally should be blocked by Serious capacity limit"
@@ -367,7 +365,7 @@ mod tests {
     #[test]
     fn test_causal_loop_recycling() {
         let mut gov = IngressGovernor::new(1);
-        let peer = mock_peer(1);
+        let peer = mock_peer();
 
         // Take the only slot
         gov.try_allocate(peer.clone(), TrustLevel::Verified, SystemStress::Nominal)
@@ -375,7 +373,7 @@ mod tests {
 
         // Verify full
         assert!(gov
-            .try_allocate(mock_peer(2), TrustLevel::Verified, SystemStress::Nominal)
+            .try_allocate(mock_peer(), TrustLevel::Verified, SystemStress::Nominal)
             .is_err());
 
         // RELEASE via Causal Feedback
@@ -383,7 +381,7 @@ mod tests {
 
         // Verify slot is now usable again
         assert!(gov
-            .try_allocate(mock_peer(2), TrustLevel::Verified, SystemStress::Nominal)
+            .try_allocate(mock_peer(), TrustLevel::Verified, SystemStress::Nominal)
             .is_ok());
     }
 }

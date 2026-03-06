@@ -96,7 +96,7 @@ impl Default for Reassembler {
 impl Reassembler {
     pub fn new() -> Self {
         Self {
-            active_shards: Crucible::new(ShardMold, std::time::Duration::from_secs(1)),
+            active_shards: Crucible::new(ShardMold, std::time::Duration::from_secs(1), 1000),
             power_state: PowerState::Normal,
         }
     }
