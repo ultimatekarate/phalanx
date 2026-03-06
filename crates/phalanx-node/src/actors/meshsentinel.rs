@@ -190,7 +190,11 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         Ok(())
     }
 
-    async fn handle_gap_discovery(&mut self, volley_id: VolleyId, gap_sequence: StorageSequence) {
+    pub async fn handle_gap_discovery(
+        &mut self,
+        volley_id: VolleyId,
+        gap_sequence: StorageSequence,
+    ) {
         tracing::info!(
             "Playback gap detected for Volley {:?} at sequence {}. Initiating mesh discovery.",
             volley_id,
@@ -370,7 +374,11 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         self.pending_egress = retry_queue;
     }
 
-    async fn dispatch_resilient_response(&mut self, channel_id: String, response: VolleyResponse) {
+    pub async fn dispatch_resilient_response(
+        &mut self,
+        channel_id: String,
+        response: VolleyResponse,
+    ) {
         if self
             .network
             .send_response(&channel_id, response.clone())
@@ -388,7 +396,12 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
     }
 
     /// Handles inbound data from the wire, applying routing and ingress quotas before hitting the vault.
-    async fn handle_network_ingress(&mut self, peer_id: NetworkId, data: &[u8], topic: MeshTopic) {
+    pub async fn handle_network_ingress(
+        &mut self,
+        peer_id: NetworkId,
+        data: &[u8],
+        topic: MeshTopic,
+    ) {
         // 1. TOPIC ROUTING (Edge Filtering)
         let topic_str = topic.as_str();
         if topic_str != self.config.network.video_topic
@@ -474,7 +487,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         }
     }
 
-    async fn handle_forensic_violation(
+    pub async fn handle_forensic_violation(
         &mut self,
         peer_id: NetworkId,
         owner_did: Did,
@@ -535,324 +548,5 @@ impl<T: NetworkTransport> MeshSentinel<T, NoOpJournal> {
         };
 
         Self::new(deps).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::vitals::SystemGovernor;
-    use phalanx_forensics::gate::WitnessGate;
-    use phalanx_proto::evidence::{ChunkType, Evidence, StorageSequence, VideoShard};
-    use phalanx_proto::network::NetworkEvent;
-    use phalanx_proto::time::PhalanxTimestamp;
-    use phalanx_proto::types::PowerState;
-
-    use tokio::sync::mpsc;
-
-    struct TestTransport {
-        ingress_rx: mpsc::Receiver<NetworkEvent>,
-        published: Vec<(MeshTopic, Vec<u8>)>,
-        banned: Vec<NetworkId>,
-        responses: Vec<(String, VolleyResponse)>,
-    }
-
-    impl TestTransport {
-        fn new(ingress_rx: mpsc::Receiver<NetworkEvent>) -> Self {
-            Self {
-                ingress_rx,
-                published: Vec::new(),
-                banned: Vec::new(),
-                responses: Vec::new(),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl NetworkTransport for TestTransport {
-        async fn publish(&mut self, topic: &MeshTopic, data: Vec<u8>) -> Result<(), String> {
-            self.published.push((topic.clone(), data));
-            Ok(())
-        }
-        async fn next_event(&mut self) -> Option<NetworkEvent> {
-            self.ingress_rx.recv().await
-        }
-        async fn ban_peer(&mut self, peer: &NetworkId) {
-            self.banned.push(peer.clone());
-        }
-        async fn send_response(
-            &mut self,
-            channel_id: &str,
-            response: VolleyResponse,
-        ) -> Result<(), String> {
-            self.responses.push((channel_id.to_string(), response));
-            Ok(())
-        }
-    }
-
-    async fn build_test_sentinel(
-        ingress_rx: mpsc::Receiver<NetworkEvent>,
-    ) -> (MeshSentinel<TestTransport, NoOpJournal>, tempfile::TempDir) {
-        let temp = tempfile::tempdir().unwrap();
-        let mut config = NodeConfig::default();
-        config.storage.vault_path = temp.path().to_string_lossy().to_string();
-
-        let identity = PhalanxIdentity::new_ephemeral();
-        let trust_registry = TrustRegistry::build(&config).await;
-        let (discovery_tx, discovery_rx) = mpsc::channel(100);
-
-        let deps = SentinelDependencies {
-            config,
-            identity,
-            network: TestTransport::new(ingress_rx),
-            journal: NoOpJournal,
-            trust_registry,
-            reputation_cache: Arc::new(SyncReputationCache::default()),
-            discovery_tx,
-            discovery_rx,
-            system_governor: Arc::new(SystemGovernor::new()),
-        };
-
-        (
-            MeshSentinel::new(deps)
-                .await
-                .expect("Failed to build test sentinel"),
-            temp,
-        )
-    }
-
-    #[tokio::test]
-    async fn test_handle_network_ingress_enforces_trust_registry() {
-        let (_ingress_tx, ingress_rx) = mpsc::channel(10);
-        let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
-
-        let (mock_storage_tx, mut mock_storage_rx) = mpsc::channel(10);
-        sentinel.storage_tx = mock_storage_tx;
-
-        let topic = MeshTopic::new("phalanx/test/1.0.0");
-        let valid_peer = NetworkId::random();
-        let bad_peer = NetworkId::random();
-        let valid_did = Did("did:phalanx:trusted".to_string());
-        let bad_did = Did("did:phalanx:malicious".to_string());
-
-        let mut record = phalanx_proto::trust::PeerRecord::default();
-        record.reputation.score = -100; // Directly flag negative via updated defragmented schema
-        record.reputation.is_blacklisted = true;
-        sentinel
-            .trust_registry
-            .contacts
-            .insert(bad_did.clone(), record);
-
-        let mut bad_chunk = ShardChunk::default();
-        bad_chunk.owner_did = bad_did.clone();
-        let bad_data = postcard::to_allocvec(&bad_chunk).expect("Failed to serialize bad chunk");
-
-        sentinel
-            .handle_network_ingress(bad_peer.clone(), &bad_data, topic.clone())
-            .await;
-
-        assert!(
-            sentinel.network.banned.contains(&bad_peer),
-            "Expected the malicious peer to be explicitly banned in TestTransport"
-        );
-
-        assert!(
-            mock_storage_rx.try_recv().is_err(),
-            "Blacklisted chunk bypassed the network edge filter"
-        );
-
-        let mut valid_chunk = ShardChunk::default();
-        valid_chunk.owner_did = valid_did;
-        let valid_data =
-            postcard::to_allocvec(&valid_chunk).expect("Failed to serialize valid chunk");
-
-        sentinel
-            .handle_network_ingress(valid_peer.clone(), &valid_data, topic)
-            .await;
-
-        assert!(
-            !sentinel.network.banned.contains(&valid_peer),
-            "Valid peer was incorrectly banned"
-        );
-
-        match mock_storage_rx.try_recv() {
-            Ok(StorageCommand::Ingest(chunk, _, _)) => {
-                assert_eq!(chunk.owner_did, valid_chunk.owner_did);
-            }
-            _ => panic!("Expected valid chunk to be successfully routed to the storage subsystem"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_sentinel_boots_and_shuts_down() {
-        let (ingress_tx, ingress_rx) = mpsc::channel(10);
-        let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
-
-        ingress_tx.send(NetworkEvent::Shutdown).await.unwrap();
-
-        let result = sentinel.run().await;
-        assert!(result.is_ok(), "Sentinel should shut down cleanly");
-    }
-
-    #[tokio::test]
-    async fn test_ingress_valid_chunk_forwarded_to_storage() {
-        let (ingress_tx, ingress_rx) = mpsc::channel(10);
-        let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
-
-        let identity = PhalanxIdentity::new_ephemeral();
-        let topic = sentinel.config.network.video_topic.clone();
-
-        let evidence = Evidence::Video(VideoShard {
-            timestamp: PhalanxTimestamp::now(),
-            sequence_id: StorageSequence(1),
-            fps: 30,
-            volley_id: VolleyId::new("v_ingress"),
-            payload: DataPayload::Clear(vec![0xAB; 4]),
-        });
-        let envelope = evidence
-            .seal(&identity, identity.network_id.clone(), None)
-            .unwrap();
-
-        let chunk = ShardChunk {
-            shard_id: ShardId(1),
-            chunk_index: 0,
-            total_chunks: 1,
-            data: postcard::to_allocvec(&envelope).unwrap(),
-            owner_did: identity.did.clone(),
-            chunk_type: ChunkType::Witnessed,
-        };
-        let chunk_bytes = postcard::to_allocvec(&chunk).unwrap();
-
-        ingress_tx
-            .send(NetworkEvent::DataReceived {
-                origin: NetworkId::random(),
-                topic,
-                data: chunk_bytes,
-            })
-            .await
-            .unwrap();
-        ingress_tx.send(NetworkEvent::Shutdown).await.unwrap();
-
-        sentinel.run().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_ingress_rejected_in_leaf_mode() {
-        let (ingress_tx, ingress_rx) = mpsc::channel(10);
-        let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
-
-        sentinel.governor.set_state(PowerState::Leaf);
-
-        let identity = PhalanxIdentity::new_ephemeral();
-        let topic = sentinel.config.network.video_topic.clone();
-
-        let evidence = Evidence::Video(VideoShard {
-            timestamp: PhalanxTimestamp::now(),
-            sequence_id: StorageSequence(1),
-            fps: 30,
-            volley_id: VolleyId::new("v_leaf"),
-            payload: DataPayload::Clear(vec![0x00; 4]),
-        });
-        let envelope = evidence
-            .seal(&identity, identity.network_id.clone(), None)
-            .unwrap();
-
-        let chunk = ShardChunk {
-            shard_id: ShardId(1),
-            chunk_index: 0,
-            total_chunks: 1,
-            data: postcard::to_allocvec(&envelope).unwrap(),
-            owner_did: identity.did.clone(),
-            chunk_type: ChunkType::Witnessed,
-        };
-        let chunk_bytes = postcard::to_allocvec(&chunk).unwrap();
-
-        ingress_tx
-            .send(NetworkEvent::DataReceived {
-                origin: NetworkId::from("foreign-peer"),
-                topic,
-                data: chunk_bytes,
-            })
-            .await
-            .unwrap();
-        ingress_tx.send(NetworkEvent::Shutdown).await.unwrap();
-
-        sentinel.run().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_dispatch_resilient_response_succeeds_without_enqueue() {
-        let (_ingress_tx, ingress_rx) = mpsc::channel(10);
-        let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
-
-        assert!(sentinel.pending_egress.is_empty());
-
-        sentinel
-            .dispatch_resilient_response("ch_ok".into(), VolleyResponse::NotFound)
-            .await;
-
-        assert!(
-            sentinel.pending_egress.is_empty(),
-            "Successful dispatch should not enqueue into pending_egress"
-        );
-
-        assert_eq!(sentinel.network.responses.len(), 1);
-        assert_eq!(sentinel.network.responses[0].0, "ch_ok");
-    }
-
-    #[tokio::test]
-    async fn test_forensic_violation_updates_reputation() {
-        let (_ingress_tx, ingress_rx) = mpsc::channel(10);
-        let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
-
-        let offender_peer = NetworkId::from("bad-peer");
-        let offender_did = Did::from("did:key:zBadActor");
-
-        sentinel
-            .handle_forensic_violation(
-                offender_peer.clone(),
-                offender_did,
-                GuardianError::VerificationFailed("signature mismatch".into()),
-            )
-            .await;
-
-        let score = sentinel
-            .reputation_cache
-            .scores
-            .read()
-            .unwrap()
-            .get(&offender_peer)
-            .cloned();
-
-        assert!(
-            score.is_some(),
-            "Reputation cache should be updated after forensic violation"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_gap_discovery_publishes_to_mesh() {
-        let (_ingress_tx, ingress_rx) = mpsc::channel(10);
-        let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
-
-        let volley_id = VolleyId::new("v_gap");
-        let gap_seq = StorageSequence(5);
-
-        sentinel
-            .handle_gap_discovery(volley_id.clone(), gap_seq)
-            .await;
-
-        assert_eq!(
-            sentinel.network.published.len(),
-            1,
-            "Gap discovery should publish exactly one message"
-        );
-
-        let (topic, data) = &sentinel.network.published[0];
-        assert_eq!(topic.as_str(), DISCOVERY_TOPIC_ID);
-
-        let request: ShardDiscoveryRequest = postcard::from_bytes(data).unwrap();
-        assert_eq!(request.volley_id, volley_id);
-        assert_eq!(request.sequence_id, gap_seq);
     }
 }

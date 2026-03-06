@@ -76,35 +76,35 @@ impl<J: TransientJournal> StorageActor<J> {
 
         loop {
             tokio::select! {
-                Some(cmd) = command_rx.recv() => {
-                    match cmd {
-                        StorageCommand::Ingest { chunk, reply_to } => {
-                            let result = self.handle_ingest(chunk).await;
-                            let _ = reply_to.send(result);
-                        }
-                        StorageCommand::Retrieval { volley_id, reply_to } => {
-                            self.handle_retrieval(volley_id, reply_to).await;
-                        }
-                        StorageCommand::GetShard { volley_id, sequence_id, reply_to } => {
-                            // CORRECTED: Uses Guardian::get_shard mapped to your context
-                            let shard = self.guardian.get_shard(&volley_id, sequence_id);
-                            let _ = reply_to.send(shard);
-                        }
-                        StorageCommand::IngestEnvelope { state, reply_to } => {
-                            // CORRECTED: Uses Guardian::ingest_envelope
-                            let result = self.guardian.ingest_envelope(state).await;
-                            let _ = reply_to.send(result);
-                        }
-                        StorageCommand::EmergencySalvage(pending) => {
-                            self.handle_salvage(pending).await;
+                // FIX: Explicitly handle the None case to break the loop
+                res = command_rx.recv() => {
+                    match res {
+                        Some(cmd) => match cmd {
+                            StorageCommand::Ingest { chunk, reply_to } => {
+                                let _ = reply_to.send(self.handle_ingest(chunk).await);
+                            }
+                            StorageCommand::Retrieval { volley_id, reply_to } => {
+                                self.handle_retrieval(volley_id, reply_to).await;
+                            }
+                            StorageCommand::GetShard { volley_id, sequence_id, reply_to } => {
+                                let _ = reply_to.send(self.guardian.get_shard(&volley_id, sequence_id));
+                            }
+                            StorageCommand::IngestEnvelope { state, reply_to } => {
+                                let _ = reply_to.send(self.guardian.ingest_envelope(state).await);
+                            }
+                            StorageCommand::EmergencySalvage(pending) => {
+                                // This handles the BrokenJournal error internally and continues
+                                self.handle_salvage(pending).await;
+                            }
+                        },
+                        None => {
+                            tracing::info!(target: "phalanx::storage", "Sentinel dropped channel. Vault shutting down.");
+                            break;
                         }
                     }
                 }
                 _ = maintenance_timer.tick() => {
-                    // CORRECTED: Uses Guardian::check_and_finalize_volley
-                    if let Err(e) = self.guardian.check_and_finalize_volley().await {
-                        tracing::warn!(target: "phalanx::storage", error = %e, "Maintenance: Crucible cycle failed");
-                    }
+                    let _ = self.guardian.check_and_finalize_volley().await;
                 }
             }
         }

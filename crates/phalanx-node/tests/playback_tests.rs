@@ -39,10 +39,12 @@ async fn test_exodus_resurrection_logic() {
                 } => {
                     let _ = reply_to.send(guardian.get_shard(&volley_id, sequence_id));
                 }
-                StorageCommand::IngestEnvelope(state) => {
-                    if let Err(e) = guardian.ingest_envelope(state).await {
+                StorageCommand::IngestEnvelope { state, reply_to } => {
+                    let result = guardian.ingest_envelope(state).await;
+                    if let Err(ref e) = result {
                         tracing::error!("Test Actor Ingestion Reject: {:?}", e);
                     }
+                    let _ = reply_to.send(result);
                 }
                 _ => {
                     tracing::debug!("Mock StorageActor ignored unsupported command");
@@ -71,12 +73,15 @@ async fn test_exodus_resurrection_logic() {
     .unwrap();
     let hash_1 = envelope_1.signature_hash();
 
+    let (tx, rx) = tokio::sync::oneshot::channel();
     storage_tx
-        .send(StorageCommand::IngestEnvelope(EnvelopeState::Intact(
-            envelope_1,
-        )))
+        .send(StorageCommand::IngestEnvelope {
+            state: EnvelopeState::Intact(envelope_1),
+            reply_to: tx,
+        })
         .await
         .unwrap();
+    rx.await.unwrap().unwrap();
 
     let v_id_clone = volley_id.clone();
     let _handle = tokio::spawn(async move {
@@ -107,12 +112,15 @@ async fn test_exodus_resurrection_logic() {
     )
     .unwrap();
 
+    let (tx2, rx2) = tokio::sync::oneshot::channel();
     storage_tx
-        .send(StorageCommand::IngestEnvelope(EnvelopeState::Intact(
-            envelope_2,
-        )))
+        .send(StorageCommand::IngestEnvelope {
+            state: EnvelopeState::Intact(envelope_2),
+            reply_to: tx2,
+        })
         .await
         .unwrap();
+    rx2.await.unwrap().unwrap();
 
     let frame_2 = ui_rx.recv().await.expect("Should receive Frame 2");
     assert_eq!(frame_2, b"Frame 2");
@@ -141,10 +149,12 @@ async fn test_playback_resurrection_with_mesh_gap() {
                 } => {
                     let _ = reply_to.send(guardian.get_shard(&volley_id, sequence_id));
                 }
-                StorageCommand::IngestEnvelope(state) => {
-                    if let Err(e) = guardian.ingest_envelope(state).await {
+                StorageCommand::IngestEnvelope { state, reply_to } => {
+                    let result = guardian.ingest_envelope(state).await;
+                    if let Err(ref e) = result {
                         tracing::error!("Test Ingestion Error: {:?}", e);
                     }
+                    let _ = reply_to.send(result);
                 }
                 _ => {}
             }
@@ -171,12 +181,15 @@ async fn test_playback_resurrection_with_mesh_gap() {
     .unwrap();
     let hash_1 = envelope_1.signature_hash();
 
+    let (tx, rx) = tokio::sync::oneshot::channel();
     storage_tx
-        .send(StorageCommand::IngestEnvelope(EnvelopeState::Intact(
-            envelope_1,
-        )))
+        .send(StorageCommand::IngestEnvelope {
+            state: EnvelopeState::Intact(envelope_1),
+            reply_to: tx,
+        })
         .await
         .unwrap();
+    rx.await.unwrap().unwrap();
 
     let v_id_clone = volley_id.clone();
     tokio::spawn(async move {
@@ -206,12 +219,15 @@ async fn test_playback_resurrection_with_mesh_gap() {
         Some(hash_1),
     )
     .unwrap();
+    let (tx2, rx2) = tokio::sync::oneshot::channel();
     storage_tx
-        .send(StorageCommand::IngestEnvelope(EnvelopeState::Intact(
-            envelope_2,
-        )))
+        .send(StorageCommand::IngestEnvelope {
+            state: EnvelopeState::Intact(envelope_2),
+            reply_to: tx2,
+        })
         .await
         .unwrap();
+    rx2.await.unwrap().unwrap();
 
     let frame_2 = ui_rx
         .recv()
@@ -242,8 +258,9 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
                 } => {
                     let _ = reply_to.send(guardian.get_shard(&volley_id, sequence_id));
                 }
-                StorageCommand::IngestEnvelope(state) => {
-                    let _ = guardian.ingest_envelope(state).await;
+                StorageCommand::IngestEnvelope { state, reply_to } => {
+                    let result = guardian.ingest_envelope(state).await;
+                    let _ = reply_to.send(result);
                 }
                 _ => {}
             }
@@ -275,28 +292,37 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
         chain.insert(i, envelope);
     }
 
+    let (tx1, rx1) = tokio::sync::oneshot::channel();
     storage_tx
-        .send(StorageCommand::IngestEnvelope(EnvelopeState::Intact(
-            chain.get(&1).unwrap().clone(),
-        )))
+        .send(StorageCommand::IngestEnvelope {
+            state: EnvelopeState::Intact(chain.get(&1).unwrap().clone()),
+            reply_to: tx1,
+        })
         .await
         .unwrap();
+    rx1.await.unwrap().unwrap();
+
+    let (tx10, rx10) = tokio::sync::oneshot::channel();
     storage_tx
-        .send(StorageCommand::IngestEnvelope(EnvelopeState::Intact(
-            chain.get(&10).unwrap().clone(),
-        )))
+        .send(StorageCommand::IngestEnvelope {
+            state: EnvelopeState::Intact(chain.get(&10).unwrap().clone()),
+            reply_to: tx10,
+        })
         .await
         .unwrap();
+    rx10.await.unwrap().unwrap();
 
     let chaos_storage_tx = storage_tx.clone();
     tokio::spawn(async move {
         while let Some((_, missing_seq)) = disc_rx.recv().await {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             if let Some(env) = chain.get(&missing_seq.0) {
+                let (tx, _) = tokio::sync::oneshot::channel();
                 let _ = chaos_storage_tx
-                    .send(StorageCommand::IngestEnvelope(EnvelopeState::Intact(
-                        env.clone(),
-                    )))
+                    .send(StorageCommand::IngestEnvelope {
+                        state: EnvelopeState::Intact(env.clone()),
+                        reply_to: tx,
+                    })
                     .await;
             }
         }

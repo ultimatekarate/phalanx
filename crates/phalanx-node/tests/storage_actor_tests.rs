@@ -15,10 +15,11 @@ use phalanx_proto::evidence::{ChunkType, DataPayload, Evidence, StorageSequence,
 use phalanx_proto::identity::{Did, NetworkId, PhalanxIdentity, ShardId, VolleyId};
 use phalanx_proto::prelude::{PendingEgress, ShardChunk, ShardError};
 use phalanx_proto::retrieval::VolleyResponse;
-use phalanx_proto::storage::{GuardianError, StorageAck};
+use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::PhalanxTimestamp;
+use phalanx_proto::types::{ForensicUnit, Verified};
 use phalanx_transport::identity_ext::Libp2pExt;
-use tokio::sync::mpsc; // ADDED: oneshot import
+use tokio::sync::{mpsc, oneshot};
 
 fn build_test_actor<J: TransientJournal + Send + 'static>(
     config: NodeConfig,
@@ -29,12 +30,8 @@ fn build_test_actor<J: TransientJournal + Send + 'static>(
     StorageActor<J>,
     mpsc::Receiver<StorageCommand>,
     mpsc::Sender<StorageCommand>,
-    mpsc::Receiver<(NetworkId, Did, GuardianError)>,
-    mpsc::Receiver<StorageAck>,
 ) {
     let (storage_tx, storage_rx) = mpsc::channel::<StorageCommand>(10);
-    let (forensic_tx, forensic_rx) = mpsc::channel::<(NetworkId, Did, GuardianError)>(10);
-    let (ack_tx, ack_rx) = mpsc::channel::<StorageAck>(10);
 
     let actor = StorageActor {
         reassembler: Reassembler::new(),
@@ -42,12 +39,9 @@ fn build_test_actor<J: TransientJournal + Send + 'static>(
         journal,
         config: config.clone(),
         identity: identity.clone(),
-        forensic_tx,
-        local_peer_id: identity.to_network_id(),
-        ack_tx,
     };
 
-    (actor, storage_rx, storage_tx, forensic_rx, ack_rx)
+    (actor, storage_rx, storage_tx)
 }
 
 // ADDED: The missing mock storage setup helper
@@ -64,8 +58,7 @@ async fn setup_mock_storage() -> (
     let (identity, _) = PhalanxIdentity::generate().unwrap();
     let guardian = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
 
-    let (actor, cmd_rx, cmd_tx, _forensic_rx, _ack_rx) =
-        build_test_actor(config, identity, NoOpJournal, guardian);
+    let (actor, cmd_rx, cmd_tx) = build_test_actor(config, identity, NoOpJournal, guardian);
 
     (actor, cmd_rx, cmd_tx, temp)
 }
@@ -125,13 +118,15 @@ async fn test_pillar_salvage_under_disk_pressure() {
         identity.did.clone(),
     );
 
-    let (actor, storage_rx, storage_tx, _forensic_rx, _ack_rx) =
+    let (actor, storage_rx, storage_tx) =
         build_test_actor(config.clone(), identity.clone(), BrokenJournal, guardian);
 
     // 4. Trigger Salvage with Evidence
+    let unit = ForensicUnit::<_, Verified>::new_verified(envelope).seal();
+
     let salvage_data = vec![PendingEgress {
         channel_id: "ch_broken_pillar".into(),
-        response: VolleyResponse::Success(vec![envelope]),
+        response: VolleyResponse::Success(vec![unit]),
         attempt_count: 0,
         next_attempt: PhalanxTimestamp::now(),
     }];
@@ -163,7 +158,6 @@ async fn test_reputation_gate_signature_mismatch() {
     let (my_identity, _) = PhalanxIdentity::generate().unwrap();
     let (attacker_identity, _) = PhalanxIdentity::generate().unwrap();
     let attacker_net_id = attacker_identity.to_network_id();
-    let topic = config.network.video_topic.clone();
 
     // 2. Create "Poisoned" Evidence
     let video_shard = VideoShard {
@@ -201,17 +195,16 @@ async fn test_reputation_gate_signature_mismatch() {
         &config,
         my_identity.did.clone(),
     );
-    let (actor, storage_rx, storage_tx, mut forensic_rx, _ack_rx) =
+    let (actor, storage_rx, storage_tx) =
         build_test_actor(config.clone(), my_identity.clone(), NoOpJournal, guardian);
 
     // 4. Inject Poisoned Chunk via Ingest Command
-    // Note: Once the StorageCommand enum is fully migrated, topic and attacker_net_id will be dropped here
+    let (reply_tx, reply_rx) = oneshot::channel();
     storage_tx
-        .send(StorageCommand::Ingest(
+        .send(StorageCommand::Ingest {
             chunk,
-            topic,
-            attacker_net_id.clone(),
-        ))
+            reply_to: reply_tx,
+        })
         .await
         .unwrap();
 
@@ -221,19 +214,17 @@ async fn test_reputation_gate_signature_mismatch() {
     });
 
     // 6. Verification: Listen for the Forensic Escalation
-    let escalation = tokio::time::timeout(Duration::from_millis(500), forensic_rx.recv()).await;
+    let result = tokio::time::timeout(Duration::from_millis(500), reply_rx).await;
 
     // Cleanup
     drop(storage_tx);
     actor_handle.abort();
 
     // 7. Assertions
-    let (offender_net_id, offender_did, error) = escalation
-        .expect("Timeout: Actor failed to escalate the signature mismatch!")
-        .expect("Forensic channel closed prematurely");
-
-    assert_eq!(offender_net_id, attacker_net_id, "Wrong peer reported!");
-    assert_eq!(offender_did, attacker_identity.did, "Wrong DID reported!");
+    let error = result
+        .expect("Timeout: Actor failed to reply")
+        .expect("Reply channel closed")
+        .expect_err("Expected error for poisoned signature");
 
     // Check that the error is specifically a Cryptographic/Signature failure
     match error {
@@ -267,7 +258,6 @@ async fn test_salvage_on_node_death() {
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
     let identity_did = identity.did.clone();
-    let topic = config.network.video_topic.clone();
 
     // 1. Create a valid envelope and chunkify it into 4 pieces
     let real_shard = VideoShard {
@@ -299,7 +289,7 @@ async fn test_salvage_on_node_death() {
         let journal = FileJournal::new(&wal_path).await.unwrap();
         let guardian = Guardian::new(&vault_path.to_string_lossy(), &config, identity.did.clone());
 
-        let (actor, storage_rx, storage_tx, _, _) =
+        let (actor, storage_rx, storage_tx) =
             build_test_actor(config.clone(), identity.clone(), journal, guardian);
 
         // Start actor in background
@@ -309,12 +299,12 @@ async fn test_salvage_on_node_death() {
 
         // Send 3 of 4 chunks
         for chunk in chunks.iter().take(3) {
+            let (tx, _) = oneshot::channel();
             storage_tx
-                .send(StorageCommand::Ingest(
-                    chunk.clone(),
-                    topic.clone(),
-                    NetworkId::random(),
-                ))
+                .send(StorageCommand::Ingest {
+                    chunk: chunk.clone(),
+                    reply_to: tx,
+                })
                 .await
                 .unwrap();
         }
@@ -334,7 +324,7 @@ async fn test_salvage_on_node_death() {
         let journal2 = FileJournal::new(&wal_path).await.unwrap();
         let guardian2 = Guardian::new(&vault_path.to_string_lossy(), &config, identity.did.clone());
 
-        let (actor2, storage_rx2, storage_tx2, _, _) =
+        let (actor2, storage_rx2, storage_tx2) =
             build_test_actor(config.clone(), identity.clone(), journal2, guardian2);
 
         let actor_handle2 = tokio::spawn(async move {
@@ -343,12 +333,12 @@ async fn test_salvage_on_node_death() {
         });
 
         // Send the 4th and final chunk
+        let (tx, _) = oneshot::channel();
         storage_tx2
-            .send(StorageCommand::Ingest(
-                chunks[3].clone(),
-                topic.clone(),
-                NetworkId::random(),
-            ))
+            .send(StorageCommand::Ingest {
+                chunk: chunks[3].clone(),
+                reply_to: tx,
+            })
             .await
             .unwrap();
 
@@ -388,7 +378,6 @@ async fn test_stronghold_ingestion_and_persistence() {
     config.storage.vault_path = temp_dir.path().to_string_lossy().into_owned();
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let topic = config.network.video_topic.clone();
 
     // 2. Prepare Mock Data (A legitimate chunk from an external peer)
     let (peer_identity, _) = PhalanxIdentity::generate().unwrap();
@@ -421,7 +410,7 @@ async fn test_stronghold_ingestion_and_persistence() {
     // 3. Wire up a StorageActor directly (no harness needed)
     let guardian = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
 
-    let (actor, storage_rx, storage_tx, _, _) =
+    let (actor, storage_rx, storage_tx) =
         build_test_actor(config.clone(), identity.clone(), NoOpJournal, guardian);
 
     let actor_handle = tokio::spawn(async move {
@@ -429,8 +418,12 @@ async fn test_stronghold_ingestion_and_persistence() {
     });
 
     // 4. Inject the chunk via StorageCommand::Ingest
+    let (tx, _) = oneshot::channel();
     storage_tx
-        .send(StorageCommand::Ingest(chunk, topic, peer_net_id))
+        .send(StorageCommand::Ingest {
+            chunk,
+            reply_to: tx,
+        })
         .await
         .expect("Injection failed");
 
@@ -515,7 +508,7 @@ async fn test_storage_actor_metric_pipeline() {
 
     let guardian = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
     // 3. Initialize StorageActor
-    let (storage_actor, command_rx, command_tx, _, _) =
+    let (storage_actor, command_rx, command_tx) =
         build_test_actor(config.clone(), identity.clone(), journal, guardian);
 
     let actor_handle = tokio::spawn(async move {
@@ -549,11 +542,13 @@ async fn test_storage_actor_metric_pipeline() {
         chunk_type: ChunkType::Witnessed,
     };
 
-    let topic = config.network.video_topic;
-
     // 5. Inject via Ingest Command
+    let (tx, _) = oneshot::channel();
     command_tx
-        .send(StorageCommand::Ingest(chunk, topic, local_peer_id))
+        .send(StorageCommand::Ingest {
+            chunk,
+            reply_to: tx,
+        })
         .await
         .unwrap();
 
@@ -575,12 +570,10 @@ async fn test_storage_actor_metric_pipeline() {
 
 // FIXED: Cleaned up the Pure Vault Retrieval Contract Test
 #[tokio::test]
-#[ignore]
 async fn test_pure_vault_retrieval_contract() {
     // Rely on the new mock helper
-    let (_actor, _cmd_rx, _cmd_tx, _temp) = setup_mock_storage().await;
+    let (actor, cmd_rx, cmd_tx, _temp) = setup_mock_storage().await;
 
-    /* Functionality not yet implemented
     // Spawn the actor
     tokio::spawn(async move {
         actor.run(cmd_rx).await;
@@ -590,55 +583,73 @@ async fn test_pure_vault_retrieval_contract() {
     let volley_id = VolleyId::new("v_test_123");
 
     // 1. Send the pure command
-    cmd_tx.send(StorageCommand::Retrieval {
-        volley_id,
-        reply_to: reply_tx,
-    }).await.unwrap();
+    cmd_tx
+        .send(StorageCommand::Retrieval {
+            volley_id,
+            reply_to: reply_tx,
+        })
+        .await
+        .unwrap();
 
     // 2. Await the response
     let envelopes = reply_rx.await.expect("Vault dropped the channel");
 
     // 3. Verify the Vault returned raw vectors, not Network Types
-    assert!(envelopes.is_empty(), "Expected empty vector from fresh vault");
-    */
+    assert!(
+        envelopes.is_empty(),
+        "Expected empty vector from fresh vault"
+    );
 }
 
 // FIXED: Cleaned up the Pure Vault Ingest Contract Test
 #[tokio::test]
-#[ignore]
-
 async fn test_pure_vault_ingest_contract() {
-    // Rely on the new mock helper
-    /*
-    let (_actor, _cmd_rx, _cmd_tx, _temp) = setup_mock_storage().await;
+    let (actor, cmd_rx, cmd_tx, _temp) = setup_mock_storage().await;
 
-    // Spawn the actor
     tokio::spawn(async move {
         actor.run(cmd_rx).await;
-    });*/
+    });
 
-    /* Functionality not yet implemented
-    // 1. Create a raw ShardChunk (No MeshTopic, No NetworkId attached)
+    // 1. Prepare REAL evidence so the reassembler doesn't choke on raw [0x00]
+    let (identity, _) = PhalanxIdentity::generate().unwrap();
+    let video_shard = VideoShard {
+        timestamp: PhalanxTimestamp::now(),
+        sequence_id: StorageSequence(1),
+        fps: 30,
+        volley_id: VolleyId::new("v_pure_ingest"),
+        payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+    };
+
+    let envelope = Evidence::Video(video_shard)
+        .seal(&identity, NetworkId::random(), None)
+        .expect("Failed to seal forensic evidence");
+
+    let valid_envelope_data = postcard::to_allocvec(&envelope).expect("Serialization failed");
+
+    // 2. Wrap that data in a ShardChunk
     let chunk = ShardChunk {
         shard_id: ShardId(1),
         chunk_index: 0,
         total_chunks: 1,
-        data: vec![],
-        owner_did: Did::from("did:mock"),
+        data: valid_envelope_data, // Use valid serialized envelope
+        owner_did: identity.did.clone(),
         chunk_type: ChunkType::Witnessed,
     };
 
     let (reply_tx, reply_rx) = oneshot::channel();
 
-    // 2. Send the purified Ingest command (assuming the new StorageCommand enum shape)
-    // NOTE: Once you update StorageCommand::Ingest in storage.rs, update this signature!
-    // For now, it matches the newly proposed contract structure.
-    cmd_tx.send(StorageCommand::Ingest {
-        chunk,
-        reply_to: reply_tx,
-    }).await.unwrap();
+    // 3. Send and Await
+    cmd_tx
+        .send(StorageCommand::Ingest {
+            chunk,
+            reply_to: reply_tx,
+        })
+        .await
+        .unwrap();
 
-    let result = reply_rx.await.expect("Vault died");
-    assert!(result.is_ok(), "Vault failed pure ingestion");
-    */
+    let result = reply_rx
+        .await
+        .expect("Vault died - check for panic in reassembler.rs");
+
+    assert!(result.is_ok(), "Vault failed ingestion: {:?}", result.err());
 }
