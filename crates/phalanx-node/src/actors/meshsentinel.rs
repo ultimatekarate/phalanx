@@ -450,6 +450,11 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                 .record_offense(&owner_did, offense_type, &self.clock)
                 .await;
 
+            let score = self.trust_registry.evaluate_reputation(&peer_id);
+            if let Ok(mut cache) = self.reputation_cache.scores.write() {
+                cache.insert(peer_id.clone(), score);
+            }
+
             if self.trust_registry.is_blacklisted(&owner_did) {
                 tracing::warn!(
                     %peer_id,

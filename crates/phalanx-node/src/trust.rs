@@ -423,7 +423,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_aliasing() {
-        let config = NodeConfig::test_defaults();
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::test_defaults();
+        config.storage.vault_path = temp.path().to_string_lossy().to_string();
         let mut registry = TrustRegistry::build(&config).await;
 
         let did1 = Did::from("did:phx:user_one");
@@ -472,7 +474,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_offense_deterministic_blacklisting() {
-        let config = NodeConfig::test_defaults();
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::test_defaults();
+        config.storage.vault_path = temp.path().to_string_lossy().to_string();
         let mut registry = TrustRegistry::build(&config).await;
         let clock = TrustedClock::new();
         let did = Did::from("did:phx:offender");
@@ -494,7 +498,7 @@ mod tests {
             .await;
 
         let record = registry.contacts.get(&did).unwrap();
-        assert_eq!(record.reputation.score, 0); // 75 - 100 (saturates at 0)
+        assert_eq!(record.reputation.score, -25); // 75 - 100 = -25
         assert!(record.reputation.is_blacklisted);
     }
 }

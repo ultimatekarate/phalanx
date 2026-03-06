@@ -29,7 +29,7 @@ pub struct TrustRegistry {
     pub peers: HashMap<Did, PeerRecord>,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerReputation {
     pub invalid_sigs: u32,
     pub quota_violations: u32,
@@ -39,6 +39,21 @@ pub struct PeerReputation {
     pub is_blacklisted: bool,
     pub score: i64,
     pub last_update_secs: MonotonicClock,
+}
+
+impl Default for PeerReputation {
+    fn default() -> Self {
+        Self {
+            invalid_sigs: 0,
+            quota_violations: 0,
+            total_shards_sent: 0,
+            active_buffers: 0,
+            last_seen_load: 0.0,
+            is_blacklisted: false,
+            score: 100,
+            last_update_secs: MonotonicClock::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
