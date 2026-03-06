@@ -12,12 +12,17 @@ use tokio::sync::broadcast;
 use tokio::time::Instant;
 use tracing::Level;
 use tracing_subscriber::{filter::Targets, fmt, prelude::*};
+use std::fs;
+use std::path::PathBuf;
+
 
 static TELEMETRY_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 static INIT: Once = Once::new();
 
 pub struct SystemGovernor {
     current_state: std::sync::RwLock<SystemStress>,
+    thermal_path: Option<PathBuf>,
+    battery_path: Option<PathBuf>,
 }
 
 impl Default for SystemGovernor {
@@ -28,11 +33,18 @@ impl Default for SystemGovernor {
 
 impl SystemGovernor {
     pub fn new() -> Self {
+        let (thermal, battery) = Self::discover_hardware();
         Self {
             current_state: std::sync::RwLock::new(SystemStress::Nominal),
+            thermal_path: thermal,
+            battery_path: battery,
         }
     }
 
+    pub fn current_stress(&self) -> SystemStress {
+        *self.current_state.read().unwrap_or_else(|poison| poison.into_inner())
+    }
+    
     pub fn check_permission(&self, task_cost: TaskCost) -> bool {
         let state = *self
             .current_state
@@ -48,42 +60,58 @@ impl SystemGovernor {
     }
 
     pub fn update_vitals(&self) {
-        let thermal = self.get_thermal_status();
-        let battery = self.get_battery_status();
+        let t_stress = self.read_thermal();
+        let b_stress = self.read_battery();
 
-        let new_state = std::cmp::max(thermal, battery);
-
-        let mut guard = self
-            .current_state
-            .write()
-            .unwrap_or_else(|poison| poison.into_inner());
-        *guard = new_state;
+        let new_stress = std::cmp::max(t_stress, b_stress);
+        
+        if let Ok(mut state) = self.current_state.write() {
+            *state = new_stress;
+        }
     }
 
-    pub fn current_stress(&self) -> SystemStress {
-        *self
-            .current_state
-            .read()
-            .unwrap_or_else(|poison| poison.into_inner())
+    // --- Hardware Discovery & Probes ---
+
+    fn discover_hardware() -> (Option<PathBuf>, Option<PathBuf>) {
+        let thermal = Self::find_path("/sys/class/thermal", "temp", &["cpu", "soc", "tsens"]);
+        let battery = Self::find_path("/sys/class/power_supply", "capacity", &["battery"]);
+        (thermal, battery)
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    fn get_thermal_status(&self) -> SystemStress {
-        SystemStress::Nominal
+    fn read_thermal(&self) -> SystemStress {
+        let raw = self.thermal_path.as_ref().and_then(|p| fs::read_to_string(p).ok());
+        let temp = raw.and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(0) / 1000;
+
+        match temp {
+            t if t > 75 => SystemStress::Critical,
+            t if t > 60 => SystemStress::Serious,
+            t if t > 45 => SystemStress::Fair,
+            _ => SystemStress::Nominal,
+        }
     }
 
-    fn get_battery_status(&self) -> SystemStress {
-        SystemStress::Nominal
+    fn read_battery(&self) -> SystemStress {
+        let raw = self.battery_path.as_ref().and_then(|p| fs::read_to_string(p).ok());
+        let cap = raw.and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(100);
+
+        match cap {
+            c if c < 5 => SystemStress::Critical,
+            c if c < 15 => SystemStress::Serious,
+            c if c < 50 => SystemStress::Fair,
+            _ => SystemStress::Nominal,
+        }
     }
 
-    #[cfg(target_os = "android")]
-    fn get_thermal_status(&self) -> SystemStress {
-        SystemStress::Nominal
-    }
-
-    #[cfg(target_os = "ios")]
-    fn get_thermal_status(&self) -> SystemStress {
-        SystemStress::Nominal
+    fn find_path(base: &str, file: &str, keys: &[&str]) -> Option<PathBuf> {
+        let entries = fs::read_dir(base).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let type_str = fs::read_to_string(path.join("type")).ok()?.to_lowercase();
+            if keys.iter().any(|k| type_str.contains(k)) {
+                return Some(path.join(file));
+            }
+        }
+        None
     }
 }
 
