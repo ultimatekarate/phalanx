@@ -52,6 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         reputation_cache,
         discovery_rx,
         discovery_tx,
+        system_governor: Arc::new(phalanx_node::vitals::SystemGovernor::new()),
     };
 
     let mut engine: MeshSentinel<Libp2pBridge, FileJournal> = MeshSentinel::new(deps).await?;

@@ -23,27 +23,10 @@ pub enum TrustLevel {
     Ally,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TrustRecord {
-    pub reputation: i64,
-    pub is_banned: bool,
-    pub last_update_secs: MonotonicClock,
-}
-
-impl Default for TrustRecord {
-    fn default() -> Self {
-        Self {
-            reputation: 100, // Default starting trust score
-            is_banned: false,
-            last_update_secs: MonotonicClock(0),
-        }
-    }
-}
-
 /// The Trust Registry: The Noun that holds the mesh's perception of peers.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TrustRegistry {
-    pub peers: HashMap<Did, TrustRecord>,
+    pub peers: HashMap<Did, PeerRecord>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -54,6 +37,8 @@ pub struct PeerReputation {
     pub active_buffers: usize,
     pub last_seen_load: f32,
     pub is_blacklisted: bool,
+    pub score: i64,
+    pub last_update_secs: MonotonicClock,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

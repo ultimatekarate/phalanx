@@ -1,3 +1,4 @@
+// --- crates/phalanx-node/src/trust.rs ---
 use crate::clock::TrustedClock;
 use crate::NodeConfig;
 use phalanx_forensics::trust::{PeerEvaluator, ReputationGate};
@@ -27,11 +28,12 @@ impl ClockProvider for SystemClock {
         MonotonicClock(start)
     }
 }
+
 /// Manages the "Social Graph" of the node with bi-directional lookup.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TrustRegistry {
     /// Primary storage: DID -> Record
-    contacts: HashMap<Did, PeerRecord>,
+    pub contacts: HashMap<Did, PeerRecord>,
     /// Lookup index: Alias -> DID (Ephemeral, rebuilt on load)
     #[serde(skip)]
     pet_name_index: HashMap<PetName, Did>,
@@ -58,7 +60,7 @@ impl TrustRegistry {
         };
 
         if let Err(e) = registry.load().await {
-            warn!(target: "trust", "Failed to load trust registry (starting fresh): {}", e);
+            tracing::warn!(target: "trust", "Failed to load trust registry (starting fresh): {}", e);
         }
 
         registry
@@ -110,7 +112,7 @@ impl TrustRegistry {
         self.contacts.insert(did.clone(), record);
         self.pet_name_index.insert(pet_name.clone(), did.clone());
 
-        info!(target: "trust", %did, %pet_name, ?level, "Peer record updated");
+        tracing::info!(target: "trust", %did, %pet_name, ?level, "Peer record updated");
 
         self.save().await?;
         Ok(())
@@ -152,7 +154,7 @@ impl TrustRegistry {
     }
 
     /// Performs a non-blocking write to the WAL/storage path.
-    async fn save(&self) -> Result<(), TrustError> {
+    pub async fn save(&self) -> Result<(), TrustError> {
         let data = postcard::to_allocvec(&self.contacts)
             .map_err(|e| TrustError::SerializationError(e.to_string()))?;
 
@@ -206,7 +208,12 @@ impl TrustRegistry {
     pub async fn record_offense(&mut self, did: &Did, offense: Offense, clock: &TrustedClock) {
         // Ensure the peer is tracked in the registry. If unknown, register as Ignored.
         if !self.contacts.contains_key(did) {
-            if let Err(e) = self.register_peer(did, TrustLevel::Ignored, clock).await {
+            // Note: If you want unverified peers to be automatically named, register_peer handles it
+            let fallback_name = PetName::new("Offender").unwrap();
+            if let Err(e) = self
+                .insert_peer(did, &fallback_name, TrustLevel::Ignored, clock)
+                .await
+            {
                 tracing::error!(%did, error = %e, "Failed to register unknown offender");
                 return;
             }
@@ -219,41 +226,43 @@ impl TrustRegistry {
                 return; // Already penalized
             }
 
+            // 1. Unified Judicial Verdict
+            let penalty = match offense {
+                Offense::InvalidSignature => 100,
+                Offense::ReplayAttack => 50,
+                Offense::QuotaExceeded => 25,
+                Offense::MalformedPacket => 5,
+            };
+
+            // 2. Granular Auditing (Keep counters for dashboard/metrics)
             match offense {
                 Offense::InvalidSignature => {
                     record.reputation.invalid_sigs =
                         record.reputation.invalid_sigs.saturating_add(1);
-
-                    if record.reputation.invalid_sigs >= 5 {
-                        record.reputation.is_blacklisted = true;
-                        needs_save = true;
-                        tracing::warn!(%did, "PEER BLACKLISTED: Cryptographic failure threshold exceeded.");
-                    }
-                }
-                Offense::ReplayAttack => {
-                    record.reputation.is_blacklisted = true;
-                    needs_save = true;
-                    tracing::warn!(%did, "PEER BLACKLISTED: Replay attack detected.");
                 }
                 Offense::QuotaExceeded => {
                     record.reputation.quota_violations =
                         record.reputation.quota_violations.saturating_add(1);
+                }
+                _ => {}
+            }
 
-                    if record.reputation.quota_violations >= 5 {
-                        record.reputation.is_blacklisted = true;
-                        needs_save = true;
-                        tracing::warn!(%did, "PEER BLACKLISTED: Quota failure threshold exceeded (Vampire Attack).");
-                    } else {
-                        tracing::debug!(%did, ?offense, "Peer quota offense recorded.");
-                    }
-                }
-                Offense::MalformedPacket => {
-                    tracing::debug!(%did, ?offense, "Minor peer offense recorded.");
-                }
+            // 3. Apply Deterministic Penalty
+            record.reputation.score = record.reputation.score.saturating_sub(penalty);
+
+            tracing::debug!(%did, ?offense, penalty, new_score = record.reputation.score, "Peer penalized");
+
+            // 4. Centralized Blacklisting Threshold
+            if record.reputation.score <= 0 {
+                record.reputation.is_blacklisted = true;
+                needs_save = true;
+                tracing::warn!(%did, "PEER BLACKLISTED: Reputation score depleted below zero.");
+            } else if penalty >= 50 {
+                // High-severity offenses trigger an immediate disk save to prevent reboot amnesia
+                needs_save = true;
             }
         }
 
-        // Immediately persist critical state changes to disk
         if needs_save {
             if let Err(e) = self.save().await {
                 tracing::error!(%did, error = %e, "Failed to persist blacklist status to disk");
@@ -392,18 +401,11 @@ impl PeerEvaluator for TrustRegistry {
             return 0.0; // Guaranteed eviction/rejection
         }
 
-        // Heuristic Scoring Algorithm
-        let mut score: f32 = 1.0;
+        // Defragmented Evaluation: Directly map the unified integer score to a float
+        // representing percentage of trust (Assuming 100 is the max/starting score)
+        let score_normalized = (record.reputation.score as f32) / 100.0;
 
-        // Severe penalty for cryptographic failures (20% reduction per offense)
-        score -= (record.reputation.invalid_sigs as f32) * 0.20;
-
-        // Moderate penalty for resource exhaustion attempts (10% reduction per offense)
-        score -= (record.reputation.quota_violations as f32) * 0.10;
-
-        // Ensure score remains within mathematical bounds.
-        // A minimum of 0.1 distinguishes severely degraded peers from fully blacklisted (0.0) peers.
-        score.clamp(0.1, 1.0)
+        score_normalized.clamp(0.1, 1.0)
     }
 }
 
@@ -466,5 +468,33 @@ mod tests {
             Some(&did1)
         );
         assert_eq!(registry.resolve_pet_name(&pet_name.clone()), None);
+    }
+
+    #[tokio::test]
+    async fn test_record_offense_deterministic_blacklisting() {
+        let config = NodeConfig::test_defaults();
+        let mut registry = TrustRegistry::build(&config).await;
+        let clock = TrustedClock::new();
+        let did = Did::from("did:phx:offender");
+
+        // Assuming PeerReputation::default() initializes `score` to 100
+
+        // 1. Record a minor offense
+        registry
+            .record_offense(&did, Offense::QuotaExceeded, &clock)
+            .await;
+
+        let record = registry.contacts.get(&did).unwrap();
+        assert_eq!(record.reputation.score, 75); // 100 - 25
+        assert!(!record.reputation.is_blacklisted);
+
+        // 2. Record a fatal offense
+        registry
+            .record_offense(&did, Offense::InvalidSignature, &clock)
+            .await;
+
+        let record = registry.contacts.get(&did).unwrap();
+        assert_eq!(record.reputation.score, 0); // 75 - 100 (saturates at 0)
+        assert!(record.reputation.is_blacklisted);
     }
 }

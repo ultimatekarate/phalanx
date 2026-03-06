@@ -16,7 +16,7 @@ pub trait TrustAuthority {
 impl TrustAuthority for TrustRegistry {
     fn authorize_peer(&self, did: &Did) -> Result<(), ShardError> {
         if let Some(record) = self.peers.get(did) {
-            if record.is_banned || record.reputation < 0 {
+            if record.reputation.is_blacklisted || record.reputation.score < 0 {
                 warn!(peer = %did, "Trust Gate Rejected: Peer is banned or untrusted");
                 return Err(ShardError::Unauthorized("Peer trust score too low".into()));
             }
@@ -28,10 +28,10 @@ impl TrustAuthority for TrustRegistry {
 
     fn penalize_peer(&mut self, did: &Did, penalty: i64) {
         let record = self.peers.entry(did.clone()).or_default();
-        record.reputation = record.reputation.saturating_sub(penalty);
+        record.reputation.score = record.reputation.score.saturating_sub(penalty);
 
-        if record.reputation < 0 {
-            record.is_banned = true;
+        if record.reputation.score < 0 {
+            record.reputation.is_blacklisted = true;
             info!(peer = %did, "Peer has been banned due to negative trust score");
         }
     }
@@ -65,6 +65,8 @@ pub trait PeerEvaluator: Send + Sync {
 /// Allows any component to verify peer standing without knowing internal registry logic.
 impl ReputationGate for TrustRegistry {
     fn is_blacklisted(&self, did: &Did) -> bool {
-        self.peers.get(did).is_some_and(|record| record.is_banned)
+        self.peers
+            .get(did)
+            .is_some_and(|record| record.reputation.is_blacklisted)
     }
 }

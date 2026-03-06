@@ -1,5 +1,5 @@
 use phalanx_proto::prelude::*;
-use phalanx_proto::trust::TrustRecord;
+use phalanx_proto::trust::PeerRecord;
 use phalanx_proto::trust::{MonotonicClock, TrustRegistry};
 use phalanx_proto::types::PhalanxPhysics;
 use phalanx_proto::types::PowerState;
@@ -22,39 +22,40 @@ impl TrustArbiter {
         const MAX_REPUTATION: i64 = 100; // The ceiling of trust
 
         for record in registry.peers.values_mut() {
-            if record.is_banned {
+            if record.reputation.is_blacklisted {
                 continue;
             }
 
             // last_update is now also a MonotonicClock
-            let elapsed = now.elapsed_since(record.last_update_secs);
+            let elapsed = now.elapsed_since(record.reputation.last_update_secs);
             let intervals = elapsed / interval_secs;
 
             if intervals > 0 {
                 let total_recovery = (intervals as i64) * recovery_step;
 
                 // ENFORCEMENT: Reputation cannot exceed the ceiling
-                record.reputation = (record.reputation + total_recovery).min(MAX_REPUTATION);
+                record.reputation.score =
+                    (record.reputation.score + total_recovery).min(MAX_REPUTATION);
 
-                if record.reputation < 0 {
-                    record.is_banned = true;
+                if record.reputation.score < 0 {
+                    record.reputation.is_blacklisted = true;
                 }
 
-                record.last_update_secs = now;
+                record.reputation.last_update_secs = now;
             }
         }
     }
 
-    pub fn should_verify_signature<R: Rng>(record: &TrustRecord, rng: &mut R) -> bool {
+    pub fn should_verify_signature<R: Rng>(record: &PeerRecord, rng: &mut R) -> bool {
         // Always verify if they are near the "Suspicion" zone
-        if record.reputation < 80 {
+        if record.reputation.score < 80 {
             return true;
         }
 
         // Probabilistic sampling for high-trust peers
         // 100 Rep = 5% check rate
         // 80 Rep = 20% check rate
-        let check_threshold: f64 = match record.reputation {
+        let check_threshold: f64 = match record.reputation.score {
             100..=i64::MAX => 0.05,
             80..=99 => 0.20,
             _ => 1.0,
@@ -63,11 +64,11 @@ impl TrustArbiter {
         rng.gen_bool(check_threshold)
     }
 
-    pub fn requires_heavy_verification<R: Rng>(record: &TrustRecord, rng: &mut R) -> bool {
+    pub fn requires_heavy_verification<R: Rng>(record: &PeerRecord, rng: &mut R) -> bool {
         // High-Reputation (100+): 5% spot-check rate (1 in 20)
         // Established (80-99): 20% spot-check rate
         // New/Suspicious (<80): 100% check rate
-        let probability = match record.reputation {
+        let probability = match record.reputation.score {
             100..=i64::MAX => 0.05,
             80..=99 => 0.20,
             _ => 1.0,
@@ -211,7 +212,7 @@ mod tests {
     use super::*;
     use crate::test_utils::MockClock;
     use phalanx_proto::identity::Did;
-    use phalanx_proto::trust::{TrustRecord, TrustRegistry};
+    use phalanx_proto::trust::{PeerRecord, PeerReputation, TrustRegistry};
 
     #[test]
     fn test_reputation_recovery_over_time() {
@@ -222,10 +223,14 @@ mod tests {
         // 1. Setup a penalized peer (not yet banned)
         registry.peers.insert(
             peer_did.clone(),
-            TrustRecord {
-                reputation: 50,
-                is_banned: false,
-                last_update_secs: clock.now(),
+            PeerRecord {
+                reputation: PeerReputation {
+                    score: 50,
+                    is_blacklisted: false,
+                    last_update_secs: clock.now(),
+                    ..Default::default()
+                },
+                ..Default::default()
             },
         );
 
@@ -233,7 +238,7 @@ mod tests {
         clock.tick(30);
         TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
         assert_eq!(
-            registry.peers[&peer_did].reputation, 50,
+            registry.peers[&peer_did].reputation.score, 50,
             "Should not recover before interval"
         );
 
@@ -241,7 +246,7 @@ mod tests {
         clock.tick(31); // Total 61s elapsed
         TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
         assert_eq!(
-            registry.peers[&peer_did].reputation, 60,
+            registry.peers[&peer_did].reputation.score, 60,
             "Reputation should have increased by recovery_step"
         );
 
@@ -249,7 +254,7 @@ mod tests {
         clock.tick(120); // 2 more intervals
         TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
         assert_eq!(
-            registry.peers[&peer_did].reputation, 80,
+            registry.peers[&peer_did].reputation.score, 80,
             "Reputation should follow multi-cycle recovery"
         );
 
@@ -257,7 +262,7 @@ mod tests {
         clock.tick(600);
         TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
         assert_eq!(
-            registry.peers[&peer_did].reputation, 100,
+            registry.peers[&peer_did].reputation.score, 100,
             "Reputation must not exceed 100"
         );
     }
@@ -270,20 +275,115 @@ mod tests {
 
         registry.peers.insert(
             peer_did.clone(),
-            TrustRecord {
-                reputation: -10,
-                is_banned: true, // HARD BAN
-                last_update_secs: clock.now(),
+            PeerRecord {
+                reputation: PeerReputation {
+                    score: -10,
+                    is_blacklisted: true, // HARD BAN
+                    last_update_secs: clock.now(),
+                    ..Default::default()
+                },
+                ..Default::default()
             },
         );
 
         clock.tick(3600); // 1 hour later
         TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
 
-        assert!(registry.peers[&peer_did].is_banned);
+        assert!(registry.peers[&peer_did].reputation.is_blacklisted);
         assert_eq!(
-            registry.peers[&peer_did].reputation, -10,
+            registry.peers[&peer_did].reputation.score, -10,
             "Banned peers require manual pardon"
         );
+    }
+
+    use phalanx_proto::identity::NetworkId;
+    use phalanx_proto::trust::TrustLevel;
+    use phalanx_proto::types::SystemStress;
+
+    fn mock_peer(id: u8) -> NetworkId {
+        let mut bytes = [0u8; 32];
+        bytes[0] = id;
+        NetworkId::random()
+    }
+
+    #[test]
+    fn test_iwfq_saturation_and_preemption() {
+        let mut gov = IngressGovernor::new(10);
+        let stress = SystemStress::Nominal;
+
+        // 1. Fill 10 slots with low-trust peers
+        for i in 0..10 {
+            let res = gov.try_allocate(mock_peer(i), TrustLevel::Ignored, stress);
+            assert!(res.is_ok(), "Failed to fill slot {}", i);
+        }
+
+        // 2. Verify the 11th low-trust peer is REJECTED (Backpressure)
+        let rejected_peer = mock_peer(11);
+        let res = gov.try_allocate(rejected_peer, TrustLevel::Ignored, stress);
+        assert!(res.is_err(), "11th Ignored peer should have been rejected");
+
+        // 3. Verify a high-trust ALLY peer PREEMPTS a low-trust peer
+        let ally_peer = mock_peer(99);
+        match gov.try_allocate(ally_peer.clone(), TrustLevel::Ally, stress) {
+            Ok(Some(evicted)) => {
+                // Assert that one of the Ignored peers (0-9) was kicked out
+                assert!(gov.active_slots.contains_key(&ally_peer));
+                assert!(!gov.active_slots.contains_key(&evicted));
+                println!("Preemption Success: Evicted low-trust peer {:?}", evicted);
+            }
+            other => panic!("Expected preemption of Ignored peer, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_thermal_load_shedding() {
+        let mut gov = IngressGovernor::new(10);
+
+        // Switch to Serious Stress (Capacity drops to 1)
+        let stress = SystemStress::Serious;
+
+        // 1. Verify Ignored peers are blocked regardless of capacity
+        let res = gov.try_allocate(mock_peer(1), TrustLevel::Ignored, stress);
+        assert!(
+            res.is_err(),
+            "Ignored peer should be blocked during Serious stress"
+        );
+
+        // 2. Verify Ally peer can still take the single remaining slot
+        let res = gov.try_allocate(mock_peer(2), TrustLevel::Ally, stress);
+        assert!(
+            res.is_ok(),
+            "Ally should be allowed 1 slot during Serious stress"
+        );
+
+        // 3. Verify second Ally is blocked (Capacity = 1)
+        let res = gov.try_allocate(mock_peer(3), TrustLevel::Ally, stress);
+        assert!(
+            res.is_err(),
+            "Second Ally should be blocked by Serious capacity limit"
+        );
+    }
+
+    #[test]
+    fn test_causal_loop_recycling() {
+        let mut gov = IngressGovernor::new(1);
+        let peer = mock_peer(1);
+
+        // Take the only slot
+        gov.try_allocate(peer.clone(), TrustLevel::Verified, SystemStress::Nominal)
+            .unwrap();
+
+        // Verify full
+        assert!(gov
+            .try_allocate(mock_peer(2), TrustLevel::Verified, SystemStress::Nominal)
+            .is_err());
+
+        // RELEASE via Causal Feedback
+        gov.release_slot(&peer);
+
+        // Verify slot is now usable again
+        assert!(gov
+            .try_allocate(mock_peer(2), TrustLevel::Verified, SystemStress::Nominal)
+            .is_ok());
     }
 }
