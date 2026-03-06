@@ -499,8 +499,7 @@ impl<T: NetworkTransport> MeshSentinel<T, NoOpJournal> {
 mod tests {
     use super::*;
     use crate::vitals::SystemGovernor;
-    use phalanx_forensics::witness::WitnessAuthority;
-    use phalanx_proto::evidence::WitnessEnvelope;
+    use phalanx_forensics::gate::WitnessGate;
     use phalanx_proto::evidence::{ChunkType, Evidence, StorageSequence, VideoShard};
     use phalanx_proto::network::NetworkEvent;
     use phalanx_proto::time::PhalanxTimestamp;
@@ -667,9 +666,9 @@ mod tests {
             volley_id: VolleyId::new("v_ingress"),
             payload: DataPayload::Clear(vec![0xAB; 4]),
         });
-        let envelope =
-            WitnessEnvelope::sign_envelope(evidence, &identity, identity.network_id.clone(), None)
-                .unwrap();
+        let envelope = evidence
+            .seal(&identity, identity.network_id.clone(), None)
+            .unwrap();
 
         let chunk = ShardChunk {
             shard_id: ShardId(1),
@@ -711,9 +710,9 @@ mod tests {
             volley_id: VolleyId::new("v_leaf"),
             payload: DataPayload::Clear(vec![0x00; 4]),
         });
-        let envelope =
-            WitnessEnvelope::sign_envelope(evidence, &identity, identity.network_id.clone(), None)
-                .unwrap();
+        let envelope = evidence
+            .seal(&identity, identity.network_id.clone(), None)
+            .unwrap();
 
         let chunk = ShardChunk {
             shard_id: ShardId(1),
