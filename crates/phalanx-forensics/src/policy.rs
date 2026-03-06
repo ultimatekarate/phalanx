@@ -3,9 +3,11 @@ use phalanx_proto::trust::TrustRecord;
 use phalanx_proto::trust::{MonotonicClock, TrustRegistry};
 use phalanx_proto::types::PhalanxPhysics;
 use phalanx_proto::types::PowerState;
+use phalanx_proto::types::SystemStress;
 use phalanx_proto::types::UnitInterval;
 use phalanx_proto::vitals::HeartbeatInterval;
 use rand::Rng;
+use std::collections::HashMap;
 
 pub struct TrustArbiter;
 
@@ -106,6 +108,84 @@ impl TrafficGovernor {
 impl Default for TrafficGovernor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub struct IngressGovernor {
+    pub active_slots: HashMap<NetworkId, TrustLevel>,
+    pub base_max_slots: usize,
+}
+
+impl IngressGovernor {
+    pub fn new(base_max_slots: usize) -> Self {
+        Self {
+            active_slots: HashMap::new(),
+            base_max_slots,
+        }
+    }
+
+    pub fn current_capacity(&self, stress: SystemStress) -> usize {
+        match stress {
+            SystemStress::Nominal => self.base_max_slots,
+            SystemStress::Fair => std::cmp::max(1, self.base_max_slots / 3),
+            SystemStress::Serious | SystemStress::Critical => 1,
+        }
+    }
+
+    pub fn try_allocate(
+        &mut self,
+        peer: NetworkId,
+        level: TrustLevel,
+        current_stress: SystemStress,
+    ) -> Result<Option<NetworkId>, &'static str> {
+        // 1. Stress Gate
+        // In Serious/Critical modes, we only accept Verified or Ally peers.
+        if current_stress >= SystemStress::Serious
+            && Self::trust_score(level) < Self::trust_score(TrustLevel::Verified)
+        {
+            return Err("System stress too high for untrusted peer");
+        }
+
+        let capacity = self.current_capacity(current_stress);
+
+        // 2. Capacity Check
+        if self.active_slots.len() < capacity {
+            self.active_slots.insert(peer, level);
+            return Ok(None);
+        }
+
+        // 3. Preemption Logic (Identity-Weighted Fair Queuing)
+        let incoming_score = Self::trust_score(level);
+
+        // Find a peer in active_slots with a strictly lower TrustLevel.
+        // We prioritize evicting the lowest trust peer to make room.
+        let victim = self
+            .active_slots
+            .iter()
+            .filter(|(_, &l)| Self::trust_score(l) < incoming_score)
+            .min_by_key(|(_, &l)| Self::trust_score(l))
+            .map(|(id, _)| id.clone());
+
+        if let Some(victim_id) = victim {
+            self.active_slots.remove(&victim_id);
+            self.active_slots.insert(peer, level);
+            Ok(Some(victim_id))
+        } else {
+            Err("No lower-priority slots available for preemption")
+        }
+    }
+
+    pub fn release_slot(&mut self, peer: &NetworkId) {
+        self.active_slots.remove(peer);
+    }
+
+    fn trust_score(level: TrustLevel) -> u8 {
+        match level {
+            TrustLevel::Blocked => 0,
+            TrustLevel::Ignored => 1,
+            TrustLevel::Verified => 2,
+            TrustLevel::Ally => 3,
+        }
     }
 }
 

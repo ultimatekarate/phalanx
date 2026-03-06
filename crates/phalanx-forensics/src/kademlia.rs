@@ -196,3 +196,65 @@ pub trait PeerEvaluator: Send + Sync + 'static {
     /// Returns a normalized reputation score (e.g., 0.0 to 1.0).
     fn evaluate_reputation(&self, peer_id: &NetworkId) -> f32;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phalanx_proto::identity::NetworkId;
+
+    #[test]
+    fn test_dht_provider_set_weighted_eviction() {
+        let mut set = DhtProviderSet {
+            providers: Vec::new(),
+        };
+        let now = system_time_now_unix();
+        let future = now + 1000;
+
+        // Fill the set with providers of increasing reputation
+        for i in 0..DhtProviderSet::MAX_PROVIDERS {
+            let pid = NetworkId::from(format!("peer_{}", i));
+            // Reputation 0.0 to 0.19
+            set.try_insert_weighted(pid, future, i as f32 / 100.0);
+        }
+
+        // Ensure full
+        assert_eq!(set.providers.len(), DhtProviderSet::MAX_PROVIDERS);
+
+        // Attempt to insert a high reputation peer (1.0)
+        let high_rep = NetworkId::from("high_rep_peer");
+        let inserted = set.try_insert_weighted(high_rep.clone(), future, 1.0);
+
+        assert!(
+            inserted,
+            "High reputation peer should displace low reputation peer"
+        );
+
+        // Verify the new peer is present
+        assert!(set.providers.iter().any(|p| p.network_id == high_rep));
+
+        // Verify the lowest reputation peer (peer_0 with 0.0) was evicted
+        let evicted = NetworkId::from("peer_0");
+        assert!(!set.providers.iter().any(|p| p.network_id == evicted));
+
+        // Attempt to insert a low reputation peer (0.0)
+        let low_rep = NetworkId::from("low_rep_peer");
+        let inserted_low = set.try_insert_weighted(low_rep, future, 0.0);
+
+        assert!(
+            !inserted_low,
+            "Low reputation peer should not displace existing better peers"
+        );
+    }
+
+    #[test]
+    fn test_dht_payload_validation() {
+        let valid = DhtPayload::new(vec![0x01, 0x02], PayloadKind::ShardPointer, None);
+        assert!(valid.validate().is_ok());
+
+        let empty = DhtPayload::new(vec![], PayloadKind::ShardPointer, None);
+        assert!(matches!(
+            empty.validate(),
+            Err(ShardError::InvalidConfiguration(_))
+        ));
+    }
+}

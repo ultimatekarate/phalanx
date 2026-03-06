@@ -8,7 +8,7 @@
 
 $CratesPath = 'crates'
 $RootCargo = 'Cargo.toml'
-$OutputFile = 'C:\Users\joevo\OneDrive\Desktop\PROJECT_CONTEXT.md'
+$OutputFile = 'C:\Users\joevo\Desktop\PROJECT_CONTEXT.md'
 $NL = [System.Environment]::NewLine
 
 function Get-SystemMetadata {

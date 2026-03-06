@@ -2,6 +2,7 @@ use crate::VolleyResponse;
 // crates/phalanx-proto/src/storage.rs
 use crate::evidence::{SignatureHash, StorageSequence};
 use crate::identity::{Did, VolleyId};
+use crate::prelude::NetworkId;
 use crate::prelude::PhalanxTimestamp;
 use crate::prelude::ShardError;
 use crate::time::TimeError;
@@ -66,6 +67,6 @@ pub struct PendingEgress {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StorageAck {
-    Success(VolleyId),
-    Failure(ShardError),
+    Success(VolleyId, NetworkId),
+    Failure(ShardError, NetworkId),
 }

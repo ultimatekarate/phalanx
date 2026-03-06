@@ -57,9 +57,16 @@ impl Guardian {
                 let now = PhalanxTimestamp::now();
 
                 let unit = ForensicUnit::new(envelope);
-                let verified_unit = unit
-                    .promote(&node_id, now, 10_000, anchor)
-                    .map_err(|e| GuardianError::VerificationFailed(e.to_string()))?;
+                let verified_unit =
+                    unit.promote(&node_id, now, 10_000, anchor)
+                        .map_err(|e| match e {
+                            ShardError::InvalidConfiguration(ref msg)
+                                if msg.contains("Causality Break") =>
+                            {
+                                GuardianError::ChainIntegrityViolation
+                            }
+                            _ => GuardianError::VerificationFailed(e.to_string()),
+                        })?;
 
                 // 2. Volley Aggregation
                 // The Crucible now accepts only Verified units

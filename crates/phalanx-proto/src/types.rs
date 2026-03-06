@@ -272,3 +272,44 @@ impl<T> ForensicUnit<T, Unverified> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_unit_interval_behavior() {
+        // Test clamping
+        let high = UnitInterval::new(1.5);
+        assert_eq!(high.as_f32(), 1.0);
+
+        let low = UnitInterval::new(-0.1);
+        assert_eq!(low.as_f32(), 0.0);
+
+        // Test NaN safety (Forensic Protocol: default to 1.0)
+        let nan = UnitInterval::new(f32::NAN);
+        assert_eq!(nan.as_f32(), 1.0);
+
+        // Test complement
+        let load = UnitInterval::new(0.3);
+        assert_eq!(load.complement().as_f32(), 0.7);
+
+        // Test critical threshold
+        let critical = UnitInterval::new(0.1);
+        assert!(critical.is_critical());
+
+        let healthy = UnitInterval::new(0.2);
+        assert!(!healthy.is_critical());
+    }
+
+    #[test]
+    fn test_byte_capacity_arithmetic() {
+        let cap = ByteCapacity::from_mib(10);
+
+        let added = cap.saturating_add(1024);
+        assert_eq!(added.as_u64(), 10 * 1024 * 1024 + 1024);
+
+        let subbed = cap.saturating_sub(20 * 1024 * 1024);
+        assert_eq!(subbed.as_u64(), 0);
+    }
+}
