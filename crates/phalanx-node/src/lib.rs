@@ -4,7 +4,6 @@ pub mod actors {
     pub mod ingress;
     pub mod meshsentinel;
     pub mod playback;
-    pub mod retrieval;
     pub mod storage;
     pub mod trust_manager;
 }

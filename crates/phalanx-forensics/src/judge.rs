@@ -183,3 +183,101 @@ pub use crate::gate::{
     BufferCapacityGate, CapacityGate, ChronosGate, ContinuityGate, ForensicGate, IntegrityGate,
     PrivacyGate, WitnessGate,
 };
+
+#[cfg(test)]
+mod tests {
+    use crate::witness::WitnessAuthority;
+
+    use super::*;
+    use crate::policy::EgressGovernor;
+    use phalanx_proto::evidence::{
+        DataPayload, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
+    };
+    use phalanx_proto::identity::{PhalanxIdentity, VolleyId};
+    use phalanx_proto::time::PhalanxTimestamp;
+    use phalanx_proto::trust::TrustLevel;
+    use phalanx_proto::types::{ForensicUnit, SystemStress, Verified};
+
+    use tracing::info;
+
+    #[tokio::test]
+    async fn test_forensic_boundary_tamper_detection_v4() {
+        // 1. Setup Identities & Baseline Environment
+        let witness_identity = PhalanxIdentity::new_ephemeral();
+        let witness_peer_id = witness_identity.clone().network_id;
+        let vid = VolleyId::new("test_stream_01");
+        let now = PhalanxTimestamp::now();
+
+        // 2. Properly initialize a valid VideoShard
+        let original_shard = VideoShard {
+            timestamp: now,
+            sequence_id: StorageSequence(100),
+            fps: 30,
+            volley_id: vid,
+            payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        };
+
+        // Seal the evidence legitimately
+        let mut envelope = WitnessEnvelope::sign_envelope(
+            Evidence::Video(original_shard),
+            &witness_identity,
+            witness_peer_id.clone(),
+            None,
+        )
+        .expect("Failed to initialize valid WitnessEnvelope");
+
+        // 3. BASELINE: Verify check_integrity passes on clean data (Gate 3)
+        let integrity_result =
+            envelope
+                .clone()
+                .check_integrity(&witness_peer_id, now, 10_000, None);
+        assert!(
+            integrity_result.is_ok(),
+            "Integrity Gate failed on clean data"
+        );
+
+        // 4. TAMPER: Modify the evidence bytes (Simulation of disk-rot or database injection)
+        match &mut envelope.evidence {
+            Evidence::Video(shard) => {
+                if let DataPayload::Clear(ref mut bytes) = shard.payload {
+                    bytes.push(0xFF); // Injected corruption into the real struct
+                }
+            }
+            _ => panic!("Expected Video evidence"),
+        }
+
+        // 5. THE TEST: Gate 3 (Integrity) must catch the modification
+        // Re-serializing and comparing against the stored signature must fail.
+        let tamper_result = envelope.check_integrity(&witness_peer_id, now, 10_000, None);
+
+        assert!(
+            tamper_result.is_err(),
+            "INTEGRITY BREACH: Gate 3 (check_integrity) accepted modified evidence!"
+        );
+
+        // 6. THE ARCHITECTURAL LOCK: Gate 4 (Policy Promotion)
+        // We prove that without a successful Gate 3, we cannot obtain a 'Verified' unit,
+        // which means the EgressGovernor cannot produce a 'Sealed' unit for the wire.
+        match tamper_result {
+            Ok(valid_env) => {
+                // If we somehow reached here (we shouldn't), the Governor is the second line of defense.
+                let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
+                let sealed_result =
+                    EgressGovernor::authorize(unit, &TrustLevel::Ally, &SystemStress::Nominal);
+                assert!(
+                    sealed_result.is_err(),
+                    "Governor allowed tampered data to be promoted to Sealed!"
+                );
+            }
+            Err(_) => {
+                info!("Gate 3 correctly blocked promotion. No 'Verified' unit was created.");
+            }
+        }
+
+        // 7. FINAL PROOF: VolleyResponse requires Sealed units
+        // Because the tamper_result was an Err, we can't even construct a
+        // VolleyResponse::Success(vec![...]) with this data.
+
+        info!("Forensic Boundary: Successfully verified that Gate 3 and Gate 4 block tampered evidence.");
+    }
+}

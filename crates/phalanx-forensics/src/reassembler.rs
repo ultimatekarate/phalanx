@@ -115,16 +115,19 @@ impl Reassembler {
         match self.active_shards.process(chunk) {
             Some(envelope) => Ok(Some(EnvelopeState::Intact(envelope))),
             None => {
-                let buffer = self.active_shards.get(&shard_id).unwrap();
-                Ok(Some(EnvelopeState::Fragmented(FragmentedEnvelope {
-                    shard_id,
-                    owner_did,
-                    gap_report: ShardGapReport {
+                if let Some(buffer) = self.active_shards.get(&shard_id) {
+                    Ok(Some(EnvelopeState::Fragmented(FragmentedEnvelope {
                         shard_id,
-                        missing_indices: buffer.missing_indices(),
-                    },
-                    partial_data: buffer.parts.clone(),
-                })))
+                        owner_did,
+                        gap_report: ShardGapReport {
+                            shard_id,
+                            missing_indices: buffer.missing_indices(),
+                        },
+                        partial_data: buffer.parts.clone(),
+                    })))
+                } else {
+                    Err(ShardError::CapacityExceeded(0))
+                }
             }
         }
     }

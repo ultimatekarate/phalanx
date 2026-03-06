@@ -12,7 +12,7 @@ use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::journal::FileJournal;
 use phalanx_node::persistence::vault::Guardian;
 use phalanx_proto::evidence::{ChunkType, DataPayload, Evidence, StorageSequence, VideoShard};
-use phalanx_proto::identity::{Did, NetworkId, PhalanxIdentity, ShardId, VolleyId};
+use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
 use phalanx_proto::prelude::{PendingEgress, ShardChunk, ShardError};
 use phalanx_proto::retrieval::VolleyResponse;
 use phalanx_proto::storage::GuardianError;
