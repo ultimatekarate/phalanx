@@ -7,14 +7,19 @@ use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
 use crate::state::SyncReputationCache;
 use crate::vitals::HealthTracker;
+use crate::vitals::SystemGovernor;
 use crate::Guardian;
 use crate::StorageActor;
+use phalanx_forensics::policy::IngressGovernor;
 use phalanx_forensics::prelude::*;
 use phalanx_proto::prelude::*;
+use phalanx_proto::storage::StorageAck;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 
 use crate::identity::PhalanxNodeIdentityExt;
 use crate::trust::TrustRegistry;
-use phalanx_forensics::trust::{PeerEvaluator, ReputationGate};
+use phalanx_forensics::trust::ReputationGate;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::AudioShard;
 use phalanx_proto::evidence::Evidence;
@@ -28,8 +33,6 @@ use phalanx_transport::identity_ext::Libp2pExt;
 use phalanx_transport::NetworkTransport;
 use std::collections::VecDeque;
 use std::error::Error;
-use std::sync::Arc;
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, Duration};
 
@@ -49,6 +52,7 @@ pub struct SentinelDependencies<T: NetworkTransport, J: TransientJournal> {
     pub reputation_cache: Arc<SyncReputationCache>,
     pub discovery_rx: mpsc::Receiver<(VolleyId, StorageSequence)>,
     pub discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
+    pub system_governor: Arc<SystemGovernor>,
 }
 
 pub struct MeshSentinel<T: NetworkTransport, J: TransientJournal> {
@@ -73,6 +77,9 @@ pub struct MeshSentinel<T: NetworkTransport, J: TransientJournal> {
     pub pending_egress: VecDeque<PendingEgress>,
     pub discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
     pub discovery_rx: mpsc::Receiver<(VolleyId, StorageSequence)>,
+    ingress_governor: IngressGovernor,
+    system_governor: Arc<SystemGovernor>,
+    ack_rx: mpsc::Receiver<StorageAck>,
 }
 
 impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, J> {
@@ -84,9 +91,10 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
 
         let (_, video_rx) = mpsc::channel(deps.config.storage.max_video_buffer);
         let (_, audio_rx) = mpsc::channel(deps.config.storage.max_audio_buffer);
-        let (storage_tx, storage_rx) = mpsc::channel(1024);
+        let (storage_tx, storage_rx) = mpsc::channel(10);
+        let (ack_tx, ack_rx) = mpsc::channel(10);
         let (forensic_tx, forensic_rx) = mpsc::channel(100);
-
+        let ingress_governor = IngressGovernor::new(10);
         // Stateless Recovery: Pull salvaged egress from the journal
         let salvaged_queue = deps
             .journal
@@ -108,6 +116,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             identity: deps.identity.clone(),
             forensic_tx,
             local_peer_id: local_network_id.clone(),
+            ack_tx,
         };
 
         let storage_task = tokio::spawn(async move {
@@ -139,6 +148,9 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             pending_egress: VecDeque::from(salvaged_queue),
             discovery_rx: deps.discovery_rx,
             discovery_tx: deps.discovery_tx,
+            ingress_governor,
+            system_governor: deps.system_governor,
+            ack_rx,
         })
     }
 
@@ -178,6 +190,14 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                 }
                 Some((volley_id, gap_sequence)) = self.discovery_rx.recv() => {
                     self.handle_gap_discovery(volley_id, gap_sequence).await;
+                }
+                Some(ack) = self.ack_rx.recv() => {
+                // Extract peer_id from ack (assuming ack has a peer_id field)
+                    let peer_id = match ack {
+                        StorageAck::Success(_, peer_id) => peer_id,
+                        StorageAck::Failure(_, peer_id) => peer_id,
+                    };
+                    self.ingress_governor.release_slot(&peer_id);
                 }
             }
         }
@@ -369,15 +389,28 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             Ok(chunk) => {
                 let sender_did = chunk.owner_did.clone();
 
-                let record = self
-                    .trust_registry
-                    .get_reputation_mut(&sender_did)
-                    .cloned()
-                    .unwrap_or_default();
-
-                if record.is_blacklisted {
+                if self.trust_registry.is_blacklisted(&sender_did) {
                     self.network.ban_peer(&peer_id).await;
                     return;
+                }
+
+                let trust_level = self.trust_registry.check_trust(&sender_did);
+                let stress = self.system_governor.current_stress();
+
+                match self
+                    .ingress_governor
+                    .try_allocate(peer_id.clone(), trust_level, stress)
+                {
+                    Ok(Some(evicted_peer)) => {
+                        self.network.ban_peer(&evicted_peer).await;
+                    }
+                    Ok(None) => {
+                        // Allocation successful, proceed
+                    }
+                    Err(_) => {
+                        // Allocation failed (stress or capacity), drop packet
+                        return;
+                    }
                 }
 
                 // Explicit error handling for the internal channel I/O operation
@@ -419,12 +452,6 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             self.trust_registry
                 .record_offense(&owner_did, offense_type, &self.clock)
                 .await;
-            let score = self.trust_registry.evaluate_reputation(&peer_id);
-            self.reputation_cache
-                .scores
-                .write()
-                .unwrap()
-                .insert(peer_id.clone(), score);
             if self.trust_registry.is_blacklisted(&owner_did) {
                 self.network.ban_peer(&peer_id).await;
             }
@@ -450,6 +477,7 @@ impl<T: NetworkTransport> MeshSentinel<T, NoOpJournal> {
             reputation_cache: Arc::new(SyncReputationCache::default()),
             discovery_rx,
             discovery_tx,
+            system_governor: Arc::new(SystemGovernor::new()),
         };
 
         Self::new(deps).await
@@ -459,12 +487,12 @@ impl<T: NetworkTransport> MeshSentinel<T, NoOpJournal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vitals::SystemGovernor;
     use phalanx_forensics::witness::WitnessAuthority;
     use phalanx_proto::evidence::WitnessEnvelope;
     use phalanx_proto::evidence::{ChunkType, Evidence, StorageSequence, VideoShard};
     use phalanx_proto::network::NetworkEvent;
     use phalanx_proto::time::PhalanxTimestamp;
-    use phalanx_proto::trust::PeerRecord;
     use phalanx_proto::types::PowerState;
 
     use tokio::sync::mpsc;
@@ -532,6 +560,7 @@ mod tests {
             reputation_cache: Arc::new(SyncReputationCache::default()),
             discovery_tx,
             discovery_rx,
+            system_governor: Arc::new(SystemGovernor::new()),
         };
 
         (
@@ -545,6 +574,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_network_ingress_enforces_trust_registry() {
         // 1. Initialize the test environment using the provided helper
+        let (_ack_tx, ack_rx) = mpsc::channel(10);
         let (_ingress_tx, ingress_rx) = mpsc::channel(10);
         let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
 
@@ -556,25 +586,16 @@ mod tests {
         let topic = MeshTopic::new("phalanx/test/1.0.0");
         let valid_peer = NetworkId::random();
         let bad_peer = NetworkId::random();
-        let bad_peer_petname = PetName::new("bad_actor".to_string()).expect("Invalid pet name");
         let valid_did = Did("did:phalanx:trusted".to_string());
         let bad_did = Did("did:phalanx:malicious".to_string());
+        sentinel.ack_rx = ack_rx;
 
         // Force the bad_did into a blacklisted state within the trust registry.
-        // Note: Replace this with your exact TrustRegistry mutator method if
-        // direct HashMap access to `contacts` is encapsulated.
-        let mut bad_record = PeerRecord::default();
-        bad_record.reputation.is_blacklisted = true;
         sentinel
             .trust_registry
-            .set_peer(
-                &bad_did.clone(),
-                &bad_peer_petname,
-                TrustLevel::Blocked,
-                &TrustedClock::new(),
-            )
+            .register_peer(&bad_did, TrustLevel::Blocked, &TrustedClock::new())
             .await
-            .expect("Failed to set peer");
+            .expect("Failed to register bad peer");
 
         // 2. Test Blacklisted Peer Rejection
         let mut bad_chunk = ShardChunk::default();
@@ -742,6 +763,9 @@ mod tests {
                 .record_offense(&attacker.did, Offense::InvalidSignature, &sentinel.clock)
                 .await;
         }
+        // Pre-blacklist the attacker's DID by penalizing them
+        use phalanx_forensics::trust::TrustAuthority;
+        sentinel.trust_registry.penalize_peer(&attacker.did, 200);
 
         let evidence = Evidence::Video(VideoShard {
             timestamp: PhalanxTimestamp::now(),

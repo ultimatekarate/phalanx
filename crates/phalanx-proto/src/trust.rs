@@ -14,7 +14,7 @@ pub enum Offense {
     MalformedPacket,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum TrustLevel {
     Blocked,
     #[default]
@@ -127,6 +127,8 @@ impl fmt::Display for PetName {
 pub enum TrustError {
     #[error("Peer with DID {0} already exists")]
     PeerAlreadyExists(Did),
+    #[error("Peer with DID {0} not found")]
+    PeerNotFound(Did),
     #[error("The pet name '{0}' is already in use by another DID")]
     PetnameCollision(String),
     #[error("Failed to persist registry: {0}")]

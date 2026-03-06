@@ -206,28 +206,7 @@ impl TrustRegistry {
     pub async fn record_offense(&mut self, did: &Did, offense: Offense, clock: &TrustedClock) {
         // Ensure the peer is tracked in the registry. If unknown, register as Ignored.
         if !self.contacts.contains_key(did) {
-            let base_name = format!(
-                "Unknown-{}",
-                did.as_str().chars().take(8).collect::<String>()
-            );
-            let mut fallback_name = base_name.clone();
-            let mut counter = 1;
-
-            let mut pet_name =
-                PetName::new(&fallback_name).unwrap_or_else(|_| PetName::new("Unknown").unwrap());
-
-            // Deterministic collision resolution: Append suffix until unique
-            while self.pet_name_index.contains_key(&pet_name) {
-                fallback_name = format!("{}-{}", base_name, counter);
-                pet_name = PetName::new(&fallback_name)
-                    .unwrap_or_else(|_| PetName::new("Unknown").unwrap());
-                counter += 1;
-            }
-
-            if let Err(e) = self
-                .set_peer(did, &pet_name, TrustLevel::Ignored, clock)
-                .await
-            {
+            if let Err(e) = self.register_peer(did, TrustLevel::Ignored, clock).await {
                 tracing::error!(%did, error = %e, "Failed to register unknown offender");
                 return;
             }
@@ -304,6 +283,59 @@ impl TrustRegistry {
         self.contacts
             .get_mut(did)
             .map(|record| &mut record.reputation)
+    }
+
+    fn generate_unique_pet_name(&self, did: &Did) -> PetName {
+        let base_name = format!(
+            "Unknown-{}",
+            did.as_str().chars().take(8).collect::<String>()
+        );
+        let mut fallback_name = base_name.clone();
+        let mut counter = 1;
+
+        let mut pet_name =
+            PetName::new(&fallback_name).unwrap_or_else(|_| PetName::new("Unknown").unwrap());
+
+        while self.pet_name_index.contains_key(&pet_name) {
+            fallback_name = format!("{}-{}", base_name, counter);
+            pet_name =
+                PetName::new(&fallback_name).unwrap_or_else(|_| PetName::new("Unknown").unwrap());
+            counter += 1;
+        }
+        pet_name
+    }
+
+    pub async fn register_peer(
+        &mut self,
+        did: &Did,
+        level: TrustLevel,
+        clock: &TrustedClock,
+    ) -> Result<(), TrustError> {
+        let pet_name = self.generate_unique_pet_name(did);
+        self.insert_peer(did, &pet_name, level, clock).await
+    }
+
+    pub async fn assign_pet_name(
+        &mut self,
+        did: &Did,
+        pet_name: PetName,
+    ) -> Result<(), TrustError> {
+        if let Some(existing_did) = self.pet_name_index.get(&pet_name) {
+            if existing_did != did {
+                return Err(TrustError::PetnameCollision(pet_name.to_string()));
+            }
+        }
+
+        let record = self
+            .contacts
+            .get_mut(did)
+            .ok_or_else(|| TrustError::PeerNotFound(did.clone()))?;
+
+        self.pet_name_index.remove(&record.pet_name);
+        record.pet_name = pet_name.clone();
+        self.pet_name_index.insert(pet_name, did.clone());
+
+        self.save().await
     }
 
     /// Inserts a new peer into the registry, failing if the peer already exists.

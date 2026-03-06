@@ -132,59 +132,49 @@ impl IngressGovernor {
         }
     }
 
+    pub fn release_slot(&mut self, peer: &NetworkId) {
+        self.active_slots.remove(peer);
+    }
+
     pub fn try_allocate(
         &mut self,
         peer: NetworkId,
         level: TrustLevel,
         current_stress: SystemStress,
     ) -> Result<Option<NetworkId>, &'static str> {
-        // 1. Stress Gate
-        // In Serious/Critical modes, we only accept Verified or Ally peers.
-        if current_stress >= SystemStress::Serious
-            && Self::trust_score(level) < Self::trust_score(TrustLevel::Verified)
-        {
-            return Err("System stress too high for untrusted peer");
+        let max_slots = self.current_capacity(current_stress);
+
+        if self.active_slots.contains_key(&peer) {
+            return Ok(None); // Peer already occupies a slot
         }
 
-        let capacity = self.current_capacity(current_stress);
+        // Under Serious stress, ONLY Ally or Verified peers are permitted
+        if matches!(
+            current_stress,
+            SystemStress::Serious | SystemStress::Critical
+        ) && matches!(level, TrustLevel::Blocked | TrustLevel::Ignored)
+        {
+            return Err("Capacity Exceeded: Thermal/Battery critical. Untrusted peers dropped.");
+        }
 
-        // 2. Capacity Check
-        if self.active_slots.len() < capacity {
+        if self.active_slots.len() < max_slots {
             self.active_slots.insert(peer, level);
             return Ok(None);
         }
 
-        // 3. Preemption Logic (Identity-Weighted Fair Queuing)
-        let incoming_score = Self::trust_score(level);
-
-        // Find a peer in active_slots with a strictly lower TrustLevel.
-        // We prioritize evicting the lowest trust peer to make room.
-        let victim = self
+        // IWFQ Preemption: Find a peer with strictly lower trust to evict
+        let target = self
             .active_slots
             .iter()
-            .filter(|(_, &l)| Self::trust_score(l) < incoming_score)
-            .min_by_key(|(_, &l)| Self::trust_score(l))
+            .find(|(_, active_lvl)| active_lvl < &&level)
             .map(|(id, _)| id.clone());
 
-        if let Some(victim_id) = victim {
-            self.active_slots.remove(&victim_id);
+        if let Some(evicted_peer) = target {
+            self.active_slots.remove(&evicted_peer);
             self.active_slots.insert(peer, level);
-            Ok(Some(victim_id))
+            Ok(Some(evicted_peer))
         } else {
-            Err("No lower-priority slots available for preemption")
-        }
-    }
-
-    pub fn release_slot(&mut self, peer: &NetworkId) {
-        self.active_slots.remove(peer);
-    }
-
-    fn trust_score(level: TrustLevel) -> u8 {
-        match level {
-            TrustLevel::Blocked => 0,
-            TrustLevel::Ignored => 1,
-            TrustLevel::Verified => 2,
-            TrustLevel::Ally => 3,
+            Err("Capacity Exceeded: No lower-trust peers to preempt")
         }
     }
 }

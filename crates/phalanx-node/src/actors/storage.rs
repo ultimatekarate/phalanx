@@ -1,5 +1,4 @@
 // crates/phalanx-node/src/actors/storage.rs
-
 use crate::actors::retrieval::RetrievalQuery;
 use crate::config::NodeConfig;
 use crate::Guardian;
@@ -8,6 +7,7 @@ use phalanx_forensics::prelude::*;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*;
+use phalanx_proto::storage::StorageAck;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::interval;
@@ -20,6 +20,7 @@ pub struct StorageActor<J: TransientJournal> {
     pub identity: PhalanxIdentity,
     pub forensic_tx: mpsc::Sender<(NetworkId, Did, GuardianError)>,
     pub local_peer_id: NetworkId,
+    pub ack_tx: mpsc::Sender<StorageAck>,
 }
 
 pub enum StorageCommand {
@@ -140,6 +141,14 @@ impl<J: TransientJournal> StorageActor<J> {
 
         if topic != normalized_video && topic != normalized_audio {
             tracing::warn!(target: "phalanx::forensics", ?topic, "Rejecting shard: Topic mismatch");
+            // CAUSAL LOOP: Release slot even on early rejection
+            let _ = self
+                .ack_tx
+                .send(StorageAck::Failure(
+                    ShardError::InvalidConfiguration("Topic mismatch".into()),
+                    peer_id,
+                ))
+                .await;
             return;
         }
 
@@ -161,7 +170,11 @@ impl<J: TransientJournal> StorageActor<J> {
                 if let Err(err) = self.guardian.ingest_envelope(envelope_state).await {
                     tracing::error!(error = %err, "Forensics: Guardian rejected network envelope");
 
-                    if let Err(e) = self.forensic_tx.send((peer_id, chunk_owner_did, err)).await {
+                    if let Err(e) = self
+                        .forensic_tx
+                        .send((peer_id.clone(), chunk_owner_did, err))
+                        .await
+                    {
                         tracing::error!(error = %e, "CRITICAL: Forensic channel disconnected");
                     }
                 }
@@ -176,10 +189,15 @@ impl<J: TransientJournal> StorageActor<J> {
                     GuardianError::VerificationFailed(format!("Shard integrity: {}", err));
                 let _ = self
                     .forensic_tx
-                    .send((peer_id, chunk_owner_did, forensic_err))
+                    .send((peer_id.clone(), chunk_owner_did, forensic_err))
                     .await;
             }
         }
+
+        let _ = self
+            .ack_tx
+            .send(StorageAck::Success(VolleyId::new(""), peer_id.clone()))
+            .await;
     }
 }
 

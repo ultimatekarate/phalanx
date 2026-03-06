@@ -20,7 +20,19 @@ pub struct SystemGovernor {
     current_state: std::sync::RwLock<SystemStress>,
 }
 
+impl Default for SystemGovernor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SystemGovernor {
+    pub fn new() -> Self {
+        Self {
+            current_state: std::sync::RwLock::new(SystemStress::Nominal),
+        }
+    }
+
     pub fn check_permission(&self, task_cost: TaskCost) -> bool {
         let state = *self
             .current_state
@@ -46,6 +58,13 @@ impl SystemGovernor {
             .write()
             .unwrap_or_else(|poison| poison.into_inner());
         *guard = new_state;
+    }
+
+    pub fn current_stress(&self) -> SystemStress {
+        *self
+            .current_state
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
