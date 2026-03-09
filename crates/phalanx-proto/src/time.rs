@@ -1,4 +1,5 @@
 use crate::evidence::SignatureHash;
+use crate::evidence::WitnessEnvelope;
 use crate::identity::NetworkId;
 use crate::identity::PhalanxIdentity;
 use std::time::SystemTime;
@@ -50,6 +51,29 @@ impl CausalitySession {
             last_hash: None,
         }
     }
+
+    /// Validates the incoming envelope against the session's continuity chain.
+    /// If valid, it updates the session state to point to the new head.
+    pub fn verify_next(&mut self, envelope: &WitnessEnvelope) -> Result<(), TimeError> {
+        let incoming_prev = envelope.prev_hash;
+
+        // 1. Link Validation
+        match (self.last_hash, incoming_prev) {
+            // Sequential case: Ensure incoming prev matches our current head
+            (Some(expected), Some(found)) if expected == found => Ok(()),
+
+            // Genesis case: New session expects a None prev_hash
+            (None, None) => Ok(()),
+
+            // Violation: Mismatch or unexpected link state
+            (expected, found) => Err(TimeError::CausalityBreak { expected, found }),
+        }?;
+
+        // 2. State Advancement: Promote the new hash as the chain head
+        self.last_hash = Some(SignatureHash(envelope.evidence_hash));
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
@@ -68,4 +92,9 @@ pub enum TimeError {
     FutureTimestamp,
     #[error("Resource expired")]
     Expired,
+    #[error("Causality violation: Expected prev_hash {expected:?}, found {found:?}")]
+    CausalityBreak {
+        expected: Option<SignatureHash>,
+        found: Option<SignatureHash>,
+    },
 }
