@@ -1,4 +1,3 @@
-// --- crates/phalanx-node/src/trust.rs ---
 use crate::clock::TrustedClock;
 use crate::NodeConfig;
 use phalanx_forensics::trust::{PeerEvaluator, ReputationGate};

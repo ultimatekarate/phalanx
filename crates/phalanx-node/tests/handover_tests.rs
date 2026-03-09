@@ -18,7 +18,7 @@ async fn test_legal_identity_handover() {
     let temp_dir = tempfile::tempdir().unwrap();
     let config = NodeConfig::test_defaults();
 
-    // 1. Setup Identities (The Relay and the Target)
+    // Setup Identities (The Relay and the Target)
     let (identity_a, _) = PhalanxIdentity::generate().expect("Failed to generate Old DID");
     let (identity_b, _) = PhalanxIdentity::generate().expect("Failed to generate New DID");
 

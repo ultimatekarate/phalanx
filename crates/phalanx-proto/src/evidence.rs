@@ -67,7 +67,7 @@ impl SignatureHash {
     }
 }
 
-/// The Evidence Monad: Wraps all possible forensic data types.
+/// The Evidence Enum: Wraps all possible forensic data types.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Evidence {
     Video(VideoShard),
