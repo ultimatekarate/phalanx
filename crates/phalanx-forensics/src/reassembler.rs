@@ -180,7 +180,8 @@ impl Mold for ShardMold {
 
     fn init_accumulator(item: &Self::Input) -> Self::Accumulator {
         ShardBuffer {
-            total_chunks: item.total_chunks,
+            // FIXED: Clamp the requested chunks to our safe ceiling
+            total_chunks: std::cmp::min(item.total_chunks, 10_000),
             received_count: 0,
             parts: BTreeMap::new(),
             owner_did: item.owner_did.clone(),
