@@ -1,9 +1,11 @@
 use crate::behaviour::PhalanxBehaviour;
+use crate::events::PhalanxEvent;
 use crate::{PeerMapper, TransportAdapter, TransportError};
 use async_trait::async_trait;
 use futures::StreamExt; // Required to bring StreamExt::select_next_some into scope
 use libp2p::kad::store::RecordStore;
 use libp2p::swarm::Swarm;
+use libp2p::swarm::SwarmEvent;
 use phalanx_proto::identity::NetworkId;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::topic::MeshTopic;
@@ -21,6 +23,37 @@ pub struct Libp2pAdapter {
     command_tx: mpsc::Sender<TransportCommand>,
     // Arc<Mutex<>> ensures the Receiver can be extracted safely across threads
     event_rx_factory: Arc<Mutex<Option<mpsc::Receiver<NetworkEvent>>>>,
+}
+
+pub fn translate_swarm_event(event: SwarmEvent<PhalanxEvent>) -> Option<NetworkEvent> {
+    match event {
+        SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(libp2p::gossipsub::Event::Message {
+            propagation_source,
+            message,
+            ..
+        })) => Some(NetworkEvent::DataReceived {
+            origin: PeerMapper::to_network_id(&propagation_source),
+            topic: MeshTopic::new(message.topic.as_str()),
+            data: message.data,
+        }),
+        SwarmEvent::Behaviour(PhalanxEvent::Retrieval(
+            libp2p::request_response::Event::Message {
+                peer,
+                message:
+                    libp2p::request_response::Message::Request {
+                        request_id,
+                        request,
+                        ..
+                    },
+                ..
+            },
+        )) => Some(NetworkEvent::VolleyRequested {
+            origin: PeerMapper::to_network_id(&peer),
+            request,
+            channel_id: request_id.to_string(),
+        }),
+        _ => None, // Safely ignore background noise like DHT pings
+    }
 }
 
 impl Libp2pAdapter {
@@ -100,11 +133,10 @@ impl Libp2pAdapter {
                         }
                     },
 
-                    _swarm_event = swarm.select_next_some() => {
-                        // Translation from libp2p::swarm::SwarmEvent to NetworkEvent goes here.
-                        // Example dispatch:
-                        // let network_event = translate_event(swarm_event);
-                        // let _ = event_tx.send(network_event).await;
+                    swarm_event = swarm.select_next_some() => {
+                        if let Some(network_event) = translate_swarm_event(swarm_event) {
+                            let _ = _event_tx.send(network_event).await;
+                        }
                     }
                 }
             }
@@ -146,5 +178,82 @@ impl TransportAdapter for Libp2pAdapter {
             .send(TransportCommand::Ban(peer.clone()))
             .await
             .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libp2p::swarm::{ConnectionId, SwarmEvent};
+    use libp2p::PeerId;
+    use phalanx_proto::network::NetworkEvent;
+
+    // Mock behaviour event for testing purposes
+    enum MockBehaviourEvent {
+        MessageReceived { source: PeerId, payload: Vec<u8> },
+    }
+
+    impl Into<NetworkEvent> for MockBehaviourEvent {
+        fn into(self) -> NetworkEvent {
+            match self {
+                MockBehaviourEvent::MessageReceived { source, payload } => {
+                    NetworkEvent::DataReceived {
+                        origin: NetworkId(source.to_string()),
+                        topic: MeshTopic::new("test_topic"),
+                        data: payload,
+                    }
+                }
+            }
+        }
+    }
+
+    fn translate_mock_event(event: SwarmEvent<MockBehaviourEvent>) -> Option<NetworkEvent> {
+        match event {
+            SwarmEvent::Behaviour(b) => Some(b.into()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn test_ignores_internal_libp2p_noise() {
+        let peer = PeerId::random();
+        let event: SwarmEvent<MockBehaviourEvent> = SwarmEvent::ConnectionEstablished {
+            peer_id: peer,
+            connection_id: ConnectionId::new_unchecked(1),
+            endpoint: libp2p::core::ConnectedPoint::Dialer {
+                address: "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
+                role_override: libp2p::core::Endpoint::Dialer,
+                port_use: libp2p::core::transport::PortUse::New,
+            },
+            num_established: std::num::NonZeroU32::new(1).unwrap(),
+            concurrent_dial_errors: None,
+            established_in: std::time::Duration::from_millis(10),
+        };
+
+        // We only care about data, not raw TCP connection events
+        assert!(translate_mock_event(event).is_none());
+    }
+
+    #[test]
+    fn test_translates_valid_payload() {
+        let peer = PeerId::random();
+        let payload = b"forensic_evidence_chunk".to_vec();
+
+        let event = SwarmEvent::Behaviour(MockBehaviourEvent::MessageReceived {
+            source: peer,
+            payload: payload.clone(),
+        });
+
+        let translated =
+            translate_mock_event(event).expect("Should translate valid behaviour event");
+
+        // Match against your actual NetworkEvent variants
+        match translated {
+            NetworkEvent::DataReceived { origin, data, .. } => {
+                assert_eq!(origin.0, peer.to_string());
+                assert_eq!(data, payload);
+            }
+            _ => panic!("Translated to wrong NetworkEvent variant"),
+        }
     }
 }
