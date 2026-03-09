@@ -1,5 +1,3 @@
-use crate::evidence::ForensicGap;
-use crate::evidence::WitnessEnvelope;
 use ed25519_dalek::SigningKey;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
@@ -49,15 +47,6 @@ impl From<&str> for VolleyId {
     fn from(s: &str) -> Self {
         Self(s.to_string())
     }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct Volley {
-    pub id: VolleyId,
-    pub owner_did: Did,
-    pub artifacts: Vec<WitnessEnvelope>,
-    pub gaps: Vec<ForensicGap>,
-    pub is_complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

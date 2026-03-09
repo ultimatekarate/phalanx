@@ -2,8 +2,8 @@ use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::vault::Guardian;
 use phalanx_node::vitals::init_observability;
-use phalanx_proto::evidence::{EnvelopeState, Evidence, StorageSequence, WitnessEnvelope};
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, Volley, VolleyId};
+use phalanx_proto::evidence::{EnvelopeState, Evidence, StorageSequence, Volley, WitnessEnvelope};
+use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
 use phalanx_proto::storage::HandoverProof;
 // Extension traits needed for method resolution
 use phalanx_forensics::crucible::EnvelopeHashExt;

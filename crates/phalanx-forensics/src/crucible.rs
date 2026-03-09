@@ -1,8 +1,8 @@
 use phalanx_proto::evidence::Evidence;
 use phalanx_proto::evidence::ForensicGap;
 use phalanx_proto::evidence::StorageSequence;
+use phalanx_proto::evidence::Volley;
 use phalanx_proto::evidence::WitnessEnvelope;
-use phalanx_proto::identity::Volley;
 use phalanx_proto::prelude::*;
 use phalanx_proto::types::{ForensicUnit, Verified};
 

@@ -213,11 +213,11 @@ pub struct HandoverShard {
 }
 
 /// The stateful reassembly container for a complete forensic session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Volley {
-    pub volley_id: VolleyId,
-    pub author_did: Did,
-    pub start_time: PhalanxTimestamp,
-    pub sequence_count: u64,
-    pub is_finalized: bool,
+    pub id: VolleyId,
+    pub owner_did: Did,
+    pub artifacts: Vec<WitnessEnvelope>,
+    pub gaps: Vec<ForensicGap>,
+    pub is_complete: bool,
 }
