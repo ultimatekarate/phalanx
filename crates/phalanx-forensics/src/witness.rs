@@ -90,6 +90,7 @@ impl WitnessAuthority for WitnessEnvelope {
         // Serialize the entire signed envelope
         let full_data = postcard::to_allocvec(&self)
             .map_err(|e| ShardError::SerializationError(e.to_string()))?;
+        let timestamp = PhalanxTimestamp::now();
 
         // Slice into physical MTU-sized chunks
         let chunks = full_data
@@ -102,6 +103,7 @@ impl WitnessAuthority for WitnessEnvelope {
                 total_chunks: full_data.len().div_ceil(mtu) as u32,
                 data: slice.to_vec(),
                 owner_did: owner_did.clone(),
+                timestamp,
             })
             .collect();
 

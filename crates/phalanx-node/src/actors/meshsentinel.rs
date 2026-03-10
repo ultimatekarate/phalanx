@@ -6,8 +6,9 @@ use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
 use crate::identity::PhalanxNodeIdentityExt;
 use crate::state::SyncReputationCache;
-use crate::vitals::HealthTracker;
-use crate::vitals::SystemGovernor;
+use crate::vitals::{
+    FinalizationScale, HealthTracker, Homeostasis, IngestionScale, SystemGovernor,
+};
 use crate::Guardian;
 use crate::{trust::TrustRegistry, StorageActor};
 use phalanx_forensics::judge::IntegrityGate;
@@ -156,13 +157,24 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         let local_network_id = self.identity.to_network_id();
         let mut retry_tick = interval(Duration::from_millis(500));
 
+        let base_throttle = 5;
         loop {
+            let scale: IngestionScale = self.system_governor.ingestion_scaler();
+
+            if scale.0 < 1.0 {
+                let delay = scale.as_throttle_delay(base_throttle);
+                tracing::trace!(target: "phalanx::metabolism", "Throttling loop for {}ms", delay.as_millis());
+                tokio::time::sleep(delay).await;
+            }
+
             tokio::select! {
                 _ = retry_tick.tick() => { self.process_pending_egress().await; }
-                Some(event) = self.network.next_event() => {
+                Some(event) = self.network.next_event(), if scale.0 > 0.01 => {
                     match event {
                         NetworkEvent::DataReceived { origin, topic, data } => {
+                            let start = tokio::time::Instant::now();
                             self.handle_network_ingress(origin, &data, topic).await;
+                            self.system_governor.record_pressure(start.elapsed());
                         }
                         NetworkEvent::VolleyRequested { origin, request, channel_id } => {
                             self.execute_secure_retrieval(origin, request, channel_id, &local_network_id).await;
@@ -265,6 +277,14 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         channel_id: String,
         local_id: &NetworkId,
     ) {
+        let io_scale: FinalizationScale = self.system_governor.finalization_scaler();
+
+        // If the disk/IO integral is too high, we shed the load
+        if io_scale.0 < 0.2 {
+            tracing::warn!("I/O Digestion integral saturated. Shedding retrieval request.");
+            return;
+        }
+
         // 1. EARLY RESOURCE SHEDDING (Physical Gate)
         if !self.system_governor.check_permission(TaskCost::Heavy) {
             tracing::warn!(target: "phalanx::egress", "Retrieval rejected: System thermal/battery limits exceeded");
@@ -471,8 +491,32 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
 
                 let sender_did = unverified.data.owner_did.clone();
 
-                if self.trust_registry.is_blacklisted(&sender_did) {
+                if !self.system_governor.is_peer_coupled(&peer_id.to_string())
+                    || self.trust_registry.is_blacklisted(&sender_did)
+                {
                     self.network.ban_peer(&peer_id).await;
+                    return;
+                }
+
+                let tolerance = self.system_governor.temporal_tolerance();
+                let now_ms = self
+                    .clock
+                    .now()
+                    .unwrap_or_else(|_| unverified.data.timestamp);
+
+                let shard_timestamp = unverified.data.timestamp;
+
+                // Saturating sub to prevent underflow if clocks are slightly out of sync
+                let age = Duration::from_millis(now_ms.0.saturating_sub(shard_timestamp.0));
+
+                if age > tolerance {
+                    tracing::warn!(
+                        peer = %peer_id,
+                        age_ms = %age.as_millis(),
+                        tolerance_ms = %tolerance.as_millis(),
+                        "Frame rejected: Exceeds dynamic temporal tolerance"
+                    );
+                    self.ingress_governor.release_slot(&peer_id);
                     return;
                 }
 

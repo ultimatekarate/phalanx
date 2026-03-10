@@ -179,7 +179,7 @@ async fn test_reputation_gate_signature_mismatch() {
     }
 
     let poisoned_data = postcard::to_allocvec(&envelope).expect("Serialization failed");
-
+    let timestamp = PhalanxTimestamp::now();
     let chunk = ShardChunk {
         shard_id: ShardId(666),
         chunk_index: 0,
@@ -187,6 +187,7 @@ async fn test_reputation_gate_signature_mismatch() {
         data: poisoned_data,
         owner_did: attacker_identity.did.clone(),
         chunk_type: ChunkType::Witnessed,
+        timestamp,
     };
 
     // 3. Setup Channels and Actor
@@ -394,7 +395,7 @@ async fn test_stronghold_ingestion_and_persistence() {
 
     // Serialize the envelope into a single-chunk ShardChunk
     let valid_envelope_data = postcard::to_allocvec(&envelope).expect("Serialization failed");
-
+    let timestamp = PhalanxTimestamp::now();
     let chunk = ShardChunk {
         shard_id: ShardId(101),
         chunk_index: 0,
@@ -402,6 +403,7 @@ async fn test_stronghold_ingestion_and_persistence() {
         data: valid_envelope_data,
         owner_did: peer_identity.did.clone(),
         chunk_type: ChunkType::Witnessed,
+        timestamp,
     };
 
     // 3. Wire up a StorageActor directly (no harness needed)
@@ -528,6 +530,7 @@ async fn test_storage_actor_metric_pipeline() {
 
     let valid_data = postcard::to_allocvec(&envelope).expect("Serialization failed");
 
+    let timestamp = PhalanxTimestamp::now();
     let chunk = ShardChunk {
         shard_id: ShardId(101),
         chunk_index: 0,
@@ -535,6 +538,7 @@ async fn test_storage_actor_metric_pipeline() {
         data: valid_data,
         owner_did: identity.did.clone(),
         chunk_type: ChunkType::Witnessed,
+        timestamp,
     };
 
     // 5. Inject via Ingest Command
@@ -620,6 +624,7 @@ async fn test_pure_vault_ingest_contract() {
     let valid_envelope_data = postcard::to_allocvec(&envelope).expect("Serialization failed");
 
     // 2. Wrap that data in a ShardChunk
+    let timestamp = PhalanxTimestamp::now();
     let chunk = ShardChunk {
         shard_id: ShardId(1),
         chunk_index: 0,
@@ -627,6 +632,7 @@ async fn test_pure_vault_ingest_contract() {
         data: valid_envelope_data, // Use valid serialized envelope
         owner_did: identity.did.clone(),
         chunk_type: ChunkType::Witnessed,
+        timestamp,
     };
 
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -690,6 +696,7 @@ mod ingress_boundary_tests {
         let valid_data = postcard::to_allocvec(&envelope).expect("Serialization failed");
 
         // 2. The Raw Data off the wire
+        let timestamp = PhalanxTimestamp::now();
         let raw_chunk = ShardChunk {
             shard_id: ShardId(1),
             chunk_index: 0,
@@ -697,6 +704,7 @@ mod ingress_boundary_tests {
             data: valid_data,
             owner_did: identity.did.clone(),
             chunk_type: ChunkType::Witnessed,
+            timestamp,
         };
 
         // 3. SENTINEL BOUNDARY: Wrap as Unverified

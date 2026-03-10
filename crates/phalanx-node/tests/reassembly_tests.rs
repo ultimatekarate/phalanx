@@ -37,6 +37,7 @@ fn create_mock_chunks(
             let start = i as usize * chunk_size;
             let end = std::cmp::min(start + chunk_size, full_bytes.len());
             let data = full_bytes[start..end].to_vec();
+            let timestamp = PhalanxTimestamp::now();
 
             ShardChunk {
                 shard_id,
@@ -45,6 +46,7 @@ fn create_mock_chunks(
                 owner_did: identity.did.clone(),
                 chunk_type: ChunkType::Witnessed,
                 data,
+                timestamp,
             }
         })
         .collect()

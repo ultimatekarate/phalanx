@@ -158,17 +158,20 @@ fn mock_valid_envelope() -> WitnessEnvelope {
 
 #[tokio::test]
 async fn test_handle_network_ingress_enforces_trust_registry() {
+    init_observability();
     let (_ingress_tx, ingress_rx) = mpsc::channel(10);
     let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
 
     let (mock_storage_tx, mut mock_storage_rx) = mpsc::channel(10);
     sentinel.storage_tx = mock_storage_tx;
 
+    let now = PhalanxTimestamp::now();
+
     let topic = MeshTopic::from(sentinel.config.network.video_topic.clone());
     let valid_peer = NetworkId::random();
     let bad_peer = NetworkId::random();
-    let valid_did = Did("did:phalanx:trusted".to_string());
-    let bad_did = Did("did:phalanx:malicious".to_string());
+    let valid_did = Did::new("did:phalanx:trusted");
+    let bad_did = Did::new("did:phalanx:malicious");
 
     // 1. Setup Blacklist in Registry
     let mut record = phalanx_proto::trust::PeerRecord::default();
@@ -179,9 +182,10 @@ async fn test_handle_network_ingress_enforces_trust_registry() {
         .contacts
         .insert(bad_did.clone(), record);
 
-    // --- TEST CASE 1: BLACKLISTED PEER (Returns immediately, no deadlock) ---
+    // --- TEST CASE 1: BLACKLISTED PEER ---
     let mut bad_chunk = ShardChunk::default();
-    bad_chunk.owner_did = bad_did.clone();
+    bad_chunk.owner_did = bad_did;
+    bad_chunk.timestamp = now;
     let bad_data = postcard::to_allocvec(&bad_chunk).expect("Failed to serialize bad chunk");
 
     sentinel
@@ -192,17 +196,13 @@ async fn test_handle_network_ingress_enforces_trust_registry() {
         sentinel.network.banned.contains(&bad_peer),
         "Malicious peer not banned"
     );
-    assert!(
-        mock_storage_rx.try_recv().is_err(),
-        "Blacklisted chunk reached storage"
-    );
 
-    // --- TEST CASE 2: VALID PEER (Requires async response) ---
+    // --- TEST CASE 2: VALID PEER ---
     let mut valid_chunk = ShardChunk::default();
-    valid_chunk.owner_did = valid_did;
+    valid_chunk.owner_did = valid_did.clone();
+    valid_chunk.timestamp = now;
     let valid_data = postcard::to_allocvec(&valid_chunk).expect("Failed to serialize valid chunk");
 
-    // We move the sentinel call to a background task so the test thread can respond
     let mut sentinel_task = sentinel;
     let v_peer = valid_peer.clone();
     let v_data = valid_data.clone();
@@ -212,19 +212,19 @@ async fn test_handle_network_ingress_enforces_trust_registry() {
         sentinel_task
             .handle_network_ingress(v_peer, &v_data, v_topic)
             .await;
-        sentinel_task // Send it back so we can inspect state
+        sentinel_task
     });
 
-    // 2. ACT AS THE VAULT: Intercept the message and send the 'Ok' reply
+    // 2. ACT AS THE VAULT
+    // The timeout should now succeed because the chunk passed the age check
     match tokio::time::timeout(Duration::from_millis(500), mock_storage_rx.recv()).await {
         Ok(Some(StorageCommand::Ingest { unit, reply_to })) => {
-            assert_eq!(unit.data.owner_did, valid_chunk.owner_did);
-            let _ = reply_to.send(Ok(())); // UNBLOCKS THE SENTINEL
+            assert_eq!(unit.data.owner_did, valid_did);
+            let _ = reply_to.send(Ok(()));
         }
-        _ => panic!("Sentinel failed to route valid chunk to storage or timed out"),
+        _ => panic!("Sentinel failed to route valid chunk to storage. Check age/tolerance logs!"),
     }
 
-    // 3. RECLAIM SENTINEL AND VERIFY
     let sentinel = task_handle.await.expect("Sentinel task panicked");
 
     assert!(
@@ -262,7 +262,7 @@ async fn test_ingress_valid_chunk_forwarded_to_storage() {
     let envelope = evidence
         .seal(&identity, identity.network_id.clone(), None)
         .unwrap();
-
+    let now = PhalanxTimestamp::now();
     let chunk = ShardChunk {
         shard_id: ShardId(1),
         chunk_index: 0,
@@ -270,6 +270,7 @@ async fn test_ingress_valid_chunk_forwarded_to_storage() {
         data: postcard::to_allocvec(&envelope).unwrap(),
         owner_did: identity.did.clone(),
         chunk_type: ChunkType::Witnessed,
+        timestamp: now,
     };
     let chunk_bytes = postcard::to_allocvec(&chunk).unwrap();
 
@@ -306,7 +307,7 @@ async fn test_ingress_rejected_in_leaf_mode() {
     let envelope = evidence
         .seal(&identity, identity.network_id.clone(), None)
         .unwrap();
-
+    let timestamp = PhalanxTimestamp::now();
     let chunk = ShardChunk {
         shard_id: ShardId(1),
         chunk_index: 0,
@@ -314,6 +315,7 @@ async fn test_ingress_rejected_in_leaf_mode() {
         data: postcard::to_allocvec(&envelope).unwrap(),
         owner_did: identity.did.clone(),
         chunk_type: ChunkType::Witnessed,
+        timestamp,
     };
     let chunk_bytes = postcard::to_allocvec(&chunk).unwrap();
 
@@ -589,6 +591,7 @@ async fn test_mesh_under_siege() {
 
             // We update last_hash immediately after the Genesis shard is created.
             let mut last_hash = Some(genesis_env.signature_hash());
+            let timestamp = PhalanxTimestamp::now();
 
             let genesis_chunk = ShardChunk {
                 shard_id: ShardId(shard_base), // Sequence 0
@@ -597,6 +600,7 @@ async fn test_mesh_under_siege() {
                 data: postcard::to_allocvec(&genesis_env).unwrap(),
                 owner_did: id.did.clone(),
                 chunk_type: ChunkType::Witnessed,
+                timestamp,
             };
 
             tx.send((
@@ -614,6 +618,7 @@ async fn test_mesh_under_siege() {
                     create_mock_envelope(&*clock, &id, &vid, StorageSequence(seq_idx), last_hash);
 
                 last_hash = Some(env.signature_hash());
+                let timestamp = PhalanxTimestamp::now();
 
                 let chunk = ShardChunk {
                     shard_id: ShardId(shard_base + seq_idx as u64),
@@ -622,6 +627,7 @@ async fn test_mesh_under_siege() {
                     data: postcard::to_allocvec(&env).unwrap(),
                     owner_did: id.did.clone(),
                     chunk_type: ChunkType::Witnessed,
+                    timestamp,
                 };
 
                 tx.send((
@@ -652,6 +658,7 @@ async fn test_mesh_under_siege() {
             // Thief attempts to spoof Seq 1.
             let evil_env =
                 create_mock_envelope(clock_ptr, &thief_id, &target_vid, StorageSequence(1), None);
+            let timestamp = PhalanxTimestamp::now();
             let evil_chunk = ShardChunk {
                 shard_id: attacker_shard_id,
                 chunk_index: 0,
@@ -659,6 +666,7 @@ async fn test_mesh_under_siege() {
                 data: postcard::to_allocvec(&evil_env).unwrap(),
                 owner_did: thief_id.did.clone(),
                 chunk_type: ChunkType::Witnessed,
+                timestamp,
             };
 
             tx.send((

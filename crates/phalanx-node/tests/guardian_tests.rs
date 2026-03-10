@@ -138,6 +138,7 @@ async fn test_leaf_mode_isolation() {
     )
     .unwrap();
     let valid_bytes = postcard::to_allocvec(&env).unwrap();
+    let now = PhalanxTimestamp::now();
 
     let foreign_chunk = ShardChunk {
         shard_id: ShardId(1),
@@ -146,6 +147,7 @@ async fn test_leaf_mode_isolation() {
         data: valid_bytes,
         owner_did: foreign_identity.did.clone(),
         chunk_type: ChunkType::Witnessed,
+        timestamp: now,
     };
 
     // 2. THE POLICY CHECK: Logic from StorageActor

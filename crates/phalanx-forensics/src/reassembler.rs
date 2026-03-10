@@ -312,6 +312,7 @@ impl Chunkifier for Vec<u8> {
 
         // 2. Calculate the "Forensic Bound" (Total Chunks)
         let total_chunks = (self.len() as f32 / chunk_size as f32).ceil() as u32;
+        let timestamp = PhalanxTimestamp::now();
 
         // 3. Slice and Map
         // We use the standard library's .chunks() for memory-efficient slicing
@@ -325,6 +326,7 @@ impl Chunkifier for Vec<u8> {
                 data: data.to_vec(), // Convert slice to owned Vec for transport
                 owner_did: owner_did.clone(),
                 chunk_type,
+                timestamp,
             })
             .collect();
 
@@ -506,6 +508,7 @@ mod tests {
         // 3. Shard the serialized bytes into two halves
         let mid = serialized_envelope.len() / 2;
         let (part1, part2) = serialized_envelope.split_at(mid);
+        let timestamp = PhalanxTimestamp::now();
 
         let chunk_1 = ShardChunk {
             shard_id: ShardId(99),
@@ -514,6 +517,7 @@ mod tests {
             data: part1.to_vec(),
             owner_did: identity.did.clone(),
             chunk_type: ChunkType::Witnessed,
+            timestamp,
         };
 
         let chunk_2 = ShardChunk {
@@ -523,6 +527,7 @@ mod tests {
             data: part2.to_vec(),
             owner_did: identity.did.clone(),
             chunk_type: ChunkType::Witnessed,
+            timestamp,
         };
 
         // 4. First chunk: returns Fragmented (not yet complete)

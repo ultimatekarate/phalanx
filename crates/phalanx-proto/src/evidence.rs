@@ -44,6 +44,7 @@ pub struct ShardChunk {
     pub total_chunks: u32,
     pub data: Vec<u8>,
     pub owner_did: Did,
+    pub timestamp: PhalanxTimestamp,
 }
 
 /// The Witness Envelope: The primary "Noun" of the Phalanx Forensic Timeline.
