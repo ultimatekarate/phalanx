@@ -229,6 +229,7 @@ impl TrustRegistry {
             // 1. Unified Judicial Verdict
             let penalty = match offense {
                 Offense::IdentityTheft => 101,
+                Offense::TemporalSkew => 101,
                 Offense::InvalidSignature => 101,
                 Offense::ProtocolViolation => 101,
                 Offense::ReplayAttack => 50,
@@ -422,6 +423,7 @@ impl ReputationGate for TrustRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vitals::init_observability;
 
     #[tokio::test]
     async fn test_aliasing() {
@@ -476,6 +478,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_offense_deterministic_blacklisting() {
+        init_observability();
         let temp = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::test_defaults();
         config.storage.vault_path = temp.path().to_string_lossy().to_string();
@@ -500,7 +503,7 @@ mod tests {
             .await;
 
         let record = registry.contacts.get(&did).unwrap();
-        assert_eq!(record.reputation.score, -25); // 75 - 100 = -25
+        assert_eq!(record.reputation.score, -26); // 75 - 101 = -26
         assert!(record.reputation.is_blacklisted);
     }
 }

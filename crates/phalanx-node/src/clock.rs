@@ -1,6 +1,6 @@
 // crates/phalanx-node/src/clock.rs
 
-use phalanx_proto::prelude::*;
+use phalanx_proto::{prelude::*, time::TrustedClock as TrustedClockTrait};
 use sntpc::{Error as NtpError, Result as NtpResult};
 use sntpc::{NtpContext, NtpTimestampGenerator, NtpUdpSocket};
 use std::net::SocketAddr;
@@ -167,6 +167,13 @@ impl TrustedClock {
                 Err(TimeError::NtpError(err_msg))
             }
         }
+    }
+}
+
+impl TrustedClockTrait for TrustedClock {
+    fn now(&self) -> PhalanxTimestamp {
+        self.now()
+            .unwrap_or_else(|_| PhalanxTimestamp::from_millis(0))
     }
 }
 

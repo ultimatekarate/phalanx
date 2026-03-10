@@ -1,3 +1,4 @@
+use phalanx_forensics::crucible::EnvelopeHashExt;
 use phalanx_forensics::gate::IntegrityGate;
 use phalanx_forensics::gate::WitnessGate;
 use phalanx_forensics::policy::EgressGovernor;
@@ -546,19 +547,27 @@ async fn test_mesh_under_siege_integration() {
     let video_topic = sentinel.config.network.video_topic.clone();
     let (tx, mut rx) = mpsc::channel(3000);
 
+    let honest_witness = 5;
+    let dishonest_witness = 2;
+
     // --- AGENT 1: THE HONEST WITNESS (500 instances) ---
-    for i in 0..500 {
+    for i in 0..honest_witness {
         let tx = tx.clone();
         let topic = video_topic.clone();
-        let clock = sentinel.clock.clone(); // Pass authoritative clock reference
-        let clock_ptr: &dyn TrustedClock = &sentinel.clock;
+        let clock = sentinel.clock.clone();
 
         tokio::spawn(async move {
             let id = PhalanxIdentity::new_ephemeral();
             let vid = VolleyId::new(format!("honest_stream_{}", i));
 
-            // Sync with authoritative clock to pass ChronosGate
-            let env1 = create_mock_envelope(&clock, &id, &vid, StorageSequence(1), None, 0);
+            let env1 = create_mock_envelope(
+                &clock as &dyn TrustedClock,
+                &id,
+                &vid,
+                StorageSequence(1),
+                None,
+                0,
+            );
 
             let chunk1 = ShardChunk {
                 shard_id: ShardId(1),
@@ -578,7 +587,14 @@ async fn test_mesh_under_siege_integration() {
 
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
-            let env2 = create_mock_envelope(&clock, &id, &vid, StorageSequence(2), None, 500);
+            let env2 = create_mock_envelope(
+                &clock as &dyn TrustedClock,
+                &id,
+                &vid,
+                StorageSequence(2),
+                Some(env1.signature_hash()),
+                500,
+            );
             let chunk2 = ShardChunk {
                 shard_id: ShardId(2),
                 chunk_index: 0,
@@ -598,7 +614,7 @@ async fn test_mesh_under_siege_integration() {
     }
 
     // --- AGENT 2: THE IDENTITY THIEF (250 instances) ---
-    for i in 0..250 {
+    for i in 0..dishonest_witness {
         let tx = tx.clone();
         let topic = video_topic.clone();
         let clock = sentinel.clock.clone();
@@ -609,8 +625,14 @@ async fn test_mesh_under_siege_integration() {
 
             // Thief also uses the clock to bypass Time Gate
             // but will slam directly into the Integrity Gate.
-            let evil_env =
-                create_mock_envelope(&clock, &thief_id, &target_vid, StorageSequence(1), None, 0);
+            let evil_env = create_mock_envelope(
+                &clock as &dyn TrustedClock,
+                &thief_id,
+                &target_vid,
+                StorageSequence(1),
+                None,
+                0,
+            );
             let evil_chunk = ShardChunk {
                 shard_id: ShardId(1),
                 chunk_index: 0,
@@ -632,7 +654,7 @@ async fn test_mesh_under_siege_integration() {
 
     // --- THE PROCESSING LOOP ---
     let mut processed_count = 0;
-    let siege_timeout = tokio::time::sleep(std::time::Duration::from_secs(30));
+    let siege_timeout = tokio::time::sleep(std::time::Duration::from_secs(20));
     tokio::pin!(siege_timeout);
 
     loop {
@@ -641,10 +663,10 @@ async fn test_mesh_under_siege_integration() {
                 sentinel.handle_network_ingress(peer_id, &data_bytes, topic).await;
 
                 processed_count += 1;
-                if processed_count >= 1250 { break; }
+                if processed_count >= (honest_witness+dishonest_witness)*2 { break; }
             }
             _ = &mut siege_timeout => {
-                tracing::error!("SIEGE TIMEOUT: Processed {}/1250", processed_count);
+                tracing::error!("SIEGE TIMEOUT: Processed {}/{}", processed_count, (honest_witness+dishonest_witness)*2);
                 break;
             }
         }

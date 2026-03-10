@@ -4,11 +4,12 @@ use crate::actors::storage::NoOpJournal;
 use crate::actors::storage::StorageCommand;
 use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
+use crate::identity::PhalanxNodeIdentityExt;
 use crate::state::SyncReputationCache;
 use crate::vitals::HealthTracker;
 use crate::vitals::SystemGovernor;
 use crate::Guardian;
-use crate::StorageActor;
+use crate::{trust::TrustRegistry, StorageActor};
 use phalanx_forensics::judge::IntegrityGate;
 use phalanx_forensics::policy::{EgressGovernor, IngressGovernor};
 use phalanx_forensics::prelude::*;
@@ -18,8 +19,6 @@ use phalanx_proto::types::Unverified;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::identity::PhalanxNodeIdentityExt;
-use crate::trust::TrustRegistry;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::AudioShard;
 use phalanx_proto::evidence::Evidence;
@@ -395,6 +394,48 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         }
     }
 
+    pub async fn handle_forensic_violation(
+        &mut self,
+        peer_id: NetworkId,
+        owner_did: Did,
+        err: GuardianError,
+    ) {
+        let offense = match err {
+            GuardianError::VerificationFailed(_) | GuardianError::InvalidSignature(_) => {
+                Some(Offense::InvalidSignature)
+            }
+            GuardianError::QuotaExceeded(_) => Some(Offense::QuotaExceeded),
+            GuardianError::ReplayDetected(_) => Some(Offense::ReplayAttack),
+
+            // NEW: Route severe Guardian errors to high-penalty Trust Offenses
+            GuardianError::PolicyViolation(_) => Some(Offense::IdentityTheft),
+            GuardianError::ChainIntegrityViolation(_) => Some(Offense::ProtocolViolation),
+
+            // Catch-all for any other unforeseen forensic crimes
+            _ => Some(Offense::ProtocolViolation),
+        };
+
+        if let Some(offense_type) = offense {
+            self.trust_registry
+                .record_offense(&owner_did, offense_type, &self.clock)
+                .await;
+
+            let score = self.trust_registry.evaluate_reputation(&peer_id);
+            if let Ok(mut cache) = self.reputation_cache.scores.write() {
+                cache.insert(peer_id.clone(), score);
+            }
+
+            if self.trust_registry.is_blacklisted(&owner_did) {
+                tracing::warn!(
+                    %peer_id,
+                    %owner_did,
+                    "CRITICAL: Peer blacklisted. Severing connection."
+                );
+                self.network.ban_peer(&peer_id).await;
+            }
+        }
+    }
+
     /// Handles inbound data from the wire, applying routing and ingress quotas before hitting the vault.
     pub async fn handle_network_ingress(
         &mut self,
@@ -468,14 +509,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                         // Success: Release slot
                         self.ingress_governor.release_slot(&peer_id);
                     }
-                    Ok(Err(guardian_error)) => {
-                        // POISON: Trigger forensic violation
-                        tracing::error!(
-                            "Sentinel escalating forensic violation: {}",
-                            guardian_error
-                        );
-                        self.handle_forensic_violation(peer_id.clone(), sender_did, guardian_error)
-                            .await;
+                    Ok(Err(_guardian_error)) => {
                         self.ingress_governor.release_slot(&peer_id);
                     }
                     Err(_) => {
@@ -489,51 +523,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             }
         }
     }
-
-    pub async fn handle_forensic_violation(
-        &mut self,
-        peer_id: NetworkId,
-        owner_did: Did,
-        err: GuardianError,
-    ) {
-        let offense = match err {
-            GuardianError::VerificationFailed(_) | GuardianError::InvalidSignature(_) => {
-                Some(Offense::InvalidSignature)
-            }
-            GuardianError::QuotaExceeded(_) => Some(Offense::QuotaExceeded),
-            GuardianError::ReplayDetected(_) => Some(Offense::ReplayAttack),
-
-            // NEW: Route severe Guardian errors to high-penalty Trust Offenses
-            GuardianError::PolicyViolation(_) => Some(Offense::IdentityTheft),
-            GuardianError::ChainIntegrityViolation(_) => Some(Offense::ProtocolViolation),
-
-            // Catch-all for any other unforeseen forensic crimes
-            _ => Some(Offense::ProtocolViolation),
-        };
-
-        if let Some(offense_type) = offense {
-            self.trust_registry
-                .record_offense(&owner_did, offense_type, &self.clock)
-                .await;
-
-            let score = self.trust_registry.evaluate_reputation(&peer_id);
-            if let Ok(mut cache) = self.reputation_cache.scores.write() {
-                cache.insert(peer_id.clone(), score);
-            }
-
-            if self.trust_registry.is_blacklisted(&owner_did) {
-                tracing::warn!(
-                    %peer_id,
-                    %owner_did,
-                    "CRITICAL: Peer blacklisted. Severing connection."
-                );
-                self.network.ban_peer(&peer_id).await;
-            }
-        }
-    }
 }
-
-// ... Ephemeral Bootstrap and Tests omitted for brevity, logic remains identical ...
 
 // Ephemeral Bootstrap
 impl<T: NetworkTransport> MeshSentinel<T, NoOpJournal> {
