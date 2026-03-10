@@ -61,13 +61,21 @@ pub struct HomeostaticConfig {
     pub base_temporal_drift: Duration,
 }
 
+impl HomeostaticConfig {
+    pub fn pipeline_capacity(&self) -> usize {
+        // We use s_crit (10.0) as the base.
+        // A coefficient of 20.0 means we can buffer 200 concurrent 'units' of stress.
+        (self.s_crit * 20.0) as usize
+    }
+}
+
 impl Default for HomeostaticConfig {
     fn default() -> Self {
         Self {
-            lambda_sys: 2.0,
+            lambda_sys: 4.0,
             s_crit: 10.0,
             lambda_io: 0.5,
-            d_crit: 10.0,
+            d_crit: 25.0,
             lambda_rep: 0.01,
             omega: 100.0,
             lambda_entry: 0.1,
@@ -82,13 +90,15 @@ pub struct IntegralState {
     pub s_integral: f64,
     pub d_integral: f64,
     pub e_integral: f64,
+    pub l_integral: f64, // Latency (Network/Scheduling Age)
     pub r_integrals: HashMap<String, f64>,
     pub last_sys_tick: Instant,
 }
 
 pub trait Homeostasis {
     fn temporal_tolerance(&self) -> Duration;
-    fn record_pressure(&self, observed_drift: Duration);
+    fn record_metabolic_pressure(&self, duration: Duration);
+    fn record_latency_pressure(&self, duration: Duration);
     fn ingestion_scaler(&self) -> IngestionScale;
     fn finalization_scaler(&self) -> FinalizationScale;
     fn sybil_endowment(&self) -> SybilEndowment;
@@ -145,6 +155,7 @@ impl SystemGovernor {
                 s_integral: 0.0,
                 d_integral: 0.0,
                 e_integral: 0.0,
+                l_integral: 0.0,
                 r_integrals: HashMap::new(),
                 last_sys_tick: Instant::now(),
             }),
@@ -277,17 +288,24 @@ impl SystemGovernor {
 // =====================================================================
 
 impl Homeostasis for SystemGovernor {
-    fn record_pressure(&self, observed_drift: Duration) {
+    fn record_metabolic_pressure(&self, duration: Duration) {
         self.with_state_mut(|s| {
             let decay = Self::calculate_dt_and_decay(s, self.config.lambda_sys);
-            s.s_integral = observed_drift.as_secs_f64() + (s.s_integral * decay);
+            s.s_integral = duration.as_secs_f64() + (s.s_integral * decay);
+        });
+    }
+
+    fn record_latency_pressure(&self, duration: Duration) {
+        self.with_state_mut(|s| {
+            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_sys);
+            s.l_integral = duration.as_secs_f64() + (s.l_integral * decay);
         });
     }
 
     fn temporal_tolerance(&self) -> Duration {
         self.with_state(|s| {
             let base = self.config.base_temporal_drift;
-            let expansion = Duration::from_secs_f64(s.s_integral * 2.0);
+            let expansion = Duration::from_secs_f64(s.l_integral);
             base + expansion
         })
     }
@@ -488,6 +506,7 @@ mod tests {
                 s_integral: 0.0,
                 d_integral: 0.0,
                 e_integral: 0.0,
+                l_integral: 0.0,
                 r_integrals: HashMap::new(),
                 last_sys_tick: Instant::now(),
             }),

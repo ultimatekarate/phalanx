@@ -515,7 +515,7 @@ struct SiegeConfig {
 impl Default for SiegeConfig {
     fn default() -> Self {
         Self {
-            honest_count: 1,
+            honest_count: 83,
             attacker_count: 1,
             frames_per_honest: 2,
             inter_frame_delay: Duration::from_millis(10),

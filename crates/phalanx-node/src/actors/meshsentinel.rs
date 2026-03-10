@@ -87,13 +87,14 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         let local_network_id = deps.identity.to_network_id();
         let reassembler = Reassembler::new();
         let guardian = Guardian::new(&deps.config.storage.vault_path, &deps.config, local_did);
+        let phys_capacity = deps.system_governor.config.pipeline_capacity();
 
         let (_, video_rx) = mpsc::channel(deps.config.storage.max_video_buffer);
         let (_, audio_rx) = mpsc::channel(deps.config.storage.max_audio_buffer);
 
         // Vault Interface
-        let (storage_tx, storage_rx) = mpsc::channel(10);
-        let ingress_governor = IngressGovernor::new(10);
+        let (storage_tx, storage_rx) = mpsc::channel(phys_capacity);
+        let ingress_governor = IngressGovernor::new(phys_capacity);
 
         // Stateless Recovery: Pull salvaged egress from the journal
         let salvaged_queue = deps
@@ -161,6 +162,12 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         loop {
             let scale: IngestionScale = self.system_governor.ingestion_scaler();
 
+            tracing::error!(
+                target: "siege_debug",
+                scale = scale.0,
+                "Loop tick: Checking network guard (Requires scale > 0.01)"
+            );
+
             if scale.0 < 1.0 {
                 let delay = scale.as_throttle_delay(base_throttle);
                 tracing::trace!(target: "phalanx::metabolism", "Throttling loop for {}ms", delay.as_millis());
@@ -172,9 +179,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                 Some(event) = self.network.next_event(), if scale.0 > 0.01 => {
                     match event {
                         NetworkEvent::DataReceived { origin, topic, data } => {
-                            let start = tokio::time::Instant::now();
                             self.handle_network_ingress(origin, &data, topic).await;
-                            self.system_governor.record_pressure(start.elapsed());
                         }
                         NetworkEvent::VolleyRequested { origin, request, channel_id } => {
                             self.execute_secure_retrieval(origin, request, channel_id, &local_network_id).await;
@@ -471,8 +476,8 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
     ) {
         // 1. TOPIC ROUTING (Edge Filtering)
         let topic_str = topic.as_str();
-        if topic_str != self.config.network.video_topic
-            && topic_str != self.config.network.audio_topic
+        if topic_str != self.config.network.video_topic.as_str()
+            && topic_str != self.config.network.audio_topic.as_str()
         {
             tracing::warn!("Sentinel dropped chunk: Invalid topic {}", topic_str);
             return;
@@ -485,12 +490,15 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             return;
         }
 
+        // START THE METABOLIC CLOCK IMMEDIATELY
+        let start_cpu = tokio::time::Instant::now();
+
         match postcard::from_bytes::<ShardChunk>(data) {
             Ok(raw_chunk) => {
                 let unverified = ForensicUnit::<_, Unverified>::new(raw_chunk);
-
                 let sender_did = unverified.data.owner_did.clone();
 
+                // 1. IMMUNE INTEGRAL FILTER
                 if !self.system_governor.is_peer_coupled(&peer_id.to_string())
                     || self.trust_registry.is_blacklisted(&sender_did)
                 {
@@ -498,81 +506,115 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                     return;
                 }
 
+                // 2. THE ELASTIC GATE (FEEDBACK REQUIRED)
+                let shard_birth = unverified.data.timestamp;
+                let now_ms = self.clock.now().unwrap_or(shard_birth);
+                let age = Duration::from_millis(now_ms.0.saturating_sub(shard_birth.0));
+
+                // CRITICAL: Feed the Latency Integral before checking tolerance!
+                self.system_governor.record_latency_pressure(age);
+
                 let tolerance = self.system_governor.temporal_tolerance();
-                let now_ms = self
-                    .clock
-                    .now()
-                    .unwrap_or_else(|_| unverified.data.timestamp);
 
-                let shard_timestamp = unverified.data.timestamp;
-
-                // Saturating sub to prevent underflow if clocks are slightly out of sync
-                let age = Duration::from_millis(now_ms.0.saturating_sub(shard_timestamp.0));
+                tracing::error!(
+                    target: "siege_debug",
+                    peer = %peer_id,
+                    age_ms = age.as_millis(),
+                    tolerance_ms = tolerance.as_millis(),
+                    "Evaluating Temporal Gate"
+                );
 
                 if age > tolerance {
-                    tracing::warn!(
-                        peer = %peer_id,
-                        age_ms = %age.as_millis(),
-                        tolerance_ms = %tolerance.as_millis(),
-                        "Frame rejected: Exceeds dynamic temporal tolerance"
-                    );
-                    self.ingress_governor.release_slot(&peer_id);
-                    return;
+                    tracing::warn!(peer = %peer_id, age = ?age, tol = ?tolerance, "Dropped: Stale Shard");
+                    return; // Guard will release slot if we had one
                 }
 
-                // 2. RESOURCE QUOTAS (IWFQ Allocation)
+                // 3. RESOURCE ALLOCATION (IWFQ)
                 let trust_level = self.trust_registry.check_trust(&sender_did);
                 let stress = self.system_governor.current_stress();
-
                 match self
                     .ingress_governor
                     .try_allocate(peer_id.clone(), trust_level, stress)
                 {
-                    Ok(Some(evicted_peer)) => {
-                        tracing::warn!(%evicted_peer, "Preempted IWFQ slot for higher-trust peer");
-                        self.network.ban_peer(&evicted_peer).await;
+                    Ok(Some(evicted)) => {
+                        self.network.ban_peer(&evicted).await;
                     }
-                    Ok(None) => {}    // Slot granted
-                    Err(_) => return, // Silent drop (Backpressure)
+                    Ok(None) => {}
+                    Err(_) => {
+                        tracing::error!(target: "siege_debug", "INGRESS GOVERNOR FULL! Dropping {}", peer_id);
+                        return;
+                    }
                 }
 
+                // CREATE A RAII GUARD: Automatically releases the slot when this scope ends
+                let _slot_guard = SlotGuard::new(&mut self.ingress_governor, peer_id.clone());
+
+                // 4. VAULT DISPATCH
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                 let verified_unit = ForensicUnit::<_, Verified>::new_verified(unverified.unpack());
 
-                // 3. DISPATCH TO PURE VAULT
-                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                if let Err(err) = self
+                tracing::error!(target: "siege_debug", "Sending to Vault. Channel Capacity: {}", self.storage_tx.capacity());
+
+                if self
                     .storage_tx
                     .send(StorageCommand::Ingest {
                         unit: verified_unit,
                         reply_to: reply_tx,
                     })
                     .await
+                    .is_err()
                 {
-                    tracing::error!(error = %err, "CRITICAL: Failed to route chunk to vault");
-                    self.ingress_governor.release_slot(&peer_id);
+                    tracing::error!("Vault disconnected");
                     return;
                 }
 
-                // 4. VAULT RESPONSE & CAUSAL BACKPRESSURE RELEASE
-                match reply_rx.await {
+                // 5. CAUSAL WAIT
+                let vault_response = reply_rx.await;
+
+                // releases the borrow on self.ingress_governor so we can use `self` again.
+                drop(_slot_guard);
+
+                match vault_response {
                     Ok(Ok(())) => {
-                        self.ingress_governor.release_slot(&peer_id);
+                        self.system_governor
+                            .record_peer_evidence(&peer_id.to_string(), true);
                     }
                     Ok(Err(guardian_error)) => {
-                        // THE FIX: If storage detects a crime, the Sentinel must punish it.
-                        self.handle_forensic_violation(peer_id.clone(), sender_did, guardian_error)
+                        self.system_governor
+                            .record_peer_evidence(&peer_id.to_string(), false);
+                        // Now this call is allowed because the guard is gone.
+                        self.handle_forensic_violation(peer_id, sender_did, guardian_error)
                             .await;
-                        self.ingress_governor.release_slot(&peer_id);
                     }
-                    Err(_) => {
-                        self.ingress_governor.release_slot(&peer_id);
-                    }
+                    _ => {}
                 }
             }
-            Err(err) => {
-                tracing::warn!(peer = %peer_id, error = %err, "Dropped malformed payload at edge");
-            }
+            Err(err) => tracing::warn!(error = %err, "Malformed payload"),
         }
+
+        // RECORD TOTAL METABOLIC COST (Including deserialization)
+        self.system_governor
+            .record_metabolic_pressure(start_cpu.elapsed());
+    }
+}
+
+/// RAII Guard to ensure IngressGovernor slots are released even on early returns.
+struct SlotGuard<'a> {
+    governor: &'a mut IngressGovernor,
+    peer_id: NetworkId,
+}
+
+impl<'a> SlotGuard<'a> {
+    fn new(governor: &'a mut IngressGovernor, peer_id: NetworkId) -> Self {
+        Self { governor, peer_id }
+    }
+}
+
+impl<'a> Drop for SlotGuard<'a> {
+    fn drop(&mut self) {
+        // This is the "Magic": No matter how handle_network_ingress exits,
+        // this line runs, preventing "Zombie Slots" from clogging the node.
+        self.governor.release_slot(&self.peer_id);
     }
 }
 
