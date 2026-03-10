@@ -118,8 +118,10 @@ async fn test_legal_identity_handover() {
 
 #[tokio::test]
 async fn test_illegal_identity_swap_rejected() {
-    let (identity_a, _) = PhalanxIdentity::generate().unwrap();
-    let (identity_b, _) = PhalanxIdentity::generate().unwrap();
+    init_observability();
+
+    let identity_a = PhalanxIdentity::new_ephemeral();
+    let identity_b = PhalanxIdentity::new_ephemeral();
     let peer_id = NetworkId::random();
     let vid = VolleyId::new("illegal_stream");
 

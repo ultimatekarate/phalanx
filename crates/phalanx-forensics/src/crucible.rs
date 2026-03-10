@@ -164,7 +164,7 @@ impl<S: Mold> Crucible<S> {
                 // 1. Ingest & Map Errors
                 S::ingest(&mut ctx.accumulator, item).map_err(|e| {
                     if S::is_authoritative(&ctx.accumulator) {
-                        GuardianError::PolicyViolation(format!("{:?}", e))
+                        GuardianError::PolicyViolation(format!("{}", e))
                     } else {
                         GuardianError::AmbiguousOwnership
                     }
