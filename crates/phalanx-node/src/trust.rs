@@ -208,7 +208,8 @@ impl TrustRegistry {
         // Ensure the peer is tracked in the registry. If unknown, register as Ignored.
         if !self.contacts.contains_key(did) {
             // Note: If you want unverified peers to be automatically named, register_peer handles it
-            let fallback_name = PetName::new("Offender").unwrap();
+            let unique_name = format!("Offender-{}", did.to_string().replace("did:key:", ""));
+            let fallback_name = PetName::new(&unique_name).unwrap();
             if let Err(e) = self
                 .insert_peer(did, &fallback_name, TrustLevel::Ignored, clock)
                 .await
@@ -227,7 +228,9 @@ impl TrustRegistry {
 
             // 1. Unified Judicial Verdict
             let penalty = match offense {
-                Offense::InvalidSignature => 100,
+                Offense::IdentityTheft => 101,
+                Offense::InvalidSignature => 101,
+                Offense::ProtocolViolation => 101,
                 Offense::ReplayAttack => 50,
                 Offense::QuotaExceeded => 25,
                 Offense::MalformedPacket => 5,

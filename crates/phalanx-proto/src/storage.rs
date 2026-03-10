@@ -10,7 +10,7 @@ use crate::types::ByteCapacity;
 use ed25519_dalek::Signature;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, thiserror::Error, Serialize, Deserialize)]
+#[derive(Clone, Debug, thiserror::Error, Serialize, Deserialize)]
 pub enum GuardianError {
     #[error("Quota exceeded: {0:?}")]
     QuotaExceeded(ByteCapacity),
@@ -42,8 +42,17 @@ pub enum GuardianError {
     #[error("Storage error: {0}")]
     StorageFailure(String),
 
-    #[error("Chain Integrity Violation")]
-    ChainIntegrityViolation,
+    #[error("Chain Integrity Violation: {0}")]
+    ChainIntegrityViolation(String),
+
+    #[error("Reassembly failure: {0}")]
+    ReassemblyError(String),
+
+    #[error("Policy Violation: {0}")]
+    PolicyViolation(String),
+
+    #[error("Identity Mismatch")]
+    IdentityMismatch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

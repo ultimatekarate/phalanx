@@ -11,12 +11,13 @@ pub trait TrustAuthority {
     fn penalize_peer(&mut self, did: &Did, penalty: i64);
 
     fn assess_violation_penalty(err: &ShardError) -> i64;
+    fn assess_guardian_penalty(err: &GuardianError) -> i64;
 }
 
 impl TrustAuthority for TrustRegistry {
     fn authorize_peer(&self, did: &Did) -> Result<(), ShardError> {
         if let Some(record) = self.peers.get(did) {
-            if record.reputation.is_blacklisted || record.reputation.score < 0 {
+            if record.reputation.is_blacklisted || record.reputation.score <= 0 {
                 warn!(peer = %did, "Trust Gate Rejected: Peer is banned or untrusted");
                 return Err(ShardError::Unauthorized("Peer trust score too low".into()));
             }
@@ -30,7 +31,7 @@ impl TrustAuthority for TrustRegistry {
         let record = self.peers.entry(did.clone()).or_default();
         record.reputation.score = record.reputation.score.saturating_sub(penalty);
 
-        if record.reputation.score < 0 {
+        if record.reputation.score <= 0 {
             record.reputation.is_blacklisted = true;
             info!(peer = %did, "Peer has been banned due to negative trust score");
         }
@@ -39,7 +40,12 @@ impl TrustAuthority for TrustRegistry {
     fn assess_violation_penalty(err: &ShardError) -> i64 {
         match err {
             // High severity: Cryptographic failures or chain breakage
-            ShardError::SigningError(_) => 100,
+            ShardError::Forensic(ge) => match ge {
+                GuardianError::IdentityMismatch => 200,
+                GuardianError::ChainIntegrityViolation(_) => 200,
+                _ => 25,
+            },
+            ShardError::SigningError(_) => 200,
             ShardError::InvalidConfiguration(msg) if msg.contains("Causality") => 100,
 
             // Medium severity: Resource abuse
@@ -47,7 +53,19 @@ impl TrustAuthority for TrustRegistry {
 
             // Low severity: Routine network noise or malformed data
             ShardError::SerializationError(_) => 5,
+
             _ => 10, // Default penalty
+        }
+    }
+
+    fn assess_guardian_penalty(err: &GuardianError) -> i64 {
+        match err {
+            // "Capital Crimes": Identity Theft or History Rewriting
+            // These ensure an immediate ban (100 points)
+            GuardianError::PolicyViolation(msg) if msg.contains("Identity") => 200,
+            GuardianError::ChainIntegrityViolation(_) => 200,
+            GuardianError::VerificationFailed(_) => 20,
+            _ => 10,
         }
     }
 }

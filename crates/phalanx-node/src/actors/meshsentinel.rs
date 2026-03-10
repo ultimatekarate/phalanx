@@ -468,18 +468,17 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                         // Success: Release slot
                         self.ingress_governor.release_slot(&peer_id);
                     }
-                    Ok(Err(GuardianError::VerificationFailed(err))) => {
+                    Ok(Err(guardian_error)) => {
                         // POISON: Trigger forensic violation
-                        tracing::error!("Sentinel escalating forensic violation: {}", err);
-                        self.handle_forensic_violation(
-                            peer_id.clone(),
-                            sender_did,
-                            GuardianError::VerificationFailed(err),
-                        )
-                        .await;
+                        tracing::error!(
+                            "Sentinel escalating forensic violation: {}",
+                            guardian_error
+                        );
+                        self.handle_forensic_violation(peer_id.clone(), sender_did, guardian_error)
+                            .await;
                         self.ingress_governor.release_slot(&peer_id);
                     }
-                    _ => {
+                    Err(_) => {
                         // General storage failure
                         self.ingress_governor.release_slot(&peer_id);
                     }
@@ -503,7 +502,13 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             }
             GuardianError::QuotaExceeded(_) => Some(Offense::QuotaExceeded),
             GuardianError::ReplayDetected(_) => Some(Offense::ReplayAttack),
-            _ => None,
+
+            // NEW: Route severe Guardian errors to high-penalty Trust Offenses
+            GuardianError::PolicyViolation(_) => Some(Offense::IdentityTheft),
+            GuardianError::ChainIntegrityViolation(_) => Some(Offense::ProtocolViolation),
+
+            // Catch-all for any other unforeseen forensic crimes
+            _ => Some(Offense::ProtocolViolation),
         };
 
         if let Some(offense_type) = offense {

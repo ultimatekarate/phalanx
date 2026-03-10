@@ -2,6 +2,7 @@ use phalanx_forensics::gate::IntegrityGate;
 use phalanx_forensics::gate::WitnessGate;
 use phalanx_forensics::policy::EgressGovernor;
 use phalanx_forensics::prelude::TransientJournal;
+use phalanx_forensics::witness::WitnessAuthority;
 use phalanx_forensics::Reassembler;
 use phalanx_node::actors::meshsentinel::{MeshSentinel, SentinelDependencies};
 use phalanx_node::actors::storage::{NoOpJournal, StorageActor, StorageCommand};
@@ -10,6 +11,7 @@ use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::vault::Guardian;
 use phalanx_node::state::SyncReputationCache;
 use phalanx_node::trust::TrustRegistry;
+use phalanx_node::vitals::init_observability;
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::evidence::{
     ChunkType, DataPayload, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
@@ -491,4 +493,177 @@ async fn test_sentinel_blocks_untrusted_egress() {
         }
         _ => panic!("Expected trust clearance error"),
     }
+}
+
+// --- ADD TO BOTTOM OF meshsentinel_tests.rs ---
+use phalanx_proto::prelude::SignatureHash;
+use phalanx_proto::prelude::TrustedClock;
+/// Authority-linked Envelope Generator
+/// This uses the Sentinel's own TrustedClock to ensure 0ms drift.
+fn create_mock_envelope(
+    clock: &dyn TrustedClock,
+    identity: &PhalanxIdentity,
+    volley_id: &VolleyId,
+    seq: StorageSequence,
+    prev_hash: Option<SignatureHash>,
+    time_offset_ms: u64,
+) -> WitnessEnvelope {
+    // 1. Get current forensic time (ms) and apply offset
+    let base_timestamp = clock.now();
+    let base_time_raw = base_timestamp.0;
+
+    // 3. Apply the sequence offset and wrap back into a PhalanxTimestamp
+    let final_timestamp = PhalanxTimestamp(base_time_raw + time_offset_ms);
+    let shard = VideoShard {
+        timestamp: final_timestamp,
+        sequence_id: seq,
+        fps: 30,
+        volley_id: volley_id.clone(),
+        payload: DataPayload::Clear(vec![0x00]),
+    };
+
+    WitnessEnvelope::sign_envelope(
+        Evidence::Video(shard),
+        identity,
+        identity.network_id.clone(),
+        prev_hash,
+    )
+    .unwrap()
+}
+
+// ============================================================================
+// The Siege Test (Integration)
+// ============================================================================
+
+#[tokio::test]
+async fn test_mesh_under_siege_integration() {
+    init_observability();
+
+    // 1. Boot a fully-wired MeshSentinel
+    let (_ingress_tx, ingress_rx) = mpsc::channel(3000);
+    let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
+
+    let video_topic = sentinel.config.network.video_topic.clone();
+    let (tx, mut rx) = mpsc::channel(3000);
+
+    // --- AGENT 1: THE HONEST WITNESS (500 instances) ---
+    for i in 0..500 {
+        let tx = tx.clone();
+        let topic = video_topic.clone();
+        let clock = sentinel.clock.clone(); // Pass authoritative clock reference
+        let clock_ptr: &dyn TrustedClock = &sentinel.clock;
+
+        tokio::spawn(async move {
+            let id = PhalanxIdentity::new_ephemeral();
+            let vid = VolleyId::new(format!("honest_stream_{}", i));
+
+            // Sync with authoritative clock to pass ChronosGate
+            let env1 = create_mock_envelope(&clock, &id, &vid, StorageSequence(1), None, 0);
+
+            let chunk1 = ShardChunk {
+                shard_id: ShardId(1),
+                chunk_index: 0,
+                total_chunks: 1,
+                data: postcard::to_allocvec(&env1).unwrap(),
+                owner_did: id.did.clone(),
+                chunk_type: ChunkType::Witnessed,
+            };
+            tx.send((
+                id.network_id.clone(),
+                postcard::to_allocvec(&chunk1).unwrap(),
+                topic.clone(),
+            ))
+            .await
+            .unwrap();
+
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+            let env2 = create_mock_envelope(&clock, &id, &vid, StorageSequence(2), None, 500);
+            let chunk2 = ShardChunk {
+                shard_id: ShardId(2),
+                chunk_index: 0,
+                total_chunks: 1,
+                data: postcard::to_allocvec(&env2).unwrap(),
+                owner_did: id.did.clone(),
+                chunk_type: ChunkType::Witnessed,
+            };
+            tx.send((
+                id.network_id,
+                postcard::to_allocvec(&chunk2).unwrap(),
+                topic,
+            ))
+            .await
+            .unwrap();
+        });
+    }
+
+    // --- AGENT 2: THE IDENTITY THIEF (250 instances) ---
+    for i in 0..250 {
+        let tx = tx.clone();
+        let topic = video_topic.clone();
+        let clock = sentinel.clock.clone();
+
+        tokio::spawn(async move {
+            let (thief_id, _) = PhalanxIdentity::generate().unwrap();
+            let target_vid = VolleyId::new(format!("honest_stream_{}", i));
+
+            // Thief also uses the clock to bypass Time Gate
+            // but will slam directly into the Integrity Gate.
+            let evil_env =
+                create_mock_envelope(&clock, &thief_id, &target_vid, StorageSequence(1), None, 0);
+            let evil_chunk = ShardChunk {
+                shard_id: ShardId(1),
+                chunk_index: 0,
+                total_chunks: 1,
+                data: postcard::to_allocvec(&evil_env).unwrap(),
+                owner_did: thief_id.did.clone(),
+                chunk_type: ChunkType::Witnessed,
+            };
+
+            tx.send((
+                thief_id.network_id,
+                postcard::to_allocvec(&evil_chunk).unwrap(),
+                topic,
+            ))
+            .await
+            .unwrap();
+        });
+    }
+
+    // --- THE PROCESSING LOOP ---
+    let mut processed_count = 0;
+    let siege_timeout = tokio::time::sleep(std::time::Duration::from_secs(30));
+    tokio::pin!(siege_timeout);
+
+    loop {
+        tokio::select! {
+            Some((peer_id, data_bytes, topic)) = rx.recv() => {
+                sentinel.handle_network_ingress(peer_id, &data_bytes, topic).await;
+
+                processed_count += 1;
+                if processed_count >= 1250 { break; }
+            }
+            _ = &mut siege_timeout => {
+                tracing::error!("SIEGE TIMEOUT: Processed {}/1250", processed_count);
+                break;
+            }
+        }
+    }
+
+    // --- FORENSIC AUDIT ---
+    let blacklist_count = sentinel
+        .trust_registry
+        .contacts
+        .values()
+        .filter(|p| p.reputation.is_blacklisted)
+        .count();
+
+    tracing::info!("Final Blacklist Count: {}", blacklist_count);
+
+    // Result: 250 (Identity Thieves only)
+    assert_eq!(
+        blacklist_count, 250,
+        "Banning failed! Count: {}",
+        blacklist_count
+    );
 }

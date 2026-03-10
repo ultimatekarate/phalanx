@@ -54,6 +54,10 @@ impl From<&str> for VolleyId {
 pub struct Did(pub String);
 
 impl Did {
+    pub fn new<S: Into<String>>(val: S) -> Self {
+        Self(val.into())
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()

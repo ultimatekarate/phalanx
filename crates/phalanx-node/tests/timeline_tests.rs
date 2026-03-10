@@ -88,7 +88,7 @@ async fn test_reliability_timeline_integrity() {
         .await;
 
     match attack_result {
-        Err(GuardianError::ChainIntegrityViolation) => {
+        Err(GuardianError::ChainIntegrityViolation(_)) => {
             info!("Reliability: Guardian successfully detected and rejected timeline hijack.");
         }
         Err(e) if format!("{:?}", e).contains("ChainIntegrity") => {

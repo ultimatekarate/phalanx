@@ -1,5 +1,6 @@
 // crates/phalanx-proto/src/storage.rs
 
+use crate::prelude::GuardianError;
 pub use crate::time::TimeError;
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +32,8 @@ pub enum ShardError {
     InvalidSize(String),
     #[error("Shard verification failed")]
     VerificationFailed,
+    #[error("Forensic Violation: {0}")]
+    Forensic(#[from] GuardianError),
 }
 
 #[derive(Debug, thiserror::Error)]

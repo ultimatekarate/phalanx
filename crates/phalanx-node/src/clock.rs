@@ -93,7 +93,7 @@ impl TrustedClock {
         let local = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| TimeError::ClockSkew(e.to_string()))?
-            .as_secs() as i64;
+            .as_millis() as i64;
 
         let offset_guard = self
             .offset_ms
@@ -102,7 +102,7 @@ impl TrustedClock {
 
         // Note: Converts offset to seconds.
         // If PhalanxTimestamp requires milliseconds in the future, remove the `/ 1000`.
-        let offset_sec = *offset_guard / 1000;
+        let offset_sec = *offset_guard;
 
         // Ensure we don't return negative time if offset is massive
         Ok(PhalanxTimestamp((local + offset_sec).max(0) as u64))

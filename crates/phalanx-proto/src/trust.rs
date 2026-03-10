@@ -12,6 +12,8 @@ pub enum Offense {
     ReplayAttack,
     QuotaExceeded,
     MalformedPacket,
+    IdentityTheft,
+    ProtocolViolation,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

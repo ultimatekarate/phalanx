@@ -4,7 +4,9 @@ use phalanx_node::persistence::vault::Guardian;
 use phalanx_node::vitals::init_observability;
 use phalanx_proto::evidence::{EnvelopeState, Evidence, StorageSequence, Volley, WitnessEnvelope};
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
+use phalanx_proto::prelude::GuardianError;
 use phalanx_proto::storage::HandoverProof;
+use tracing::info;
 // Extension traits needed for method resolution
 use phalanx_forensics::crucible::EnvelopeHashExt;
 use phalanx_forensics::reassembler::create_video_shard;
@@ -124,6 +126,7 @@ async fn test_illegal_identity_swap_rejected() {
     let config = NodeConfig::test_defaults();
     let mut guardian = Guardian::new("sim_vault/illegal_test", &config, identity_a.did.clone());
 
+    // -- Frame 1 (Identity A) --
     let shard_1 =
         create_video_shard(vec![vec![0x01]], StorageSequence(1), 30, vid.clone()).unwrap();
     let env_1 = WitnessEnvelope::sign_envelope(
@@ -135,6 +138,7 @@ async fn test_illegal_identity_swap_rejected() {
     .unwrap();
     let hash_1 = env_1.signature_hash();
 
+    // -- Frame 2 (Identity B - THE ATTACKER) --
     let shard_2 =
         create_video_shard(vec![vec![0x02]], StorageSequence(2), 30, vid.clone()).unwrap();
     let env_2 = WitnessEnvelope::sign_envelope(
@@ -145,19 +149,36 @@ async fn test_illegal_identity_swap_rejected() {
     )
     .unwrap();
 
+    // 1. First frame should succeed and establish ownership
     guardian
         .ingest_envelope(EnvelopeState::Intact(env_1))
         .await
-        .unwrap();
-    guardian
-        .ingest_envelope(EnvelopeState::Intact(env_2))
-        .await
-        .unwrap();
+        .expect("Genesis frame should be accepted");
 
+    // 2. Second frame should be REJECTED.
+    // We remove the .unwrap() and match the specific GuardianError.
+    let result = guardian.ingest_envelope(EnvelopeState::Intact(env_2)).await;
+
+    assert!(
+        result.is_err(),
+        "Guardian should have rejected the unauthorized identity swap"
+    );
+
+    if let Err(GuardianError::PolicyViolation(msg)) = result {
+        assert!(
+            msg.contains("Identity Mismatch"),
+            "Error should report Identity Mismatch"
+        );
+        info!("Forensic success: Guardian blocked identity swap: {}", msg);
+    } else {
+        panic!("Expected PolicyViolation, got {:?}", result);
+    }
+
+    // 3. Verify the state wasn't poisoned
     let active_session = guardian.get_active_volley_shards(&vid).unwrap();
     assert_eq!(
         active_session.len(),
         1,
-        "Crucible accepted an illegal identity swap! Causality Breach failed to trigger."
+        "Crucible state should only contain the first valid frame"
     );
 }

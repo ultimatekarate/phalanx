@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use phalanx_forensics::crucible::Crucible;
 use phalanx_forensics::crucible::VolleyAmalgam;
 use phalanx_forensics::crucible::{EnvelopeHashExt, EvidenceExt};
+use phalanx_forensics::errors::ForensicPromotion;
 use phalanx_forensics::gate::PromotionGate;
 use phalanx_forensics::prelude::TransientJournal;
 use phalanx_proto::evidence::StorageSequence;
@@ -39,6 +40,13 @@ impl Guardian {
 
         match state {
             EnvelopeState::Intact(envelope) => {
+                let vid = envelope.evidence.volley_id().clone();
+                let seq = envelope.evidence.sequence_id();
+                let sender_did = envelope.witness_peer_id.clone(); // The DID we SHOULD be banning
+
+                // Log the attempt
+                tracing::info!(volley = %vid, seq = %seq.0, from = %sender_did, "Guardian: Processing frame");
+
                 let seq = envelope.evidence.sequence_id();
                 let volley_id = envelope.evidence.volley_id().clone();
                 let mut anchor = None;
@@ -63,14 +71,19 @@ impl Guardian {
                             ShardError::InvalidConfiguration(ref msg)
                                 if msg.contains("Causality Break") =>
                             {
-                                GuardianError::ChainIntegrityViolation
+                                GuardianError::ChainIntegrityViolation(msg.clone())
                             }
                             _ => GuardianError::VerificationFailed(e.to_string()),
                         })?;
 
                 // 2. Volley Aggregation
                 // The Crucible now accepts only Verified units
-                if let Some(volley) = self.crucible.process(verified_unit) {
+                let maybe_volley = self
+                    .crucible
+                    .process(verified_unit)
+                    .map_err(|e| e.promote())?;
+
+                if let Some(volley) = maybe_volley {
                     self.commit_volley_to_disk(&volley).await?;
                 }
             }
@@ -131,17 +144,23 @@ impl Guardian {
     }
 
     /// Explicit salvage command for node termination sequences.
-    pub async fn salvage(&mut self) -> Result<(), GuardianError> {
+    pub async fn salvage(&mut self) -> Result<Vec<Volley>, GuardianError> {
+        // Flush the Crucible to extract all pending reassemblies from memory
         let active_volleys = self.crucible.flush_all();
 
+        // Early return if there's nothing to save (returns an empty Vec)
         if active_volleys.is_empty() {
-            return Ok(());
+            return Ok(vec![]);
         }
 
-        for volley in active_volleys {
-            self.commit_volley_to_disk(&volley).await?;
+        // Commit each volley to the permanent silo (The 'Hands' layer)
+        // We iterate by reference so we can return the collection at the end
+        for volley in &active_volleys {
+            self.commit_volley_to_disk(volley).await?;
         }
-        Ok(())
+
+        // 4. Return the collection to satisfy the return type Result<Vec<Volley>, ...>
+        Ok(active_volleys)
     }
 
     /// Non-blocking Disk Persistence

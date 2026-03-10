@@ -37,6 +37,7 @@ pub trait TrustedClock: Send + Sync {
 }
 
 /// A stateful session that maintains the causality chain for a specific timeline.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CausalitySession {
     pub identity: Arc<PhalanxIdentity>,
     pub peer_id: NetworkId,

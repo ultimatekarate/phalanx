@@ -11,8 +11,11 @@ use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use std::time::Instant;
-use tracing::{debug, info, instrument};
-use tracing::{error, warn};
+use tracing::{debug, error, info, instrument, warn};
+
+// Placeholder constants for threshold limits
+const VOLLEY_SIZE_THRESHOLD: usize = 100;
+const VOLLEY_TIME_THRESHOLD: Duration = Duration::from_secs(60);
 
 fn default_cleanup_interval() -> Duration {
     Duration::from_secs(1)
@@ -70,14 +73,12 @@ impl EvidenceExt for Evidence {
         }
     }
 }
+
 /// A stateful aggregation strategy for transforming stream-based inputs into unified outputs.
 ///
 /// The `Mold` trait defines the "logic of completion" for a specific data type. It utilizes
 /// an **Accumulator** pattern, where incoming data is held in a temporary stateful buffer
 /// (the `Accumulator`) until it satisfies specific readiness criteria.
-///
-/// This pattern is essential for reconstructing high-level objects from fragmented network
-/// data, such as reassembling shards into envelopes or grouping envelopes into volleys.
 pub trait Mold: Send + Sync + Serialize + for<'de> Deserialize<'de> {
     type Input;
     type Output;
@@ -92,29 +93,19 @@ pub trait Mold: Send + Sync + Serialize + for<'de> Deserialize<'de> {
         + std::fmt::Display;
     // ENFORCEMENT: Accumulators must serialize their internal byte states
     type Accumulator: Serialize + DeserializeOwned;
+    // ENFORCEMENT: Strategies must define a failure state for active backpressure
+    type Error: std::fmt::Debug + std::error::Error + Send + Sync + 'static;
 
     fn get_key(item: &Self::Input) -> Self::Key;
     fn init_accumulator(item: &Self::Input) -> Self::Accumulator;
 
-    fn ingest(acc: &mut Self::Accumulator, item: Self::Input);
+    // GUARDIAN GATE: Ingest now returns a Result to reject adversarial data
+    fn ingest(acc: &mut Self::Accumulator, item: Self::Input) -> Result<(), Self::Error>;
     fn is_ready(acc: &Self::Accumulator, elapsed: Duration) -> bool;
     fn assemble(&self, key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output>;
 }
+
 /// A generic execution engine and container for stateful data aggregation.
-///
-/// `Crucible` acts as a "workbench" that manages multiple active **WorkContexts**.
-/// It routes incoming inputs to their respective **Accumulators** based on keys derived
-/// via the associated [`Mold`] strategy.
-///
-/// ### The Salvage Protocol: Handling Stale Data
-/// In distributed mesh networks, there is no guarantee that every fragment of a data set
-/// will arrive. To prevent memory exhaustion and "zombie" sessions, `Crucible` implements
-/// a **Salvage Protocol** through methods like [`flush_stale`].
-///
-/// By tracking the `created_at` timestamp for every Accumulator, the system can identify
-/// items that have exceeded a Time-To-Live (TTL) threshold. These stale items
-/// are force-sealed and assembled, allowing the system to recover partial data (such as
-/// a Volley with detected gaps) rather than losing the information entirely.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(
     bound = "S::Key: Serialize + DeserializeOwned, S::Accumulator: Serialize + DeserializeOwned"
@@ -131,9 +122,8 @@ pub struct Crucible<S: Mold> {
     #[serde(skip, default = "default_capacity")]
     pub max_capacity: usize,
 }
-// --- THE WRAPPER (The Work Unit) ---
-// Wraps the raw data (Accumulator) with metadata (Time)
 
+// --- THE WRAPPER (The Work Unit) ---
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkContext<A> {
     pub accumulator: A,
@@ -159,7 +149,7 @@ impl<S: Mold> Crucible<S> {
     }
 
     #[instrument(skip(self, item), level = "info")]
-    pub fn process(&mut self, item: S::Input) -> Option<S::Output> {
+    pub fn process(&mut self, item: S::Input) -> Result<Option<S::Output>, S::Error> {
         self.perform_cleanup();
         let key = S::get_key(&item);
         let active_contexts = self.contexts.len();
@@ -167,7 +157,9 @@ impl<S: Mold> Crucible<S> {
         let (is_ready_now, elapsed) = match self.contexts.entry(key.clone()) {
             Entry::Occupied(mut entry) => {
                 let ctx = entry.get_mut();
-                S::ingest(&mut ctx.accumulator, item);
+
+                // If ingestion fails (e.g., policy breach), the error is propagated
+                S::ingest(&mut ctx.accumulator, item)?;
                 let el = ctx.created_at.elapsed();
 
                 (S::is_ready(&ctx.accumulator, el), el)
@@ -175,14 +167,13 @@ impl<S: Mold> Crucible<S> {
             Entry::Vacant(entry) => {
                 if active_contexts >= self.max_capacity {
                     warn!("Crucible capacity exceeded. Dropping item.");
-                    return None;
+                    return Ok(None);
                 }
 
-                // Initialize the empty accumulator
                 let mut acc = S::init_accumulator(&item);
 
-                // FIX: Actually ingest the first item!
-                S::ingest(&mut acc, item);
+                // First item is also subject to validation
+                S::ingest(&mut acc, item)?;
 
                 let ctx = entry.insert(WorkContext {
                     accumulator: acc,
@@ -202,16 +193,15 @@ impl<S: Mold> Crucible<S> {
                 ?elapsed,
                 "Crucible: Item ingested but NOT ready to seal."
             );
-            return None; // Ensure we exit if not ready
+            return Ok(None);
         }
 
         info!(?key, ?elapsed, "Crucible: Item READY. Sealing...");
         if let Some(ctx) = self.contexts.remove(&key) {
-            // FIX: Call assemble on the instance
-            return self.strategy.assemble(key, ctx.accumulator);
+            return Ok(self.strategy.assemble(key, ctx.accumulator));
         }
 
-        None
+        Ok(None)
     }
 
     #[must_use]
@@ -234,15 +224,10 @@ impl<S: Mold> Crucible<S> {
         }
     }
 
-    /// Orchestrates the "Salvage Protocol" for the workbench.
-    ///
-    /// Iterates through all active WorkContexts and force-seals any Accumulators
-    /// that have exceeded the defined Duration. This ensures partial data is
-    /// archived rather than leaked during peer disconnection.
     pub fn flush_stale(&mut self, ttl: Duration) -> Vec<S::Output> {
         let mut ready_keys = Vec::new();
         let active_count = self.contexts.len();
-        let now = Instant::now(); // FORENSIC: Capture reference time
+        let now = Instant::now();
 
         if active_count > 0 {
             info!(
@@ -289,7 +274,6 @@ impl<S: Mold> Crucible<S> {
 
         for key in keys {
             if let Some(ctx) = self.contexts.remove(&key) {
-                // Assemble immediately regardless of state
                 if let Some(out) = self.strategy.assemble(key, ctx.accumulator) {
                     results.push(out);
                 }
@@ -297,12 +281,18 @@ impl<S: Mold> Crucible<S> {
         }
         results
     }
+
+    pub fn freeze(&self) -> Result<Vec<u8>, ShardError> {
+        postcard::to_allocvec(self).map_err(|e| ShardError::SerializationError(e.to_string()))
+    }
+
+    pub fn thaw(bytes: &[u8]) -> Result<Self, ShardError> {
+        postcard::from_bytes(bytes).map_err(|e| ShardError::SerializationError(e.to_string()))
+    }
 }
 
 impl<S: Mold + Default> Default for Crucible<S> {
-    /// Initializes a default Crucible workbench with a standard 1-second cleanup interval.
     fn default() -> Self {
-        // Use the strategy's default and our standard 1s interval
         Self::new(S::default(), Duration::from_secs(1), default_capacity())
     }
 }
@@ -317,11 +307,21 @@ pub struct VolleyBuffer {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VolleyAmalgam;
 
+// Define a concrete error type for VolleyAmalgam rejections
+#[derive(Debug, thiserror::Error)]
+pub enum AmalgamError {
+    #[error("Unauthorized Handover: Origin DID mismatch")]
+    UnauthorizedHandover,
+    #[error("Identity Mismatch: Frame DID does not match Volley owner")]
+    IdentityMismatch,
+}
+
 impl Mold for VolleyAmalgam {
     type Input = ForensicUnit<WitnessEnvelope, Verified>;
     type Output = Volley;
     type Key = VolleyId;
     type Accumulator = VolleyBuffer;
+    type Error = AmalgamError;
 
     fn get_key(item: &Self::Input) -> Self::Key {
         item.data.evidence.volley_id().clone()
@@ -338,39 +338,39 @@ impl Mold for VolleyAmalgam {
         }
     }
 
-    fn ingest(acc: &mut Self::Accumulator, item: Self::Input) {
+    fn ingest(acc: &mut Self::Accumulator, item: Self::Input) -> Result<(), Self::Error> {
         let seq = item.data.evidence.sequence_id();
 
         match &item.data.evidence {
             Evidence::Handover(proof) => {
-                // 1. Verify the bridge connects to the CURRENT legal owner
                 if proof.old_did == acc.owner_did {
                     tracing::info!(
                         volley = %acc.volley_id,
                         "Crucible: Advancing stream ownership via HandoverProof"
                     );
-
-                    // Transfer legal ownership of the active buffer
                     acc.owner_did = proof.new_did.clone();
                     acc.artifacts.insert(seq, item.data);
+                    Ok(())
                 } else {
                     tracing::warn!(
                         volley = %acc.volley_id,
                         "Crucible rejected HandoverProof: Unauthorized origin"
                     );
+                    // ACTIVE REJECTION: Signals the Sentinel to drop connection/penalize peer
+                    Err(AmalgamError::UnauthorizedHandover)
                 }
             }
             _ => {
-                // 2. Standard Frame Verification
                 if item.data.did == acc.owner_did {
                     acc.artifacts.insert(seq, item.data);
+                    Ok(())
                 } else {
-                    // ZERO-TRUST DROP: Prevent buffer bloat from malicious peers
                     tracing::warn!(
                         volley = %acc.volley_id,
                         seq = %seq.0,
                         "Crucible dropped illegal frame: Causality Breach (Identity Mismatch)"
                     );
+                    Err(AmalgamError::IdentityMismatch)
                 }
             }
         }
@@ -392,29 +392,21 @@ impl Mold for VolleyAmalgam {
         let mut expected_seq: Option<StorageSequence> = None;
         let mut last_signature_hash: Option<SignatureHash> = None;
 
-        // BTreeMap guarantees we iterate by StorageSequence order
         for (seq, env) in acc.artifacts {
             let current_seq: StorageSequence = seq;
 
-            // 1. SEQUENCE CONTINUITY CHECK
             if let Some(expected) = expected_seq {
                 if current_seq > expected {
-                    // Detected a sequence gap - create an attributed ForensicGap
                     gaps.push(ForensicGap {
-                        volley_id: key.clone(), // FIX: Every gap belongs to the Volley
+                        volley_id: key.clone(),
                         start_seq: expected,
                         end_seq: current_seq - 1,
                         detected_at: now,
                     });
-
-                    // Note: A gap breaks the hash-link by definition.
-                    // In a 'Healable' timeline, we reset the link anchor here.
                     last_signature_hash = None;
                 }
             }
 
-            // 2. CAUSALITY (HASH-LINK) VERIFICATION
-            // Only verify link if there wasn't just a gap or if it's not the first unit
             if let (Some(expected_hash), Some(actual_link)) = (last_signature_hash, env.prev_hash) {
                 if expected_hash != actual_link {
                     error!(
@@ -422,12 +414,10 @@ impl Mold for VolleyAmalgam {
                         seq = %current_seq.0,
                         "VolleyAmalgam: CAUSALITY BREACH - Hash link mismatch detected"
                     );
-                    // In Zero-Trust, a breach means we discard the assembly to prevent corruption
                     return None;
                 }
             }
 
-            // Update state for next iteration
             expected_seq = Some(current_seq + 1);
             last_signature_hash = Some(env.signature_hash());
             sorted_envelopes.push(env);
@@ -457,16 +447,20 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    // 1. MOCK STRATEGY
-    // 1. MOCK STRATEGY - Now with Derives
     #[derive(Debug, Serialize, Deserialize, Default)]
     struct SumMold;
+
+    // Define a dummy error for the test mold
+    #[derive(Debug, thiserror::Error)]
+    #[error("SumMoldError")]
+    struct SumError;
 
     impl Mold for SumMold {
         type Input = i32;
         type Output = String;
         type Key = String;
         type Accumulator = Vec<i32>;
+        type Error = SumError;
 
         fn get_key(_item: &i32) -> String {
             "fixed".to_string()
@@ -476,8 +470,9 @@ mod tests {
             vec![]
         }
 
-        fn ingest(acc: &mut Vec<i32>, item: i32) {
+        fn ingest(acc: &mut Vec<i32>, item: i32) -> Result<(), Self::Error> {
             acc.push(item);
+            Ok(())
         }
 
         fn is_ready(acc: &Vec<i32>, _elapsed: Duration) -> bool {
@@ -490,36 +485,29 @@ mod tests {
         }
     }
 
-    // FIXED: The Lab uses std::time::Instant, not tokio. No tokio dependency needed.
     #[test]
     fn test_crucible_auto_seal() {
         let mut crucible = Crucible::new(SumMold, Duration::from_secs(5), 100);
 
-        // 1. Ingest 2 items (Not ready)
-        assert!(crucible.process(10).is_none());
-        assert!(crucible.process(20).is_none());
+        // Process returns a Result now, so we unwrap the Ok
+        assert!(crucible.process(10).unwrap().is_none());
+        assert!(crucible.process(20).unwrap().is_none());
 
-        // 2. Ingest 3rd item (Trigger Seal)
-        let result = crucible.process(30);
+        let result = crucible.process(30).unwrap();
         assert_eq!(result, Some("Sum: 60".to_string()));
 
-        // 3. Verify Workbench is empty
         assert!(crucible.contexts.is_empty());
     }
 
     #[test]
     fn test_crucible_flush_stale() {
-        // Use a very short TTL to avoid slow tests while staying tokio-free
         let ttl = Duration::from_millis(50);
         let mut crucible = Crucible::new(SumMold, ttl, 100);
 
-        // 1. Ingest 1 item (Stale)
-        crucible.process(5);
+        crucible.process(5).unwrap();
 
-        // 2. Wait beyond threshold using std::thread::sleep (no tokio needed)
         std::thread::sleep(Duration::from_millis(100));
 
-        // 3. Flush (TTL is 50ms, we waited 100ms)
         let results = crucible.flush_stale(ttl);
 
         assert_eq!(results.len(), 1);
@@ -529,11 +517,11 @@ mod tests {
     #[test]
     fn test_crucible_flush_all() {
         let mut crucible = Crucible::new(SumMold, Duration::from_secs(5), 100);
-        crucible.process(1);
-        crucible.process(2); // 2 items waiting
+        crucible.process(1).unwrap();
+        crucible.process(2).unwrap();
 
         let results = crucible.flush_all();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0], "Sum: 3"); // 1+2
+        assert_eq!(results[0], "Sum: 3");
     }
 }

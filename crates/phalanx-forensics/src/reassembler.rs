@@ -16,8 +16,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 // BRIDGE API (Restored for Hardware Drivers) ---
-
-/// RESTORED: Compresses a raw RGB frame into JPEG format.
 pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, String> {
     let img = DynamicImage::ImageRgb8(
         image::ImageBuffer::from_raw(width, height, raw_data)
@@ -113,8 +111,8 @@ impl Reassembler {
         let owner_did = chunk.owner_did.clone();
 
         match self.active_shards.process(chunk) {
-            Some(envelope) => Ok(Some(EnvelopeState::Intact(envelope))),
-            None => {
+            Ok(Some(envelope)) => Ok(Some(EnvelopeState::Intact(envelope))),
+            Ok(None) => {
                 if let Some(buffer) = self.active_shards.get(&shard_id) {
                     Ok(Some(EnvelopeState::Fragmented(FragmentedEnvelope {
                         shard_id,
@@ -129,6 +127,7 @@ impl Reassembler {
                     Err(ShardError::CapacityExceeded(0))
                 }
             }
+            Err(e) => Err(e),
         }
     }
 
@@ -139,7 +138,7 @@ impl Reassembler {
         let chunks = journal.read_all_chunks().await?;
         for chunk in chunks {
             // Replay the WAL chunks through the Crucible engine
-            self.active_shards.process(chunk);
+            let _ = self.active_shards.process(chunk);
         }
         Ok(())
     }
@@ -173,6 +172,7 @@ impl Mold for ShardMold {
     type Output = WitnessEnvelope;
     type Key = ShardId;
     type Accumulator = ShardBuffer;
+    type Error = ShardError;
 
     fn get_key(item: &Self::Input) -> Self::Key {
         item.shard_id
@@ -188,11 +188,14 @@ impl Mold for ShardMold {
         }
     }
 
-    fn ingest(acc: &mut Self::Accumulator, item: Self::Input) {
+    fn ingest(acc: &mut Self::Accumulator, item: Self::Input) -> Result<(), Self::Error> {
         if let std::collections::btree_map::Entry::Vacant(e) = acc.parts.entry(item.chunk_index) {
             e.insert(item.data);
             acc.received_count += 1;
         }
+
+        // Raw chunks have no causality, so we just return Ok
+        Ok(())
     }
 
     fn is_ready(acc: &Self::Accumulator, _elapsed: std::time::Duration) -> bool {
