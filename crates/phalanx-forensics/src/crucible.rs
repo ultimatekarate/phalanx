@@ -378,10 +378,20 @@ impl Mold for VolleyAmalgam {
             _ => false,
         };
 
+        // Detect Handover target
+        let handover_target = if let Evidence::Handover(ref h) = item.data.evidence {
+            Some(h.new_did.clone())
+        } else {
+            None
+        };
+
         // 2. Resolve Ownership State
         match &acc.ownership {
             Ownership::Authoritative(pinned_did) => {
                 if incoming_did == pinned_did {
+                    if let Some(new_owner) = handover_target {
+                        acc.ownership = Ownership::Authoritative(new_owner);
+                    }
                     acc.artifacts.insert(seq, item.data);
                     Ok(())
                 } else {
@@ -394,7 +404,8 @@ impl Mold for VolleyAmalgam {
                     // UPGRADE OR DISPLACE:
                     // A Genesis/Handover arrives. It doesn't matter who the tentative owner was;
                     // the one with the proof wins and cements the volley.
-                    acc.ownership = Ownership::Authoritative(incoming_did.clone());
+                    let new_authority = handover_target.unwrap_or_else(|| incoming_did.clone());
+                    acc.ownership = Ownership::Authoritative(new_authority);
                     acc.artifacts.insert(seq, item.data);
                     Ok(())
                 } else if incoming_did == tentative_did {

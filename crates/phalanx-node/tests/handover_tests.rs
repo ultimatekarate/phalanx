@@ -128,7 +128,7 @@ async fn test_illegal_identity_swap_rejected() {
 
     // -- Frame 1 (Identity A) --
     let shard_1 =
-        create_video_shard(vec![vec![0x01]], StorageSequence(1), 30, vid.clone()).unwrap();
+        create_video_shard(vec![vec![0x01]], StorageSequence(0), 30, vid.clone()).unwrap();
     let env_1 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_1),
         &identity_a,
