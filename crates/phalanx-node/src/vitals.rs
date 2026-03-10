@@ -117,6 +117,23 @@ impl SystemGovernor {
         Self::with_config(HomeostaticConfig::default())
     }
 
+    fn with_state<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&IntegralState) -> R,
+    {
+        let state = self.integrals.read().unwrap_or_else(|e| e.into_inner());
+        f(&state)
+    }
+
+    /// The "State Monad" helper for mutable state access.
+    fn with_state_mut<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut IntegralState) -> R,
+    {
+        let mut state = self.integrals.write().unwrap_or_else(|e| e.into_inner());
+        f(&mut state)
+    }
+
     pub fn with_config(config: HomeostaticConfig) -> Self {
         let (thermal, battery) = Self::discover_hardware();
         Self {
@@ -168,14 +185,16 @@ impl SystemGovernor {
         };
 
         if heat_penalty > 0.0 {
-            let mut state = self.integrals.write().unwrap();
+            let mut state = self.integrals.write().unwrap_or_else(|e| e.into_inner());
             let decay = Self::calculate_dt_and_decay(&mut state, self.config.lambda_sys);
             state.s_integral = heat_penalty + (state.s_integral * decay);
         }
 
-        if let Ok(mut state) = self.current_state.write() {
-            *state = new_stress;
-        }
+        let mut state = self
+            .current_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *state = new_stress;
     }
 
     fn calculate_dt_and_decay(state: &mut IntegralState, lambda: f64) -> f64 {
@@ -188,21 +207,16 @@ impl SystemGovernor {
     // --- Immune Integral (Reputation) ---
 
     pub fn record_peer_evidence(&self, peer_id: &str, is_valid: bool) {
-        let mut state = self.integrals.write().unwrap();
-        let decay = Self::calculate_dt_and_decay(&mut state, self.config.lambda_rep);
-
-        let current_r = state.r_integrals.get(peer_id).unwrap_or(&0.0) * decay;
-        let delta = if is_valid { 1.0 } else { -self.config.omega };
-
-        state
-            .r_integrals
-            .insert(peer_id.to_string(), current_r + delta);
+        self.with_state_mut(|s| {
+            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_rep);
+            let current_r = s.r_integrals.get(peer_id).unwrap_or(&0.0) * decay;
+            let delta = if is_valid { 1.0 } else { -self.config.omega };
+            s.r_integrals.insert(peer_id.to_string(), current_r + delta);
+        });
     }
 
     pub fn is_peer_coupled(&self, peer_id: &str) -> bool {
-        let state = self.integrals.read().unwrap();
-        let r_j = state.r_integrals.get(peer_id).unwrap_or(&0.0);
-        *r_j >= 0.0
+        self.with_state(|s| *s.r_integrals.get(peer_id).unwrap_or(&0.0) >= 0.0)
     }
 
     // --- Hardware Discovery & Probes ---
@@ -264,37 +278,32 @@ impl SystemGovernor {
 
 impl Homeostasis for SystemGovernor {
     fn record_pressure(&self, observed_drift: Duration) {
-        let mut state = self.integrals.write().unwrap();
-        let decay = SystemGovernor::calculate_dt_and_decay(&mut state, self.config.lambda_sys);
-
-        let p_tau = observed_drift.as_secs_f64();
-        state.s_integral = p_tau + (state.s_integral * decay);
+        self.with_state_mut(|s| {
+            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_sys);
+            s.s_integral = observed_drift.as_secs_f64() + (s.s_integral * decay);
+        });
     }
 
     fn temporal_tolerance(&self) -> Duration {
-        let state = self.integrals.read().unwrap();
-        let base = self.config.base_temporal_drift;
-        let expansion = Duration::from_secs_f64(state.s_integral * 2.0);
-
-        base + expansion
+        self.with_state(|s| {
+            let base = self.config.base_temporal_drift;
+            let expansion = Duration::from_secs_f64(s.s_integral * 2.0);
+            base + expansion
+        })
     }
 
     fn ingestion_scaler(&self) -> IngestionScale {
-        let state = self.integrals.read().unwrap();
-        let raw = (1.0 - (state.s_integral / self.config.s_crit)).max(0.0);
-        IngestionScale(raw)
+        self.with_state(|s| IngestionScale((1.0 - (s.s_integral / self.config.s_crit)).max(0.0)))
     }
 
     fn finalization_scaler(&self) -> FinalizationScale {
-        let state = self.integrals.read().unwrap();
-        let raw = (1.0 - (state.d_integral / self.config.d_crit)).max(0.0);
-        FinalizationScale(raw)
+        self.with_state(|s| FinalizationScale((1.0 - (s.d_integral / self.config.d_crit)).max(0.0)))
     }
 
     fn sybil_endowment(&self) -> SybilEndowment {
-        let state = self.integrals.read().unwrap();
-        let raw = self.config.psi_max / (1.0 + self.config.k_sybil * state.e_integral);
-        SybilEndowment(raw)
+        self.with_state(|s| {
+            SybilEndowment(self.config.psi_max / (1.0 + self.config.k_sybil * s.e_integral))
+        })
     }
 }
 
