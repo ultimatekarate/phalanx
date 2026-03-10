@@ -9,7 +9,8 @@ use phalanx_proto::vitals::ControlMessage;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Once, OnceLock};
+use std::sync::{Once, OnceLock, RwLock};
+use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 use tracing::Level;
@@ -18,10 +19,91 @@ use tracing_subscriber::{filter::Targets, fmt, prelude::*};
 static TELEMETRY_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 static INIT: Once = Once::new();
 
+// =====================================================================
+// API BOUNDARIES (Hardened Types)
+// =====================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct IngestionScale(pub f64);
+
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct FinalizationScale(pub f64);
+
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct SybilEndowment(pub f64);
+
+impl IngestionScale {
+    pub fn as_throttle_delay(&self, base_delay_ms: u64) -> Duration {
+        if self.0 <= 0.01 {
+            Duration::from_millis(base_delay_ms * 100)
+        } else {
+            let multiplier = (1.0 / self.0) - 1.0;
+            Duration::from_millis((base_delay_ms as f64 * multiplier) as u64)
+        }
+    }
+}
+
+// =====================================================================
+// HOMEOSTATIC CONFIGURATION & STATE
+// =====================================================================
+
+#[derive(Debug, Clone)]
+pub struct HomeostaticConfig {
+    pub lambda_sys: f64,
+    pub s_crit: f64,
+    pub lambda_io: f64,
+    pub d_crit: f64,
+    pub lambda_rep: f64,
+    pub omega: f64,
+    pub lambda_entry: f64,
+    pub psi_max: f64,
+    pub k_sybil: f64,
+    pub base_temporal_drift: Duration,
+}
+
+impl Default for HomeostaticConfig {
+    fn default() -> Self {
+        Self {
+            lambda_sys: 2.0,
+            s_crit: 10.0,
+            lambda_io: 0.5,
+            d_crit: 10.0,
+            lambda_rep: 0.01,
+            omega: 100.0,
+            lambda_entry: 0.1,
+            psi_max: 50.0,
+            k_sybil: 2.0,
+            base_temporal_drift: Duration::from_millis(500),
+        }
+    }
+}
+
+pub struct IntegralState {
+    pub s_integral: f64,
+    pub d_integral: f64,
+    pub e_integral: f64,
+    pub r_integrals: HashMap<String, f64>,
+    pub last_sys_tick: Instant,
+}
+
+pub trait Homeostasis {
+    fn temporal_tolerance(&self) -> Duration;
+    fn record_pressure(&self, observed_drift: Duration);
+    fn ingestion_scaler(&self) -> IngestionScale;
+    fn finalization_scaler(&self) -> FinalizationScale;
+    fn sybil_endowment(&self) -> SybilEndowment;
+}
+
+// =====================================================================
+// THE SYSTEM GOVERNOR
+// =====================================================================
+
 pub struct SystemGovernor {
-    current_state: std::sync::RwLock<SystemStress>,
+    current_state: RwLock<SystemStress>,
     thermal_path: Option<PathBuf>,
     battery_path: Option<PathBuf>,
+    pub config: HomeostaticConfig,
+    pub integrals: RwLock<IntegralState>,
 }
 
 impl Default for SystemGovernor {
@@ -32,11 +114,23 @@ impl Default for SystemGovernor {
 
 impl SystemGovernor {
     pub fn new() -> Self {
+        Self::with_config(HomeostaticConfig::default())
+    }
+
+    pub fn with_config(config: HomeostaticConfig) -> Self {
         let (thermal, battery) = Self::discover_hardware();
         Self {
-            current_state: std::sync::RwLock::new(SystemStress::Nominal),
+            current_state: RwLock::new(SystemStress::Nominal),
             thermal_path: thermal,
             battery_path: battery,
+            config,
+            integrals: RwLock::new(IntegralState {
+                s_integral: 0.0,
+                d_integral: 0.0,
+                e_integral: 0.0,
+                r_integrals: HashMap::new(),
+                last_sys_tick: Instant::now(),
+            }),
         }
     }
 
@@ -64,12 +158,51 @@ impl SystemGovernor {
     pub fn update_vitals(&self) {
         let t_stress = self.read_thermal();
         let b_stress = self.read_battery();
-
         let new_stress = std::cmp::max(t_stress, b_stress);
+
+        let heat_penalty = match new_stress {
+            SystemStress::Nominal => 0.0,
+            SystemStress::Fair => 0.5,
+            SystemStress::Serious => 2.0,
+            SystemStress::Critical => 10.0,
+        };
+
+        if heat_penalty > 0.0 {
+            let mut state = self.integrals.write().unwrap();
+            let decay = Self::calculate_dt_and_decay(&mut state, self.config.lambda_sys);
+            state.s_integral = heat_penalty + (state.s_integral * decay);
+        }
 
         if let Ok(mut state) = self.current_state.write() {
             *state = new_stress;
         }
+    }
+
+    fn calculate_dt_and_decay(state: &mut IntegralState, lambda: f64) -> f64 {
+        let now = Instant::now();
+        let dt = now.duration_since(state.last_sys_tick).as_secs_f64();
+        state.last_sys_tick = now;
+        (-lambda * dt).exp()
+    }
+
+    // --- Immune Integral (Reputation) ---
+
+    pub fn record_peer_evidence(&self, peer_id: &str, is_valid: bool) {
+        let mut state = self.integrals.write().unwrap();
+        let decay = Self::calculate_dt_and_decay(&mut state, self.config.lambda_rep);
+
+        let current_r = state.r_integrals.get(peer_id).unwrap_or(&0.0) * decay;
+        let delta = if is_valid { 1.0 } else { -self.config.omega };
+
+        state
+            .r_integrals
+            .insert(peer_id.to_string(), current_r + delta);
+    }
+
+    pub fn is_peer_coupled(&self, peer_id: &str) -> bool {
+        let state = self.integrals.read().unwrap();
+        let r_j = state.r_integrals.get(peer_id).unwrap_or(&0.0);
+        *r_j >= 0.0
     }
 
     // --- Hardware Discovery & Probes ---
@@ -125,6 +258,50 @@ impl SystemGovernor {
     }
 }
 
+// =====================================================================
+// THE HOMEOSTASIS IMPLEMENTATION
+// =====================================================================
+
+impl Homeostasis for SystemGovernor {
+    fn record_pressure(&self, observed_drift: Duration) {
+        let mut state = self.integrals.write().unwrap();
+        let decay = SystemGovernor::calculate_dt_and_decay(&mut state, self.config.lambda_sys);
+
+        let p_tau = observed_drift.as_secs_f64();
+        state.s_integral = p_tau + (state.s_integral * decay);
+    }
+
+    fn temporal_tolerance(&self) -> Duration {
+        let state = self.integrals.read().unwrap();
+        let base = self.config.base_temporal_drift;
+        let expansion = Duration::from_secs_f64(state.s_integral * 2.0);
+
+        base + expansion
+    }
+
+    fn ingestion_scaler(&self) -> IngestionScale {
+        let state = self.integrals.read().unwrap();
+        let raw = (1.0 - (state.s_integral / self.config.s_crit)).max(0.0);
+        IngestionScale(raw)
+    }
+
+    fn finalization_scaler(&self) -> FinalizationScale {
+        let state = self.integrals.read().unwrap();
+        let raw = (1.0 - (state.d_integral / self.config.d_crit)).max(0.0);
+        FinalizationScale(raw)
+    }
+
+    fn sybil_endowment(&self) -> SybilEndowment {
+        let state = self.integrals.read().unwrap();
+        let raw = self.config.psi_max / (1.0 + self.config.k_sybil * state.e_integral);
+        SybilEndowment(raw)
+    }
+}
+
+// =====================================================================
+// OBSERVABILITY & HEALTH
+// =====================================================================
+
 pub struct TelemetryHub {
     pub tx: broadcast::Sender<SimEvent>,
 }
@@ -145,7 +322,6 @@ pub fn init_observability() {
         let registry = tracing_subscriber::registry()
             .with(filter)
             .with(fmt::layer().with_target(true).with_thread_ids(true))
-            // Requires: tracing-subscriber = { version = "0.3", features = ["json"] }
             .with(fmt::layer().with_writer(non_blocking_file).json());
 
         let _ = registry.try_init();
@@ -170,7 +346,6 @@ impl HealthTracker {
 
     pub fn register_activity(&mut self, msg: ControlMessage) {
         let peer_id = msg.sender.clone();
-        // FIX: Clone peer_id so it can be used in multiple maps
         self.heartbeats.insert(peer_id.clone(), Instant::now());
         self.peer_contracts
             .insert(peer_id.clone(), VitalityRate::new(msg.heartbeat_ms));
@@ -188,12 +363,8 @@ impl HealthTracker {
             .peer_contracts
             .get(peer_id)
             .cloned()
-            .unwrap_or_else(|| {
-                // FIX: Fallback to default VitalityRate instead of using non-existent calculate
-                VitalityRate::new(5000)
-            });
+            .unwrap_or_else(|| VitalityRate::new(5000));
 
-        // FIX: Derive jitter multiplier from tau_rtt instead of undefined jitter_factor property
         let jitter_multiplier = (physics.tau_rtt as u32 / 10).max(2);
         let grace_period = contract.as_duration() * jitter_multiplier;
 
@@ -207,15 +378,17 @@ impl Default for HealthTracker {
     }
 }
 
+// =====================================================================
+// 6. TESTS
+// =====================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use phalanx_proto::types::TaskCost;
     use std::fs;
-    use std::sync::RwLock;
     use tempfile::tempdir;
 
-    /// Helper to setup a mock sysfs structure
     fn setup_mock_sysfs(root: &std::path::Path) -> (PathBuf, PathBuf) {
         let thermal_dir = root.join("sys/class/thermal/thermal_zone0");
         let battery_dir = root.join("sys/class/power_supply/battery");
@@ -223,11 +396,9 @@ mod tests {
         fs::create_dir_all(&thermal_dir).unwrap();
         fs::create_dir_all(&battery_dir).unwrap();
 
-        // Mock thermal zone: Type "cpu-thermal", Temp 40000 (40°C)
         fs::write(thermal_dir.join("type"), "cpu-thermal\n").unwrap();
         fs::write(thermal_dir.join("temp"), "40000\n").unwrap();
 
-        // Mock battery: Type "Battery", Capacity 80%
         fs::write(battery_dir.join("type"), "Battery\n").unwrap();
         fs::write(battery_dir.join("capacity"), "80\n").unwrap();
 
@@ -239,7 +410,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
 
-        // We simulate the discovery logic by pointing to our temp dir
         let thermal_path = SystemGovernor::find_path(
             &root.join("sys/class/thermal").to_string_lossy(),
             "temp",
@@ -251,13 +421,10 @@ mod tests {
             &["battery"],
         );
 
-        // Before creation, they should be None
         assert!(thermal_path.is_none());
         assert!(battery_path.is_none());
-        // Create the files
         setup_mock_sysfs(root);
 
-        // Now they should be discovered
         let thermal_path = SystemGovernor::find_path(
             &root.join("sys/class/thermal").to_string_lossy(),
             "temp",
@@ -279,20 +446,17 @@ mod tests {
 
     #[test]
     fn test_permission_logic_matrix() {
-        let gov = SystemGovernor::new(); // Defaults to Nominal
+        let gov = SystemGovernor::new();
 
-        // 1. Nominal: All tasks allowed
         assert!(gov.check_permission(TaskCost::Light));
         assert!(gov.check_permission(TaskCost::Heavy));
 
-        // 2. Fair Stress: Only Light tasks
         if let Ok(mut state) = gov.current_state.write() {
             *state = SystemStress::Fair;
         }
         assert!(gov.check_permission(TaskCost::Light));
         assert!(!gov.check_permission(TaskCost::Heavy));
 
-        // 3. Critical: Everything blocked
         if let Ok(mut state) = gov.current_state.write() {
             *state = SystemStress::Critical;
         }
@@ -310,20 +474,25 @@ mod tests {
             current_state: RwLock::new(SystemStress::Nominal),
             thermal_path: Some(t_file.clone()),
             battery_path: Some(b_file.clone()),
+            config: HomeostaticConfig::default(),
+            integrals: RwLock::new(IntegralState {
+                s_integral: 0.0,
+                d_integral: 0.0,
+                e_integral: 0.0,
+                r_integrals: HashMap::new(),
+                last_sys_tick: Instant::now(),
+            }),
         };
 
-        // Baseline Nominal
         gov.update_vitals();
         assert_eq!(gov.current_stress(), SystemStress::Nominal);
 
-        // Test Thermal Spike (80°C) -> Critical
         fs::write(&t_file, "80000\n").unwrap();
         gov.update_vitals();
         assert_eq!(gov.current_stress(), SystemStress::Critical);
 
-        // Test Low Battery (10%) -> Serious
-        fs::write(&t_file, "30000\n").unwrap(); // Cool down
-        fs::write(&b_file, "10\n").unwrap(); // Battery drain
+        fs::write(&t_file, "30000\n").unwrap();
+        fs::write(&b_file, "10\n").unwrap();
         gov.update_vitals();
         assert_eq!(gov.current_stress(), SystemStress::Serious);
     }
