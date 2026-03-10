@@ -68,8 +68,11 @@ impl Guardian {
                 let now = PhalanxTimestamp::now();
 
                 let unit = ForensicUnit::new(envelope);
+                let absolute_max_ms = 30_000; // hard coded for now
+                let dynamic_limit = (current_tolerance.as_millis() as u64).min(absolute_max_ms);
+
                 let verified_unit =
-                    unit.promote(&node_id, now, 10_000, anchor)
+                    unit.promote(&node_id, now, dynamic_limit, anchor)
                         .map_err(|e| match e {
                             ShardError::InvalidConfiguration(ref msg)
                                 if msg.contains("Causality Break") =>

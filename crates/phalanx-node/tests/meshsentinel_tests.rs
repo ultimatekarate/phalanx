@@ -222,7 +222,7 @@ async fn test_handle_network_ingress_enforces_trust_registry() {
         Ok(Some(StorageCommand::Ingest {
             unit,
             reply_to,
-            ttl,
+            ttl: _,
         })) => {
             assert_eq!(unit.data.owner_did, valid_did);
             let _ = reply_to.send(Ok(()));
