@@ -119,6 +119,7 @@ fn build_test_actor<J: TransientJournal + Send + 'static>(
         journal,
         config: config.clone(),
         identity: identity.clone(),
+        current_tolerance: Duration::from_millis(1000),
     };
 
     (actor, storage_rx, storage_tx)
@@ -218,7 +219,11 @@ async fn test_handle_network_ingress_enforces_trust_registry() {
     // 2. ACT AS THE VAULT
     // The timeout should now succeed because the chunk passed the age check
     match tokio::time::timeout(Duration::from_millis(500), mock_storage_rx.recv()).await {
-        Ok(Some(StorageCommand::Ingest { unit, reply_to })) => {
+        Ok(Some(StorageCommand::Ingest {
+            unit,
+            reply_to,
+            ttl,
+        })) => {
             assert_eq!(unit.data.owner_did, valid_did);
             let _ = reply_to.send(Ok(()));
         }
@@ -515,8 +520,8 @@ struct SiegeConfig {
 impl Default for SiegeConfig {
     fn default() -> Self {
         Self {
-            honest_count: 83,
-            attacker_count: 1,
+            honest_count: 500,
+            attacker_count: 50,
             frames_per_honest: 2,
             inter_frame_delay: Duration::from_millis(10),
         }

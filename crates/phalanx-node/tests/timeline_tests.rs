@@ -9,6 +9,7 @@ use phalanx_proto::evidence::{
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::PhalanxTimestamp;
+use std::time::Duration;
 use tempfile::tempdir;
 use tracing::info;
 
@@ -41,7 +42,10 @@ async fn test_reliability_timeline_integrity() {
     let anchor_hash = anchor_envelope.signature_hash();
 
     guardian
-        .ingest_envelope(EnvelopeState::Intact(anchor_envelope))
+        .ingest_envelope(
+            EnvelopeState::Intact(anchor_envelope),
+            Duration::from_secs(1),
+        )
         .await
         .expect("Anchor should be accepted");
 
@@ -61,7 +65,10 @@ async fn test_reliability_timeline_integrity() {
     .unwrap();
 
     guardian
-        .ingest_envelope(EnvelopeState::Intact(valid_envelope.clone()))
+        .ingest_envelope(
+            EnvelopeState::Intact(valid_envelope.clone()),
+            Duration::from_secs(1),
+        )
         .await
         .expect("Guardian should accept a valid cryptographic link");
 
@@ -84,7 +91,10 @@ async fn test_reliability_timeline_integrity() {
 
     // VERIFICATION: The Guardian MUST catch the chain break
     let attack_result = guardian
-        .ingest_envelope(EnvelopeState::Intact(hijacked_envelope))
+        .ingest_envelope(
+            EnvelopeState::Intact(hijacked_envelope),
+            Duration::from_secs(1),
+        )
         .await;
 
     match attack_result {

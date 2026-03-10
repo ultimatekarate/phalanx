@@ -39,6 +39,7 @@ fn build_test_actor<J: TransientJournal + Send + 'static>(
         journal,
         config: config.clone(),
         identity: identity.clone(),
+        current_tolerance: Duration::from_millis(1000),
     };
 
     (actor, storage_rx, storage_tx)
@@ -206,6 +207,7 @@ async fn test_reputation_gate_signature_mismatch() {
         .send(StorageCommand::Ingest {
             unit,
             reply_to: reply_tx,
+            ttl: Duration::from_secs(1),
         })
         .await
         .unwrap();
@@ -304,7 +306,11 @@ async fn test_salvage_on_node_death() {
             let (tx, _) = oneshot::channel();
             let unit = ForensicUnit::<_, Verified>::new_verified(chunk.clone());
             storage_tx
-                .send(StorageCommand::Ingest { unit, reply_to: tx })
+                .send(StorageCommand::Ingest {
+                    unit,
+                    reply_to: tx,
+                    ttl: Duration::from_secs(1),
+                })
                 .await
                 .unwrap();
         }
@@ -336,7 +342,11 @@ async fn test_salvage_on_node_death() {
         let (tx, _) = oneshot::channel();
         let unit = ForensicUnit::<_, Verified>::new_verified(chunks[3].clone());
         storage_tx2
-            .send(StorageCommand::Ingest { unit, reply_to: tx })
+            .send(StorageCommand::Ingest {
+                unit,
+                reply_to: tx,
+                ttl: Duration::from_secs(1),
+            })
             .await
             .unwrap();
 
@@ -420,7 +430,11 @@ async fn test_stronghold_ingestion_and_persistence() {
     let (tx, _) = oneshot::channel();
     let unit = ForensicUnit::<_, Verified>::new_verified(chunk);
     storage_tx
-        .send(StorageCommand::Ingest { unit, reply_to: tx })
+        .send(StorageCommand::Ingest {
+            unit,
+            reply_to: tx,
+            ttl: Duration::from_secs(1),
+        })
         .await
         .expect("Injection failed");
 
@@ -545,7 +559,11 @@ async fn test_storage_actor_metric_pipeline() {
     let (tx, _) = oneshot::channel();
     let unit = ForensicUnit::<_, Verified>::new_verified(chunk);
     command_tx
-        .send(StorageCommand::Ingest { unit, reply_to: tx })
+        .send(StorageCommand::Ingest {
+            unit,
+            reply_to: tx,
+            ttl: Duration::from_secs(1),
+        })
         .await
         .unwrap();
 
@@ -643,6 +661,7 @@ async fn test_pure_vault_ingest_contract() {
         .send(StorageCommand::Ingest {
             unit,
             reply_to: reply_tx,
+            ttl: Duration::from_secs(1),
         })
         .await
         .unwrap();
@@ -724,6 +743,7 @@ mod ingress_boundary_tests {
             .send(StorageCommand::Ingest {
                 unit: verified_unit,
                 reply_to: reply_tx,
+                ttl: Duration::from_secs(1),
             })
             .await
             .expect("Failed to send verified chunk to Vault");

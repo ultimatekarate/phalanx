@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::time::Duration;
 use tracing::{debug, instrument};
 
 // Dictionary Nouns
@@ -58,6 +59,7 @@ impl IngressOrchestrator {
         topic: &MeshTopic,
         ctx: &IngressContext<'_>,
         pipeline: &mut SecurityPipeline<'_, J>,
+        current_tolerance: Duration,
     ) -> Result<Option<()>, IngressError> {
         let sender_did = chunk.owner_did.clone();
         let chunk_id = (chunk.shard_id, chunk.chunk_index);
@@ -83,7 +85,11 @@ impl IngressOrchestrator {
             Ok(Some(state)) => {
                 // 4. GUARDIAN PHASE
                 // ingest_envelope now expects the full EnvelopeState (Intact or Fragmented)
-                match pipeline.guardian.ingest_envelope(state).await {
+                match pipeline
+                    .guardian
+                    .ingest_envelope(state, current_tolerance)
+                    .await
+                {
                     Ok(_) => Ok(Some(())),
                     Err(guardian_error) => {
                         Self::report_offense(&sender_did, &guardian_error, ctx, pipeline).await;

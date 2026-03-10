@@ -13,6 +13,7 @@ use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
 use phalanx_proto::prelude::ShardChunk;
 use phalanx_proto::time::PhalanxTimestamp;
 use phalanx_transport::identity_ext::Libp2pExt;
+use std::time::Duration;
 use tempfile::tempdir;
 
 fn create_test_shard(seq: u32, volley_id: VolleyId) -> VideoShard {
@@ -59,12 +60,14 @@ async fn test_out_of_sequence_salvage_on_node_death() {
 
     // Ingest Seq 1
     guardian
-        .ingest_envelope(EnvelopeState::Intact(env_1))
+        .ingest_envelope(EnvelopeState::Intact(env_1), Duration::from_secs(1))
         .await
         .expect("Seq 1 failed");
 
     // Ingest Seq 2 (Now has a valid link to 1)
-    let result = guardian.ingest_envelope(EnvelopeState::Intact(env_2)).await;
+    let result = guardian
+        .ingest_envelope(EnvelopeState::Intact(env_2), Duration::from_secs(1))
+        .await;
 
     assert!(
         result.is_ok(),
@@ -92,7 +95,10 @@ async fn test_stronghold_crash_recovery() {
         .expect("Failed to sign envelope");
 
     storage
-        .ingest_envelope(EnvelopeState::Intact(envelope.clone()))
+        .ingest_envelope(
+            EnvelopeState::Intact(envelope.clone()),
+            Duration::from_secs(1),
+        )
         .await
         .expect("Ingest failed");
 
@@ -102,7 +108,10 @@ async fn test_stronghold_crash_recovery() {
 
     // Replay: re-ingest the same envelope into the fresh Guardian
     recovered_storage
-        .ingest_envelope(EnvelopeState::Intact(envelope.clone()))
+        .ingest_envelope(
+            EnvelopeState::Intact(envelope.clone()),
+            Duration::from_secs(1),
+        )
         .await
         .expect("WAL replay failed");
 

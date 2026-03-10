@@ -117,6 +117,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             journal: deps.journal,
             config: deps.config.clone(),
             identity: deps.identity.clone(),
+            current_tolerance: Duration::from_millis(1000),
         };
 
         let storage_task = tokio::spawn(async move {
@@ -560,6 +561,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                     .send(StorageCommand::Ingest {
                         unit: verified_unit,
                         reply_to: reply_tx,
+                        ttl: tolerance,
                     })
                     .await
                     .is_err()

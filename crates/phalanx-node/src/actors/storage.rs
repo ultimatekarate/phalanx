@@ -23,7 +23,7 @@ pub struct StorageActor<J: TransientJournal> {
     pub journal: J,
     pub config: NodeConfig,
     pub identity: PhalanxIdentity,
-    // REMOVED: forensic_tx, local_peer_id, ack_tx to ensure absolute isolation
+    pub current_tolerance: Duration,
 }
 
 pub enum StorageCommand {
@@ -31,6 +31,7 @@ pub enum StorageCommand {
     Ingest {
         unit: ForensicUnit<ShardChunk, Verified>,
         reply_to: oneshot::Sender<Result<(), GuardianError>>,
+        ttl: Duration,
     },
     /// Pure retrieval. Returns raw envelopes directly from the vault.
     Retrieval {
@@ -47,6 +48,7 @@ pub enum StorageCommand {
     IngestEnvelope {
         state: EnvelopeState,
         reply_to: oneshot::Sender<Result<(), GuardianError>>,
+        ttl: Duration,
     },
     /// Emergency backup of egress queues during node shutdown.
     EmergencySalvage(Vec<PendingEgress>),
@@ -82,8 +84,10 @@ impl<J: TransientJournal> StorageActor<J> {
                 res = command_rx.recv() => {
                     match res {
                         Some(cmd) => match cmd {
-                            StorageCommand::Ingest { unit, reply_to } => {
-                                let _ = reply_to.send(self.handle_ingest(unit).await);
+                            StorageCommand::Ingest { unit, reply_to, ttl } => {
+                                self.current_tolerance = ttl;
+                                let result = self.handle_ingest(unit).await;
+                                let _ = reply_to.send(result);
                             }
                             StorageCommand::Retrieval { volley_id, reply_to } => {
                                 self.handle_retrieval(volley_id, reply_to).await;
@@ -91,8 +95,8 @@ impl<J: TransientJournal> StorageActor<J> {
                             StorageCommand::GetShard { volley_id, sequence_id, reply_to } => {
                                 let _ = reply_to.send(self.guardian.get_shard(&volley_id, sequence_id));
                             }
-                            StorageCommand::IngestEnvelope { state, reply_to } => {
-                                let _ = reply_to.send(self.guardian.ingest_envelope(state).await);
+                            StorageCommand::IngestEnvelope { state, reply_to, ttl } => {
+                                let _ = reply_to.send(self.guardian.ingest_envelope(state, ttl).await);
                             }
                             StorageCommand::EmergencySalvage(pending) => {
                                 // This handles the BrokenJournal error internally and continues
@@ -106,7 +110,7 @@ impl<J: TransientJournal> StorageActor<J> {
                     }
                 }
                 _ = maintenance_timer.tick() => {
-                    let _ = self.guardian.check_and_finalize_volley().await;
+                    let _ = self.guardian.check_and_finalize_volley(self.current_tolerance).await;
                 }
             }
         }
@@ -130,8 +134,9 @@ impl<J: TransientJournal> StorageActor<J> {
 
         match reassembly_result {
             Ok(Some(envelope_state)) => {
-                // CORRECTED: Uses Guardian::ingest_envelope which takes EnvelopeState
-                self.guardian.ingest_envelope(envelope_state).await
+                self.guardian
+                    .ingest_envelope(envelope_state, self.current_tolerance)
+                    .await
             }
             Ok(None) => {
                 // Chunk accepted, but volley is still incomplete

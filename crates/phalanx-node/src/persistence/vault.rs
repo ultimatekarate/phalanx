@@ -34,7 +34,11 @@ impl Guardian {
     }
 
     /// The sole entry point for data promotion into the permanent archive.
-    pub async fn ingest_envelope(&mut self, state: EnvelopeState) -> Result<(), GuardianError> {
+    pub async fn ingest_envelope(
+        &mut self,
+        state: EnvelopeState,
+        current_tolerance: Duration,
+    ) -> Result<(), GuardianError> {
         tracing::debug!("Guardian: Received envelope for ingestion. Verifying...");
 
         match state {
@@ -91,15 +95,18 @@ impl Guardian {
         }
 
         // Trigger TTL checks, stale volley flushing, and workbench cleanup
-        self.check_and_finalize_volley().await?;
+        self.check_and_finalize_volley(current_tolerance).await?;
 
         Ok(())
     }
 
     /// Evaluates active working contexts for TTL expiration.
-    pub async fn check_and_finalize_volley(&mut self) -> Result<(), GuardianError> {
+    pub async fn check_and_finalize_volley(
+        &mut self,
+        current_tolerance: Duration,
+    ) -> Result<(), GuardianError> {
         // Utilize the predefined threshold from strategies.rs logic
-        let stale_volleys = self.crucible.flush_stale(Duration::from_secs(1));
+        let stale_volleys = self.crucible.flush_stale(current_tolerance);
         for volley in stale_volleys {
             self.commit_volley_to_disk(&volley).await?;
         }
@@ -366,7 +373,7 @@ mod tests {
         .expect("WitnessEnvelope construction failed");
 
         let result = guardian
-            .ingest_envelope(EnvelopeState::Intact(envelope))
+            .ingest_envelope(EnvelopeState::Intact(envelope), Duration::from_secs(1))
             .await;
         assert!(result.is_ok(), "Ingestion failed: {:?}", result.err());
 
@@ -412,7 +419,7 @@ mod tests {
         .expect("WitnessEnvelope construction failed");
 
         let result = guardian
-            .ingest_envelope(EnvelopeState::Intact(envelope))
+            .ingest_envelope(EnvelopeState::Intact(envelope), Duration::from_secs(1))
             .await;
 
         assert!(result.is_ok());

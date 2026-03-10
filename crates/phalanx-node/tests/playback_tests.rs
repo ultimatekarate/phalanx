@@ -14,6 +14,7 @@ use phalanx_proto::evidence::{
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
 use phalanx_proto::time::PhalanxTimestamp;
+use std::time::Duration;
 
 #[tokio::test]
 async fn test_exodus_resurrection_logic() {
@@ -39,8 +40,12 @@ async fn test_exodus_resurrection_logic() {
                 } => {
                     let _ = reply_to.send(guardian.get_shard(&volley_id, sequence_id));
                 }
-                StorageCommand::IngestEnvelope { state, reply_to } => {
-                    let result = guardian.ingest_envelope(state).await;
+                StorageCommand::IngestEnvelope {
+                    state,
+                    reply_to,
+                    ttl,
+                } => {
+                    let result = guardian.ingest_envelope(state, ttl).await;
                     if let Err(ref e) = result {
                         tracing::error!("Test Actor Ingestion Reject: {:?}", e);
                     }
@@ -78,6 +83,7 @@ async fn test_exodus_resurrection_logic() {
         .send(StorageCommand::IngestEnvelope {
             state: EnvelopeState::Intact(envelope_1),
             reply_to: tx,
+            ttl: Duration::from_secs(1),
         })
         .await
         .unwrap();
@@ -117,6 +123,7 @@ async fn test_exodus_resurrection_logic() {
         .send(StorageCommand::IngestEnvelope {
             state: EnvelopeState::Intact(envelope_2),
             reply_to: tx2,
+            ttl: Duration::from_secs(1),
         })
         .await
         .unwrap();
@@ -149,8 +156,12 @@ async fn test_playback_resurrection_with_mesh_gap() {
                 } => {
                     let _ = reply_to.send(guardian.get_shard(&volley_id, sequence_id));
                 }
-                StorageCommand::IngestEnvelope { state, reply_to } => {
-                    let result = guardian.ingest_envelope(state).await;
+                StorageCommand::IngestEnvelope {
+                    state,
+                    reply_to,
+                    ttl,
+                } => {
+                    let result = guardian.ingest_envelope(state, ttl).await;
                     if let Err(ref e) = result {
                         tracing::error!("Test Ingestion Error: {:?}", e);
                     }
@@ -186,6 +197,7 @@ async fn test_playback_resurrection_with_mesh_gap() {
         .send(StorageCommand::IngestEnvelope {
             state: EnvelopeState::Intact(envelope_1),
             reply_to: tx,
+            ttl: Duration::from_secs(1),
         })
         .await
         .unwrap();
@@ -224,6 +236,7 @@ async fn test_playback_resurrection_with_mesh_gap() {
         .send(StorageCommand::IngestEnvelope {
             state: EnvelopeState::Intact(envelope_2),
             reply_to: tx2,
+            ttl: Duration::from_secs(1),
         })
         .await
         .unwrap();
@@ -258,8 +271,12 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
                 } => {
                     let _ = reply_to.send(guardian.get_shard(&volley_id, sequence_id));
                 }
-                StorageCommand::IngestEnvelope { state, reply_to } => {
-                    let result = guardian.ingest_envelope(state).await;
+                StorageCommand::IngestEnvelope {
+                    state,
+                    reply_to,
+                    ttl,
+                } => {
+                    let result = guardian.ingest_envelope(state, ttl).await;
                     let _ = reply_to.send(result);
                 }
                 _ => {}
@@ -297,6 +314,7 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
         .send(StorageCommand::IngestEnvelope {
             state: EnvelopeState::Intact(chain.get(&1).unwrap().clone()),
             reply_to: tx1,
+            ttl: Duration::from_secs(1),
         })
         .await
         .unwrap();
@@ -307,6 +325,7 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
         .send(StorageCommand::IngestEnvelope {
             state: EnvelopeState::Intact(chain.get(&10).unwrap().clone()),
             reply_to: tx10,
+            ttl: Duration::from_secs(1),
         })
         .await
         .unwrap();
@@ -322,6 +341,7 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
                     .send(StorageCommand::IngestEnvelope {
                         state: EnvelopeState::Intact(env.clone()),
                         reply_to: tx,
+                        ttl: Duration::from_secs(1),
                     })
                     .await;
             }

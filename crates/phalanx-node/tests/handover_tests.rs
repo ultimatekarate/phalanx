@@ -6,6 +6,7 @@ use phalanx_proto::evidence::{EnvelopeState, Evidence, StorageSequence, Volley, 
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
 use phalanx_proto::prelude::GuardianError;
 use phalanx_proto::storage::HandoverProof;
+use std::time::Duration;
 use tracing::info;
 // Extension traits needed for method resolution
 use phalanx_forensics::crucible::EnvelopeHashExt;
@@ -78,15 +79,15 @@ async fn test_legal_identity_handover() {
 
     // VERIFICATION
     assert!(guardian
-        .ingest_envelope(EnvelopeState::Intact(env_1))
+        .ingest_envelope(EnvelopeState::Intact(env_1), Duration::from_secs(1))
         .await
         .is_ok());
     assert!(guardian
-        .ingest_envelope(EnvelopeState::Intact(env_2))
+        .ingest_envelope(EnvelopeState::Intact(env_2), Duration::from_secs(1))
         .await
         .is_ok());
     assert!(guardian
-        .ingest_envelope(EnvelopeState::Intact(env_3))
+        .ingest_envelope(EnvelopeState::Intact(env_3), Duration::from_secs(1))
         .await
         .is_ok());
 
@@ -153,13 +154,15 @@ async fn test_illegal_identity_swap_rejected() {
 
     // 1. First frame should succeed and establish ownership
     guardian
-        .ingest_envelope(EnvelopeState::Intact(env_1))
+        .ingest_envelope(EnvelopeState::Intact(env_1), Duration::from_secs(1))
         .await
         .expect("Genesis frame should be accepted");
 
     // 2. Second frame should be REJECTED.
     // We remove the .unwrap() and match the specific GuardianError.
-    let result = guardian.ingest_envelope(EnvelopeState::Intact(env_2)).await;
+    let result = guardian
+        .ingest_envelope(EnvelopeState::Intact(env_2), Duration::from_secs(1))
+        .await;
 
     assert!(
         result.is_err(),
