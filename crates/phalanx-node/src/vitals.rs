@@ -139,11 +139,12 @@ pub fn init_observability() {
         let filter = Targets::new()
             .with_target("phalanx_node", Level::DEBUG)
             .with_target("phalanx_forensics", Level::DEBUG)
+            .with_target("phalanx::forensics::collision", Level::TRACE)
             .with_default(Level::INFO);
 
         let registry = tracing_subscriber::registry()
             .with(filter)
-            .with(fmt::layer().with_target(false).with_thread_ids(true))
+            .with(fmt::layer().with_target(true).with_thread_ids(true))
             // Requires: tracing-subscriber = { version = "0.3", features = ["json"] }
             .with(fmt::layer().with_writer(non_blocking_file).json());
 

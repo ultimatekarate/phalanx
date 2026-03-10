@@ -3,6 +3,7 @@ use phalanx_proto::evidence::ForensicGap;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::Volley;
 use phalanx_proto::evidence::WitnessEnvelope;
+use phalanx_proto::identity::Ownership;
 use phalanx_proto::prelude::*;
 use phalanx_proto::types::{ForensicUnit, Verified};
 
@@ -103,6 +104,7 @@ pub trait Mold: Send + Sync + Serialize + for<'de> Deserialize<'de> {
     fn ingest(acc: &mut Self::Accumulator, item: Self::Input) -> Result<(), Self::Error>;
     fn is_ready(acc: &Self::Accumulator, elapsed: Duration) -> bool;
     fn assemble(&self, key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output>;
+    fn is_authoritative(acc: &Self::Accumulator) -> bool;
 }
 
 /// A generic execution engine and container for stateful data aggregation.
@@ -149,20 +151,40 @@ impl<S: Mold> Crucible<S> {
     }
 
     #[instrument(skip(self, item), level = "info")]
-    pub fn process(&mut self, item: S::Input) -> Result<Option<S::Output>, S::Error> {
+    pub fn process(&mut self, item: S::Input) -> Result<Option<S::Output>, GuardianError> {
         self.perform_cleanup();
         let key = S::get_key(&item);
         let active_contexts = self.contexts.len();
 
-        let (is_ready_now, elapsed) = match self.contexts.entry(key.clone()) {
+        // UNIFIED: The match block now produces the final Result<Option<S::Output>, GuardianError>
+        match self.contexts.entry(key.clone()) {
             Entry::Occupied(mut entry) => {
                 let ctx = entry.get_mut();
 
-                // If ingestion fails (e.g., policy breach), the error is propagated
-                S::ingest(&mut ctx.accumulator, item)?;
-                let el = ctx.created_at.elapsed();
+                // 1. Ingest & Map Errors
+                S::ingest(&mut ctx.accumulator, item).map_err(|e| {
+                    if S::is_authoritative(&ctx.accumulator) {
+                        GuardianError::PolicyViolation(format!("{:?}", e))
+                    } else {
+                        GuardianError::AmbiguousOwnership
+                    }
+                })?;
 
-                (S::is_ready(&ctx.accumulator, el), el)
+                let elapsed = ctx.created_at.elapsed();
+
+                // 2. Internalized Sealing: If ready, assemble and return NOW.
+                if S::is_ready(&ctx.accumulator, elapsed) {
+                    info!(?key, ?elapsed, "Crucible: Item READY. Sealing...");
+                    let ctx = entry.remove();
+                    Ok(self.strategy.assemble(key, ctx.accumulator))
+                } else {
+                    debug!(
+                        ?key,
+                        ?elapsed,
+                        "Crucible: Item ingested but NOT ready to seal."
+                    );
+                    Ok(None)
+                }
             }
             Entry::Vacant(entry) => {
                 if active_contexts >= self.max_capacity {
@@ -172,36 +194,23 @@ impl<S: Mold> Crucible<S> {
 
                 let mut acc = S::init_accumulator(&item);
 
-                // First item is also subject to validation
-                S::ingest(&mut acc, item)?;
+                // First shard is inherently Ambiguous until Seq 0 or Handover arrives
+                S::ingest(&mut acc, item).map_err(|_| GuardianError::AmbiguousOwnership)?;
 
-                let ctx = entry.insert(WorkContext {
-                    accumulator: acc,
-                    created_at: Instant::now(),
-                });
-
-                (
-                    S::is_ready(&ctx.accumulator, Duration::ZERO),
-                    Duration::ZERO,
-                )
+                // 3. Optimization: If the first item makes it ready (e.g. 1-chunk shard),
+                // assemble it without ever touching the contexts map.
+                if S::is_ready(&acc, Duration::ZERO) {
+                    info!(?key, "Crucible: Item READY on initial shard. Sealing...");
+                    Ok(self.strategy.assemble(key, acc))
+                } else {
+                    entry.insert(WorkContext {
+                        accumulator: acc,
+                        created_at: Instant::now(),
+                    });
+                    Ok(None)
+                }
             }
-        };
-
-        if !is_ready_now {
-            debug!(
-                ?key,
-                ?elapsed,
-                "Crucible: Item ingested but NOT ready to seal."
-            );
-            return Ok(None);
         }
-
-        info!(?key, ?elapsed, "Crucible: Item READY. Sealing...");
-        if let Some(ctx) = self.contexts.remove(&key) {
-            return Ok(self.strategy.assemble(key, ctx.accumulator));
-        }
-
-        Ok(None)
     }
 
     #[must_use]
@@ -301,7 +310,7 @@ impl<S: Mold + Default> Default for Crucible<S> {
 pub struct VolleyBuffer {
     pub artifacts: BTreeMap<StorageSequence, WitnessEnvelope>,
     pub volley_id: VolleyId,
-    pub owner_did: Did,
+    pub ownership: Ownership,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -314,6 +323,8 @@ pub enum AmalgamError {
     UnauthorizedHandover,
     #[error("Identity Mismatch: Frame DID does not match Volley owner")]
     IdentityMismatch,
+    #[error("Ambiguous Ownership: We require additional evidence to determine ownership")]
+    AmbiguousOwnership,
 }
 
 impl Mold for VolleyAmalgam {
@@ -327,49 +338,70 @@ impl Mold for VolleyAmalgam {
         item.data.evidence.volley_id().clone()
     }
 
+    fn is_authoritative(acc: &Self::Accumulator) -> bool {
+        acc.ownership.is_authoritative()
+    }
+
     fn init_accumulator(item: &Self::Input) -> Self::Accumulator {
         let mut artifacts = BTreeMap::new();
-        artifacts.insert(item.data.evidence.sequence_id(), item.data.clone());
+        let seq = item.data.evidence.sequence_id();
+        artifacts.insert(seq, item.data.clone());
+
+        // Check if the very first packet seen is an authority signal
+        let is_auth = match &item.data.evidence {
+            Evidence::Video(s) if s.sequence_id.0 == 0 => true,
+            Evidence::Handover(_) => true,
+            _ => false,
+        };
+
+        let ownership = if is_auth {
+            Ownership::Authoritative(item.data.did.clone())
+        } else {
+            Ownership::Tentative(item.data.did.clone())
+        };
 
         VolleyBuffer {
             artifacts,
             volley_id: item.data.evidence.volley_id().clone(),
-            owner_did: item.data.did.clone(),
+            ownership,
         }
     }
 
     fn ingest(acc: &mut Self::Accumulator, item: Self::Input) -> Result<(), Self::Error> {
+        let incoming_did = &item.data.did;
         let seq = item.data.evidence.sequence_id();
 
-        match &item.data.evidence {
-            Evidence::Handover(proof) => {
-                if proof.old_did == acc.owner_did {
-                    tracing::info!(
-                        volley = %acc.volley_id,
-                        "Crucible: Advancing stream ownership via HandoverProof"
-                    );
-                    acc.owner_did = proof.new_did.clone();
+        // 1. Determine if the incoming shard is an "Authority Signal"
+        let provides_authority = match &item.data.evidence {
+            Evidence::Handover(_) => true,
+            Evidence::Video(s) if s.sequence_id.0 == 0 => true,
+            _ => false,
+        };
+
+        // 2. Resolve Ownership State
+        match &acc.ownership {
+            Ownership::Authoritative(pinned_did) => {
+                if incoming_did == pinned_did {
                     acc.artifacts.insert(seq, item.data);
                     Ok(())
                 } else {
-                    tracing::warn!(
-                        volley = %acc.volley_id,
-                        "Crucible rejected HandoverProof: Unauthorized origin"
-                    );
-                    // ACTIVE REJECTION: Signals the Sentinel to drop connection/penalize peer
-                    Err(AmalgamError::UnauthorizedHandover)
+                    // AUTHORITATIVE MISMATCH: Proven Identity Theft
+                    Err(AmalgamError::IdentityMismatch)
                 }
             }
-            _ => {
-                if item.data.did == acc.owner_did {
+            Ownership::Tentative(tentative_did) => {
+                if provides_authority {
+                    // UPGRADE OR DISPLACE:
+                    // A Genesis/Handover arrives. It doesn't matter who the tentative owner was;
+                    // the one with the proof wins and cements the volley.
+                    acc.ownership = Ownership::Authoritative(incoming_did.clone());
+                    acc.artifacts.insert(seq, item.data);
+                    Ok(())
+                } else if incoming_did == tentative_did {
                     acc.artifacts.insert(seq, item.data);
                     Ok(())
                 } else {
-                    tracing::warn!(
-                        volley = %acc.volley_id,
-                        seq = %seq.0,
-                        "Crucible dropped illegal frame: Causality Breach (Identity Mismatch)"
-                    );
+                    // TENTATIVE MISMATCH: Race condition (Ambiguous)
                     Err(AmalgamError::IdentityMismatch)
                 }
             }
@@ -432,9 +464,13 @@ impl Mold for VolleyAmalgam {
 
         let gaps_2 = gaps.clone();
 
+        let final_owner_did = match acc.ownership {
+            Ownership::Tentative(did) | Ownership::Authoritative(did) => did,
+        };
+
         Some(Volley {
             id: key.clone(),
-            owner_did: acc.owner_did,
+            owner_did: final_owner_did,
             artifacts: sorted_envelopes,
             gaps,
             is_complete: gaps_2.is_empty(),
@@ -477,6 +513,10 @@ mod tests {
 
         fn is_ready(acc: &Vec<i32>, _elapsed: Duration) -> bool {
             acc.len() >= 3
+        }
+
+        fn is_authoritative(_acc: &Self::Accumulator) -> bool {
+            true
         }
 
         fn assemble(&self, _key: String, acc: Vec<i32>) -> Option<String> {

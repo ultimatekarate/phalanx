@@ -63,7 +63,7 @@ pub struct MeshSentinel<T: NetworkTransport, J: TransientJournal> {
     pub mode: NodeMode,
     pub config: NodeConfig,
     pub identity: Arc<PhalanxIdentity>,
-    pub clock: TrustedClock,
+    pub clock: Arc<TrustedClock>,
     pub network: T,
     pub video_rx: mpsc::Receiver<VideoShard>,
     pub audio_rx: mpsc::Receiver<AudioShard>,
@@ -123,11 +123,13 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
 
         let arc_identity = Arc::new(deps.identity.clone());
         let session = CausalitySession::new(arc_identity.clone(), local_network_id.clone());
+        let raw_clock = TrustedClock::new();
+        let clock_handle = Arc::new(raw_clock);
 
         Ok(Self {
             config: deps.config,
             identity: arc_identity,
-            clock: TrustedClock::new(),
+            clock: clock_handle,
             network: deps.network,
             trust_registry: deps.trust_registry,
             reputation_cache: deps.reputation_cache,
@@ -407,6 +409,10 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             GuardianError::QuotaExceeded(_) => Some(Offense::QuotaExceeded),
             GuardianError::ReplayDetected(_) => Some(Offense::ReplayAttack),
 
+            GuardianError::AmbiguousOwnership => {
+                tracing::debug!(%peer_id, "Dropping ambiguous shard without penalty");
+                None
+            }
             // NEW: Route severe Guardian errors to high-penalty Trust Offenses
             GuardianError::PolicyViolation(_) => Some(Offense::IdentityTheft),
             GuardianError::ChainIntegrityViolation(_) => Some(Offense::ProtocolViolation),
@@ -506,14 +512,15 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                 // 4. VAULT RESPONSE & CAUSAL BACKPRESSURE RELEASE
                 match reply_rx.await {
                     Ok(Ok(())) => {
-                        // Success: Release slot
                         self.ingress_governor.release_slot(&peer_id);
                     }
-                    Ok(Err(_guardian_error)) => {
+                    Ok(Err(guardian_error)) => {
+                        // THE FIX: If storage detects a crime, the Sentinel must punish it.
+                        self.handle_forensic_violation(peer_id.clone(), sender_did, guardian_error)
+                            .await;
                         self.ingress_governor.release_slot(&peer_id);
                     }
                     Err(_) => {
-                        // General storage failure
                         self.ingress_governor.release_slot(&peer_id);
                     }
                 }

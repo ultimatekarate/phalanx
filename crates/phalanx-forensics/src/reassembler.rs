@@ -127,7 +127,11 @@ impl Reassembler {
                     Err(ShardError::CapacityExceeded(0))
                 }
             }
-            Err(e) => Err(e),
+            // THE FIX: Map the Crucible's generic GuardianError back to a ShardError
+            Err(guardian_error) => Err(ShardError::SerializationError(format!(
+                "Reassembly rejected by Crucible: {:?}",
+                guardian_error
+            ))),
         }
     }
 
@@ -186,6 +190,12 @@ impl Mold for ShardMold {
             parts: BTreeMap::new(),
             owner_did: item.owner_did.clone(),
         }
+    }
+
+    // Byte-level buffers inherently lack cryptographic proof
+    // thus this must be false.
+    fn is_authoritative(_acc: &Self::Accumulator) -> bool {
+        false
     }
 
     fn ingest(acc: &mut Self::Accumulator, item: Self::Input) -> Result<(), Self::Error> {

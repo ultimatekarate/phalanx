@@ -498,25 +498,45 @@ async fn test_sentinel_blocks_untrusted_egress() {
 
 // --- ADD TO BOTTOM OF meshsentinel_tests.rs ---
 use phalanx_proto::prelude::SignatureHash;
-use phalanx_proto::prelude::TrustedClock;
-/// Authority-linked Envelope Generator
-/// This uses the Sentinel's own TrustedClock to ensure 0ms drift.
+
+// ============================================================================
+// Siege Configuration
+// ============================================================================
+
+struct SiegeConfig {
+    honest_count: usize,
+    attacker_count: usize,
+    frames_per_honest: u32,
+    inter_frame_delay: Duration,
+}
+
+impl Default for SiegeConfig {
+    fn default() -> Self {
+        Self {
+            honest_count: 300,
+            attacker_count: 311,
+            frames_per_honest: 2,
+            inter_frame_delay: Duration::from_millis(10),
+        }
+    }
+}
+
+// ============================================================================
+// Unified Envelope Generator
+// ============================================================================
+
 fn create_mock_envelope(
-    clock: &dyn TrustedClock,
+    clock: &dyn phalanx_proto::time::TrustedClock,
     identity: &PhalanxIdentity,
     volley_id: &VolleyId,
     seq: StorageSequence,
     prev_hash: Option<SignatureHash>,
-    time_offset_ms: u64,
 ) -> WitnessEnvelope {
-    // 1. Get current forensic time (ms) and apply offset
-    let base_timestamp = clock.now();
-    let base_time_raw = base_timestamp.0;
+    // SYNC: Pull the exact forensic millisecond from the Sentinel's clock
+    let timestamp = clock.now();
 
-    // 3. Apply the sequence offset and wrap back into a PhalanxTimestamp
-    let final_timestamp = PhalanxTimestamp(base_time_raw + time_offset_ms);
     let shard = VideoShard {
-        timestamp: final_timestamp,
+        timestamp,
         sequence_id: seq,
         fps: 30,
         volley_id: volley_id.clone(),
@@ -533,108 +553,107 @@ fn create_mock_envelope(
 }
 
 // ============================================================================
-// The Siege Test (Integration)
+// The Siege Test
 // ============================================================================
 
 #[tokio::test]
-async fn test_mesh_under_siege_integration() {
+async fn test_mesh_under_siege() {
     init_observability();
+    let config = SiegeConfig::default();
+    let total_expected_messages =
+        config.honest_count * (config.frames_per_honest as usize) + config.attacker_count;
 
-    // 1. Boot a fully-wired MeshSentinel
-    let (_ingress_tx, ingress_rx) = mpsc::channel(3000);
+    // 1. Boot Sentinel
+    let (_ingress_tx, ingress_rx) = mpsc::channel(total_expected_messages);
     let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
+    let (tx, mut rx) = mpsc::channel(total_expected_messages);
 
-    let video_topic = sentinel.config.network.video_topic.clone();
-    let (tx, mut rx) = mpsc::channel(3000);
+    let clock_handle = sentinel.clock.clone();
 
-    let honest_witness = 5;
-    let dishonest_witness = 2;
+    let shards_per_stream = (config.frames_per_honest + 1) as u64;
+    let attacker_base_id = config.honest_count as u64 * shards_per_stream;
 
-    // --- AGENT 1: THE HONEST WITNESS (500 instances) ---
-    for i in 0..honest_witness {
+    // --- AGENT 1: THE HONEST WITNESSES ---
+    for i in 0..config.honest_count {
         let tx = tx.clone();
-        let topic = video_topic.clone();
-        let clock = sentinel.clock.clone();
+        let topic = sentinel.config.network.video_topic.clone();
+        let clock = clock_handle.clone();
+
+        let shard_base = i as u64 * shards_per_stream;
 
         tokio::spawn(async move {
             let id = PhalanxIdentity::new_ephemeral();
             let vid = VolleyId::new(format!("honest_stream_{}", i));
 
-            let env1 = create_mock_envelope(
-                &clock as &dyn TrustedClock,
-                &id,
-                &vid,
-                StorageSequence(1),
-                None,
-                0,
-            );
+            let genesis_env = create_mock_envelope(&*clock, &id, &vid, StorageSequence(0), None);
 
-            let chunk1 = ShardChunk {
-                shard_id: ShardId(1),
+            // We update last_hash immediately after the Genesis shard is created.
+            let mut last_hash = Some(genesis_env.signature_hash());
+
+            let genesis_chunk = ShardChunk {
+                shard_id: ShardId(shard_base), // Sequence 0
                 chunk_index: 0,
                 total_chunks: 1,
-                data: postcard::to_allocvec(&env1).unwrap(),
+                data: postcard::to_allocvec(&genesis_env).unwrap(),
                 owner_did: id.did.clone(),
                 chunk_type: ChunkType::Witnessed,
             };
+
             tx.send((
                 id.network_id.clone(),
-                postcard::to_allocvec(&chunk1).unwrap(),
+                postcard::to_allocvec(&genesis_chunk).unwrap(),
                 topic.clone(),
             ))
             .await
             .unwrap();
 
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            tokio::time::sleep(config.inter_frame_delay).await;
 
-            let env2 = create_mock_envelope(
-                &clock as &dyn TrustedClock,
-                &id,
-                &vid,
-                StorageSequence(2),
-                Some(env1.signature_hash()),
-                500,
-            );
-            let chunk2 = ShardChunk {
-                shard_id: ShardId(2),
-                chunk_index: 0,
-                total_chunks: 1,
-                data: postcard::to_allocvec(&env2).unwrap(),
-                owner_did: id.did.clone(),
-                chunk_type: ChunkType::Witnessed,
-            };
-            tx.send((
-                id.network_id,
-                postcard::to_allocvec(&chunk2).unwrap(),
-                topic,
-            ))
-            .await
-            .unwrap();
+            for seq_idx in 1..=config.frames_per_honest {
+                let env =
+                    create_mock_envelope(&*clock, &id, &vid, StorageSequence(seq_idx), last_hash);
+
+                last_hash = Some(env.signature_hash());
+
+                let chunk = ShardChunk {
+                    shard_id: ShardId(shard_base + seq_idx as u64),
+                    chunk_index: 0,
+                    total_chunks: 1,
+                    data: postcard::to_allocvec(&env).unwrap(),
+                    owner_did: id.did.clone(),
+                    chunk_type: ChunkType::Witnessed,
+                };
+
+                tx.send((
+                    id.network_id.clone(),
+                    postcard::to_allocvec(&chunk).unwrap(),
+                    topic.clone(),
+                ))
+                .await
+                .unwrap();
+                tokio::time::sleep(config.inter_frame_delay).await;
+            }
         });
     }
 
-    // --- AGENT 2: THE IDENTITY THIEF (250 instances) ---
-    for i in 0..dishonest_witness {
+    // --- AGENT 2: THE IDENTITY THIEVES ---
+    for i in 0..config.attacker_count {
         let tx = tx.clone();
-        let topic = video_topic.clone();
-        let clock = sentinel.clock.clone();
+        let topic = sentinel.config.network.video_topic.clone();
+        let thread_clock = sentinel.clock.clone();
+        let attacker_shard_id = ShardId(attacker_base_id + i as u64);
 
         tokio::spawn(async move {
             let (thief_id, _) = PhalanxIdentity::generate().unwrap();
-            let target_vid = VolleyId::new(format!("honest_stream_{}", i));
+            let target_idx = i % config.honest_count;
+            let target_vid = VolleyId::new(format!("honest_stream_{}", target_idx));
 
-            // Thief also uses the clock to bypass Time Gate
-            // but will slam directly into the Integrity Gate.
-            let evil_env = create_mock_envelope(
-                &clock as &dyn TrustedClock,
-                &thief_id,
-                &target_vid,
-                StorageSequence(1),
-                None,
-                0,
-            );
+            let clock_ptr: &dyn phalanx_proto::time::TrustedClock = &*thread_clock;
+            // Thief attempts to spoof Seq 1.
+            let evil_env =
+                create_mock_envelope(clock_ptr, &thief_id, &target_vid, StorageSequence(1), None);
             let evil_chunk = ShardChunk {
-                shard_id: ShardId(1),
+                shard_id: attacker_shard_id,
                 chunk_index: 0,
                 total_chunks: 1,
                 data: postcard::to_allocvec(&evil_env).unwrap(),
@@ -652,21 +671,20 @@ async fn test_mesh_under_siege_integration() {
         });
     }
 
-    // --- THE PROCESSING LOOP ---
+    // --- EXECUTION PIPELINE ---
     let mut processed_count = 0;
-    let siege_timeout = tokio::time::sleep(std::time::Duration::from_secs(20));
+    let siege_timeout = tokio::time::sleep(Duration::from_secs(45));
     tokio::pin!(siege_timeout);
 
     loop {
         tokio::select! {
             Some((peer_id, data_bytes, topic)) = rx.recv() => {
                 sentinel.handle_network_ingress(peer_id, &data_bytes, topic).await;
-
                 processed_count += 1;
-                if processed_count >= (honest_witness+dishonest_witness)*2 { break; }
+                if processed_count >= total_expected_messages { break; }
             }
             _ = &mut siege_timeout => {
-                tracing::error!("SIEGE TIMEOUT: Processed {}/{}", processed_count, (honest_witness+dishonest_witness)*2);
+                tracing::error!("SIEGE TIMEOUT: Processed {}/{}", processed_count, total_expected_messages);
                 break;
             }
         }
@@ -682,10 +700,10 @@ async fn test_mesh_under_siege_integration() {
 
     tracing::info!("Final Blacklist Count: {}", blacklist_count);
 
-    // Result: 250 (Identity Thieves only)
+    // Result: Perfectly isolated attackers
     assert_eq!(
-        blacklist_count, 250,
-        "Banning failed! Count: {}",
-        blacklist_count
+        blacklist_count, config.attacker_count,
+        "Banning failed! Expected {}, got {}",
+        config.attacker_count, blacklist_count
     );
 }

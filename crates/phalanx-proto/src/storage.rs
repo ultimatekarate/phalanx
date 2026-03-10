@@ -53,6 +53,9 @@ pub enum GuardianError {
 
     #[error("Identity Mismatch")]
     IdentityMismatch,
+
+    #[error("Ambiguous ownership: Multiple unproven identities claiming Volley")]
+    AmbiguousOwnership,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

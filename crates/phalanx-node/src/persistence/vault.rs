@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use phalanx_forensics::crucible::Crucible;
 use phalanx_forensics::crucible::VolleyAmalgam;
 use phalanx_forensics::crucible::{EnvelopeHashExt, EvidenceExt};
-use phalanx_forensics::errors::ForensicPromotion;
 use phalanx_forensics::gate::PromotionGate;
 use phalanx_forensics::prelude::TransientJournal;
 use phalanx_proto::evidence::StorageSequence;
@@ -78,10 +77,7 @@ impl Guardian {
 
                 // 2. Volley Aggregation
                 // The Crucible now accepts only Verified units
-                let maybe_volley = self
-                    .crucible
-                    .process(verified_unit)
-                    .map_err(|e| e.promote())?;
+                let maybe_volley = self.crucible.process(verified_unit)?;
 
                 if let Some(volley) = maybe_volley {
                     self.commit_volley_to_disk(&volley).await?;

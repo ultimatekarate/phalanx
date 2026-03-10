@@ -9,7 +9,7 @@ pub const IDENTITY_VERSION: u32 = 1;
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize, Default,
 )]
-pub struct ShardId(pub u32);
+pub struct ShardId(pub u64);
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct VolleyId(pub String);
@@ -293,6 +293,26 @@ impl FromStr for PhalanxLocator {
             author: crate::identity::Did(author_str.to_string()),
             recipient_did: crate::identity::Did(recipient_str.to_string()),
         })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum Ownership {
+    /// Tentative ownership based on first-seen shard. Subject to displacement.
+    Tentative(Did),
+    /// Authoritative ownership proven by Genesis (Seq 0) or Handover. Permanent.
+    Authoritative(Did),
+}
+
+impl Ownership {
+    pub fn did(&self) -> &Did {
+        match self {
+            Self::Tentative(d) | Self::Authoritative(d) => d,
+        }
+    }
+
+    pub fn is_authoritative(&self) -> bool {
+        matches!(self, Self::Authoritative(_))
     }
 }
 
