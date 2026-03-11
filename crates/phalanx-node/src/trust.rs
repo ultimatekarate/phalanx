@@ -193,8 +193,7 @@ impl TrustRegistry {
     }
 
     fn sync_projection_for(projection: &ReputationProjection, did: &Did, record: &PeerRecord) {
-        let network_id_str = did.as_str().replace("did:key:", "");
-        let network_id = NetworkId::from(network_id_str);
+        let network_id = did.to_network_id();
 
         let score_normalized = if record.reputation.is_blacklisted {
             0.0
@@ -298,12 +297,7 @@ impl TrustRegistry {
 
         if let Some(record) = self.core.peers.get_mut(did) {
             let old_score = record.reputation.score;
-            let penalty = match offense {
-                Offense::QuotaExceeded => 25,
-                // Assuming forensic violations trigger fatal penalties
-                Offense::InvalidSignature | Offense::IdentityTheft => 101,
-                _ => 10,
-            };
+            let penalty = phalanx_forensics::trust::assess_penalty(&offense);
 
             record.reputation.score = record.reputation.score.saturating_sub(penalty);
 
@@ -487,10 +481,7 @@ impl TrustRegistry {
     /// Checks if a network-level ID is blacklisted by resolving it to a DID.
     #[must_use]
     pub fn is_network_id_blacklisted(&self, network_id: &NetworkId) -> bool {
-        // Resolve PeerId string into standard did:key format for lookup
-        let deterministic_did_str = format!("did:key:{}", network_id);
-        let target_did = Did::from(deterministic_did_str);
-
+        let target_did = Did::from_network_id(network_id);
         self.is_blacklisted(&target_did)
     }
 
@@ -530,10 +521,7 @@ impl TrustRegistry {
 
 impl PeerEvaluator for TrustRegistry {
     fn evaluate_reputation(&self, peer_id: &NetworkId) -> f32 {
-        // Deterministic Identity Resolution
-        // Converts the base58 PeerId string into a standard did:key format
-        let deterministic_did_str = format!("did:key:{}", peer_id);
-        let target_did = Did::from(deterministic_did_str);
+        let target_did = Did::from_network_id(peer_id);
 
         let record = match self.core.peers.get(&target_did) {
             Some(r) => r,
