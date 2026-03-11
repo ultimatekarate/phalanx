@@ -221,15 +221,16 @@ impl TrustRegistry {
             // Apply penalty based on offense severity
             // (Adjust these penalty values to match your domain rules)
             let penalty = match offense {
+                Offense::InvalidSignature | Offense::IdentityTheft | Offense::ReplayAttack => 101,
                 Offense::QuotaExceeded => 25,
-                // Add other match arms as defined in your Offense enum
-                _ => 10,
+                Offense::ProtocolViolation | Offense::MalformedPacket => 15,
+                Offense::TemporalSkew => 10,
             };
 
             record.reputation.score = record.reputation.score.saturating_sub(penalty);
 
             // Apply deterministic blacklisting if the score hits bottom
-            if record.reputation.score == 0 {
+            if record.reputation.score <= 0 {
                 record.reputation.is_blacklisted = true;
             }
 
@@ -514,6 +515,10 @@ mod tests {
         let mut registry = TrustRegistry::build(&config).await;
         let clock = TrustedClock::new();
         let did = Did::from("did:phx:offender");
+        registry
+            .register_peer(&did, TrustLevel::Ignored, &clock)
+            .await
+            .unwrap();
 
         // Assuming PeerReputation::default() initializes `score` to 100
 
