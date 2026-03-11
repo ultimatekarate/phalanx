@@ -179,6 +179,16 @@ impl<I: IngressPort> MeshSentinel<I> {
 
         tokio::spawn(media_actor.run());
 
+        // Vitals polling task — feeds hardware stress into s_integral
+        let vitals_governor = deps.system_governor.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                tick.tick().await;
+                vitals_governor.update_vitals();
+            }
+        });
+
         let config_arc = Arc::new(deps.config);
 
         Ok(Self {

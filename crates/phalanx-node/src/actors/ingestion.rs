@@ -101,6 +101,12 @@ impl IngestionActor {
         // Since Sentinel owns HealthTracker, Sentinel should handle Control Messages.
         // We will assume Sentinel filters Control Messages.
 
+        let scale = self.system_governor.ingestion_scaler();
+        let delay = scale.as_throttle_delay(10);
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+
         if !self
             .traffic_governor
             .should_accept(&peer_id, &self.identity.to_network_id())
@@ -143,6 +149,10 @@ impl IngestionActor {
 
             let trust_level = self.trust_oracle.check_trust_by_did(&sender_did);
             let stress = self.system_governor.current_stress();
+
+            let endowment = self.system_governor.sybil_endowment();
+            self.ingress_governor.base_max_slots = endowment.0 as usize;
+
             match self
                 .ingress_governor
                 .try_allocate(peer_id.clone(), trust_level, stress)
@@ -156,6 +166,7 @@ impl IngestionActor {
                     return;
                 }
             }
+            self.system_governor.record_entry_pressure();
 
             let _slot_guard = SlotGuard::new(&mut self.ingress_governor, peer_id.clone());
 

@@ -99,6 +99,8 @@ pub trait Homeostasis {
     fn temporal_tolerance(&self) -> Duration;
     fn record_metabolic_pressure(&self, duration: Duration);
     fn record_latency_pressure(&self, duration: Duration);
+    fn record_io_pressure(&self, duration: Duration);
+    fn record_entry_pressure(&self);
     fn ingestion_scaler(&self) -> IngestionScale;
     fn finalization_scaler(&self) -> FinalizationScale;
     fn sybil_endowment(&self) -> SybilEndowment;
@@ -299,6 +301,20 @@ impl Homeostasis for SystemGovernor {
         self.with_state_mut(|s| {
             let decay = Self::calculate_dt_and_decay(s, self.config.lambda_sys);
             s.l_integral = duration.as_secs_f64() + (s.l_integral * decay);
+        });
+    }
+
+    fn record_io_pressure(&self, duration: Duration) {
+        self.with_state_mut(|s| {
+            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_io);
+            s.d_integral = duration.as_secs_f64() + (s.d_integral * decay);
+        });
+    }
+
+    fn record_entry_pressure(&self) {
+        self.with_state_mut(|s| {
+            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_entry);
+            s.e_integral = 1.0 + (s.e_integral * decay);
         });
     }
 
