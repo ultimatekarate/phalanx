@@ -180,8 +180,7 @@ impl TimeJudge for PhalanxTimestamp {
 // compatibility so existing `use phalanx_forensics::judge::IntegrityGate`
 // paths continue to resolve.
 pub use crate::gate::{
-    BufferCapacityGate, CapacityGate, ChronosGate, ContinuityGate, ForensicGate, IntegrityGate,
-    PrivacyGate, WitnessGate,
+    BufferCapacityGate, ContinuityGate, ForensicGate, IntegrityGate, PrivacyGate, WitnessGate,
 };
 
 #[cfg(test)]
@@ -263,8 +262,12 @@ mod tests {
             Ok(valid_env) => {
                 // If we somehow reached here (we shouldn't), the Governor is the second line of defense.
                 let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
-                let sealed_result =
-                    EgressGovernor::authorize(unit, &TrustLevel::Ally, &SystemStress::Nominal);
+                let sealed_result = EgressGovernor::authorize(
+                    unit,
+                    &TrustLevel::Ally,
+                    &SystemStress::Nominal,
+                    &SymmetricKey([0u8; 32]),
+                );
                 assert!(
                     sealed_result.is_err(),
                     "Governor allowed tampered data to be promoted to Sealed!"

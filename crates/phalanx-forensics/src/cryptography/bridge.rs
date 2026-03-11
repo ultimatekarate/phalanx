@@ -36,26 +36,9 @@ pub fn ed_to_x25519_sk(ed_key: &SigningKey) -> Result<x25519_dalek::StaticSecret
 
 /// Resolves a `did:key:z...` DID to an Ed25519 VerifyingKey.
 ///
-/// The DID format is: `did:key:z<bs58(0xed01 ++ ed25519_public_key)>`
-/// This function reverses that encoding to recover the public key.
+/// Delegates to `resolve_did_public_key` for the raw byte extraction,
+/// then constructs the VerifyingKey from the result.
 pub fn resolve_did_pk(did: &Did) -> Result<VerifyingKey, CryptoError> {
-    let did_str = did.as_ref();
-    let multibase_str = did_str
-        .strip_prefix("did:key:z")
-        .ok_or(CryptoError::DidResolutionFailure)?;
-
-    let decoded = bs58::decode(multibase_str)
-        .into_vec()
-        .map_err(|_| CryptoError::DidResolutionFailure)?;
-
-    // Expect 2-byte multicodec prefix (0xed, 0x01) + 32-byte Ed25519 public key
-    if decoded.len() != 34 || decoded[0] != 0xed || decoded[1] != 0x01 {
-        return Err(CryptoError::DidResolutionFailure);
-    }
-
-    let key_bytes: [u8; 32] = decoded[2..34]
-        .try_into()
-        .map_err(|_| CryptoError::DidResolutionFailure)?;
-
-    VerifyingKey::from_bytes(&key_bytes).map_err(|_| CryptoError::DidResolutionFailure)
+    let bytes = crate::identity::resolve_did_public_key(did)?;
+    VerifyingKey::from_bytes(&bytes).map_err(|_| CryptoError::DidResolutionFailure)
 }

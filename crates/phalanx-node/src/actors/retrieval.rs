@@ -9,6 +9,7 @@ use crate::vitals::{FinalizationScale, SystemGovernor};
 use phalanx_forensics::crucible::EvidenceExt;
 use phalanx_forensics::gate::IntegrityGate;
 use phalanx_forensics::policy::EgressGovernor;
+use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*;
 use phalanx_proto::trust::Offense;
@@ -34,6 +35,7 @@ pub struct RetrievalActor {
     egress_tx: mpsc::Sender<EgressCommand>,
     trust_oracle: ReputationProjection,   // For reads
     trust_tx: mpsc::Sender<TrustCommand>, // For writes
+    network_key: Arc<SymmetricKey>,
     rx: mpsc::Receiver<RetrievalCommand>,
 }
 
@@ -47,6 +49,7 @@ impl RetrievalActor {
         egress_tx: mpsc::Sender<EgressCommand>,
         trust_oracle: ReputationProjection,
         trust_tx: mpsc::Sender<TrustCommand>,
+        network_key: Arc<SymmetricKey>,
         rx: mpsc::Receiver<RetrievalCommand>,
     ) -> Self {
         Self {
@@ -57,6 +60,7 @@ impl RetrievalActor {
             egress_tx,
             trust_oracle,
             trust_tx,
+            network_key,
             rx,
         }
     }
@@ -135,8 +139,12 @@ impl RetrievalActor {
             let sequence_id = env.evidence.sequence_id();
             if let Ok(valid_env) = env.check_integrity(local_id, &*self.clock, 10_000, None) {
                 let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
-                if let Ok(sealed) = EgressGovernor::authorize(unit, &target_trust, &current_stress)
-                {
+                if let Ok(sealed) = EgressGovernor::authorize(
+                    unit,
+                    &target_trust,
+                    &current_stress,
+                    &self.network_key,
+                ) {
                     sealed_units.push(sealed);
                 } else {
                     tracing::warn!(seq = %sequence_id, "Egress denied by policy");
