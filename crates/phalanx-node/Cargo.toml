@@ -12,10 +12,6 @@ path = "src/lib.rs"
 name = "sentinel"
 path = "src/bin/sentinel.rs"
 
-[[bin]]
-name = "stronghold"
-path = "src/bin/stronghold.rs"
-
 [dependencies]
 # The Linguistic Foundation
 phalanx-proto = { path = "../phalanx-proto" }

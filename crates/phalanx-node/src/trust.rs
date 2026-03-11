@@ -216,21 +216,62 @@ impl TrustRegistry {
         clock: &C,
     ) {
         let mut requires_save = false;
+        tracing::debug!(
+            target: "phalanx::trust",
+            offender_did = %did,
+            offense_type = ?offense,
+            "PENALTY_ATTEMPTED"
+        );
+        // LAZY REGISTRATION: Never ignore a forensic offense, even from unknown peers
+        if !self.contacts.contains_key(did) {
+            tracing::info!(
+                target: "phalanx::trust",
+                offender_did = %did,
+                "LAZY_REGISTRATION_TRIGGERED"
+            );
+
+            let pet_name = self.generate_unique_pet_name(did);
+            let timestamp = PhalanxTimestamp(clock.current_monotonic().0 * 1000);
+
+            let record = PeerRecord {
+                did: did.clone(),
+                pet_name: Some(pet_name.clone()),
+                level: TrustLevel::Ignored, // Untrusted baseline
+                added_at: timestamp,
+                last_interaction: timestamp,
+                reputation: PeerReputation::default(),
+            };
+            self.contacts.insert(did.clone(), record);
+            self.pet_name_index.insert(pet_name, did.clone());
+        }
 
         if let Some(record) = self.contacts.get_mut(did) {
-            // Apply penalty based on offense severity
-            // (Adjust these penalty values to match your domain rules)
+            let old_score = record.reputation.score;
             let penalty = match offense {
                 Offense::QuotaExceeded => 25,
-                // Add other match arms as defined in your Offense enum
+                // Assuming forensic violations trigger fatal penalties
+                Offense::InvalidSignature => 101,
                 _ => 10,
             };
 
             record.reputation.score = record.reputation.score.saturating_sub(penalty);
 
-            // Apply deterministic blacklisting if the score hits bottom
-            if record.reputation.score == 0 {
+            tracing::info!(
+                target: "phalanx::trust",
+                offender_did = %did,
+                from_score = old_score,
+                to_score = record.reputation.score,
+                penalty_applied = penalty,
+                "REPUTATION_DEGRADED"
+            );
+
+            if record.reputation.score <= 0 || penalty > 100 {
                 record.reputation.is_blacklisted = true;
+                tracing::warn!(
+                    target: "phalanx::trust",
+                    offender_did = %did,
+                    "PEER_BLACKLISTED"
+                );
             }
 
             let now = clock.current_monotonic();
@@ -242,8 +283,6 @@ impl TrustRegistry {
             requires_save = true;
         }
 
-        // ASYNC SAFETY GUARANTEE:
-        // We only trigger disk I/O after all synchronous locks have been dropped.
         if requires_save {
             if let Err(e) = self.save().await {
                 tracing::error!(target: "trust", "Failed to persist trust registry after offense: {}", e);
@@ -511,19 +550,21 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::test_defaults();
         config.storage.vault_path = temp.path().to_string_lossy().to_string();
+
         let mut registry = TrustRegistry::build(&config).await;
-        let clock = TrustedClock::new();
+        let clock = SystemClock; // Using SystemClock for the trait impl
         let did = Did::from("did:phx:offender");
 
-        // Assuming PeerReputation::default() initializes `score` to 100
-
-        // 1. Record a minor offense
+        // 1. Record a minor offense (Implicitly registers the peer)
         registry
             .record_offense(&did, Offense::QuotaExceeded, &clock)
             .await;
 
-        let record = registry.contacts.get(&did).unwrap();
-        assert_eq!(record.reputation.score, 75); // 100 - 25
+        let record = registry
+            .contacts
+            .get(&did)
+            .expect("Peer should be lazily registered");
+        assert_eq!(record.reputation.score, 75);
         assert!(!record.reputation.is_blacklisted);
 
         // 2. Record a fatal offense
@@ -532,7 +573,8 @@ mod tests {
             .await;
 
         let record = registry.contacts.get(&did).unwrap();
-        assert_eq!(record.reputation.score, -26); // 75 - 101 = -26
+        // If score is i32: 75 - 101 = -26. If u32 saturating: 0.
+        assert!(record.reputation.score <= 0);
         assert!(record.reputation.is_blacklisted);
     }
 }

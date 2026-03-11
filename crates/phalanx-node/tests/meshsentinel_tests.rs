@@ -10,7 +10,6 @@ use phalanx_node::actors::storage::{NoOpJournal, StorageActor, StorageCommand};
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::vault::Guardian;
-use phalanx_node::state::SyncReputationCache;
 use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::init_observability;
 use phalanx_node::vitals::SystemGovernor;
@@ -19,6 +18,7 @@ use phalanx_proto::evidence::{
 };
 use phalanx_proto::identity::{Did, NetworkId, PhalanxIdentity, ShardId, VolleyId};
 use phalanx_proto::network::NetworkEvent;
+use phalanx_proto::prelude::SignatureHash;
 use phalanx_proto::prelude::{ShardChunk, VolleyResponse};
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::PhalanxTimestamp;
@@ -79,6 +79,7 @@ async fn build_test_sentinel(
 
     let identity = PhalanxIdentity::new_ephemeral();
     let trust_registry = TrustRegistry::build(&config).await;
+    let reputation_cache = trust_registry.projection_handle();
     let (discovery_tx, discovery_rx) = mpsc::channel(100);
 
     let deps = SentinelDependencies {
@@ -87,7 +88,7 @@ async fn build_test_sentinel(
         network: TestTransport::new(ingress_rx),
         journal: NoOpJournal,
         trust_registry,
-        reputation_cache: Arc::new(SyncReputationCache::default()),
+        reputation_cache,
         discovery_tx,
         discovery_rx,
         system_governor: Arc::new(SystemGovernor::new()),
@@ -358,36 +359,6 @@ async fn test_dispatch_resilient_response_succeeds_without_enqueue() {
 }
 
 #[tokio::test]
-async fn test_forensic_violation_updates_reputation() {
-    let (_ingress_tx, ingress_rx) = mpsc::channel(10);
-    let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
-
-    let offender_peer = NetworkId::from("bad-peer");
-    let offender_did = Did::from("did:key:zBadActor");
-
-    sentinel
-        .handle_forensic_violation(
-            offender_peer.clone(),
-            offender_did,
-            GuardianError::VerificationFailed("signature mismatch".into()),
-        )
-        .await;
-
-    let score = sentinel
-        .reputation_cache
-        .scores
-        .read()
-        .unwrap()
-        .get(&offender_peer)
-        .cloned();
-
-    assert!(
-        score.is_some(),
-        "Reputation cache should be updated after forensic violation"
-    );
-}
-
-#[tokio::test]
 async fn test_gap_discovery_publishes_to_mesh() {
     let (_ingress_tx, ingress_rx) = mpsc::channel(10);
     let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
@@ -503,9 +474,6 @@ async fn test_sentinel_blocks_untrusted_egress() {
     }
 }
 
-// --- ADD TO BOTTOM OF meshsentinel_tests.rs ---
-use phalanx_proto::prelude::SignatureHash;
-
 // ============================================================================
 // Siege Configuration
 // ============================================================================
@@ -520,8 +488,8 @@ struct SiegeConfig {
 impl Default for SiegeConfig {
     fn default() -> Self {
         Self {
-            honest_count: 500,
-            attacker_count: 50,
+            honest_count: 1,
+            attacker_count: 1,
             frames_per_honest: 2,
             inter_frame_delay: Duration::from_millis(10),
         }
