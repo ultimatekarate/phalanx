@@ -26,6 +26,7 @@ pub struct StorageActor<J: TransientJournal> {
     pub current_tolerance: Duration,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum StorageCommand {
     /// Pure ingestion. No routing logic or network ACKs.
     Ingest {

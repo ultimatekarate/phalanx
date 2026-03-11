@@ -18,6 +18,7 @@ use phalanx_forensics::ReputationGate;
 use phalanx_proto::prelude::*;
 use phalanx_proto::types::Unverified;
 use std::sync::Arc;
+
 use tokio::sync::mpsc;
 
 use phalanx_proto::crypto::SymmetricKey;
@@ -158,6 +159,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
         let local_network_id = self.identity.to_network_id();
         let mut retry_tick = interval(Duration::from_millis(500));
+        let mut heartbeat_tick = interval(Duration::from_secs(1));
 
         let base_throttle = 5;
         loop {
@@ -177,6 +179,17 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
 
             tokio::select! {
                 _ = retry_tick.tick() => { self.process_pending_egress().await; }
+
+                _ = heartbeat_tick.tick() => {
+                    let load = 1.0 - self.system_governor.ingestion_scaler().0;
+                    let storage = self.check_available_storage();
+
+                    // The Sentinel asks the Tracker: "Is my metabolic drift significant?"
+                    if self.health_tracker.should_broadcast_self(load as f32, storage) {
+                        self.broadcast_metabolic_pulse().await?;
+                    }
+                }
+
                 Some(event) = self.network.next_event(), if scale.0 > 0.01 => {
                     match event {
                         NetworkEvent::DataReceived { origin, topic, data } => {
@@ -207,6 +220,45 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             }
         }
         Ok(())
+    }
+
+    async fn broadcast_metabolic_pulse(&mut self) -> Result<(), Box<dyn Error>> {
+        // Capture the current "Breath" of the node
+        let scale = self.system_governor.ingestion_scaler(); //
+
+        // Map scale (1.0 = Empty) to load (0.0 = Busy)
+        // If scale is 0.2 (80% throttled), load_factor is 0.8.
+        let metabolic_load: f64 = 1.0 - scale.0;
+
+        let message = ControlMessage {
+            sender: self.identity.to_network_id(),
+            load_factor: metabolic_load as f32,
+            storage_remaining_mb: 10_000,
+            heartbeat_ms: self.clock.now()?.0,
+            is_leaf: self.mode == NodeMode::Leaf,
+        };
+
+        // Publish to the mesh control topic
+        let topic = &self.config.network.control_topic;
+        let data = postcard::to_allocvec(&message)?;
+
+        self.network.publish(topic, data).await?;
+
+        Ok(())
+    }
+
+    fn check_available_storage(&self) -> u64 {
+        // 1. Convert usize to u64 explicitly.
+        // 'as u64' is safe here because usize is at most 64-bit on modern systems.
+        let max_bytes = self.config.storage.max_storage_bytes.as_u64();
+
+        // 2. TODO: In a production 'Mighty' node, you'd query the disk or the Guardian
+        // for the actual used bytes. For now, we'll assume the vault is empty.
+        let used_bytes = 0u64;
+
+        // 3. Subtract and convert to MB (1024 * 1024 bytes)
+        // saturating_sub ensures we never underflow if the disk is over-full
+        max_bytes.saturating_sub(used_bytes) / (1024 * 1024)
     }
 
     pub async fn handle_gap_discovery(
@@ -481,6 +533,21 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         {
             tracing::warn!("Sentinel dropped chunk: Invalid topic {}", topic_str);
             return;
+        }
+
+        let topic = &self.config.network.control_topic;
+        if topic_str == topic.as_str() {
+            match postcard::from_bytes::<ControlMessage>(data) {
+                Ok(msg) => {
+                    // Update our medical records for this peer
+                    self.health_tracker.register_activity(msg);
+                    return; // Control messages don't go to the Vault
+                }
+                Err(e) => {
+                    tracing::warn!(peer = %peer_id, "Malformed control message: {}", e);
+                    return;
+                }
+            }
         }
 
         if !self

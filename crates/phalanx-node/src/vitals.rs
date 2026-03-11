@@ -359,6 +359,10 @@ pub struct HealthTracker {
     pub heartbeats: HashMap<NetworkId, Instant>,
     pub capacities: HashMap<NetworkId, ControlMessage>,
     pub peer_contracts: HashMap<NetworkId, VitalityRate>,
+
+    pub last_sent_load: f32,
+    pub last_sent_storage: u64,
+    pub last_sent_at: Instant,
 }
 
 impl HealthTracker {
@@ -368,7 +372,25 @@ impl HealthTracker {
             heartbeats: HashMap::new(),
             capacities: HashMap::new(),
             peer_contracts: HashMap::new(),
+            last_sent_at: Instant::now(),
+            last_sent_load: 0.0,
+            last_sent_storage: 0,
         }
+    }
+
+    pub fn should_broadcast_self(&mut self, current_load: f32, current_storage: u64) -> bool {
+        let load_delta = (current_load - self.last_sent_load).abs();
+        let time_since = self.last_sent_at.elapsed();
+
+        // 1. SIGNIFICANCE: Did my stress change by more than 10%?
+        // 2. STALENESS: Has it been 30 seconds since I checked in?
+        if load_delta > 0.10 || time_since > Duration::from_secs(30) {
+            self.last_sent_load = current_load;
+            self.last_sent_storage = current_storage;
+            self.last_sent_at = Instant::now();
+            return true;
+        }
+        false
     }
 
     pub fn register_activity(&mut self, msg: ControlMessage) {
