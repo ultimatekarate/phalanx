@@ -24,7 +24,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tracing::info;
 
 const MAX_WAL_CHUNK_BYTES: u32 = 16 * 1024 * 1024; // 16 MiB
-const MAX_WORKBENCH_STATE_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
+const _MAX_WORKBENCH_STATE_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 const MAX_EGRESS_SALVAGE_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
 const AEAD_NONCE_LEN: usize = 24;
 
@@ -90,11 +90,11 @@ impl Guardian {
                     }
                 }
 
-                // 1. Promotion Gate (Integrity + Continuity + Time)
+                // Promotion Gate (Integrity + Continuity + Time)
                 let node_id = envelope.witness_peer_id.clone();
 
                 let unit = ForensicUnit::new(envelope);
-                let absolute_max_ms = 30_000; // hard coded for now
+                let absolute_max_ms = 30_000; // TODO: hard coded for now, move this to a config file
                 let dynamic_limit = (current_tolerance.as_millis() as u64).min(absolute_max_ms);
 
                 let verified_unit = unit
@@ -134,7 +134,6 @@ impl Guardian {
         &mut self,
         current_tolerance: Duration,
     ) -> Result<(), GuardianError> {
-        // Utilize the predefined threshold from strategies.rs logic
         let stale_volleys = self.crucible.flush_stale(current_tolerance);
         for volley in stale_volleys {
             self.commit_volley_to_disk(&volley).await?;
@@ -217,7 +216,7 @@ impl Guardian {
 
     pub fn get_active_volley_shards(
         &self,
-        volley_id: &VolleyId, // 1. FIX: Use the specific stream ID, not the person
+        volley_id: &VolleyId,
     ) -> Option<&BTreeMap<StorageSequence, WitnessEnvelope>> {
         self.crucible
             .contexts // 2. FIX: Crucible doesn't have .get(), its BTreeMap is 'contexts'
