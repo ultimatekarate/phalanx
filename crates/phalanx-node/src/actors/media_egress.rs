@@ -1,4 +1,3 @@
-use libp2p::identity;
 use phalanx_forensics::crucible::EnvelopeHashExt;
 use phalanx_forensics::gate::WitnessGate;
 use phalanx_proto::evidence::{AudioShard, Evidence, SignatureHash, VideoShard};
@@ -8,8 +7,6 @@ use phalanx_proto::prelude::*;
 use phalanx_transport::EgressPort;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-
-use crate::hardware::audio;
 
 pub struct MediaEgressActor<E: EgressPort> {
     egress: E,
