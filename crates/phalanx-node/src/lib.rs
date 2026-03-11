@@ -3,6 +3,7 @@
 pub mod actors {
     pub mod egress;
     pub mod ingress;
+    pub mod media_egress;
     pub mod meshsentinel;
     pub mod playback;
     pub mod storage;

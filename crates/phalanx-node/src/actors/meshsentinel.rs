@@ -1,5 +1,6 @@
 // --- crates/phalanx-node/src/actors/meshsentinel.rs ---
 use crate::actors::egress::{EgressActor, EgressCommand};
+use crate::actors::media_egress::MediaEgressActor;
 use crate::actors::playback::PlaybackCoordinator;
 use crate::actors::storage::NoOpJournal;
 use crate::actors::storage::StorageCommand;
@@ -25,10 +26,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use phalanx_proto::crypto::SymmetricKey;
-use phalanx_proto::evidence::AudioShard;
 use phalanx_proto::evidence::Evidence;
 use phalanx_proto::evidence::StorageSequence;
-use phalanx_proto::evidence::VideoShard;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::time::CausalitySession;
 use phalanx_proto::trust::Offense;
@@ -69,8 +68,6 @@ pub struct MeshSentinel<I: IngressPort, E: EgressPort, J: TransientJournal> {
     pub clock: Arc<TrustedClock>,
     pub ingress: I,
     pub egress: E,
-    pub video_rx: mpsc::Receiver<VideoShard>,
-    pub audio_rx: mpsc::Receiver<AudioShard>,
     pub seq_counter: u64,
     pub network_key: SymmetricKey,
     pub storage_task: JoinHandle<()>,
@@ -94,8 +91,8 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
         let guardian = Guardian::new(&deps.config.storage.vault_path, &deps.config, local_did);
         let phys_capacity = deps.system_governor.config.pipeline_capacity();
 
-        let (_, video_rx) = mpsc::channel(deps.config.storage.max_video_buffer);
-        let (_, audio_rx) = mpsc::channel(deps.config.storage.max_audio_buffer);
+        let (_video_tx_unused, video_rx) = mpsc::channel(deps.config.storage.max_video_buffer);
+        let (_audio_tx_unused, audio_rx) = mpsc::channel(deps.config.storage.max_audio_buffer);
 
         // Vault Interface
         let (storage_tx, storage_rx) = mpsc::channel(phys_capacity);
@@ -137,6 +134,18 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
             egress_actor.run().await;
         });
 
+        // Media Egress Actor instantiation
+        let media_actor = MediaEgressActor::new(
+            deps.egress.clone(),
+            video_rx,
+            audio_rx,
+            deps.config.network.video_topic.clone(),
+            deps.config.network.audio_topic.clone(),
+            local_network_id.clone(),
+        );
+
+        tokio::spawn(media_actor.run());
+
         let arc_identity = Arc::new(deps.identity.clone());
         let session = CausalitySession::new(arc_identity.clone(), local_network_id.clone());
         let raw_clock = TrustedClock::new();
@@ -153,8 +162,6 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
             health_tracker: HealthTracker::new(),
             governor: TrafficGovernor::new(),
             mode: NodeMode::Standard,
-            video_rx,
-            audio_rx,
             seq_counter: 0,
             network_key: SymmetricKey([0x42; 32]),
             storage_task,
@@ -221,12 +228,6 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
                         }
                         _ => {}
                     }
-                }
-                Some(shard) = self.video_rx.recv() => {
-                    self.process_media_egress(Evidence::Video(shard), &local_network_id).await;
-                }
-                Some(shard) = self.audio_rx.recv() => {
-                    self.process_media_egress(Evidence::Audio(shard), &local_network_id).await;
                 }
                 Some((volley_id, gap_sequence)) = self.discovery_rx.recv() => {
                     self.handle_gap_discovery(volley_id, gap_sequence).await;
@@ -299,26 +300,6 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
                 }
             }
             Err(e) => tracing::error!("Failed to serialize discovery request: {}", e),
-        }
-    }
-
-    async fn process_media_egress(&mut self, evidence: Evidence, _local_id: &NetworkId) {
-        let topic = match &evidence {
-            Evidence::Video(_) => &self.config.network.video_topic,
-            Evidence::Audio(_) => &self.config.network.audio_topic,
-            Evidence::Gap(_) | Evidence::Handover(_) => {
-                tracing::warn!("Unexpected evidence type for media egress");
-                return;
-            }
-        };
-
-        match postcard::to_allocvec(&evidence) {
-            Ok(data) => {
-                if let Err(e) = self.egress.publish(topic, data).await {
-                    tracing::error!("Failed to publish media egress: {}", e);
-                }
-            }
-            Err(e) => tracing::error!("Failed to serialize media evidence: {}", e),
         }
     }
 

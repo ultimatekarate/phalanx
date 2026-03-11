@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         system_governor: Arc::new(phalanx_node::vitals::SystemGovernor::new()),
     };
 
-    let mut engine: MeshSentinel<Libp2pBridge, FileJournal> = MeshSentinel::new(deps).await?;
+    let mut engine: MeshSentinel<Libp2pBridge, FileJournal, J> = MeshSentinel::new(deps).await?;
 
     println!("--- PHALANX SENSOR: ONLINE (WAN + LAN) ---");
 
