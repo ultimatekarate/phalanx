@@ -130,7 +130,10 @@ impl RetrievalActor {
             return;
         }
 
+        let io_start = tokio::time::Instant::now();
         let raw_envelopes = reply_rx.await.unwrap_or_default();
+        self.system_governor.record_io_pressure(io_start.elapsed());
+
         let mut sealed_units = Vec::new();
         let current_stress = self.system_governor.current_stress();
         let target_trust = self.trust_oracle.check_trust_by_did(&request.target_did);
