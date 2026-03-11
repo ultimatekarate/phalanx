@@ -217,7 +217,7 @@ impl Mold for ShardMold {
         for i in 0..acc.total_chunks {
             full_payload.extend(acc.parts.get(&i)?);
         }
-        postcard::from_bytes(&full_payload).ok()
+        crate::gate::unmarshal(&full_payload, "ShardMold::assemble").ok()
     }
 }
 

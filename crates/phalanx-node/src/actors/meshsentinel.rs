@@ -50,7 +50,7 @@ pub struct MeshSentinel<I: IngressPort> {
 
     // For the playback factory method
     pub storage_tx: mpsc::Sender<StorageCommand>,
-    pub network_key: SymmetricKey,
+    pub network_key: Arc<SymmetricKey>,
     pub discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
 
     // Actor dispatch channels
@@ -135,6 +135,8 @@ impl<I: IngressPort> MeshSentinel<I> {
         let trust_actor = TrustActor::new(trust_registry, trust_rx);
         tokio::spawn(trust_actor.run());
 
+        let network_key = Arc::new(SymmetricKey([0x42; 32]));
+
         let retrieval_actor = RetrievalActor::new(
             arc_identity.clone(),
             clock_handle.clone(),
@@ -143,6 +145,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             egress_tx.clone(),
             reputation_projection.clone(),
             trust_tx.clone(), // Pass the sender to the retrieval actor
+            network_key.clone(),
             retrieval_rx,
         );
         tokio::spawn(retrieval_actor.run());
@@ -183,7 +186,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             identity: arc_identity,
             ingress: deps.ingress,
             health_tracker: HealthTracker::new(),
-            network_key: SymmetricKey([0x42; 32]),
+            network_key: network_key.clone(),
             storage_task,
             storage_tx,
             ingestion_tx,
@@ -200,7 +203,7 @@ impl<I: IngressPort> MeshSentinel<I> {
                     match event {
                         NetworkEvent::DataReceived { origin, topic, data } => {
                             if topic.as_str() == self.config.network.control_topic.as_str() {
-                                if let Ok(msg) = postcard::from_bytes::<ControlMessage>(&data) {
+                                if let Ok(msg) = phalanx_forensics::gate::unmarshal::<ControlMessage>(&data, "control_message") {
                                     self.health_tracker.register_activity(msg);
                                 }
                             } else {
@@ -249,7 +252,7 @@ impl<I: IngressPort> MeshSentinel<I> {
     ) -> tokio::task::JoinHandle<()> {
         let mut coordinator = PlaybackCoordinator::new(
             self.storage_tx.clone(),
-            Some(self.network_key.clone()),
+            Some((*self.network_key).clone()),
             sink,
             self.discovery_tx.clone(),
         );

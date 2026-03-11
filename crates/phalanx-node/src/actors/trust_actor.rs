@@ -75,6 +75,6 @@ impl TrustActor {
 
     async fn run_maintenance(&mut self) {
         let now = self.clock.current_monotonic();
-        TrustArbiter::accumulate_reputation(&mut self.registry.core, now, 60, 5);
+        TrustArbiter::accumulate_reputation(&mut self.registry.peers, now, 60, 5);
     }
 }

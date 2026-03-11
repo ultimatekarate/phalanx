@@ -1,7 +1,8 @@
+use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*;
+use phalanx_proto::trust::MonotonicClock;
 use phalanx_proto::trust::PeerRecord;
-use phalanx_proto::trust::{MonotonicClock, TrustRegistry};
 use phalanx_proto::types::ForensicUnit;
 use phalanx_proto::types::PhalanxPhysics;
 use phalanx_proto::types::PowerState;
@@ -18,14 +19,14 @@ pub struct TrustArbiter;
 impl TrustArbiter {
     /// Pure, deterministic recovery logic.
     pub fn accumulate_reputation(
-        registry: &mut TrustRegistry,
+        peers: &mut HashMap<Did, PeerRecord>,
         now: MonotonicClock,
         interval_secs: u64,
         recovery_step: i64,
     ) {
         const MAX_REPUTATION: i64 = 100; // The ceiling of trust
 
-        for record in registry.peers.values_mut() {
+        for record in peers.values_mut() {
             if record.reputation.is_blacklisted {
                 continue;
             }
@@ -66,19 +67,6 @@ impl TrustArbiter {
         };
 
         rng.gen_bool(check_threshold)
-    }
-
-    pub fn requires_heavy_verification<R: Rng>(record: &PeerRecord, rng: &mut R) -> bool {
-        // High-Reputation (100+): 5% spot-check rate (1 in 20)
-        // Established (80-99): 20% spot-check rate
-        // New/Suspicious (<80): 100% check rate
-        let probability = match record.reputation.score {
-            100..=i64::MAX => 0.05,
-            80..=99 => 0.20,
-            _ => 1.0,
-        };
-
-        rng.gen_bool(probability)
     }
 }
 
@@ -190,10 +178,13 @@ impl EgressGovernor {
     /// Evaluates physical and social constraints to determine if a verified unit
     /// is authorized to be promoted for mesh egress.
     pub fn authorize(
-        unit: ForensicUnit<WitnessEnvelope, Verified>,
+        mut unit: ForensicUnit<WitnessEnvelope, Verified>,
         trust: &TrustLevel,
         stress: &SystemStress,
+        encryption_key: &SymmetricKey,
     ) -> Result<ForensicUnit<WitnessEnvelope, Sealed>, GuardianError> {
+        use crate::gate::PrivacyGate;
+
         // 1. Physical Constraint: Hardware Preservation
         // Prevent heavy network egress if the device battery is dying or thermal throttling.
         if matches!(stress, SystemStress::Critical | SystemStress::Serious) {
@@ -210,10 +201,14 @@ impl EgressGovernor {
             ));
         }
 
-        // Optional: If you want to restrict egress to ONLY explicitly Verified/Ally peers,
-        // you could also block TrustLevel::Unknown here. For now, we block the known-bad.
+        // 3. Privacy Gate: Encrypt evidence payload before egress
+        unit.data.evidence = unit
+            .data
+            .evidence
+            .safeguard(encryption_key)
+            .map_err(|e| GuardianError::VerificationFailed(e.to_string()))?;
 
-        // 3. Typestate Promotion (The core architectural lock)
+        // 4. Typestate Promotion (The core architectural lock)
         // This is the ONLY place in the entire codebase where .seal() is called,
         // physically proving to the compiler that the data passed the policy gates.
         Ok(unit.seal())
@@ -252,16 +247,16 @@ mod tests {
     use super::*;
     use crate::test_utils::MockClock;
     use phalanx_proto::identity::Did;
-    use phalanx_proto::trust::{PeerRecord, PeerReputation, TrustRegistry};
+    use phalanx_proto::trust::{PeerRecord, PeerReputation};
 
     #[test]
     fn test_reputation_recovery_over_time() {
-        let mut registry = TrustRegistry::default();
+        let mut peers = HashMap::<Did, PeerRecord>::new();
         let peer_did = Did("test_peer".to_string());
         let mut clock = MockClock::new(1000); // Start at T=1000
 
         // 1. Setup a penalized peer (not yet banned)
-        registry.peers.insert(
+        peers.insert(
             peer_did.clone(),
             PeerRecord {
                 reputation: PeerReputation {
@@ -276,44 +271,44 @@ mod tests {
 
         // 2. Advance time by half an interval (No recovery expected)
         clock.tick(30);
-        TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
+        TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 60, 10);
         assert_eq!(
-            registry.peers[&peer_did].reputation.score, 50,
+            peers[&peer_did].reputation.score, 50,
             "Should not recover before interval"
         );
 
         // 3. Advance time past the full interval (Recovery: 50 -> 60)
         clock.tick(31); // Total 61s elapsed
-        TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
+        TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 60, 10);
         assert_eq!(
-            registry.peers[&peer_did].reputation.score, 60,
+            peers[&peer_did].reputation.score, 60,
             "Reputation should have increased by recovery_step"
         );
 
         // 4. Advance time by multiple intervals (Recovery: 60 -> 90)
         clock.tick(120); // 2 more intervals
-        TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
+        TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 60, 10);
         assert_eq!(
-            registry.peers[&peer_did].reputation.score, 80,
+            peers[&peer_did].reputation.score, 80,
             "Reputation should follow multi-cycle recovery"
         );
 
         // 5. Ensure it caps at the baseline (100)
         clock.tick(600);
-        TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
+        TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 60, 10);
         assert_eq!(
-            registry.peers[&peer_did].reputation.score, 100,
+            peers[&peer_did].reputation.score, 100,
             "Reputation must not exceed 100"
         );
     }
 
     #[test]
     fn test_banned_peers_do_not_recover() {
-        let mut registry = TrustRegistry::default();
+        let mut peers = HashMap::<Did, PeerRecord>::new();
         let peer_did = Did("bad_actor".to_string());
         let mut clock = MockClock::new(1000);
 
-        registry.peers.insert(
+        peers.insert(
             peer_did.clone(),
             PeerRecord {
                 reputation: PeerReputation {
@@ -327,11 +322,11 @@ mod tests {
         );
 
         clock.tick(3600); // 1 hour later
-        TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
+        TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 60, 10);
 
-        assert!(registry.peers[&peer_did].reputation.is_blacklisted);
+        assert!(peers[&peer_did].reputation.is_blacklisted);
         assert_eq!(
-            registry.peers[&peer_did].reputation.score, -10,
+            peers[&peer_did].reputation.score, -10,
             "Banned peers require manual pardon"
         );
     }
