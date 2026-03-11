@@ -9,7 +9,7 @@ pub mod actors {
     pub mod playback;
     pub mod retrieval;
     pub mod storage;
-    pub mod trust_manager;
+    pub mod trust_actor;
 }
 
 pub mod artifacts;

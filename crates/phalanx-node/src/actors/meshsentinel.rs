@@ -3,14 +3,14 @@ use crate::actors::egress::{EgressActor, EgressCommand};
 use crate::actors::ingestion::{IngestionActor, IngestionCommand};
 use crate::actors::media_egress::MediaEgressActor;
 use crate::actors::playback::PlaybackCoordinator;
-use crate::actors::retrieval::{RetrievalActor, RetrievalCommand, TrustCommand};
+use crate::actors::retrieval::{RetrievalActor, RetrievalCommand};
 use crate::actors::storage::NoOpJournal;
 use crate::actors::storage::StorageCommand;
-use crate::actors::trust_manager::TrustManager;
+use crate::actors::trust_actor::{TrustActor, TrustCommand};
 use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
 use crate::identity::PhalanxNodeIdentityExt;
-use crate::trust::ReputationProjection;
+use crate::trust::{ReputationProjection, TrustOracle};
 use crate::vitals::{
     FinalizationScale, HealthTracker, Homeostasis, IngestionScale, SystemGovernor,
 };
@@ -49,16 +49,12 @@ pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJourn
     pub ingress: I,
     pub egress: E,
     pub journal: J,
-    pub trust_registry: Arc<tokio::sync::RwLock<TrustRegistry>>,
-    pub reputation_cache: ReputationProjection,
     pub discovery_rx: mpsc::Receiver<(VolleyId, StorageSequence)>,
     pub discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
     pub system_governor: Arc<SystemGovernor>,
 }
 
 pub struct MeshSentinel<I: IngressPort, E: EgressPort, J: TransientJournal> {
-    pub trust_registry: Arc<tokio::sync::RwLock<TrustRegistry>>,
-    pub reputation_cache: ReputationProjection,
     pub health_tracker: HealthTracker,
     pub mode: NodeMode,
     pub config: NodeConfig,
@@ -93,11 +89,10 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
         let (_video_tx_unused, video_rx) = mpsc::channel(deps.config.storage.max_video_buffer);
         let (_audio_tx_unused, audio_rx) = mpsc::channel(deps.config.storage.max_audio_buffer);
 
-        // Vault Interface
         let (storage_tx, storage_rx) = mpsc::channel(phys_capacity);
+        let (ingestion_tx, ingestion_rx) = mpsc::channel(phys_capacity);
         let ingress_governor = IngressGovernor::new(phys_capacity);
         let (egress_tx, egress_rx) = mpsc::channel(100);
-        let (ingestion_tx, ingestion_rx) = mpsc::channel(phys_capacity);
 
         // Stateless Recovery: Pull salvaged egress from the journal
         let salvaged_queue = deps
@@ -134,10 +129,16 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
             egress_actor.run().await;
         });
 
+        let arc_identity = Arc::new(deps.identity.clone());
+        let raw_clock = TrustedClock::new();
+        let clock_handle = Arc::new(raw_clock);
+
         // Trust Manager Actor
+        let mut trust_registry = TrustRegistry::build(&deps.config).await;
+        let reputation_projection = trust_registry.projection_handle();
         let (trust_tx, trust_rx) = mpsc::channel(100);
-        let trust_manager = TrustManager::new(deps.trust_registry.clone(), trust_rx);
-        tokio::spawn(trust_manager.run());
+        let trust_actor = TrustActor::new(trust_registry, trust_rx);
+        tokio::spawn(trust_actor.run());
 
         // Retrieval Actor
         let (retrieval_tx, retrieval_rx) = mpsc::channel(100);
@@ -147,8 +148,8 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
             deps.system_governor.clone(),
             storage_tx.clone(),
             egress_tx.clone(),
-            deps.trust_registry.clone(),
-            trust_tx,
+            reputation_projection.clone(),
+            trust_tx.clone(),
             retrieval_rx,
         );
         tokio::spawn(retrieval_actor.run());
@@ -160,11 +161,10 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
             clock_handle.clone(),
             TrafficGovernor::new(),
             ingress_governor,
-            deps.trust_registry.clone(),
-            deps.reputation_cache.clone(),
+            reputation_projection.clone(),
             storage_tx.clone(),
             egress_tx.clone(),
-            trust_tx.clone(),
+            trust_tx,
             deps.system_governor.clone(),
             ingestion_rx,
         );
@@ -182,10 +182,7 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
 
         tokio::spawn(media_actor.run());
 
-        let arc_identity = Arc::new(deps.identity.clone());
         let session = CausalitySession::new(arc_identity.clone(), local_network_id.clone());
-        let raw_clock = TrustedClock::new();
-        let clock_handle = Arc::new(raw_clock);
 
         Ok(Self {
             config: deps.config,
@@ -193,8 +190,6 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
             clock: clock_handle,
             ingress: deps.ingress,
             egress: deps.egress,
-            trust_registry: deps.trust_registry,
-            reputation_cache: deps.reputation_cache,
             health_tracker: HealthTracker::new(),
             mode: NodeMode::Standard,
             seq_counter: 0,
@@ -389,9 +384,6 @@ impl<I: IngressPort, E: EgressPort + 'static> MeshSentinel<I, E, NoOpJournal> {
         let mut config = NodeConfig::default();
         config.storage.vault_path = path.to_string();
         let identity = PhalanxIdentity::new_ephemeral();
-        let trust_registry_inner = TrustRegistry::build(&config).await;
-        let trust_registry = Arc::new(tokio::sync::RwLock::new(trust_registry_inner));
-        let reputation_cache = trust_registry.read().await.projection_handle();
         let (discovery_tx, discovery_rx) = mpsc::channel(100);
 
         let deps = SentinelDependencies {
@@ -400,8 +392,6 @@ impl<I: IngressPort, E: EgressPort + 'static> MeshSentinel<I, E, NoOpJournal> {
             ingress,
             egress,
             journal: NoOpJournal,
-            trust_registry,
-            reputation_cache,
             discovery_rx,
             discovery_tx,
             system_governor: Arc::new(SystemGovernor::new()),

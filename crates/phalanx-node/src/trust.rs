@@ -15,13 +15,55 @@ use phalanx_proto::prelude::NetworkId;
 use std::sync::{Arc, RwLock as StdRwLock};
 
 #[derive(Clone, Default, Debug)]
+pub struct PeerReputationInfo {
+    pub score: f32,
+    pub is_blacklisted: bool,
+    pub trust_level: TrustLevel,
+}
+
+#[derive(Clone, Default, Debug)]
 pub struct ReputationProjection {
-    scores: Arc<StdRwLock<HashMap<NetworkId, f32>>>,
+    scores: Arc<StdRwLock<HashMap<NetworkId, PeerReputationInfo>>>,
+    did_to_network_id: Arc<StdRwLock<HashMap<Did, NetworkId>>>,
+}
+
+pub trait TrustOracle: Send + Sync {
+    fn is_blacklisted_by_did(&self, did: &Did) -> bool;
+    fn check_trust_by_did(&self, did: &Did) -> TrustLevel;
+}
+
+impl TrustOracle for ReputationProjection {
+    fn is_blacklisted_by_did(&self, did: &Did) -> bool {
+        let did_map = self.did_to_network_id.read().unwrap();
+        if let Some(network_id) = did_map.get(did) {
+            let scores_map = self.scores.read().unwrap();
+            if let Some(info) = scores_map.get(network_id) {
+                return info.is_blacklisted;
+            }
+        }
+        false
+    }
+
+    fn check_trust_by_did(&self, did: &Did) -> TrustLevel {
+        let did_map = self.did_to_network_id.read().unwrap();
+        if let Some(network_id) = did_map.get(did) {
+            let scores_map = self.scores.read().unwrap();
+            scores_map
+                .get(network_id)
+                .map_or(TrustLevel::Ignored, |info| info.trust_level)
+        } else {
+            TrustLevel::Ignored
+        }
+    }
 }
 
 impl PeerEvaluator for ReputationProjection {
     fn evaluate_reputation(&self, peer_id: &NetworkId) -> f32 {
-        *self.scores.read().unwrap().get(peer_id).unwrap_or(&1.0)
+        self.scores
+            .read()
+            .unwrap()
+            .get(peer_id)
+            .map_or(1.0, |info| info.score)
     }
 }
 
@@ -150,24 +192,31 @@ impl TrustRegistry {
 
     fn sync_projection_for(projection: &ReputationProjection, did: &Did, record: &PeerRecord) {
         let network_id_str = did.as_str().replace("did:key:", "");
-
-        // Infallible conversion; no 'if let' required.
         let network_id = NetworkId::from(network_id_str);
 
         let score_normalized = if record.reputation.is_blacklisted {
             0.0
         } else {
-            // Assuming score is 0-100; normalize to 0.1-1.0 to match cache logic
             ((record.reputation.score as f32) / 100.0).clamp(0.1, 1.0)
         };
 
-        // STRICT ASYNC SAFETY: Lock is acquired, modified, and dropped synchronously.
-        // Never hold this lock across an .await boundary.
+        let info = PeerReputationInfo {
+            score: score_normalized,
+            is_blacklisted: record.reputation.is_blacklisted,
+            trust_level: record.level,
+        };
+
         projection
             .scores
             .write()
             .unwrap()
-            .insert(network_id, score_normalized);
+            .insert(network_id.clone(), info);
+
+        projection
+            .did_to_network_id
+            .write()
+            .unwrap()
+            .insert(did.clone(), network_id);
     }
 
     /// Updates the last interaction timestamp. Must be awaited.
