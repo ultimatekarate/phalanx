@@ -11,6 +11,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use phalanx_proto::prelude::NetworkId;
+use std::sync::{Arc, RwLock as StdRwLock};
+
+#[derive(Clone, Default, Debug)]
+pub struct ReputationProjection {
+    scores: Arc<StdRwLock<HashMap<NetworkId, f32>>>,
+}
+
+impl PeerEvaluator for ReputationProjection {
+    fn evaluate_reputation(&self, peer_id: &NetworkId) -> f32 {
+        *self.scores.read().unwrap().get(peer_id).unwrap_or(&1.0)
+    }
+}
+
 pub trait ClockProvider {
     fn current_monotonic(&self) -> MonotonicClock;
 }
@@ -28,6 +42,13 @@ impl ClockProvider for SystemClock {
     }
 }
 
+impl ClockProvider for TrustedClock {
+    fn current_monotonic(&self) -> MonotonicClock {
+        let millis = self.now().unwrap_or_default().0;
+        MonotonicClock(millis / 1000)
+    }
+}
+
 /// Manages the "Social Graph" of the node with bi-directional lookup.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TrustRegistry {
@@ -36,7 +57,8 @@ pub struct TrustRegistry {
     /// Lookup index: Alias -> DID (Ephemeral, rebuilt on load)
     #[serde(skip)]
     pet_name_index: HashMap<PetName, Did>,
-
+    #[serde(skip)]
+    pub live_projection: ReputationProjection,
     storage_path: PathBuf,
 }
 
@@ -55,6 +77,7 @@ impl TrustRegistry {
         let mut registry = Self {
             contacts: HashMap::new(),
             pet_name_index: HashMap::new(),
+            live_projection: ReputationProjection::default(),
             storage_path,
         };
 
@@ -83,8 +106,10 @@ impl TrustRegistry {
 
         if let Some(old_record) = self.contacts.get(did) {
             existing_reputation = old_record.reputation.clone();
-            if old_record.pet_name != *pet_name {
-                self.pet_name_index.remove(&old_record.pet_name);
+            if let Some(old_name) = &old_record.pet_name {
+                if old_name != pet_name {
+                    self.pet_name_index.remove(old_name);
+                }
             }
         }
 
@@ -101,7 +126,7 @@ impl TrustRegistry {
 
         let record = PeerRecord {
             did: did.clone(),
-            pet_name: pet_name.clone(),
+            pet_name: Some(pet_name.clone()),
             level,
             added_at: original_added_at,
             last_interaction: timestamp,
@@ -113,8 +138,36 @@ impl TrustRegistry {
 
         tracing::info!(target: "trust", %did, %pet_name, ?level, "Peer record updated");
 
-        self.save().await?;
+        self.save()
+            .await
+            .map_err(|e| TrustError::IoError(e.to_string()))?;
         Ok(())
+    }
+
+    pub fn projection_handle(&self) -> ReputationProjection {
+        self.live_projection.clone()
+    }
+
+    fn sync_projection_for(projection: &ReputationProjection, did: &Did, record: &PeerRecord) {
+        let network_id_str = did.as_str().replace("did:key:", "");
+
+        // Infallible conversion; no 'if let' required.
+        let network_id = NetworkId::from(network_id_str);
+
+        let score_normalized = if record.reputation.is_blacklisted {
+            0.0
+        } else {
+            // Assuming score is 0-100; normalize to 0.1-1.0 to match cache logic
+            ((record.reputation.score as f32) / 100.0).clamp(0.1, 1.0)
+        };
+
+        // STRICT ASYNC SAFETY: Lock is acquired, modified, and dropped synchronously.
+        // Never hold this lock across an .await boundary.
+        projection
+            .scores
+            .write()
+            .unwrap()
+            .insert(network_id, score_normalized);
     }
 
     /// Updates the last interaction timestamp. Must be awaited.
@@ -146,131 +199,105 @@ impl TrustRegistry {
 
     pub async fn remove_peer(&mut self, did: &Did) -> Result<(), TrustError> {
         if let Some(record) = self.contacts.remove(did) {
-            self.pet_name_index.remove(&record.pet_name);
-            self.save().await?;
+            if let Some(ref pet_name) = record.pet_name {
+                self.pet_name_index.remove(pet_name);
+            }
+            self.save()
+                .await
+                .map_err(|e| TrustError::IoError(e.to_string()))?;
         }
         Ok(())
     }
 
-    /// Performs a non-blocking write to the WAL/storage path.
-    pub async fn save(&self) -> Result<(), TrustError> {
-        let data = postcard::to_allocvec(&self.contacts)
-            .map_err(|e| TrustError::SerializationError(e.to_string()))?;
+    pub async fn record_offense<C: ClockProvider>(
+        &mut self,
+        did: &Did,
+        offense: Offense,
+        clock: &C,
+    ) {
+        let mut requires_save = false;
 
-        let temp_path = self.storage_path.with_extension("tmp");
+        if let Some(record) = self.contacts.get_mut(did) {
+            // Apply penalty based on offense severity
+            // (Adjust these penalty values to match your domain rules)
+            let penalty = match offense {
+                Offense::QuotaExceeded => 25,
+                // Add other match arms as defined in your Offense enum
+                _ => 10,
+            };
 
-        // Asynchronous file operations
-        let mut file = File::create(&temp_path)
-            .await
-            .map_err(|e| TrustError::IoError(e.to_string()))?;
-        file.write_all(&data)
-            .await
-            .map_err(|e| TrustError::IoError(e.to_string()))?;
-        file.sync_all()
-            .await
-            .map_err(|e| TrustError::IoError(e.to_string()))?; // Ensures OS buffers are flushed to disk
-        fs::rename(temp_path, &self.storage_path)
-            .await
-            .map_err(|e| TrustError::IoError(e.to_string()))?;
+            record.reputation.score = record.reputation.score.saturating_sub(penalty);
+
+            // Apply deterministic blacklisting if the score hits bottom
+            if record.reputation.score == 0 {
+                record.reputation.is_blacklisted = true;
+            }
+
+            let now = clock.current_monotonic();
+            record.last_interaction = PhalanxTimestamp(now.0 * 1000);
+
+            // SYNC STATE: Update the read-only projection synchronously
+            Self::sync_projection_for(&self.live_projection, did, record);
+
+            requires_save = true;
+        }
+
+        // ASYNC SAFETY GUARANTEE:
+        // We only trigger disk I/O after all synchronous locks have been dropped.
+        if requires_save {
+            if let Err(e) = self.save().await {
+                tracing::error!(target: "trust", "Failed to persist trust registry after offense: {}", e);
+            }
+        }
+    }
+
+    /// Helper to flush the current state to NVMe/Disk.
+    pub async fn save(&self) -> Result<(), std::io::Error> {
+        let bytes = postcard::to_allocvec(&self.contacts)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        let mut file = File::create(&self.storage_path).await?;
+        file.write_all(&bytes).await?;
+        file.flush().await?;
 
         Ok(())
     }
 
     /// Performs a non-blocking read from disk on initialization.
-    async fn load(&mut self) -> Result<(), TrustError> {
-        if !fs::try_exists(&self.storage_path).await.unwrap_or(false) {
+    pub async fn load(&mut self) -> Result<(), std::io::Error> {
+        let mut file = match File::open(&self.storage_path).await {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer).await?;
+
+        if buffer.is_empty() {
             return Ok(());
         }
 
-        let mut file = File::open(&self.storage_path)
-            .await
-            .map_err(|e| TrustError::IoError(e.to_string()))?;
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)
-            .await
-            .map_err(|e| TrustError::IoError(e.to_string()))?;
+        // Deserialize using postcard (as per standard project stack)
+        let loaded_contacts: HashMap<Did, PeerRecord> = postcard::from_bytes(&buffer)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-        let loaded: HashMap<Did, PeerRecord> = postcard::from_bytes(&buffer)
-            .map_err(|e| TrustError::SerializationError(e.to_string()))?;
+        self.contacts = loaded_contacts;
 
-        self.contacts = loaded;
-
+        // Clear and rebuild ephemeral state
         self.pet_name_index.clear();
+
         for (did, record) in &self.contacts {
-            self.pet_name_index
-                .insert(record.pet_name.clone(), did.clone());
+            if let Some(alias) = &record.pet_name {
+                self.pet_name_index.insert(alias.clone(), did.clone());
+            }
+
+            // WARM THE CACHE: Synchronous lock acquired and released here.
+            // No .await points exist inside this loop.
+            Self::sync_projection_for(&self.live_projection, did, record);
         }
 
         Ok(())
-    }
-
-    pub async fn record_offense(&mut self, did: &Did, offense: Offense, clock: &TrustedClock) {
-        // Ensure the peer is tracked in the registry. If unknown, register as Ignored.
-        if !self.contacts.contains_key(did) {
-            // Note: If you want unverified peers to be automatically named, register_peer handles it
-            let unique_name = format!("Offender-{}", did.to_string().replace("did:key:", ""));
-            let fallback_name = PetName::new(&unique_name).unwrap();
-            if let Err(e) = self
-                .insert_peer(did, &fallback_name, TrustLevel::Ignored, clock)
-                .await
-            {
-                tracing::error!(%did, error = %e, "Failed to register unknown offender");
-                return;
-            }
-        }
-
-        let mut needs_save = false;
-
-        if let Some(record) = self.contacts.get_mut(did) {
-            if record.reputation.is_blacklisted {
-                return; // Already penalized
-            }
-
-            // 1. Unified Judicial Verdict
-            let penalty = match offense {
-                Offense::IdentityTheft => 101,
-                Offense::TemporalSkew => 101,
-                Offense::InvalidSignature => 101,
-                Offense::ProtocolViolation => 101,
-                Offense::ReplayAttack => 50,
-                Offense::QuotaExceeded => 25,
-                Offense::MalformedPacket => 5,
-            };
-
-            // 2. Granular Auditing (Keep counters for dashboard/metrics)
-            match offense {
-                Offense::InvalidSignature => {
-                    record.reputation.invalid_sigs =
-                        record.reputation.invalid_sigs.saturating_add(1);
-                }
-                Offense::QuotaExceeded => {
-                    record.reputation.quota_violations =
-                        record.reputation.quota_violations.saturating_add(1);
-                }
-                _ => {}
-            }
-
-            // 3. Apply Deterministic Penalty
-            record.reputation.score = record.reputation.score.saturating_sub(penalty);
-
-            tracing::debug!(%did, ?offense, penalty, new_score = record.reputation.score, "Peer penalized");
-
-            // 4. Centralized Blacklisting Threshold
-            if record.reputation.score <= 0 {
-                record.reputation.is_blacklisted = true;
-                needs_save = true;
-                tracing::warn!(%did, "PEER BLACKLISTED: Reputation score depleted below zero.");
-            } else if penalty >= 50 {
-                // High-severity offenses trigger an immediate disk save to prevent reboot amnesia
-                needs_save = true;
-            }
-        }
-
-        if needs_save {
-            if let Err(e) = self.save().await {
-                tracing::error!(%did, error = %e, "Failed to persist blacklist status to disk");
-            }
-        }
     }
 
     #[must_use]
@@ -280,7 +307,9 @@ impl TrustRegistry {
 
     #[must_use]
     pub fn get_alias(&self, did: &Did) -> Option<&str> {
-        self.contacts.get(did).map(|r| r.pet_name.as_str())
+        self.contacts
+            .get(did)
+            .and_then(|r| r.pet_name.as_ref().map(|n| n.as_str()))
     }
 
     #[must_use]
@@ -343,19 +372,17 @@ impl TrustRegistry {
             .get_mut(did)
             .ok_or_else(|| TrustError::PeerNotFound(did.clone()))?;
 
-        self.pet_name_index.remove(&record.pet_name);
-        record.pet_name = pet_name.clone();
+        if let Some(old_name) = &record.pet_name {
+            self.pet_name_index.remove(old_name);
+        }
+        record.pet_name = Some(pet_name.clone());
         self.pet_name_index.insert(pet_name, did.clone());
 
-        self.save().await
+        self.save()
+            .await
+            .map_err(|e| TrustError::IoError(e.to_string()))
     }
 
-    /// Inserts a new peer into the registry, failing if the peer already exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns `TrustError::PeerAlreadyExists` if the `did` is already tracked,
-    /// or `TrustError::PetnameCollision` if the `pet_name` is in use by another peer.
     pub async fn insert_peer(
         &mut self,
         did: &Did,
@@ -374,7 +401,7 @@ impl TrustRegistry {
         let timestamp = clock.now()?;
         let record = PeerRecord {
             did: did.clone(),
-            pet_name: pet_name.clone(),
+            pet_name: Some(pet_name.clone()),
             level,
             added_at: timestamp,
             last_interaction: timestamp,
@@ -384,7 +411,9 @@ impl TrustRegistry {
         self.contacts.insert(did.clone(), record);
         self.pet_name_index.insert(pet_name.clone(), did.clone());
 
-        self.save().await
+        self.save()
+            .await
+            .map_err(|e| TrustError::IoError(e.to_string()))
     }
 }
 

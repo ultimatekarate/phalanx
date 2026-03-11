@@ -5,7 +5,7 @@ use crate::actors::storage::StorageCommand;
 use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
 use crate::identity::PhalanxNodeIdentityExt;
-use crate::state::SyncReputationCache;
+use crate::trust::ReputationProjection;
 use crate::vitals::{
     FinalizationScale, HealthTracker, Homeostasis, IngestionScale, SystemGovernor,
 };
@@ -50,7 +50,7 @@ pub struct SentinelDependencies<T: NetworkTransport, J: TransientJournal> {
     pub network: T,
     pub journal: J,
     pub trust_registry: TrustRegistry,
-    pub reputation_cache: Arc<SyncReputationCache>,
+    pub reputation_cache: ReputationProjection,
     pub discovery_rx: mpsc::Receiver<(VolleyId, StorageSequence)>,
     pub discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
     pub system_governor: Arc<SystemGovernor>,
@@ -58,7 +58,7 @@ pub struct SentinelDependencies<T: NetworkTransport, J: TransientJournal> {
 
 pub struct MeshSentinel<T: NetworkTransport, J: TransientJournal> {
     pub trust_registry: TrustRegistry,
-    pub reputation_cache: Arc<SyncReputationCache>,
+    pub reputation_cache: ReputationProjection,
     pub health_tracker: HealthTracker,
     pub governor: TrafficGovernor,
     pub mode: NodeMode,
@@ -303,7 +303,11 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         if PhalanxNodeIdentityExt::verify_retrieval_auth(&*self.identity, &request).is_err() {
             tracing::warn!(peer = %origin, volley = %request.volley_id, "Privacy Gate: Unauthorized retrieval attempt blocked");
             self.trust_registry
-                .record_offense(&request.target_did, Offense::InvalidSignature, &self.clock)
+                .record_offense(
+                    &request.target_did,
+                    Offense::InvalidSignature,
+                    self.clock.as_ref(),
+                )
                 .await;
             self.dispatch_resilient_response(channel_id, VolleyResponse::Unauthorized)
                 .await;
@@ -449,13 +453,8 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
 
         if let Some(offense_type) = offense {
             self.trust_registry
-                .record_offense(&owner_did, offense_type, &self.clock)
+                .record_offense(&owner_did, offense_type, self.clock.as_ref())
                 .await;
-
-            let score = self.trust_registry.evaluate_reputation(&peer_id);
-            if let Ok(mut cache) = self.reputation_cache.scores.write() {
-                cache.insert(peer_id.clone(), score);
-            }
 
             if self.trust_registry.is_blacklisted(&owner_did) {
                 tracing::warn!(
@@ -627,6 +626,7 @@ impl<T: NetworkTransport> MeshSentinel<T, NoOpJournal> {
         config.storage.vault_path = path.to_string();
         let identity = PhalanxIdentity::new_ephemeral();
         let trust_registry = TrustRegistry::build(&config).await;
+        let reputation_cache = trust_registry.projection_handle();
         let (discovery_tx, discovery_rx) = mpsc::channel(100);
 
         let deps = SentinelDependencies {
@@ -635,7 +635,7 @@ impl<T: NetworkTransport> MeshSentinel<T, NoOpJournal> {
             network,
             journal: NoOpJournal,
             trust_registry,
-            reputation_cache: Arc::new(SyncReputationCache::default()),
+            reputation_cache,
             discovery_rx,
             discovery_tx,
             system_governor: Arc::new(SystemGovernor::new()),

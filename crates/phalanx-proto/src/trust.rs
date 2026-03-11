@@ -60,27 +60,16 @@ impl Default for PeerReputation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct PeerRecord {
     pub did: Did,
-    pub pet_name: PetName,
+    pub pet_name: Option<PetName>,
     pub level: TrustLevel,
     pub added_at: PhalanxTimestamp,
     pub last_interaction: PhalanxTimestamp,
     pub reputation: PeerReputation,
 }
 
-impl Default for PeerRecord {
-    fn default() -> Self {
-        Self {
-            did: Did::default(),
-            pet_name: PetName("Unknown".to_string()),
-            level: TrustLevel::default(),
-            added_at: PhalanxTimestamp::default(),
-            last_interaction: PhalanxTimestamp::default(),
-            reputation: PeerReputation::default(),
-        }
-    }
-}
 
 /// A user-defined local identifier for a DID (Pet name).
 ///

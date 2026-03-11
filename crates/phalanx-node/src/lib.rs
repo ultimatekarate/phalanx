@@ -26,8 +26,6 @@ pub mod network {
     pub mod orchestrator;
 }
 pub mod psk;
-
-pub mod state;
 pub mod persistence {
     pub mod journal;
     pub mod kademlia;
