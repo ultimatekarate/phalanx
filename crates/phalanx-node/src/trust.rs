@@ -3,7 +3,6 @@ use crate::NodeConfig;
 use phalanx_forensics::trust::{PeerEvaluator, ReputationGate};
 use phalanx_proto::prelude::*;
 use phalanx_proto::trust::MonotonicClock;
-use phalanx_proto::trust::TrustRegistry as ProtoTrustRegistry;
 use phalanx_proto::trust::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -118,7 +117,7 @@ impl TrustRegistry {
         let storage_path = vault.join("trust_registry.bin");
 
         let mut registry = Self {
-            core: ProtoTrustRegistry::default(),
+            peers: HashMap::new(),
             pet_name_index: HashMap::new(),
             live_projection: ReputationProjection::default(),
             storage_path,
@@ -163,7 +162,6 @@ impl TrustRegistry {
         let timestamp = clock.now()?;
 
         let original_added_at = self
-            .core
             .peers
             .get(did)
             .map_or(timestamp, |record| record.added_at);
@@ -337,7 +335,7 @@ impl TrustRegistry {
 
     /// Helper to flush the current state to NVMe/Disk.
     pub async fn save(&self) -> Result<(), std::io::Error> {
-        let bytes = postcard::to_allocvec(&self.core)
+        let bytes = postcard::to_allocvec(&self.peers)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         let mut file = File::create(&self.storage_path).await?;
@@ -362,11 +360,8 @@ impl TrustRegistry {
             return Ok(());
         }
 
-        // Deserialize using postcard (as per standard project stack)
-        let loaded_core: ProtoTrustRegistry = postcard::from_bytes(&buffer)
+        self.peers = postcard::from_bytes(&buffer)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-        self.core = loaded_core;
 
         // Clear and rebuild ephemeral state
         self.pet_name_index.clear();
@@ -391,26 +386,19 @@ impl TrustRegistry {
 
     #[must_use]
     pub fn get_alias(&self, did: &Did) -> Option<&str> {
-        self.core
-            .peers
+        self.peers
             .get(did)
             .and_then(|r| r.pet_name.as_ref().map(|n| n.as_str()))
     }
 
     #[must_use]
     pub fn check_trust(&self, did: &Did) -> TrustLevel {
-        self.core
-            .peers
-            .get(did)
-            .map_or(TrustLevel::Ignored, |r| r.level)
+        self.peers.get(did).map_or(TrustLevel::Ignored, |r| r.level)
     }
 
     /// Retrieves a mutable reference to a peer's reputation state.
     pub fn get_reputation_mut(&mut self, did: &Did) -> Option<&mut PeerReputation> {
-        self.core
-            .peers
-            .get_mut(did)
-            .map(|record| &mut record.reputation)
+        self.peers.get_mut(did).map(|record| &mut record.reputation)
     }
 
     fn generate_unique_pet_name(&self, did: &Did) -> PetName {
@@ -455,7 +443,6 @@ impl TrustRegistry {
         }
 
         let record = self
-            .core
             .peers
             .get_mut(did)
             .ok_or_else(|| TrustError::PeerNotFound(did.clone()))?;
@@ -472,8 +459,7 @@ impl TrustRegistry {
     }
 
     pub fn is_blacklisted(&self, did: &Did) -> bool {
-        self.core
-            .peers
+        self.peers
             .get(did)
             .is_some_and(|record| record.reputation.is_blacklisted)
     }
@@ -542,8 +528,7 @@ impl PeerEvaluator for TrustRegistry {
 
 impl ReputationGate for TrustRegistry {
     fn is_blacklisted(&self, did: &Did) -> bool {
-        self.core
-            .peers
+        self.peers
             .get(did)
             .is_some_and(|r| r.reputation.is_blacklisted)
     }
@@ -622,7 +607,6 @@ mod tests {
             .await;
 
         let record = registry
-            .core
             .peers
             .get(&did)
             .expect("Peer should be lazily registered");
@@ -634,7 +618,7 @@ mod tests {
             .record_offense(&did, Offense::InvalidSignature, &clock)
             .await;
 
-        let record = registry.core.peers.get(&did).unwrap();
+        let record = registry.peers.get(&did).unwrap();
         // If score is i32: 75 - 101 = -26. If u32 saturating: 0.
         assert!(record.reputation.score <= 0);
         assert!(record.reputation.is_blacklisted);
