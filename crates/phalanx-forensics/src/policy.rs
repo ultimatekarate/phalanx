@@ -67,19 +67,6 @@ impl TrustArbiter {
 
         rng.gen_bool(check_threshold)
     }
-
-    pub fn requires_heavy_verification<R: Rng>(record: &PeerRecord, rng: &mut R) -> bool {
-        // High-Reputation (100+): 5% spot-check rate (1 in 20)
-        // Established (80-99): 20% spot-check rate
-        // New/Suspicious (<80): 100% check rate
-        let probability = match record.reputation.score {
-            100..=i64::MAX => 0.05,
-            80..=99 => 0.20,
-            _ => 1.0,
-        };
-
-        rng.gen_bool(probability)
-    }
 }
 
 pub struct TrafficGovernor {
