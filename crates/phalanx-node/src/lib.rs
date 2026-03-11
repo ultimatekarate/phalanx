@@ -2,6 +2,7 @@
 
 pub mod actors {
     pub mod egress;
+    pub mod ingestion;
     pub mod ingress;
     pub mod media_egress;
     pub mod meshsentinel;

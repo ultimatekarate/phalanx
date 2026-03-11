@@ -1,5 +1,6 @@
 // --- crates/phalanx-node/src/actors/meshsentinel.rs ---
 use crate::actors::egress::{EgressActor, EgressCommand};
+use crate::actors::ingestion::{IngestionActor, IngestionCommand};
 use crate::actors::media_egress::MediaEgressActor;
 use crate::actors::playback::PlaybackCoordinator;
 use crate::actors::retrieval::{RetrievalActor, RetrievalCommand, TrustCommand};
@@ -16,11 +17,9 @@ use crate::vitals::{
 use crate::Guardian;
 use crate::{trust::TrustRegistry, StorageActor};
 use phalanx_forensics::judge::IntegrityGate;
-use phalanx_forensics::policy::{EgressGovernor, IngressGovernor};
+use phalanx_forensics::policy::{EgressGovernor, IngressGovernor, TrafficGovernor};
 use phalanx_forensics::prelude::*;
-use phalanx_forensics::ReputationGate;
 use phalanx_proto::prelude::*;
-use phalanx_proto::types::Unverified;
 use phalanx_transport::identity_ext::Libp2pExt;
 use phalanx_transport::{EgressPort, IngressPort};
 use std::sync::Arc;
@@ -28,12 +27,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use phalanx_proto::crypto::SymmetricKey;
-use phalanx_proto::evidence::Evidence;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::time::CausalitySession;
-use phalanx_proto::trust::Offense;
-use phalanx_proto::types::{ForensicUnit, NodeMode, TaskCost, Verified};
+use phalanx_proto::types::NodeMode;
 use phalanx_proto::VolleyRequest;
 use std::error::Error;
 use tokio::task::JoinHandle;
@@ -63,7 +60,6 @@ pub struct MeshSentinel<I: IngressPort, E: EgressPort, J: TransientJournal> {
     pub trust_registry: Arc<tokio::sync::RwLock<TrustRegistry>>,
     pub reputation_cache: ReputationProjection,
     pub health_tracker: HealthTracker,
-    pub governor: TrafficGovernor,
     pub mode: NodeMode,
     pub config: NodeConfig,
     pub identity: Arc<PhalanxIdentity>,
@@ -74,13 +70,13 @@ pub struct MeshSentinel<I: IngressPort, E: EgressPort, J: TransientJournal> {
     pub network_key: SymmetricKey,
     pub storage_task: JoinHandle<()>,
     pub storage_tx: mpsc::Sender<StorageCommand>,
+    pub ingestion_tx: mpsc::Sender<IngestionCommand>,
     pub retrieval_tx: mpsc::Sender<RetrievalCommand>,
     pub egress_tx: mpsc::Sender<EgressCommand>,
     pub _journal_phantom: std::marker::PhantomData<J>,
     pub session: CausalitySession,
     pub discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
     pub discovery_rx: mpsc::Receiver<(VolleyId, StorageSequence)>,
-    pub ingress_governor: IngressGovernor,
     pub system_governor: Arc<SystemGovernor>,
 }
 
@@ -101,6 +97,7 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
         let (storage_tx, storage_rx) = mpsc::channel(phys_capacity);
         let ingress_governor = IngressGovernor::new(phys_capacity);
         let (egress_tx, egress_rx) = mpsc::channel(100);
+        let (ingestion_tx, ingestion_rx) = mpsc::channel(phys_capacity);
 
         // Stateless Recovery: Pull salvaged egress from the journal
         let salvaged_queue = deps
@@ -156,6 +153,23 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
         );
         tokio::spawn(retrieval_actor.run());
 
+        // Ingestion Actor
+        let ingestion_actor = IngestionActor::new(
+            deps.config.clone(),
+            arc_identity.clone(),
+            clock_handle.clone(),
+            TrafficGovernor::new(),
+            ingress_governor,
+            deps.trust_registry.clone(),
+            deps.reputation_cache.clone(),
+            storage_tx.clone(),
+            egress_tx.clone(),
+            trust_tx.clone(),
+            deps.system_governor.clone(),
+            ingestion_rx,
+        );
+        tokio::spawn(ingestion_actor.run());
+
         // Media Egress Actor instantiation
         let media_actor = MediaEgressActor::new(
             deps.egress.clone(),
@@ -182,19 +196,18 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
             trust_registry: deps.trust_registry,
             reputation_cache: deps.reputation_cache,
             health_tracker: HealthTracker::new(),
-            governor: TrafficGovernor::new(),
             mode: NodeMode::Standard,
             seq_counter: 0,
             network_key: SymmetricKey([0x42; 32]),
             storage_task,
             storage_tx,
+            ingestion_tx,
             retrieval_tx,
             egress_tx,
             _journal_phantom: std::marker::PhantomData,
             session,
             discovery_rx: deps.discovery_rx,
             discovery_tx: deps.discovery_tx,
-            ingress_governor,
             system_governor: deps.system_governor,
         })
     }
@@ -233,7 +246,11 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
                 Some(event) = self.ingress.next_event(), if scale.0 > 0.01 => {
                     match event {
                         NetworkEvent::DataReceived { origin, topic, data } => {
-                            self.handle_network_ingress(origin, &data, topic).await;
+                            let _ = self.ingestion_tx.try_send(IngestionCommand::ProcessChunk {
+                                peer_id: origin,
+                                data,
+                                topic,
+                            });
                         }
                         NetworkEvent::VolleyRequested { origin, request, channel_id } => {
                             let _ = self.retrieval_tx.send(
@@ -363,222 +380,6 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
                 response,
             })
             .await;
-    }
-
-    pub async fn handle_forensic_violation(
-        &mut self,
-        peer_id: NetworkId,
-        owner_did: Did,
-        err: GuardianError,
-    ) {
-        let offense = match err {
-            GuardianError::VerificationFailed(_) | GuardianError::InvalidSignature(_) => {
-                Some(Offense::InvalidSignature)
-            }
-            GuardianError::QuotaExceeded(_) => Some(Offense::QuotaExceeded),
-            GuardianError::ReplayDetected(_) => Some(Offense::ReplayAttack),
-
-            GuardianError::AmbiguousOwnership => {
-                tracing::debug!(%peer_id, "Dropping ambiguous shard without penalty");
-                None
-            }
-            // NEW: Route severe Guardian errors to high-penalty Trust Offenses
-            GuardianError::PolicyViolation(_) => Some(Offense::IdentityTheft),
-            GuardianError::ChainIntegrityViolation(_) => Some(Offense::ProtocolViolation),
-
-            // Catch-all for any other unforeseen forensic crimes
-            _ => Some(Offense::ProtocolViolation),
-        };
-
-        if let Some(offense_type) = offense {
-            let mut registry = self.trust_registry.write().await;
-            registry
-                .record_offense(&owner_did, offense_type, self.clock.as_ref())
-                .await;
-
-            let is_blacklisted = registry.is_blacklisted(&owner_did);
-            if is_blacklisted {
-                tracing::warn!(
-                    %peer_id,
-                    %owner_did,
-                    "CRITICAL: Peer blacklisted. Severing connection."
-                );
-                self.egress.ban_peer(&peer_id).await;
-            }
-        }
-    }
-
-    /// Handles inbound data from the wire, applying routing and ingress quotas before hitting the vault.
-    pub async fn handle_network_ingress(
-        &mut self,
-        peer_id: NetworkId,
-        data: &[u8],
-        topic: MeshTopic,
-    ) {
-        // 1. TOPIC ROUTING (Edge Filtering)
-        let topic_str = topic.as_str();
-        if topic_str != self.config.network.video_topic.as_str()
-            && topic_str != self.config.network.audio_topic.as_str()
-        {
-            tracing::warn!("Sentinel dropped chunk: Invalid topic {}", topic_str);
-            return;
-        }
-
-        let topic = &self.config.network.control_topic;
-        if topic_str == topic.as_str() {
-            match postcard::from_bytes::<ControlMessage>(data) {
-                Ok(msg) => {
-                    // Update our medical records for this peer
-                    self.health_tracker.register_activity(msg);
-                    return; // Control messages don't go to the Vault
-                }
-                Err(e) => {
-                    tracing::warn!(peer = %peer_id, "Malformed control message: {}", e);
-                    return;
-                }
-            }
-        }
-
-        if !self
-            .governor
-            .should_accept(&peer_id, &self.identity.to_network_id())
-        {
-            return;
-        }
-
-        // START THE METABOLIC CLOCK IMMEDIATELY
-        let start_cpu = tokio::time::Instant::now();
-
-        match postcard::from_bytes::<ShardChunk>(data) {
-            Ok(raw_chunk) => {
-                let unverified = ForensicUnit::<_, Unverified>::new(raw_chunk);
-                let sender_did = unverified.data.owner_did.clone();
-
-                let registry = self.trust_registry.read().await;
-                // 1. IMMUNE INTEGRAL FILTER
-                if !self.system_governor.is_peer_coupled(&peer_id.to_string())
-                    || registry.is_blacklisted(&sender_did)
-                {
-                    self.egress.ban_peer(&peer_id).await;
-                    return;
-                }
-
-                // 2. THE ELASTIC GATE (FEEDBACK REQUIRED)
-                let shard_birth = unverified.data.timestamp;
-                let now_ms = self.clock.now().unwrap_or(shard_birth);
-                let age = Duration::from_millis(now_ms.0.saturating_sub(shard_birth.0));
-
-                // CRITICAL: Feed the Latency Integral before checking tolerance!
-                self.system_governor.record_latency_pressure(age);
-
-                let tolerance = self.system_governor.temporal_tolerance();
-
-                tracing::error!(
-                    target: "siege_debug",
-                    peer = %peer_id,
-                    age_ms = age.as_millis(),
-                    tolerance_ms = tolerance.as_millis(),
-                    "Evaluating Temporal Gate"
-                );
-
-                if age > tolerance {
-                    tracing::warn!(peer = %peer_id, age = ?age, tol = ?tolerance, "Dropped: Stale Shard");
-                    return; // Guard will release slot if we had one
-                }
-
-                // 3. RESOURCE ALLOCATION (IWFQ)
-                let trust_level = registry.check_trust(&sender_did);
-                let stress = self.system_governor.current_stress();
-                match self
-                    .ingress_governor
-                    .try_allocate(peer_id.clone(), trust_level, stress)
-                {
-                    Ok(Some(evicted)) => {
-                        self.egress.ban_peer(&evicted).await;
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        tracing::error!(target: "siege_debug", "INGRESS GOVERNOR FULL! Dropping {}", peer_id);
-                        return;
-                    }
-                }
-
-                // CREATE A RAII GUARD: Automatically releases the slot when this scope ends
-                let _slot_guard = SlotGuard::new(&mut self.ingress_governor, peer_id.clone());
-
-                // 4. VAULT DISPATCH
-                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                let verified_unit = ForensicUnit::<_, Verified>::new_verified(unverified.unpack());
-
-                tracing::error!(target: "siege_debug", "Sending to Vault. Channel Capacity: {}", self.storage_tx.capacity());
-
-                if self
-                    .storage_tx
-                    .send(StorageCommand::Ingest {
-                        unit: verified_unit,
-                        reply_to: reply_tx,
-                        ttl: tolerance,
-                    })
-                    .await
-                    .is_err()
-                {
-                    tracing::error!("Vault disconnected");
-                    return;
-                }
-
-                // 5. CAUSAL WAIT
-                let vault_response = reply_rx.await;
-
-                // releases the borrow on self.ingress_governor so we can use `self` again.
-                drop(_slot_guard);
-
-                match vault_response {
-                    Ok(Ok(())) => {
-                        self.system_governor
-                            .record_peer_evidence(&peer_id.to_string(), true);
-                    }
-                    Ok(Err(guardian_error)) => {
-                        tracing::warn!(
-                            target: "siege_debug",
-                            peer = %peer_id,
-                            error = ?guardian_error,
-                            "Vault rejected ingress payload"
-                        );
-                        self.system_governor
-                            .record_peer_evidence(&peer_id.to_string(), false);
-                        // Now this call is allowed because the guard is gone.
-                        self.handle_forensic_violation(peer_id, sender_did, guardian_error)
-                            .await;
-                    }
-                    _ => {}
-                }
-            }
-            Err(err) => tracing::warn!(error = %err, "Malformed payload"),
-        }
-
-        // RECORD TOTAL METABOLIC COST (Including deserialization)
-        self.system_governor
-            .record_metabolic_pressure(start_cpu.elapsed());
-    }
-}
-
-/// RAII Guard to ensure IngressGovernor slots are released even on early returns.
-struct SlotGuard<'a> {
-    governor: &'a mut IngressGovernor,
-    peer_id: NetworkId,
-}
-
-impl<'a> SlotGuard<'a> {
-    fn new(governor: &'a mut IngressGovernor, peer_id: NetworkId) -> Self {
-        Self { governor, peer_id }
-    }
-}
-
-impl<'a> Drop for SlotGuard<'a> {
-    fn drop(&mut self) {
-        // This is the "Magic": No matter how handle_network_ingress exits,
-        // this line runs, preventing "Zombie Slots" from clogging the node.
-        self.governor.release_slot(&self.peer_id);
     }
 }
 
