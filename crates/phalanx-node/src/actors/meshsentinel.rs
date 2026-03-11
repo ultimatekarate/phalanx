@@ -10,13 +10,11 @@ use crate::actors::trust_actor::TrustActor;
 use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
 
-use crate::vitals::{
-    FinalizationScale, HealthTracker, Homeostasis, IngestionScale, SystemGovernor,
-};
+use crate::vitals::{HealthTracker, SystemGovernor};
 use crate::Guardian;
 use crate::{trust::TrustRegistry, StorageActor};
 
-use phalanx_forensics::policy::{EgressGovernor, IngressGovernor, TrafficGovernor};
+use phalanx_forensics::policy::{IngressGovernor, TrafficGovernor};
 use phalanx_forensics::prelude::*;
 use phalanx_proto::prelude::*;
 use phalanx_transport::identity_ext::Libp2pExt;
@@ -40,7 +38,7 @@ pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJourn
     pub system_governor: Arc<SystemGovernor>,
 }
 
-pub struct MeshSentinel<I: IngressPort, E: EgressPort, J: TransientJournal> {
+pub struct MeshSentinel<I: IngressPort> {
     // Core router dependencies
     pub config: Arc<NodeConfig>,
     pub identity: Arc<PhalanxIdentity>,
@@ -61,13 +59,14 @@ pub struct MeshSentinel<I: IngressPort, E: EgressPort, J: TransientJournal> {
 
     // Keep a reference to the storage task to ensure it's not dropped.
     pub storage_task: JoinHandle<()>,
-    pub _journal_phantom: std::marker::PhantomData<J>,
 }
 
-impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'static>
-    MeshSentinel<I, E, J>
-{
-    pub async fn new(mut deps: SentinelDependencies<I, E, J>) -> Result<Self, Box<dyn Error>> {
+impl<I: IngressPort> MeshSentinel<I> {
+    pub async fn new<E, J>(mut deps: SentinelDependencies<I, E, J>) -> Result<Self, Box<dyn Error>>
+    where
+        E: EgressPort + 'static,
+        J: TransientJournal + Send + 'static,
+    {
         let local_did = deps.identity.did.clone();
         let local_network_id = deps.identity.to_network_id();
         let reassembler = Reassembler::new();
@@ -184,7 +183,6 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
             retrieval_tx,
             egress_tx,
             discovery_tx,
-            _journal_phantom: std::marker::PhantomData,
         })
     }
 

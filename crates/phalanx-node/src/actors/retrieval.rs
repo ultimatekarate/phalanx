@@ -1,16 +1,19 @@
 use crate::actors::egress::EgressCommand;
 use crate::actors::storage::StorageCommand;
+use crate::actors::trust_actor::TrustCommand;
 use crate::clock::TrustedClock;
 use crate::identity::PhalanxNodeIdentityExt;
 use crate::trust::{ReputationProjection, TrustOracle};
+use crate::vitals::Homeostasis;
 use crate::vitals::{FinalizationScale, SystemGovernor};
 use phalanx_forensics::crucible::EvidenceExt;
+use phalanx_forensics::gate::IntegrityGate;
 use phalanx_forensics::policy::EgressGovernor;
+use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*;
 use phalanx_proto::trust::Offense;
 use phalanx_proto::types::{ForensicUnit, TaskCost, Verified};
 use phalanx_proto::VolleyRequest;
-use phalanx_transport::EgressPort;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
@@ -23,13 +26,7 @@ pub enum RetrievalCommand {
     },
 }
 
-// Command for the TrustManager actor
-#[derive(Debug)]
-pub enum TrustCommand {
-    RecordOffense { did: Did, offense: Offense },
-}
-
-pub struct RetrievalActor<E: EgressPort> {
+pub struct RetrievalActor {
     identity: Arc<PhalanxIdentity>,
     clock: Arc<TrustedClock>,
     system_governor: Arc<SystemGovernor>,
@@ -40,7 +37,7 @@ pub struct RetrievalActor<E: EgressPort> {
     rx: mpsc::Receiver<RetrievalCommand>,
 }
 
-impl<E: EgressPort + 'static> RetrievalActor<E> {
+impl RetrievalActor {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         identity: Arc<PhalanxIdentity>,
@@ -85,7 +82,7 @@ impl<E: EgressPort + 'static> RetrievalActor<E> {
         request: VolleyRequest,
         channel_id: String,
     ) {
-        let local_id = self.identity.to_network_id();
+        let local_id = &self.identity.network_id;
         let io_scale: FinalizationScale = self.system_governor.finalization_scaler();
 
         if io_scale.0 < 0.2 {
@@ -137,7 +134,7 @@ impl<E: EgressPort + 'static> RetrievalActor<E> {
 
         for env in raw_envelopes {
             let sequence_id = env.evidence.sequence_id();
-            if let Ok(valid_env) = env.check_integrity(&local_id, now, 10_000, None) {
+            if let Ok(valid_env) = env.check_integrity(local_id, now, 10_000, None) {
                 let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
                 if let Ok(sealed) = EgressGovernor::authorize(unit, &target_trust, &current_stress)
                 {

@@ -1,6 +1,6 @@
 use crate::actors::egress::EgressCommand;
-use crate::actors::retrieval::TrustCommand;
 use crate::actors::storage::StorageCommand;
+use crate::actors::trust_actor::TrustCommand;
 use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
 use crate::trust::{ReputationProjection, TrustOracle};
