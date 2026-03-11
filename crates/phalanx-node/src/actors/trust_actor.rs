@@ -1,6 +1,7 @@
 use crate::trust::{ClockProvider, SystemClock, TrustRegistry};
 use phalanx_forensics::policy::TrustArbiter;
 use phalanx_proto::prelude::*;
+use phalanx_proto::trust::Offense;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{interval, Duration};
 
@@ -74,6 +75,6 @@ impl TrustActor {
 
     async fn run_maintenance(&mut self) {
         let now = self.clock.current_monotonic();
-        TrustArbiter::accumulate_reputation(&mut self.registry, now, 60, 5);
+        TrustArbiter::accumulate_reputation(&mut self.registry.core, now, 60, 5);
     }
 }

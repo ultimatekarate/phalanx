@@ -3,20 +3,19 @@ use crate::actors::egress::{EgressActor, EgressCommand};
 use crate::actors::ingestion::{IngestionActor, IngestionCommand};
 use crate::actors::media_egress::MediaEgressActor;
 use crate::actors::playback::PlaybackCoordinator;
-use crate::actors::retrieval::{RetrievalActor, RetrievalCommand, TrustCommand};
-use crate::actors::storage::NoOpJournal;
+use crate::actors::retrieval::{RetrievalActor, RetrievalCommand};
+
 use crate::actors::storage::StorageCommand;
-use crate::actors::trust_actor::{TrustActor, TrustCommand};
+use crate::actors::trust_actor::TrustActor;
 use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
-use crate::identity::PhalanxNodeIdentityExt;
-use crate::trust::{ReputationProjection, TrustOracle};
+
 use crate::vitals::{
     FinalizationScale, HealthTracker, Homeostasis, IngestionScale, SystemGovernor,
 };
 use crate::Guardian;
 use crate::{trust::TrustRegistry, StorageActor};
-use phalanx_forensics::judge::IntegrityGate;
+
 use phalanx_forensics::policy::{EgressGovernor, IngressGovernor, TrafficGovernor};
 use phalanx_forensics::prelude::*;
 use phalanx_proto::prelude::*;
@@ -28,13 +27,9 @@ use tokio::sync::mpsc;
 
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::StorageSequence;
-use phalanx_proto::evidence::WitnessEnvelope;
-use phalanx_proto::time::CausalitySession;
-use phalanx_proto::types::NodeMode;
-use phalanx_proto::VolleyRequest;
 use std::error::Error;
 use tokio::task::JoinHandle;
-use tokio::time::{interval, timeout, Duration};
+use tokio::time::{timeout, Duration};
 
 pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJournal> {
     pub config: NodeConfig,
@@ -258,9 +253,6 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
             if let Err(e) = coordinator.run(volley_id).await {
                 tracing::error!("Playback Coordinator terminated with error: {:?}", e);
             }
-            system_governor: Arc::new(SystemGovernor::new()),
-        };
-
-        Self::new(deps).await
+        })
     }
 }

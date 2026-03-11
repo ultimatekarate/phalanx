@@ -3,6 +3,7 @@ use crate::NodeConfig;
 use phalanx_forensics::trust::{PeerEvaluator, ReputationGate};
 use phalanx_proto::prelude::*;
 use phalanx_proto::trust::MonotonicClock;
+use phalanx_proto::trust::TrustRegistry as ProtoTrustRegistry;
 use phalanx_proto::trust::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -94,8 +95,8 @@ impl ClockProvider for TrustedClock {
 /// Manages the "Social Graph" of the node with bi-directional lookup.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TrustRegistry {
-    /// Primary storage: DID -> Record
-    pub contacts: HashMap<Did, PeerRecord>,
+    #[serde(flatten)]
+    pub core: ProtoTrustRegistry,
     /// Lookup index: Alias -> DID (Ephemeral, rebuilt on load)
     #[serde(skip)]
     pet_name_index: HashMap<PetName, Did>,
@@ -117,7 +118,7 @@ impl TrustRegistry {
         let storage_path = vault.join("trust_registry.bin");
 
         let mut registry = Self {
-            contacts: HashMap::new(),
+            core: ProtoTrustRegistry::default(),
             pet_name_index: HashMap::new(),
             live_projection: ReputationProjection::default(),
             storage_path,
@@ -146,7 +147,7 @@ impl TrustRegistry {
 
         let mut existing_reputation = PeerReputation::default();
 
-        if let Some(old_record) = self.contacts.get(did) {
+        if let Some(old_record) = self.core.peers.get(did) {
             existing_reputation = old_record.reputation.clone();
             if let Some(old_name) = &old_record.pet_name {
                 if old_name != pet_name {
@@ -162,7 +163,8 @@ impl TrustRegistry {
         let timestamp = clock.now()?;
 
         let original_added_at = self
-            .contacts
+            .core
+            .peers
             .get(did)
             .map_or(timestamp, |record| record.added_at);
 
@@ -175,7 +177,7 @@ impl TrustRegistry {
             reputation: existing_reputation,
         };
 
-        self.contacts.insert(did.clone(), record);
+        self.core.peers.insert(did.clone(), record);
         self.pet_name_index.insert(pet_name.clone(), did.clone());
 
         tracing::info!(target: "trust", %did, %pet_name, ?level, "Peer record updated");
@@ -221,7 +223,7 @@ impl TrustRegistry {
 
     /// Updates the last interaction timestamp. Must be awaited.
     pub async fn touch(&mut self, did: &Did, clock: &TrustedClock) {
-        if let Some(record) = self.contacts.get_mut(did) {
+        if let Some(record) = self.core.peers.get_mut(did) {
             match clock.now() {
                 Ok(now) => {
                     record.last_interaction = now;
@@ -247,7 +249,7 @@ impl TrustRegistry {
     }
 
     pub async fn remove_peer(&mut self, did: &Did) -> Result<(), TrustError> {
-        if let Some(record) = self.contacts.remove(did) {
+        if let Some(record) = self.core.peers.remove(did) {
             if let Some(ref pet_name) = record.pet_name {
                 self.pet_name_index.remove(pet_name);
             }
@@ -272,7 +274,7 @@ impl TrustRegistry {
             "PENALTY_ATTEMPTED"
         );
         // LAZY REGISTRATION: Never ignore a forensic offense, even from unknown peers
-        if !self.contacts.contains_key(did) {
+        if !self.core.peers.contains_key(did) {
             tracing::info!(
                 target: "phalanx::trust",
                 offender_did = %did,
@@ -290,11 +292,11 @@ impl TrustRegistry {
                 last_interaction: timestamp,
                 reputation: PeerReputation::default(),
             };
-            self.contacts.insert(did.clone(), record);
+            self.core.peers.insert(did.clone(), record);
             self.pet_name_index.insert(pet_name, did.clone());
         }
 
-        if let Some(record) = self.contacts.get_mut(did) {
+        if let Some(record) = self.core.peers.get_mut(did) {
             let old_score = record.reputation.score;
             let penalty = match offense {
                 Offense::QuotaExceeded => 25,
@@ -341,7 +343,7 @@ impl TrustRegistry {
 
     /// Helper to flush the current state to NVMe/Disk.
     pub async fn save(&self) -> Result<(), std::io::Error> {
-        let bytes = postcard::to_allocvec(&self.contacts)
+        let bytes = postcard::to_allocvec(&self.core)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         let mut file = File::create(&self.storage_path).await?;
@@ -367,15 +369,15 @@ impl TrustRegistry {
         }
 
         // Deserialize using postcard (as per standard project stack)
-        let loaded_contacts: HashMap<Did, PeerRecord> = postcard::from_bytes(&buffer)
+        let loaded_core: ProtoTrustRegistry = postcard::from_bytes(&buffer)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-        self.contacts = loaded_contacts;
+        self.core = loaded_core;
 
         // Clear and rebuild ephemeral state
         self.pet_name_index.clear();
 
-        for (did, record) in &self.contacts {
+        for (did, record) in &self.core.peers {
             if let Some(alias) = &record.pet_name {
                 self.pet_name_index.insert(alias.clone(), did.clone());
             }
@@ -395,21 +397,24 @@ impl TrustRegistry {
 
     #[must_use]
     pub fn get_alias(&self, did: &Did) -> Option<&str> {
-        self.contacts
+        self.core
+            .peers
             .get(did)
             .and_then(|r| r.pet_name.as_ref().map(|n| n.as_str()))
     }
 
     #[must_use]
     pub fn check_trust(&self, did: &Did) -> TrustLevel {
-        self.contacts
+        self.core
+            .peers
             .get(did)
             .map_or(TrustLevel::Ignored, |r| r.level)
     }
 
     /// Retrieves a mutable reference to a peer's reputation state.
     pub fn get_reputation_mut(&mut self, did: &Did) -> Option<&mut PeerReputation> {
-        self.contacts
+        self.core
+            .peers
             .get_mut(did)
             .map(|record| &mut record.reputation)
     }
@@ -456,7 +461,8 @@ impl TrustRegistry {
         }
 
         let record = self
-            .contacts
+            .core
+            .peers
             .get_mut(did)
             .ok_or_else(|| TrustError::PeerNotFound(did.clone()))?;
 
@@ -471,6 +477,23 @@ impl TrustRegistry {
             .map_err(|e| TrustError::IoError(e.to_string()))
     }
 
+    pub fn is_blacklisted(&self, did: &Did) -> bool {
+        self.core
+            .peers
+            .get(did)
+            .map_or(false, |record| record.reputation.is_blacklisted)
+    }
+
+    /// Checks if a network-level ID is blacklisted by resolving it to a DID.
+    #[must_use]
+    pub fn is_network_id_blacklisted(&self, network_id: &NetworkId) -> bool {
+        // Resolve PeerId string into standard did:key format for lookup
+        let deterministic_did_str = format!("did:key:{}", network_id);
+        let target_did = Did::from(deterministic_did_str);
+
+        self.is_blacklisted(&target_did)
+    }
+
     pub async fn insert_peer(
         &mut self,
         did: &Did,
@@ -478,7 +501,7 @@ impl TrustRegistry {
         level: TrustLevel,
         clock: &TrustedClock,
     ) -> Result<(), TrustError> {
-        if self.contacts.contains_key(did) {
+        if self.core.peers.contains_key(did) {
             return Err(TrustError::PeerAlreadyExists(did.clone()));
         }
 
@@ -496,7 +519,7 @@ impl TrustRegistry {
             reputation: PeerReputation::default(),
         };
 
-        self.contacts.insert(did.clone(), record);
+        self.core.peers.insert(did.clone(), record);
         self.pet_name_index.insert(pet_name.clone(), did.clone());
 
         self.save()
@@ -512,7 +535,7 @@ impl PeerEvaluator for TrustRegistry {
         let deterministic_did_str = format!("did:key:{}", peer_id);
         let target_did = Did::from(deterministic_did_str);
 
-        let record = match self.contacts.get(&target_did) {
+        let record = match self.core.peers.get(&target_did) {
             Some(r) => r,
             None => return 1.0, // Baseline neutral reputation for untracked peers
         };
@@ -531,7 +554,8 @@ impl PeerEvaluator for TrustRegistry {
 
 impl ReputationGate for TrustRegistry {
     fn is_blacklisted(&self, did: &Did) -> bool {
-        self.contacts
+        self.core
+            .peers
             .get(did)
             .is_some_and(|r| r.reputation.is_blacklisted)
     }
@@ -610,7 +634,8 @@ mod tests {
             .await;
 
         let record = registry
-            .contacts
+            .core
+            .peers
             .get(&did)
             .expect("Peer should be lazily registered");
         assert_eq!(record.reputation.score, 75);
@@ -621,7 +646,7 @@ mod tests {
             .record_offense(&did, Offense::InvalidSignature, &clock)
             .await;
 
-        let record = registry.contacts.get(&did).unwrap();
+        let record = registry.core.peers.get(&did).unwrap();
         // If score is i32: 75 - 101 = -26. If u32 saturating: 0.
         assert!(record.reputation.score <= 0);
         assert!(record.reputation.is_blacklisted);

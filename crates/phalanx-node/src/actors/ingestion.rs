@@ -4,16 +4,16 @@ use crate::actors::storage::StorageCommand;
 use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
 use crate::trust::{ReputationProjection, TrustOracle};
+use crate::vitals::Homeostasis;
 use crate::vitals::SystemGovernor;
 use phalanx_forensics::policy::{IngressGovernor, TrafficGovernor};
-use phalanx_forensics::prelude::*;
-use phalanx_proto::evidence::Evidence;
+
 use phalanx_proto::prelude::*;
 use phalanx_proto::trust::Offense;
 use phalanx_proto::types::{ForensicUnit, Unverified, Verified};
 use phalanx_transport::identity_ext::Libp2pExt;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
 
 pub enum IngestionCommand {
