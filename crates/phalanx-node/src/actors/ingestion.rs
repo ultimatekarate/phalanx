@@ -6,6 +6,7 @@ use crate::config::NodeConfig;
 use crate::trust::{ReputationProjection, TrustOracle};
 use crate::vitals::Homeostasis;
 use crate::vitals::SystemGovernor;
+use phalanx_forensics::gate::TrustGate;
 use phalanx_forensics::policy::{IngressGovernor, TrafficGovernor};
 
 use phalanx_proto::prelude::*;
@@ -114,7 +115,7 @@ impl IngestionActor {
             let sender_did = unverified.data.owner_did.clone();
 
             if !self.system_governor.is_peer_coupled(&peer_id.to_string())
-                || self.trust_oracle.is_blacklisted_by_did(&sender_did)
+                || sender_did.verify_standing(&self.trust_oracle).is_err()
             {
                 let _ = self
                     .egress_tx

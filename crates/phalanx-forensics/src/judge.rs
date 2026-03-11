@@ -262,8 +262,12 @@ mod tests {
             Ok(valid_env) => {
                 // If we somehow reached here (we shouldn't), the Governor is the second line of defense.
                 let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
-                let sealed_result =
-                    EgressGovernor::authorize(unit, &TrustLevel::Ally, &SystemStress::Nominal);
+                let sealed_result = EgressGovernor::authorize(
+                    unit,
+                    &TrustLevel::Ally,
+                    &SystemStress::Nominal,
+                    &SymmetricKey([0u8; 32]),
+                );
                 assert!(
                     sealed_result.is_err(),
                     "Governor allowed tampered data to be promoted to Sealed!"

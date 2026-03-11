@@ -11,6 +11,7 @@ use phalanx_node::actors::storage::{NoOpJournal, StorageActor, StorageCommand};
 use phalanx_node::config::NodeConfig;
 use phalanx_node::persistence::vault::Guardian;
 use phalanx_node::vitals::SystemGovernor;
+use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{
     ChunkType, DataPayload, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
 };
@@ -306,7 +307,8 @@ async fn test_sentinel_egress_promotion_logic() {
     // 3. Sentinel performs Gate 4: Policy Promotion
     let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
 
-    let promotion_result = EgressGovernor::authorize(unit, &trust, &stress);
+    let promotion_result =
+        EgressGovernor::authorize(unit, &trust, &stress, &SymmetricKey([0u8; 32]));
 
     // 4. VERIFICATION: Result MUST be a Sealed ForensicUnit
     assert!(promotion_result.is_ok());
@@ -337,7 +339,7 @@ async fn test_sentinel_blocks_untrusted_egress() {
     let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
 
     // ACT: Attempt promotion
-    let result = EgressGovernor::authorize(unit, &trust, &stress);
+    let result = EgressGovernor::authorize(unit, &trust, &stress, &SymmetricKey([0u8; 32]));
 
     // ASSERT: Policy Gate must catch the untrusted requester
     assert!(result.is_err());
