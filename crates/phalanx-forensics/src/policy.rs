@@ -1,7 +1,7 @@
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*;
+use phalanx_proto::trust::MonotonicClock;
 use phalanx_proto::trust::PeerRecord;
-use phalanx_proto::trust::{MonotonicClock, TrustRegistry};
 use phalanx_proto::types::ForensicUnit;
 use phalanx_proto::types::PhalanxPhysics;
 use phalanx_proto::types::PowerState;
@@ -18,14 +18,14 @@ pub struct TrustArbiter;
 impl TrustArbiter {
     /// Pure, deterministic recovery logic.
     pub fn accumulate_reputation(
-        registry: &mut TrustRegistry,
+        peers: &mut HashMap<Did, PeerRecord>,
         now: MonotonicClock,
         interval_secs: u64,
         recovery_step: i64,
     ) {
         const MAX_REPUTATION: i64 = 100; // The ceiling of trust
 
-        for record in registry.peers.values_mut() {
+        for record in peers.values_mut() {
             if record.reputation.is_blacklisted {
                 continue;
             }
@@ -239,16 +239,16 @@ mod tests {
     use super::*;
     use crate::test_utils::MockClock;
     use phalanx_proto::identity::Did;
-    use phalanx_proto::trust::{PeerRecord, PeerReputation, TrustRegistry};
+    use phalanx_proto::trust::{PeerRecord, PeerReputation};
 
     #[test]
     fn test_reputation_recovery_over_time() {
-        let mut registry = TrustRegistry::default();
+        let mut peers = HashMap::<Did, PeerRecord>::new();
         let peer_did = Did("test_peer".to_string());
         let mut clock = MockClock::new(1000); // Start at T=1000
 
         // 1. Setup a penalized peer (not yet banned)
-        registry.peers.insert(
+        peers.insert(
             peer_did.clone(),
             PeerRecord {
                 reputation: PeerReputation {
@@ -263,44 +263,44 @@ mod tests {
 
         // 2. Advance time by half an interval (No recovery expected)
         clock.tick(30);
-        TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
+        TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 60, 10);
         assert_eq!(
-            registry.peers[&peer_did].reputation.score, 50,
+            peers[&peer_did].reputation.score, 50,
             "Should not recover before interval"
         );
 
         // 3. Advance time past the full interval (Recovery: 50 -> 60)
         clock.tick(31); // Total 61s elapsed
-        TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
+        TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 60, 10);
         assert_eq!(
-            registry.peers[&peer_did].reputation.score, 60,
+            peers[&peer_did].reputation.score, 60,
             "Reputation should have increased by recovery_step"
         );
 
         // 4. Advance time by multiple intervals (Recovery: 60 -> 90)
         clock.tick(120); // 2 more intervals
-        TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
+        TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 60, 10);
         assert_eq!(
-            registry.peers[&peer_did].reputation.score, 80,
+            peers[&peer_did].reputation.score, 80,
             "Reputation should follow multi-cycle recovery"
         );
 
         // 5. Ensure it caps at the baseline (100)
         clock.tick(600);
-        TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
+        TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 60, 10);
         assert_eq!(
-            registry.peers[&peer_did].reputation.score, 100,
+            peers[&peer_did].reputation.score, 100,
             "Reputation must not exceed 100"
         );
     }
 
     #[test]
     fn test_banned_peers_do_not_recover() {
-        let mut registry = TrustRegistry::default();
+        let mut peers = HashMap::<Did, PeerRecord>::new();
         let peer_did = Did("bad_actor".to_string());
         let mut clock = MockClock::new(1000);
 
-        registry.peers.insert(
+        peers.insert(
             peer_did.clone(),
             PeerRecord {
                 reputation: PeerReputation {
@@ -314,11 +314,11 @@ mod tests {
         );
 
         clock.tick(3600); // 1 hour later
-        TrustArbiter::accumulate_reputation(&mut registry, clock.now(), 60, 10);
+        TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 60, 10);
 
-        assert!(registry.peers[&peer_did].reputation.is_blacklisted);
+        assert!(peers[&peer_did].reputation.is_blacklisted);
         assert_eq!(
-            registry.peers[&peer_did].reputation.score, -10,
+            peers[&peer_did].reputation.score, -10,
             "Banned peers require manual pardon"
         );
     }
