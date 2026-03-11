@@ -59,8 +59,7 @@ impl Default for PeerReputation {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PeerRecord {
     pub did: Did,
     pub pet_name: Option<PetName>,
@@ -69,7 +68,6 @@ pub struct PeerRecord {
     pub last_interaction: PhalanxTimestamp,
     pub reputation: PeerReputation,
 }
-
 
 /// A user-defined local identifier for a DID (Pet name).
 ///
