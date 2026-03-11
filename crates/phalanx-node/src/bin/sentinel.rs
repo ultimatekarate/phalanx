@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 // Internal Modules from Workspace
+use phalanx_forensics::PeerEvaluator;
 use phalanx_node::actors::meshsentinel::SentinelDependencies;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
@@ -45,7 +46,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // --- ZERO-TRUST DEPENDENCY GRAPH ---
     let trust_registry = TrustRegistry::build(&config).await;
-    let reputation_cache = Arc::new(SyncReputationCache::default());
+    let reputation_projection = trust_registry.projection_handle();
 
     // 4. Production Network Adapter Setup (Hexagonal Port Injection)
     let network_keypair = my_identity.to_libp2p_keypair();
@@ -54,7 +55,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &config,
         &physics,
         psk,
-        reputation_cache.clone(),
+        Arc::new(reputation_projection.clone()) as Arc<dyn PeerEvaluator>,
     )?;
 
     let adapter = Libp2pAdapter::new(swarm);
@@ -69,7 +70,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         network,
         journal,
         trust_registry,
-        reputation_cache,
+        reputation_cache: reputation_projection,
         discovery_rx,
         discovery_tx,
         system_governor: Arc::new(phalanx_node::vitals::SystemGovernor::new()),
