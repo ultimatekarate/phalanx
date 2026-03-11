@@ -40,16 +40,11 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         let verifying_key = signing_key.verifying_key();
         let public_key_bytes = verifying_key.to_bytes();
 
-        // Derive did:key using Ed25519 multicodec prefix (0xed, 0x01)
-        let mut multicodec_payload = vec![0xed, 0x01];
-        multicodec_payload.extend_from_slice(&public_key_bytes);
-        let multibase_pubkey = bs58::encode(multicodec_payload).into_string();
-
         Ok((
             PhalanxIdentity {
                 network_id: NetworkId::random(),
                 version: IDENTITY_VERSION,
-                did: Did::from(format!("did:key:z{}", multibase_pubkey)),
+                did: Did::derive_did_key(&public_key_bytes),
                 keypair: signing_key,
             },
             phrase,
@@ -68,14 +63,10 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         let verifying_key = signing_key.verifying_key();
         let public_key_bytes = verifying_key.to_bytes();
 
-        let mut multicodec_payload = vec![0xed, 0x01];
-        multicodec_payload.extend_from_slice(&public_key_bytes);
-        let multibase_pubkey = bs58::encode(multicodec_payload).into_string();
-
         Ok(PhalanxIdentity {
             network_id: NetworkId::random(),
             version: IDENTITY_VERSION,
-            did: Did::from(format!("did:key:z{}", multibase_pubkey)),
+            did: Did::derive_did_key(&public_key_bytes),
             keypair: signing_key,
         })
     }
