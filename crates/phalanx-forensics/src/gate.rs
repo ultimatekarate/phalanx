@@ -6,7 +6,7 @@
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{Evidence, SignatureHash, WitnessEnvelope};
 use phalanx_proto::prelude::*;
-use phalanx_proto::time::PhalanxTimestamp;
+use phalanx_proto::time::TrustedClock;
 use std::collections::HashMap;
 use tracing::{error, warn};
 
@@ -71,7 +71,7 @@ pub trait IntegrityGate {
     fn check_integrity(
         self,
         node_id: &NetworkId,
-        now: PhalanxTimestamp,
+        clock: &dyn TrustedClock,
         tolerance: u64,
         anchor: Option<SignatureHash>,
     ) -> Result<Self, ShardError>
@@ -83,7 +83,7 @@ impl IntegrityGate for WitnessEnvelope {
     fn check_integrity(
         self,
         node_id: &NetworkId,
-        now: PhalanxTimestamp,
+        clock: &dyn TrustedClock,
         tolerance: u64,
         anchor: Option<SignatureHash>,
     ) -> Result<Self, ShardError> {
@@ -99,6 +99,7 @@ impl IntegrityGate for WitnessEnvelope {
             ));
         }
 
+        let now = clock.now();
         match self.evidence.timestamp().verify_freshness(now, tolerance) {
             Ok(_) => Ok(self),
             Err(e) => {
@@ -265,7 +266,7 @@ pub trait PromotionGate {
     fn promote(
         self,
         node_id: &NetworkId,
-        now: PhalanxTimestamp,
+        clock: &dyn TrustedClock,
         tolerance: u64,
         anchor: Option<SignatureHash>,
     ) -> Result<ForensicUnit<WitnessEnvelope, Verified>, ShardError>;
@@ -279,12 +280,14 @@ impl PromotionGate for ForensicUnit<WitnessEnvelope, Unverified> {
     fn promote(
         self,
         node_id: &NetworkId,
-        now: PhalanxTimestamp,
+        clock: &dyn TrustedClock,
         tolerance: u64,
         anchor: Option<SignatureHash>,
     ) -> Result<ForensicUnit<WitnessEnvelope, Verified>, ShardError> {
         // 1. Integrity Gate (Signature + Time + Sticky Trust)
-        let mut envelope = self.data.check_integrity(node_id, now, tolerance, anchor)?;
+        let mut envelope = self
+            .data
+            .check_integrity(node_id, clock, tolerance, anchor)?;
 
         // 2. Continuity Gate (Chain Enforcement)
         if let Some(ref a) = anchor {

@@ -36,6 +36,16 @@ pub trait TrustedClock: Send + Sync {
     fn now(&self) -> PhalanxTimestamp;
 }
 
+/// A default TrustedClock that delegates directly to PhalanxTimestamp::now().
+/// Used in tests and as a fallback when no NTP-corrected clock is available.
+pub struct SystemClock;
+
+impl TrustedClock for SystemClock {
+    fn now(&self) -> PhalanxTimestamp {
+        PhalanxTimestamp::now()
+    }
+}
+
 /// A stateful session that maintains the causality chain for a specific timeline.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CausalitySession {

@@ -8,7 +8,8 @@ use phalanx_proto::evidence::{
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
 use phalanx_proto::storage::GuardianError;
-use phalanx_proto::time::PhalanxTimestamp;
+use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 use tracing::info;
@@ -21,7 +22,12 @@ async fn test_reliability_timeline_integrity() {
     let (identity, _) = PhalanxIdentity::generate().unwrap();
     let config = NodeConfig::default();
 
-    let mut guardian = Guardian::new(&vault_path, &config, identity.did.clone());
+    let mut guardian = Guardian::new(
+        &vault_path,
+        &config,
+        identity.did.clone(),
+        Arc::new(SystemClock),
+    );
     let volley_id = VolleyId::new("v_timeline");
 
     // 1. ANCHOR: Establish the legitimate start of the timeline

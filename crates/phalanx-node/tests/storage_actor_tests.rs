@@ -16,7 +16,7 @@ use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
 use phalanx_proto::prelude::{PendingEgress, ShardChunk, ShardError};
 use phalanx_proto::retrieval::VolleyResponse;
 use phalanx_proto::storage::GuardianError;
-use phalanx_proto::time::PhalanxTimestamp;
+use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
 use phalanx_proto::types::{ForensicUnit, Verified};
 use phalanx_transport::identity_ext::Libp2pExt;
 use tokio::sync::{mpsc, oneshot};
@@ -57,7 +57,12 @@ async fn setup_mock_storage() -> (
     config.storage.vault_path = temp.path().to_string_lossy().into_owned();
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let guardian = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
+    let guardian = Guardian::new(
+        &config.storage.vault_path,
+        &config,
+        identity.did.clone(),
+        Arc::new(SystemClock),
+    );
 
     let (actor, cmd_rx, cmd_tx) = build_test_actor(config, identity, NoOpJournal, guardian);
 
@@ -117,6 +122,7 @@ async fn test_pillar_salvage_under_disk_pressure() {
         &temp.path().to_string_lossy(),
         &config,
         identity.did.clone(),
+        Arc::new(SystemClock),
     );
 
     let (actor, storage_rx, storage_tx) =
@@ -196,6 +202,7 @@ async fn test_reputation_gate_signature_mismatch() {
         &temp.path().to_string_lossy(),
         &config,
         my_identity.did.clone(),
+        Arc::new(SystemClock),
     );
     let (actor, storage_rx, storage_tx) =
         build_test_actor(config.clone(), my_identity.clone(), NoOpJournal, guardian);
@@ -291,7 +298,12 @@ async fn test_salvage_on_node_death() {
     // 2. PHASE 1: First actor ingests 3 of 4 chunks, then "dies"
     {
         let journal = FileJournal::new(&wal_path).await.unwrap();
-        let guardian = Guardian::new(&vault_path.to_string_lossy(), &config, identity.did.clone());
+        let guardian = Guardian::new(
+            &vault_path.to_string_lossy(),
+            &config,
+            identity.did.clone(),
+            Arc::new(SystemClock),
+        );
 
         let (actor, storage_rx, storage_tx) =
             build_test_actor(config.clone(), identity.clone(), journal, guardian);
@@ -328,7 +340,12 @@ async fn test_salvage_on_node_death() {
     // 3. PHASE 2: "Reboot" — new actor recovers from WAL, receives final chunk
     {
         let journal2 = FileJournal::new(&wal_path).await.unwrap();
-        let guardian2 = Guardian::new(&vault_path.to_string_lossy(), &config, identity.did.clone());
+        let guardian2 = Guardian::new(
+            &vault_path.to_string_lossy(),
+            &config,
+            identity.did.clone(),
+            Arc::new(SystemClock),
+        );
 
         let (actor2, storage_rx2, storage_tx2) =
             build_test_actor(config.clone(), identity.clone(), journal2, guardian2);
@@ -417,7 +434,12 @@ async fn test_stronghold_ingestion_and_persistence() {
     };
 
     // 3. Wire up a StorageActor directly (no harness needed)
-    let guardian = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
+    let guardian = Guardian::new(
+        &config.storage.vault_path,
+        &config,
+        identity.did.clone(),
+        Arc::new(SystemClock),
+    );
 
     let (actor, storage_rx, storage_tx) =
         build_test_actor(config.clone(), identity.clone(), NoOpJournal, guardian);
@@ -517,7 +539,12 @@ async fn test_storage_actor_metric_pipeline() {
         counter: Arc::clone(&storage_load),
     };
 
-    let guardian = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
+    let guardian = Guardian::new(
+        &config.storage.vault_path,
+        &config,
+        identity.did.clone(),
+        Arc::new(SystemClock),
+    );
     // 3. Initialize StorageActor
     let (storage_actor, command_rx, command_tx) =
         build_test_actor(config.clone(), identity.clone(), journal, guardian);
@@ -682,7 +709,7 @@ mod ingress_boundary_tests {
     };
     use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
     use phalanx_proto::prelude::ShardChunk;
-    use phalanx_proto::time::PhalanxTimestamp;
+    use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
     use phalanx_proto::types::{ForensicUnit, Unverified, Verified};
     use tokio::sync::oneshot;
 

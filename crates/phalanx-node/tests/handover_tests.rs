@@ -6,6 +6,8 @@ use phalanx_proto::evidence::{EnvelopeState, Evidence, StorageSequence, Volley, 
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
 use phalanx_proto::prelude::GuardianError;
 use phalanx_proto::storage::HandoverProof;
+use phalanx_proto::time::SystemClock;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 // Extension traits needed for method resolution
@@ -33,6 +35,7 @@ async fn test_legal_identity_handover() {
         temp_dir.path().to_string_lossy().as_ref(),
         &config,
         identity_a.did.clone(),
+        Arc::new(SystemClock),
     );
 
     // PHASE 1: Identity A owns the stream
@@ -127,7 +130,12 @@ async fn test_illegal_identity_swap_rejected() {
     let vid = VolleyId::new("illegal_stream");
 
     let config = NodeConfig::test_defaults();
-    let mut guardian = Guardian::new("sim_vault/illegal_test", &config, identity_a.did.clone());
+    let mut guardian = Guardian::new(
+        "sim_vault/illegal_test",
+        &config,
+        identity_a.did.clone(),
+        Arc::new(SystemClock),
+    );
 
     // -- Frame 1 (Identity A) --
     let shard_1 =

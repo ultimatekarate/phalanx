@@ -11,8 +11,10 @@ use phalanx_proto::evidence::Volley;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*;
 use phalanx_proto::storage::GuardianError;
+use phalanx_proto::time::TrustedClock;
 use phalanx_proto::types::ForensicUnit;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
@@ -22,14 +24,21 @@ pub struct Guardian {
     pub crucible: Crucible<VolleyAmalgam>,
     pub vault_path: String,
     pub local_did: Did,
+    pub clock: Arc<dyn TrustedClock>,
 }
 
 impl Guardian {
-    pub fn new(vault_path: &str, _config: &NodeConfig, local_did: Did) -> Self {
+    pub fn new(
+        vault_path: &str,
+        _config: &NodeConfig,
+        local_did: Did,
+        clock: Arc<dyn TrustedClock>,
+    ) -> Self {
         Self {
             crucible: Crucible::new(VolleyAmalgam, Duration::from_secs(5), 1000),
             vault_path: vault_path.to_string(),
             local_did,
+            clock,
         }
     }
 
@@ -65,22 +74,21 @@ impl Guardian {
 
                 // 1. Promotion Gate (Integrity + Continuity + Time)
                 let node_id = envelope.witness_peer_id.clone();
-                let now = PhalanxTimestamp::now();
 
                 let unit = ForensicUnit::new(envelope);
                 let absolute_max_ms = 30_000; // hard coded for now
                 let dynamic_limit = (current_tolerance.as_millis() as u64).min(absolute_max_ms);
 
-                let verified_unit =
-                    unit.promote(&node_id, now, dynamic_limit, anchor)
-                        .map_err(|e| match e {
-                            ShardError::InvalidConfiguration(ref msg)
-                                if msg.contains("Causality Break") =>
-                            {
-                                GuardianError::ChainIntegrityViolation(msg.clone())
-                            }
-                            _ => GuardianError::VerificationFailed(e.to_string()),
-                        })?;
+                let verified_unit = unit
+                    .promote(&node_id, &*self.clock, dynamic_limit, anchor)
+                    .map_err(|e| match e {
+                        ShardError::InvalidConfiguration(ref msg)
+                            if msg.contains("Causality Break") =>
+                        {
+                            GuardianError::ChainIntegrityViolation(msg.clone())
+                        }
+                        _ => GuardianError::VerificationFailed(e.to_string()),
+                    })?;
 
                 // 2. Volley Aggregation
                 // The Crucible now accepts only Verified units
@@ -343,6 +351,7 @@ mod tests {
     use phalanx_forensics::witness::WitnessAuthority;
     use phalanx_proto::evidence::Evidence;
     use phalanx_proto::evidence::VideoShard;
+    use phalanx_proto::time::SystemClock;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -353,7 +362,12 @@ mod tests {
 
         let identity = PhalanxIdentity::new_ephemeral();
         let config = NodeConfig::default();
-        let mut guardian = Guardian::new(&vault_path, &config, identity.did.clone());
+        let mut guardian = Guardian::new(
+            &vault_path,
+            &config,
+            identity.did.clone(),
+            Arc::new(SystemClock),
+        );
 
         // Define a specific VolleyId for this stream
         let vid = VolleyId::new("v1");
@@ -402,7 +416,12 @@ mod tests {
 
         let identity = PhalanxIdentity::new_ephemeral();
         let config = NodeConfig::default();
-        let mut guardian = Guardian::new(&vault_path, &config, identity.did.clone());
+        let mut guardian = Guardian::new(
+            &vault_path,
+            &config,
+            identity.did.clone(),
+            Arc::new(SystemClock),
+        );
 
         let shard = VideoShard {
             timestamp: PhalanxTimestamp::now(),

@@ -71,7 +71,14 @@ impl<I: IngressPort> MeshSentinel<I> {
         let local_did = deps.identity.did.clone();
         let local_network_id = deps.identity.to_network_id();
         let reassembler = Reassembler::new();
-        let guardian = Guardian::new(&deps.config.storage.vault_path, &deps.config, local_did);
+        let raw_clock = TrustedClock::new();
+        let clock_handle = Arc::new(raw_clock);
+        let guardian = Guardian::new(
+            &deps.config.storage.vault_path,
+            &deps.config,
+            local_did,
+            clock_handle.clone(),
+        );
         let phys_capacity = deps.system_governor.config.pipeline_capacity();
 
         let (_video_tx_unused, video_rx) = mpsc::channel(deps.config.storage.max_video_buffer);
@@ -121,8 +128,6 @@ impl<I: IngressPort> MeshSentinel<I> {
         });
 
         let arc_identity = Arc::new(deps.identity.clone());
-        let raw_clock = TrustedClock::new();
-        let clock_handle = Arc::new(raw_clock);
 
         // Trust Manager Actor
         let reputation_projection = deps.trust_registry.projection_handle();

@@ -130,11 +130,10 @@ impl RetrievalActor {
         let mut sealed_units = Vec::new();
         let current_stress = self.system_governor.current_stress();
         let target_trust = self.trust_oracle.check_trust_by_did(&request.target_did);
-        let now = self.clock.now();
 
         for env in raw_envelopes {
             let sequence_id = env.evidence.sequence_id();
-            if let Ok(valid_env) = env.check_integrity(local_id, now, 10_000, None) {
+            if let Ok(valid_env) = env.check_integrity(local_id, &*self.clock, 10_000, None) {
                 let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
                 if let Ok(sealed) = EgressGovernor::authorize(unit, &target_trust, &current_stress)
                 {

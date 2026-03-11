@@ -18,7 +18,7 @@ use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::{ShardChunk, VolleyResponse};
 use phalanx_proto::storage::GuardianError;
-use phalanx_proto::time::PhalanxTimestamp;
+use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
 use phalanx_proto::topic::MeshTopic;
 use phalanx_proto::trust::TrustLevel;
 use phalanx_proto::types::{ForensicUnit, SystemStress, Verified};
@@ -125,7 +125,12 @@ async fn setup_mock_storage() -> (
     config.storage.vault_path = temp.path().to_string_lossy().into_owned();
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let guardian = Guardian::new(&config.storage.vault_path, &config, identity.did.clone());
+    let guardian = Guardian::new(
+        &config.storage.vault_path,
+        &config,
+        identity.did.clone(),
+        Arc::new(SystemClock),
+    );
 
     let (actor, cmd_rx, cmd_tx) = build_test_actor(config, identity, NoOpJournal, guardian);
 
@@ -295,7 +300,7 @@ async fn test_sentinel_egress_promotion_logic() {
 
     // 2. Sentinel performs Gate 3: Integrity
     let valid_env = raw_env
-        .check_integrity(&local_net_id, PhalanxTimestamp::now(), 1000, None)
+        .check_integrity(&local_net_id, &SystemClock, 1000, None)
         .expect("Integrity check failed");
 
     // 3. Sentinel performs Gate 4: Policy Promotion
@@ -327,7 +332,7 @@ async fn test_sentinel_blocks_untrusted_egress() {
 
     let raw_env = mock_valid_envelope();
     let valid_env = raw_env
-        .check_integrity(&local_net_id, PhalanxTimestamp::now(), 1000, None)
+        .check_integrity(&local_net_id, &SystemClock, 1000, None)
         .unwrap();
     let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
 

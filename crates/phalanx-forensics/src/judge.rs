@@ -194,7 +194,7 @@ mod tests {
         DataPayload, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
     };
     use phalanx_proto::identity::{PhalanxIdentity, VolleyId};
-    use phalanx_proto::time::PhalanxTimestamp;
+    use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
     use phalanx_proto::trust::TrustLevel;
     use phalanx_proto::types::{ForensicUnit, SystemStress, Verified};
 
@@ -206,7 +206,7 @@ mod tests {
         let witness_identity = PhalanxIdentity::new_ephemeral();
         let witness_peer_id = witness_identity.clone().network_id;
         let vid = VolleyId::new("test_stream_01");
-        let now = PhalanxTimestamp::now();
+        let clock = SystemClock;
 
         // 2. Properly initialize a valid VideoShard
         let original_shard = VideoShard {
@@ -230,7 +230,7 @@ mod tests {
         let integrity_result =
             envelope
                 .clone()
-                .check_integrity(&witness_peer_id, now, 10_000, None);
+                .check_integrity(&witness_peer_id, &clock, 10_000, None);
         assert!(
             integrity_result.is_ok(),
             "Integrity Gate failed on clean data"
@@ -248,7 +248,7 @@ mod tests {
 
         // 5. THE TEST: Gate 3 (Integrity) must catch the modification
         // Re-serializing and comparing against the stored signature must fail.
-        let tamper_result = envelope.check_integrity(&witness_peer_id, now, 10_000, None);
+        let tamper_result = envelope.check_integrity(&witness_peer_id, &clock, 10_000, None);
 
         assert!(
             tamper_result.is_err(),

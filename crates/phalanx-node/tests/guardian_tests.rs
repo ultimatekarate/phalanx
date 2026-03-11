@@ -11,8 +11,9 @@ use phalanx_proto::evidence::{
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
 use phalanx_proto::prelude::ShardChunk;
-use phalanx_proto::time::PhalanxTimestamp;
+use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
 use phalanx_transport::identity_ext::Libp2pExt;
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 
@@ -35,7 +36,12 @@ async fn test_out_of_sequence_salvage_on_node_death() {
     let temp_dir = tempdir().expect("Failed to create temp dir");
     let vault_path = temp_dir.path().to_string_lossy().to_string();
 
-    let mut guardian = Guardian::new(&vault_path, &config, identity.did.clone());
+    let mut guardian = Guardian::new(
+        &vault_path,
+        &config,
+        identity.did.clone(),
+        Arc::new(SystemClock),
+    );
 
     // 1. CREATE VALID CHAIN: Seq 1 -> Seq 2
     let shard_1 = create_test_shard(1, volley_id.clone());
@@ -86,7 +92,12 @@ async fn test_stronghold_crash_recovery() {
     let seq = StorageSequence(101);
     let vid = VolleyId::new("crash_volley");
 
-    let mut storage = Guardian::new(&vault_path, &config, identity.did.clone());
+    let mut storage = Guardian::new(
+        &vault_path,
+        &config,
+        identity.did.clone(),
+        Arc::new(SystemClock),
+    );
 
     let shard = create_video_shard(vec![vec![0xAA]], seq, 30, vid.clone())
         .expect("Failed to generate shard");
@@ -104,7 +115,12 @@ async fn test_stronghold_crash_recovery() {
 
     drop(storage);
 
-    let mut recovered_storage = Guardian::new(&vault_path, &config, identity.did.clone());
+    let mut recovered_storage = Guardian::new(
+        &vault_path,
+        &config,
+        identity.did.clone(),
+        Arc::new(SystemClock),
+    );
 
     // Replay: re-ingest the same envelope into the fresh Guardian
     recovered_storage

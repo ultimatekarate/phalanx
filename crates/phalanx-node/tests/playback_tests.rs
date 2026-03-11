@@ -13,7 +13,8 @@ use phalanx_proto::evidence::{
     DataPayload, EnvelopeState, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
-use phalanx_proto::time::PhalanxTimestamp;
+use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[tokio::test]
@@ -30,7 +31,12 @@ async fn test_exodus_resurrection_logic() {
 
     let identity_clone = identity.clone();
     tokio::spawn(async move {
-        let mut guardian = Guardian::new(&vault_path, &config, identity_clone.did);
+        let mut guardian = Guardian::new(
+            &vault_path,
+            &config,
+            identity_clone.did,
+            Arc::new(SystemClock),
+        );
         while let Some(cmd) = storage_rx.recv().await {
             match cmd {
                 StorageCommand::GetShard {
@@ -146,7 +152,12 @@ async fn test_playback_resurrection_with_mesh_gap() {
 
     let identity_clone = identity.clone();
     tokio::spawn(async move {
-        let mut guardian = Guardian::new(&vault_path, &config, identity_clone.did);
+        let mut guardian = Guardian::new(
+            &vault_path,
+            &config,
+            identity_clone.did,
+            Arc::new(SystemClock),
+        );
         while let Some(cmd) = storage_rx.recv().await {
             match cmd {
                 StorageCommand::GetShard {
@@ -261,7 +272,7 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
     let (ui_tx, mut ui_rx) = mpsc::channel(100);
 
     tokio::spawn(async move {
-        let mut guardian = Guardian::new(&vault_path, &config, identity.did);
+        let mut guardian = Guardian::new(&vault_path, &config, identity.did, Arc::new(SystemClock));
         while let Some(cmd) = storage_rx.recv().await {
             match cmd {
                 StorageCommand::GetShard {
