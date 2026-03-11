@@ -96,7 +96,7 @@ impl ClockProvider for TrustedClock {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TrustRegistry {
     #[serde(flatten)]
-    pub core: ProtoTrustRegistry,
+    pub peers: HashMap<Did, PeerRecord>,
     /// Lookup index: Alias -> DID (Ephemeral, rebuilt on load)
     #[serde(skip)]
     pet_name_index: HashMap<PetName, Did>,
@@ -147,7 +147,7 @@ impl TrustRegistry {
 
         let mut existing_reputation = PeerReputation::default();
 
-        if let Some(old_record) = self.core.peers.get(did) {
+        if let Some(old_record) = self.peers.get(did) {
             existing_reputation = old_record.reputation.clone();
             if let Some(old_name) = &old_record.pet_name {
                 if old_name != pet_name {
@@ -177,7 +177,7 @@ impl TrustRegistry {
             reputation: existing_reputation,
         };
 
-        self.core.peers.insert(did.clone(), record);
+        self.peers.insert(did.clone(), record);
         self.pet_name_index.insert(pet_name.clone(), did.clone());
 
         tracing::info!(target: "trust", %did, %pet_name, ?level, "Peer record updated");
@@ -222,7 +222,7 @@ impl TrustRegistry {
 
     /// Updates the last interaction timestamp. Must be awaited.
     pub async fn touch(&mut self, did: &Did, clock: &TrustedClock) {
-        if let Some(record) = self.core.peers.get_mut(did) {
+        if let Some(record) = self.peers.get_mut(did) {
             match clock.now() {
                 Ok(now) => {
                     record.last_interaction = now;
@@ -248,7 +248,7 @@ impl TrustRegistry {
     }
 
     pub async fn remove_peer(&mut self, did: &Did) -> Result<(), TrustError> {
-        if let Some(record) = self.core.peers.remove(did) {
+        if let Some(record) = self.peers.remove(did) {
             if let Some(ref pet_name) = record.pet_name {
                 self.pet_name_index.remove(pet_name);
             }
@@ -273,7 +273,7 @@ impl TrustRegistry {
             "PENALTY_ATTEMPTED"
         );
         // LAZY REGISTRATION: Never ignore a forensic offense, even from unknown peers
-        if !self.core.peers.contains_key(did) {
+        if !self.peers.contains_key(did) {
             tracing::info!(
                 target: "phalanx::trust",
                 offender_did = %did,
@@ -291,11 +291,11 @@ impl TrustRegistry {
                 last_interaction: timestamp,
                 reputation: PeerReputation::default(),
             };
-            self.core.peers.insert(did.clone(), record);
+            self.peers.insert(did.clone(), record);
             self.pet_name_index.insert(pet_name, did.clone());
         }
 
-        if let Some(record) = self.core.peers.get_mut(did) {
+        if let Some(record) = self.peers.get_mut(did) {
             let old_score = record.reputation.score;
             let penalty = phalanx_forensics::trust::assess_penalty(&offense);
 
@@ -371,7 +371,7 @@ impl TrustRegistry {
         // Clear and rebuild ephemeral state
         self.pet_name_index.clear();
 
-        for (did, record) in &self.core.peers {
+        for (did, record) in &self.peers {
             if let Some(alias) = &record.pet_name {
                 self.pet_name_index.insert(alias.clone(), did.clone());
             }
@@ -492,7 +492,7 @@ impl TrustRegistry {
         level: TrustLevel,
         clock: &TrustedClock,
     ) -> Result<(), TrustError> {
-        if self.core.peers.contains_key(did) {
+        if self.peers.contains_key(did) {
             return Err(TrustError::PeerAlreadyExists(did.clone()));
         }
 
@@ -510,7 +510,7 @@ impl TrustRegistry {
             reputation: PeerReputation::default(),
         };
 
-        self.core.peers.insert(did.clone(), record);
+        self.peers.insert(did.clone(), record);
         self.pet_name_index.insert(pet_name.clone(), did.clone());
 
         self.save()
@@ -523,7 +523,7 @@ impl PeerEvaluator for TrustRegistry {
     fn evaluate_reputation(&self, peer_id: &NetworkId) -> f32 {
         let target_did = Did::from_network_id(peer_id);
 
-        let record = match self.core.peers.get(&target_did) {
+        let record = match self.peers.get(&target_did) {
             Some(r) => r,
             None => return 1.0, // Baseline neutral reputation for untracked peers
         };
