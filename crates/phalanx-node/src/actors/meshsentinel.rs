@@ -2,8 +2,10 @@
 use crate::actors::egress::{EgressActor, EgressCommand};
 use crate::actors::media_egress::MediaEgressActor;
 use crate::actors::playback::PlaybackCoordinator;
+use crate::actors::retrieval::{RetrievalActor, RetrievalCommand, TrustCommand};
 use crate::actors::storage::NoOpJournal;
 use crate::actors::storage::StorageCommand;
+use crate::actors::trust_manager::TrustManager;
 use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
 use crate::identity::PhalanxNodeIdentityExt;
@@ -50,7 +52,7 @@ pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJourn
     pub ingress: I,
     pub egress: E,
     pub journal: J,
-    pub trust_registry: TrustRegistry,
+    pub trust_registry: Arc<tokio::sync::RwLock<TrustRegistry>>,
     pub reputation_cache: ReputationProjection,
     pub discovery_rx: mpsc::Receiver<(VolleyId, StorageSequence)>,
     pub discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
@@ -58,7 +60,7 @@ pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJourn
 }
 
 pub struct MeshSentinel<I: IngressPort, E: EgressPort, J: TransientJournal> {
-    pub trust_registry: TrustRegistry,
+    pub trust_registry: Arc<tokio::sync::RwLock<TrustRegistry>>,
     pub reputation_cache: ReputationProjection,
     pub health_tracker: HealthTracker,
     pub governor: TrafficGovernor,
@@ -72,6 +74,7 @@ pub struct MeshSentinel<I: IngressPort, E: EgressPort, J: TransientJournal> {
     pub network_key: SymmetricKey,
     pub storage_task: JoinHandle<()>,
     pub storage_tx: mpsc::Sender<StorageCommand>,
+    pub retrieval_tx: mpsc::Sender<RetrievalCommand>,
     pub egress_tx: mpsc::Sender<EgressCommand>,
     pub _journal_phantom: std::marker::PhantomData<J>,
     pub session: CausalitySession,
@@ -134,6 +137,25 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
             egress_actor.run().await;
         });
 
+        // Trust Manager Actor
+        let (trust_tx, trust_rx) = mpsc::channel(100);
+        let trust_manager = TrustManager::new(deps.trust_registry.clone(), trust_rx);
+        tokio::spawn(trust_manager.run());
+
+        // Retrieval Actor
+        let (retrieval_tx, retrieval_rx) = mpsc::channel(100);
+        let retrieval_actor = RetrievalActor::new(
+            arc_identity.clone(),
+            clock_handle.clone(),
+            deps.system_governor.clone(),
+            storage_tx.clone(),
+            egress_tx.clone(),
+            deps.trust_registry.clone(),
+            trust_tx,
+            retrieval_rx,
+        );
+        tokio::spawn(retrieval_actor.run());
+
         // Media Egress Actor instantiation
         let media_actor = MediaEgressActor::new(
             deps.egress.clone(),
@@ -166,6 +188,7 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
             network_key: SymmetricKey([0x42; 32]),
             storage_task,
             storage_tx,
+            retrieval_tx,
             egress_tx,
             _journal_phantom: std::marker::PhantomData,
             session,
@@ -213,7 +236,13 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
                             self.handle_network_ingress(origin, &data, topic).await;
                         }
                         NetworkEvent::VolleyRequested { origin, request, channel_id } => {
-                            self.execute_secure_retrieval(origin, request, channel_id, &local_network_id).await;
+                            let _ = self.retrieval_tx.send(
+                                RetrievalCommand::SecureRetrieval {
+                                    origin,
+                                    request,
+                                    channel_id,
+                                }
+                            ).await;
                         }
                         NetworkEvent::Shutdown => {
                             tracing::info!("Engine: Initiating emergency salvage");
@@ -322,104 +351,6 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
         })
     }
 
-    /// Handles outbound data requests from the mesh, applying integrity and policy gates.
-    async fn execute_secure_retrieval(
-        &mut self,
-        origin: NetworkId,
-        request: VolleyRequest,
-        channel_id: String,
-        local_id: &NetworkId,
-    ) {
-        let io_scale: FinalizationScale = self.system_governor.finalization_scaler();
-
-        // If the disk/IO integral is too high, we shed the load
-        if io_scale.0 < 0.2 {
-            tracing::warn!("I/O Digestion integral saturated. Shedding retrieval request.");
-            return;
-        }
-
-        // 1. EARLY RESOURCE SHEDDING (Physical Gate)
-        if !self.system_governor.check_permission(TaskCost::Heavy) {
-            tracing::warn!(target: "phalanx::egress", "Retrieval rejected: System thermal/battery limits exceeded");
-            self.dispatch_resilient_response(channel_id, VolleyResponse::Unauthorized)
-                .await;
-            return;
-        }
-
-        // 2. PRIVACY GATE
-        if PhalanxNodeIdentityExt::verify_retrieval_auth(&*self.identity, &request).is_err() {
-            tracing::warn!(peer = %origin, volley = %request.volley_id, "Privacy Gate: Unauthorized retrieval attempt blocked");
-            self.trust_registry
-                .record_offense(
-                    &request.target_did,
-                    Offense::InvalidSignature,
-                    self.clock.as_ref(),
-                )
-                .await;
-            self.dispatch_resilient_response(channel_id, VolleyResponse::Unauthorized)
-                .await;
-            return;
-        }
-
-        // 3. FETCH FROM PURE VAULT
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        if self
-            .storage_tx
-            .send(StorageCommand::Retrieval {
-                volley_id: request.volley_id.clone(),
-                reply_to: reply_tx,
-            })
-            .await
-            .is_err()
-        {
-            self.dispatch_resilient_response(channel_id, VolleyResponse::NotFound)
-                .await;
-            return;
-        }
-
-        let raw_envelopes = reply_rx.await.unwrap_or_default();
-
-        // 4. INTEGRITY & POLICY GATES
-        let mut sealed_units = Vec::new();
-        let current_stress = self.system_governor.current_stress();
-        let target_trust = self.trust_registry.check_trust(&request.target_did);
-        let now = PhalanxTimestamp::now();
-
-        for env in raw_envelopes {
-            // Safe extraction of sequence_id for logging
-            let sequence_id = match &env.evidence {
-                Evidence::Video(shard) => shard.sequence_id,
-                Evidence::Audio(shard) => shard.sequence_id,
-                Evidence::Gap(gap) => gap.start_seq,
-                Evidence::Handover(_) => StorageSequence(0),
-            };
-
-            // GATE 3: Cryptographic Integrity Validation (Data-at-rest becoming Data-in-motion)
-            if let Ok(valid_env) = env.check_integrity(local_id, now, 10_000, None) {
-                // GATE 4: Typestate Promotion via Egress Policy
-                let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
-
-                if let Ok(sealed) = EgressGovernor::authorize(unit, &target_trust, &current_stress)
-                {
-                    sealed_units.push(sealed);
-                } else {
-                    tracing::warn!(seq = %sequence_id, "Egress denied by policy");
-                }
-            } else {
-                tracing::error!(seq = %sequence_id, "CRITICAL: Integrity validation failed for local vault data");
-            }
-        }
-
-        // 5. DISPATCH TO NETWORK
-        let response = if sealed_units.is_empty() {
-            VolleyResponse::NotFound
-        } else {
-            VolleyResponse::Success(sealed_units)
-        };
-
-        self.dispatch_resilient_response(channel_id, response).await;
-    }
-
     pub async fn dispatch_resilient_response(
         &mut self,
         channel_id: String,
@@ -460,11 +391,13 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
         };
 
         if let Some(offense_type) = offense {
-            self.trust_registry
+            let mut registry = self.trust_registry.write().await;
+            registry
                 .record_offense(&owner_did, offense_type, self.clock.as_ref())
                 .await;
 
-            if self.trust_registry.is_blacklisted(&owner_did) {
+            let is_blacklisted = registry.is_blacklisted(&owner_did);
+            if is_blacklisted {
                 tracing::warn!(
                     %peer_id,
                     %owner_did,
@@ -521,9 +454,10 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
                 let unverified = ForensicUnit::<_, Unverified>::new(raw_chunk);
                 let sender_did = unverified.data.owner_did.clone();
 
+                let registry = self.trust_registry.read().await;
                 // 1. IMMUNE INTEGRAL FILTER
                 if !self.system_governor.is_peer_coupled(&peer_id.to_string())
-                    || self.trust_registry.is_blacklisted(&sender_did)
+                    || registry.is_blacklisted(&sender_did)
                 {
                     self.egress.ban_peer(&peer_id).await;
                     return;
@@ -553,7 +487,7 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
                 }
 
                 // 3. RESOURCE ALLOCATION (IWFQ)
-                let trust_level = self.trust_registry.check_trust(&sender_did);
+                let trust_level = registry.check_trust(&sender_did);
                 let stress = self.system_governor.current_stress();
                 match self
                     .ingress_governor
@@ -654,8 +588,9 @@ impl<I: IngressPort, E: EgressPort + 'static> MeshSentinel<I, E, NoOpJournal> {
         let mut config = NodeConfig::default();
         config.storage.vault_path = path.to_string();
         let identity = PhalanxIdentity::new_ephemeral();
-        let trust_registry = TrustRegistry::build(&config).await;
-        let reputation_cache = trust_registry.projection_handle();
+        let trust_registry_inner = TrustRegistry::build(&config).await;
+        let trust_registry = Arc::new(tokio::sync::RwLock::new(trust_registry_inner));
+        let reputation_cache = trust_registry.read().await.projection_handle();
         let (discovery_tx, discovery_rx) = mpsc::channel(100);
 
         let deps = SentinelDependencies {
