@@ -648,6 +648,12 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                             .record_peer_evidence(&peer_id.to_string(), true);
                     }
                     Ok(Err(guardian_error)) => {
+                        tracing::warn!(
+                            target: "siege_debug",
+                            peer = %peer_id,
+                            error = ?guardian_error,
+                            "Vault rejected ingress payload"
+                        );
                         self.system_governor
                             .record_peer_evidence(&peer_id.to_string(), false);
                         // Now this call is allowed because the guard is gone.

@@ -250,7 +250,7 @@ impl TrustRegistry {
             let penalty = match offense {
                 Offense::QuotaExceeded => 25,
                 // Assuming forensic violations trigger fatal penalties
-                Offense::InvalidSignature => 101,
+                Offense::InvalidSignature | Offense::IdentityTheft => 101,
                 _ => 10,
             };
 
