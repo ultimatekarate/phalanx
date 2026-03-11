@@ -35,6 +35,7 @@ pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJourn
     pub ingress: I,
     pub egress: E,
     pub journal: J,
+    pub trust_registry: TrustRegistry,
     pub system_governor: Arc<SystemGovernor>,
 }
 
@@ -124,8 +125,8 @@ impl<I: IngressPort> MeshSentinel<I> {
         let clock_handle = Arc::new(raw_clock);
 
         // Trust Manager Actor
-        let trust_registry = TrustRegistry::build(&deps.config).await;
-        let reputation_projection = trust_registry.projection_handle();
+        let reputation_projection = deps.trust_registry.projection_handle();
+        let trust_registry = deps.trust_registry;
         let trust_actor = TrustActor::new(trust_registry, trust_rx);
         tokio::spawn(trust_actor.run());
 
