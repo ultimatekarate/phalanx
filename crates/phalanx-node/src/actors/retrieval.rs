@@ -130,7 +130,7 @@ impl RetrievalActor {
         let mut sealed_units = Vec::new();
         let current_stress = self.system_governor.current_stress();
         let target_trust = self.trust_oracle.check_trust_by_did(&request.target_did);
-        let now = PhalanxTimestamp::now();
+        let now = self.clock.now();
 
         for env in raw_envelopes {
             let sequence_id = env.evidence.sequence_id();

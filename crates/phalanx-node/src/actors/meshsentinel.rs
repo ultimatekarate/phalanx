@@ -161,6 +161,7 @@ impl<I: IngressPort> MeshSentinel<I> {
         // Media Egress Actor instantiation
         let media_actor = MediaEgressActor::new(
             deps.egress.clone(),
+            arc_identity.clone(),
             video_rx,
             audio_rx,
             deps.config.network.video_topic.clone(),
