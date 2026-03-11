@@ -180,8 +180,7 @@ impl TimeJudge for PhalanxTimestamp {
 // compatibility so existing `use phalanx_forensics::judge::IntegrityGate`
 // paths continue to resolve.
 pub use crate::gate::{
-    BufferCapacityGate, CapacityGate, ChronosGate, ContinuityGate, ForensicGate, IntegrityGate,
-    PrivacyGate, WitnessGate,
+    BufferCapacityGate, ContinuityGate, ForensicGate, IntegrityGate, PrivacyGate, WitnessGate,
 };
 
 #[cfg(test)]

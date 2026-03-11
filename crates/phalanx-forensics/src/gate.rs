@@ -11,11 +11,23 @@ use std::collections::HashMap;
 use tracing::{error, warn};
 
 // Extension traits from sibling modules that provide methods on proto types.
-use crate::crucible::{EnvelopeHashExt, EvidenceExt};
+use crate::crucible::EvidenceExt;
 use crate::judge::{PayloadCipher, TimeJudge};
 use crate::witness::WitnessAuthority;
 
 use sha2::{Digest, Sha256};
+
+/// Deserialization Gate: Unified postcard deserialization with forensic logging.
+pub fn unmarshal<T: serde::de::DeserializeOwned>(
+    data: &[u8],
+    context: &str,
+) -> Result<T, ShardError> {
+    postcard::from_bytes(data).map_err(|e| {
+        warn!(event = "deserialization_failure", context, error = %e);
+        ShardError::SerializationError(e.to_string())
+    })
+}
+
 /// Gate 1: The Witnessing Gate
 pub trait WitnessGate {
     fn seal(
@@ -40,33 +52,7 @@ impl WitnessGate for Evidence {
     }
 }
 
-/// Gate 2: The Chronos Gate (Timeline Integrity)
-pub trait ChronosGate {
-    fn verify_continuity(&self, envelopes: &[WitnessEnvelope]) -> Result<(), ShardError>;
-}
-
-impl ChronosGate for Vec<WitnessEnvelope> {
-    fn verify_continuity(&self, envelopes: &[WitnessEnvelope]) -> Result<(), ShardError> {
-        if envelopes.is_empty() {
-            return Ok(());
-        }
-
-        for window in envelopes.windows(2) {
-            let (prev, curr) = (&window[0], &window[1]);
-
-            if curr.prev_hash != Some(prev.signature_hash()) {
-                return Err(ShardError::InvalidConfiguration("Causality Break".into()));
-            }
-
-            if curr.evidence.timestamp() < prev.evidence.timestamp() {
-                return Err(ShardError::InvalidConfiguration("Temporal Paradox".into()));
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Gate 3: The Integrity Gate (Reception Side)
+/// Gate 2: The Integrity Gate (Reception Side)
 pub trait IntegrityGate {
     fn check_integrity(
         self,
@@ -132,34 +118,7 @@ impl PrivacyGate for Evidence {
     }
 }
 
-/// Gate 5: The Ingress Capacity Gate
-pub trait CapacityGate {
-    fn check_capacity(
-        self,
-        peer: &NetworkId,
-        pending: usize,
-        limit: usize,
-    ) -> Result<Self, ShardError>
-    where
-        Self: Sized;
-}
-
-impl CapacityGate for WitnessEnvelope {
-    fn check_capacity(
-        self,
-        peer: &NetworkId,
-        pending: usize,
-        limit: usize,
-    ) -> Result<Self, ShardError> {
-        if pending > limit {
-            warn!(event = "capacity_shedding", peer = %peer, "Node saturated");
-            return Err(ShardError::CapacityExceeded(pending as u64));
-        }
-        Ok(self)
-    }
-}
-
-/// Gate 6: The Memory Buffer Gate
+/// Gate 5: The Memory Buffer Gate
 pub trait BufferCapacityGate {
     fn enforce_capacity_limit(
         &mut self,
