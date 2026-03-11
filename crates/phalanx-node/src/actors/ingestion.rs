@@ -109,91 +109,88 @@ impl IngestionActor {
 
         let start_cpu = tokio::time::Instant::now();
 
-        match postcard::from_bytes::<ShardChunk>(data) {
-            Ok(raw_chunk) => {
-                let unverified = ForensicUnit::<_, Unverified>::new(raw_chunk);
-                let sender_did = unverified.data.owner_did.clone();
+        if let Ok(raw_chunk) = phalanx_forensics::gate::unmarshal::<ShardChunk>(data, "ingestion") {
+            let unverified = ForensicUnit::<_, Unverified>::new(raw_chunk);
+            let sender_did = unverified.data.owner_did.clone();
 
-                if !self.system_governor.is_peer_coupled(&peer_id.to_string())
-                    || self.trust_oracle.is_blacklisted_by_did(&sender_did)
-                {
-                    let _ = self
-                        .egress_tx
-                        .send(EgressCommand::Dispatch {
-                            channel_id: "ban".to_string(),
-                            response: VolleyResponse::Unauthorized,
-                        })
-                        .await;
-                    // The EgressActor will need a way to ban peers. For now, this sends a message
-                    // that will likely fail, but the important part is we drop the ingress.
-                    return;
-                }
-
-                let shard_birth = unverified.data.timestamp;
-                let now_ms = self.clock.now().unwrap_or(shard_birth);
-                let age = Duration::from_millis(now_ms.0.saturating_sub(shard_birth.0));
-
-                self.system_governor.record_latency_pressure(age);
-                let tolerance = self.system_governor.temporal_tolerance();
-
-                if age > tolerance {
-                    tracing::warn!(peer = %peer_id, age = ?age, tol = ?tolerance, "Dropped: Stale Shard");
-                    return;
-                }
-
-                let trust_level = self.trust_oracle.check_trust_by_did(&sender_did);
-                let stress = self.system_governor.current_stress();
-                match self
-                    .ingress_governor
-                    .try_allocate(peer_id.clone(), trust_level, stress)
-                {
-                    Ok(Some(_evicted)) => {
-                        // self.egress.ban_peer(&evicted).await; // Need mechanism to ban
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        tracing::error!(target: "siege_debug", "INGRESS GOVERNOR FULL! Dropping {}", peer_id);
-                        return;
-                    }
-                }
-
-                let _slot_guard = SlotGuard::new(&mut self.ingress_governor, peer_id.clone());
-
-                let (reply_tx, reply_rx) = oneshot::channel();
-                let verified_unit = ForensicUnit::<_, Verified>::new_verified(unverified.unpack());
-
-                if self
-                    .storage_tx
-                    .send(StorageCommand::Ingest {
-                        unit: verified_unit,
-                        reply_to: reply_tx,
-                        ttl: tolerance,
+            if !self.system_governor.is_peer_coupled(&peer_id.to_string())
+                || self.trust_oracle.is_blacklisted_by_did(&sender_did)
+            {
+                let _ = self
+                    .egress_tx
+                    .send(EgressCommand::Dispatch {
+                        channel_id: "ban".to_string(),
+                        response: VolleyResponse::Unauthorized,
                     })
-                    .await
-                    .is_err()
-                {
-                    tracing::error!("Vault disconnected");
-                    return;
+                    .await;
+                // The EgressActor will need a way to ban peers. For now, this sends a message
+                // that will likely fail, but the important part is we drop the ingress.
+                return;
+            }
+
+            let shard_birth = unverified.data.timestamp;
+            let now_ms = self.clock.now().unwrap_or(shard_birth);
+            let age = Duration::from_millis(now_ms.0.saturating_sub(shard_birth.0));
+
+            self.system_governor.record_latency_pressure(age);
+            let tolerance = self.system_governor.temporal_tolerance();
+
+            if age > tolerance {
+                tracing::warn!(peer = %peer_id, age = ?age, tol = ?tolerance, "Dropped: Stale Shard");
+                return;
+            }
+
+            let trust_level = self.trust_oracle.check_trust_by_did(&sender_did);
+            let stress = self.system_governor.current_stress();
+            match self
+                .ingress_governor
+                .try_allocate(peer_id.clone(), trust_level, stress)
+            {
+                Ok(Some(_evicted)) => {
+                    // self.egress.ban_peer(&evicted).await; // Need mechanism to ban
                 }
-
-                let vault_response = reply_rx.await;
-                drop(_slot_guard);
-
-                match vault_response {
-                    Ok(Ok(())) => {
-                        self.system_governor
-                            .record_peer_evidence(&peer_id.to_string(), true);
-                    }
-                    Ok(Err(guardian_error)) => {
-                        self.system_governor
-                            .record_peer_evidence(&peer_id.to_string(), false);
-                        self.handle_forensic_violation(sender_did, guardian_error)
-                            .await;
-                    }
-                    Err(_) => {} // Channel closed
+                Ok(None) => {}
+                Err(_) => {
+                    tracing::error!(target: "siege_debug", "INGRESS GOVERNOR FULL! Dropping {}", peer_id);
+                    return;
                 }
             }
-            Err(err) => tracing::warn!(error = %err, "Malformed payload"),
+
+            let _slot_guard = SlotGuard::new(&mut self.ingress_governor, peer_id.clone());
+
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let verified_unit = ForensicUnit::<_, Verified>::new_verified(unverified.unpack());
+
+            if self
+                .storage_tx
+                .send(StorageCommand::Ingest {
+                    unit: verified_unit,
+                    reply_to: reply_tx,
+                    ttl: tolerance,
+                })
+                .await
+                .is_err()
+            {
+                tracing::error!("Vault disconnected");
+                return;
+            }
+
+            let vault_response = reply_rx.await;
+            drop(_slot_guard);
+
+            match vault_response {
+                Ok(Ok(())) => {
+                    self.system_governor
+                        .record_peer_evidence(&peer_id.to_string(), true);
+                }
+                Ok(Err(guardian_error)) => {
+                    self.system_governor
+                        .record_peer_evidence(&peer_id.to_string(), false);
+                    self.handle_forensic_violation(sender_did, guardian_error)
+                        .await;
+                }
+                Err(_) => {} // Channel closed
+            }
         }
         self.system_governor
             .record_metabolic_pressure(start_cpu.elapsed());

@@ -73,8 +73,7 @@ impl DhtPayloadAuthority for DhtPayload {
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, ShardError> {
-        let decoded: Self = postcard::from_bytes(bytes)
-            .map_err(|e| ShardError::SerializationError(e.to_string()))?;
+        let decoded: Self = crate::gate::unmarshal(bytes, "DhtPayload::decode")?;
         decoded.validate()?;
         Ok(decoded)
     }
@@ -177,7 +176,7 @@ impl ProviderAuthority for DhtProviderSet {
                 providers: Vec::new(),
             });
         }
-        postcard::from_bytes(bytes).map_err(|e| ShardError::SerializationError(e.to_string()))
+        crate::gate::unmarshal(bytes, "DhtProviderSet::decode")
     }
 
     fn encode(&self) -> Vec<u8> {

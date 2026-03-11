@@ -296,7 +296,7 @@ impl<S: Mold> Crucible<S> {
     }
 
     pub fn thaw(bytes: &[u8]) -> Result<Self, ShardError> {
-        postcard::from_bytes(bytes).map_err(|e| ShardError::SerializationError(e.to_string()))
+        crate::gate::unmarshal(bytes, "VolleyAmalgam::thaw")
     }
 }
 
