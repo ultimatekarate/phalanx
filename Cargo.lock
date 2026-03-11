@@ -3609,6 +3609,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bip39",
+ "blake3",
  "bs58",
  "clap",
  "config",

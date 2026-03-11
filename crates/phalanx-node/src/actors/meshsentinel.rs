@@ -37,6 +37,7 @@ pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJourn
     pub journal: J,
     pub trust_registry: TrustRegistry,
     pub system_governor: Arc<SystemGovernor>,
+    pub vault_key: SymmetricKey,
 }
 
 pub struct MeshSentinel<I: IngressPort> {
@@ -78,6 +79,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             &deps.config,
             local_did,
             clock_handle.clone(),
+            deps.vault_key.clone(),
         );
         let phys_capacity = deps.system_governor.config.pipeline_capacity();
 

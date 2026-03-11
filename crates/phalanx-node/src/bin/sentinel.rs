@@ -10,6 +10,7 @@ use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::network::bridge::Libp2pBridge;
 use phalanx_node::network::orchestrator::setup_phalanx_swarm;
+use phalanx_node::persistence::vault::derive_vault_key;
 use phalanx_node::psk::load_swarm_key;
 use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::init_observability;
@@ -41,7 +42,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     info!("Initializing Transient WAL");
-    let journal = FileJournal::new("sentinel_transient_wal.bin").await?;
+    let vault_key = derive_vault_key(&my_identity);
+    let journal = FileJournal::new("sentinel_transient_wal.bin", vault_key.clone()).await?;
 
     // --- ZERO-TRUST DEPENDENCY GRAPH ---
     // External registry for swarm's gossipsub validator.
@@ -72,6 +74,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         journal,
         trust_registry,
         system_governor: Arc::new(phalanx_node::vitals::SystemGovernor::new()),
+        vault_key,
     };
 
     let mut engine = MeshSentinel::new(deps).await?;

@@ -9,7 +9,7 @@ use phalanx_forensics::Reassembler;
 use phalanx_node::actors::meshsentinel::{MeshSentinel, SentinelDependencies};
 use phalanx_node::actors::storage::{NoOpJournal, StorageActor, StorageCommand};
 use phalanx_node::config::NodeConfig;
-use phalanx_node::persistence::vault::Guardian;
+use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{
@@ -69,6 +69,7 @@ async fn build_test_sentinel(
     config.storage.vault_path = temp.path().to_string_lossy().to_string();
 
     let identity = PhalanxIdentity::new_ephemeral();
+    let vault_key = derive_vault_key(&identity);
     let trust_registry = TrustRegistry::build(&config).await;
 
     let deps = SentinelDependencies {
@@ -79,6 +80,7 @@ async fn build_test_sentinel(
         journal: NoOpJournal,
         trust_registry,
         system_governor: Arc::new(SystemGovernor::new()),
+        vault_key,
     };
 
     (
@@ -126,11 +128,13 @@ async fn setup_mock_storage() -> (
     config.storage.vault_path = temp.path().to_string_lossy().into_owned();
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
+    let vault_key = derive_vault_key(&identity);
     let guardian = Guardian::new(
         &config.storage.vault_path,
         &config,
         identity.did.clone(),
         Arc::new(SystemClock),
+        vault_key,
     );
 
     let (actor, cmd_rx, cmd_tx) = build_test_actor(config, identity, NoOpJournal, guardian);

@@ -298,6 +298,25 @@ impl<S: Mold> Crucible<S> {
     pub fn thaw(bytes: &[u8]) -> Result<Self, ShardError> {
         crate::gate::unmarshal(bytes, "VolleyAmalgam::thaw")
     }
+
+    /// Deserialize and restore `#[serde(skip)]` fields that reset to defaults on thaw.
+    pub fn thaw_with_config(
+        bytes: &[u8],
+        cleanup_interval: Duration,
+        max_capacity: usize,
+    ) -> Result<Self, ShardError> {
+        let mut crucible: Self = crate::gate::unmarshal(bytes, "VolleyAmalgam::thaw_with_config")?;
+        crucible.cleanup_interval = cleanup_interval;
+        crucible.max_capacity = max_capacity;
+        crucible.last_cleanup = Instant::now();
+
+        // Restore created_at on all WorkContexts so they aren't immediately stale
+        for ctx in crucible.contexts.values_mut() {
+            ctx.created_at = Instant::now();
+        }
+
+        Ok(crucible)
+    }
 }
 
 impl<S: Mold + Default> Default for Crucible<S> {

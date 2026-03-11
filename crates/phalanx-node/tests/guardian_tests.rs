@@ -5,7 +5,7 @@ use phalanx_forensics::Reassembler;
 use phalanx_node::actors::storage::NoOpJournal;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
-use phalanx_node::persistence::vault::Guardian;
+use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
 use phalanx_proto::evidence::{
     ChunkType, DataPayload, EnvelopeState, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
 };
@@ -30,6 +30,7 @@ fn create_test_shard(seq: u32, volley_id: VolleyId) -> VideoShard {
 #[tokio::test]
 async fn test_out_of_sequence_salvage_on_node_death() {
     let (identity, _) = PhalanxIdentity::generate().unwrap();
+    let vault_key = derive_vault_key(&identity);
     let config = NodeConfig::default();
     let volley_id = VolleyId::new("v_salvage");
 
@@ -41,6 +42,7 @@ async fn test_out_of_sequence_salvage_on_node_death() {
         &config,
         identity.did.clone(),
         Arc::new(SystemClock),
+        vault_key,
     );
 
     // 1. CREATE VALID CHAIN: Seq 1 -> Seq 2
@@ -88,6 +90,7 @@ async fn test_stronghold_crash_recovery() {
     let vault_path = temp_dir.path().to_string_lossy().to_string();
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
+    let vault_key = derive_vault_key(&identity);
     let peer_id = NetworkId::random();
     let seq = StorageSequence(101);
     let vid = VolleyId::new("crash_volley");
@@ -97,6 +100,7 @@ async fn test_stronghold_crash_recovery() {
         &config,
         identity.did.clone(),
         Arc::new(SystemClock),
+        vault_key.clone(),
     );
 
     let shard = create_video_shard(vec![vec![0xAA]], seq, 30, vid.clone())
@@ -120,6 +124,7 @@ async fn test_stronghold_crash_recovery() {
         &config,
         identity.did.clone(),
         Arc::new(SystemClock),
+        vault_key,
     );
 
     // Replay: re-ingest the same envelope into the fresh Guardian

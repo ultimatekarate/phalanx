@@ -4,8 +4,10 @@ use async_trait::async_trait;
 use phalanx_forensics::crucible::Crucible;
 use phalanx_forensics::crucible::VolleyAmalgam;
 use phalanx_forensics::crucible::{EnvelopeHashExt, EvidenceExt};
+use phalanx_forensics::cryptography::{decrypt_bytes, encrypt_bytes};
 use phalanx_forensics::gate::PromotionGate;
 use phalanx_forensics::prelude::TransientJournal;
+use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::Volley;
 use phalanx_proto::evidence::WitnessEnvelope;
@@ -14,17 +16,31 @@ use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::TrustedClock;
 use phalanx_proto::types::ForensicUnit;
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tracing::info;
 
+const MAX_WAL_CHUNK_BYTES: u32 = 16 * 1024 * 1024; // 16 MiB
+const MAX_WORKBENCH_STATE_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
+const MAX_EGRESS_SALVAGE_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
+const AEAD_NONCE_LEN: usize = 24;
+
+pub fn derive_vault_key(identity: &PhalanxIdentity) -> SymmetricKey {
+    SymmetricKey(blake3::derive_key(
+        "phalanx.vault.v1.disk-encryption",
+        &identity.keypair.to_bytes(),
+    ))
+}
+
 pub struct Guardian {
     pub crucible: Crucible<VolleyAmalgam>,
     pub vault_path: String,
     pub local_did: Did,
     pub clock: Arc<dyn TrustedClock>,
+    pub vault_key: SymmetricKey,
 }
 
 impl Guardian {
@@ -33,12 +49,14 @@ impl Guardian {
         _config: &NodeConfig,
         local_did: Did,
         clock: Arc<dyn TrustedClock>,
+        vault_key: SymmetricKey,
     ) -> Self {
         Self {
             crucible: Crucible::new(VolleyAmalgam, Duration::from_secs(5), 1000),
             vault_path: vault_path.to_string(),
             local_did,
             clock,
+            vault_key,
         }
     }
 
@@ -145,16 +163,13 @@ impl Guardian {
             "Guardian: Committing forensic gap record to disk"
         );
 
-        // Serialize the FragmentedEnvelope as a proof of absence
         let gap_data = postcard::to_allocvec(&fragmented)
             .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
 
         let file_name = format!("{}.gap", fragmented.shard_id);
         let path = std::path::Path::new(&self.vault_path).join(file_name);
 
-        fs::write(path, gap_data)
-            .await
-            .map_err(|e| GuardianError::WalWriteFailed(e.to_string()))
+        atomic_encrypted_write(&path, &gap_data, &self.vault_key).await
     }
 
     /// Explicit salvage command for node termination sequences.
@@ -179,7 +194,6 @@ impl Guardian {
 
     /// Non-blocking Disk Persistence
     pub async fn commit_volley_to_disk(&self, volley: &Volley) -> Result<(), GuardianError> {
-        // FIX: Standardize on .volley extension across the entire crate
         let file_name = format!("{}.volley", volley.id);
         let path = std::path::PathBuf::from(&self.vault_path)
             .join(volley.owner_did.to_safe_name())
@@ -195,9 +209,7 @@ impl Guardian {
         let data = postcard::to_allocvec(&volley)
             .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
 
-        fs::write(&path, data)
-            .await
-            .map_err(|e| GuardianError::WalWriteFailed(e.to_string()))?;
+        atomic_encrypted_write(&path, &data, &self.vault_key).await?;
 
         info!(path = ?path, "DISK_WRITE_SUCCESS: Volley committed");
         Ok(())
@@ -214,28 +226,76 @@ impl Guardian {
     }
 }
 
+/// Encrypt and atomically write to disk (write .tmp → rename to final path).
+async fn atomic_encrypted_write(
+    path: &Path,
+    plaintext: &[u8],
+    key: &SymmetricKey,
+) -> Result<(), GuardianError> {
+    let (nonce, ciphertext) = encrypt_bytes(key, plaintext)
+        .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
+
+    // On-disk format: [24-byte nonce][ciphertext + poly1305 tag]
+    let mut sealed = Vec::with_capacity(nonce.len() + ciphertext.len());
+    sealed.extend_from_slice(&nonce);
+    sealed.extend_from_slice(&ciphertext);
+
+    let tmp_path = path.with_extension("tmp");
+    fs::write(&tmp_path, &sealed)
+        .await
+        .map_err(|e| GuardianError::WalWriteFailed(e.to_string()))?;
+
+    fs::rename(&tmp_path, path)
+        .await
+        .map_err(|e| GuardianError::WalWriteFailed(e.to_string()))
+}
+
+/// Read and decrypt a file written by `atomic_encrypted_write`.
+pub async fn read_encrypted_file(
+    path: &Path,
+    key: &SymmetricKey,
+) -> Result<Vec<u8>, GuardianError> {
+    let sealed = fs::read(path)
+        .await
+        .map_err(|e| GuardianError::StorageFailure(e.to_string()))?;
+
+    if sealed.len() < AEAD_NONCE_LEN {
+        return Err(GuardianError::StorageFailure(
+            "File too small for AEAD frame".to_string(),
+        ));
+    }
+
+    let (nonce, ciphertext) = sealed.split_at(AEAD_NONCE_LEN);
+    decrypt_bytes(key, nonce, ciphertext)
+        .map_err(|_| GuardianError::StorageFailure("AEAD authentication failed".to_string()))
+}
+
 #[async_trait]
 impl TransientJournal for FileJournal {
     async fn record_chunk(&mut self, chunk: &ShardChunk) -> Result<(), ShardError> {
-        // 1. Serialize and explicitly map the postcard::Error to a String
-        let payload = postcard::to_allocvec(chunk)
+        // 1. Serialize → encrypt
+        let plaintext = postcard::to_allocvec(chunk)
             .map_err(|e| ShardError::SerializationError(e.to_string()))?;
 
-        // 2. Prepare length-prefix (4-byte unsigned little-endian)
-        let payload_length = payload.len() as u32;
-        let length_bytes = payload_length.to_le_bytes();
+        let (nonce, ciphertext) = encrypt_bytes(&self.vault_key, &plaintext)
+            .map_err(|e| ShardError::Encryption(e.to_string()))?;
 
-        // 3. Write framing length, then payload
+        // 2. Frame: [4-byte LE len][24-byte nonce][ciphertext]
+        let frame_len = (nonce.len() + ciphertext.len()) as u32;
         self.handle
-            .write_all(&length_bytes)
+            .write_all(&frame_len.to_le_bytes())
             .await
             .map_err(|e| ShardError::Io(e.to_string()))?;
         self.handle
-            .write_all(&payload)
+            .write_all(&nonce)
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
+        self.handle
+            .write_all(&ciphertext)
             .await
             .map_err(|e| ShardError::Io(e.to_string()))?;
 
-        // 4. Flush data to disk (excluding metadata for performance)
+        // 3. Flush data to disk
         self.handle
             .sync_data()
             .await
@@ -265,29 +325,63 @@ impl TransientJournal for FileJournal {
             let mut len_buf = [0u8; 4];
             match self.handle.read_exact(&mut len_buf).await {
                 Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break, // Deterministic EOF
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Err(e) => return Err(ShardError::Io(e.to_string())),
             }
 
-            let payload_len = u32::from_le_bytes(len_buf);
-            let mut payload = vec![0u8; payload_len as usize];
+            let frame_len = u32::from_le_bytes(len_buf);
 
-            match self.handle.read_exact(&mut payload).await {
+            // Bounds check: reject frames larger than 16 MiB
+            if frame_len > MAX_WAL_CHUNK_BYTES {
+                tracing::warn!(
+                    frame_len,
+                    "WAL corruption: frame exceeds 16 MiB limit, skipping"
+                );
+                // Attempt to seek past the corrupt frame
+                match self.handle.seek(SeekFrom::Current(frame_len as i64)).await {
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
+            }
+
+            if (frame_len as usize) < AEAD_NONCE_LEN {
+                tracing::warn!(
+                    frame_len,
+                    "WAL corruption: frame too small for AEAD, skipping"
+                );
+                match self.handle.seek(SeekFrom::Current(frame_len as i64)).await {
+                    Ok(_) => continue,
+                    Err(_) => break,
+                }
+            }
+
+            let mut frame = vec![0u8; frame_len as usize];
+            match self.handle.read_exact(&mut frame).await {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    tracing::warn!(
-                        "WAL corruption detected: Incomplete payload. Truncating remainder."
-                    );
+                    tracing::warn!("WAL corruption: incomplete frame, truncating");
                     break;
                 }
                 Err(e) => return Err(ShardError::Io(e.to_string())),
             }
 
-            if let Ok(chunk) = postcard::from_bytes::<ShardChunk>(&payload) {
-                chunks.push(chunk);
-            } else {
-                tracing::warn!("WAL corruption detected: Failed to deserialize payload.");
-                break;
+            // Split frame into [nonce][ciphertext]
+            let (nonce, ciphertext) = frame.split_at(AEAD_NONCE_LEN);
+
+            let plaintext = match decrypt_bytes(&self.vault_key, nonce, ciphertext) {
+                Ok(pt) => pt,
+                Err(_) => {
+                    tracing::warn!("WAL corruption: AEAD authentication failed, skipping record");
+                    continue;
+                }
+            };
+
+            match postcard::from_bytes::<ShardChunk>(&plaintext) {
+                Ok(chunk) => chunks.push(chunk),
+                Err(_) => {
+                    tracing::warn!("WAL corruption: deserialization failed, skipping record");
+                    continue;
+                }
             }
         }
 
@@ -313,11 +407,23 @@ impl TransientJournal for FileJournal {
     async fn record_pending_egress(&mut self, pending: &[PendingEgress]) -> Result<(), ShardError> {
         let salvage_path = self.file_path.with_file_name("egress_salvage.bin");
 
-        let encoded = postcard::to_allocvec(pending).map_err(|e| {
+        let plaintext = postcard::to_allocvec(pending).map_err(|e| {
             ShardError::SerializationError(format!("Salvage serialization failed: {}", e))
         })?;
 
-        tokio::fs::write(&salvage_path, encoded)
+        let (nonce, ciphertext) = encrypt_bytes(&self.vault_key, &plaintext)
+            .map_err(|e| ShardError::Encryption(e.to_string()))?;
+
+        let mut sealed = Vec::with_capacity(nonce.len() + ciphertext.len());
+        sealed.extend_from_slice(&nonce);
+        sealed.extend_from_slice(&ciphertext);
+
+        // Atomic write: tmp → rename
+        let tmp_path = salvage_path.with_extension("tmp");
+        tokio::fs::write(&tmp_path, &sealed)
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
+        tokio::fs::rename(&tmp_path, &salvage_path)
             .await
             .map_err(|e| ShardError::Io(e.to_string()))?;
 
@@ -331,14 +437,31 @@ impl TransientJournal for FileJournal {
             return Ok(vec![]);
         }
 
-        let encoded = tokio::fs::read(&salvage_path)
+        let sealed = tokio::fs::read(&salvage_path)
             .await
             .map_err(|e| ShardError::Io(e.to_string()))?;
 
-        let pending: Vec<PendingEgress> =
-            postcard::from_bytes(&encoded).map_err(|e| ShardError::Encryption(e.to_string()))?;
+        // Bounds check
+        if sealed.len() as u64 > MAX_EGRESS_SALVAGE_BYTES {
+            return Err(ShardError::SerializationError(
+                "Egress salvage file exceeds 64 MiB limit".to_string(),
+            ));
+        }
 
-        // Cleanup after recovery to prevent replay of the same retry state
+        if sealed.len() < AEAD_NONCE_LEN {
+            return Err(ShardError::SerializationError(
+                "Egress salvage file too small for AEAD frame".to_string(),
+            ));
+        }
+
+        let (nonce, ciphertext) = sealed.split_at(AEAD_NONCE_LEN);
+        let plaintext = decrypt_bytes(&self.vault_key, nonce, ciphertext)
+            .map_err(|e| ShardError::Encryption(e.to_string()))?;
+
+        let pending: Vec<PendingEgress> = postcard::from_bytes(&plaintext)
+            .map_err(|e| ShardError::SerializationError(e.to_string()))?;
+
+        // Cleanup after successful recovery
         let _ = tokio::fs::remove_file(salvage_path).await;
 
         Ok(pending)
@@ -361,12 +484,14 @@ mod tests {
         let vault_path = temp_dir.path().to_string_lossy().to_string();
 
         let identity = PhalanxIdentity::new_ephemeral();
+        let vault_key = derive_vault_key(&identity);
         let config = NodeConfig::default();
         let mut guardian = Guardian::new(
             &vault_path,
             &config,
             identity.did.clone(),
             Arc::new(SystemClock),
+            vault_key,
         );
 
         // Define a specific VolleyId for this stream
@@ -415,12 +540,14 @@ mod tests {
         let vault_path = temp_dir.path().to_string_lossy().to_string();
 
         let identity = PhalanxIdentity::new_ephemeral();
+        let vault_key = derive_vault_key(&identity);
         let config = NodeConfig::default();
         let mut guardian = Guardian::new(
             &vault_path,
             &config,
             identity.did.clone(),
             Arc::new(SystemClock),
+            vault_key,
         );
 
         let shard = VideoShard {
