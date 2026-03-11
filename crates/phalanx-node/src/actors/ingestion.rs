@@ -150,9 +150,7 @@ impl IngestionActor {
                 .ingress_governor
                 .try_allocate(peer_id.clone(), trust_level, stress)
             {
-                Ok(Some(_evicted)) => {
-                    // self.egress.ban_peer(&evicted).await; // Need mechanism to ban
-                }
+                Ok(Some(_evicted)) => {}
                 Ok(None) => {}
                 Err(_) => {
                     tracing::error!(target: "siege_debug", "INGRESS GOVERNOR FULL! Dropping {}", peer_id);
