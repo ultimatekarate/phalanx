@@ -72,6 +72,21 @@ pub trait NetworkTransport: Send {
     ) -> Result<(), String>;
 }
 
+// NEW: Discrete ports for Actor-based architecture
+
+#[async_trait]
+pub trait IngressPort: Send {
+    async fn next_event(&mut self) -> Option<NetworkEvent>;
+}
+
+#[async_trait]
+pub trait EgressPort: Send + Sync + Clone {
+    async fn publish(&self, topic: &MeshTopic, data: Vec<u8>) -> Result<(), String>;
+    async fn ban_peer(&self, peer: &NetworkId);
+    async fn send_response(&self, channel_id: &str, response: VolleyResponse)
+        -> Result<(), String>;
+}
+
 // 4. THE PEER MAPPER (THE TRANSLATOR)
 pub struct PeerMapper;
 
@@ -106,6 +121,8 @@ pub enum TransportError {
 // 6. THE PRELUDE (GATEWAY FOR OTHER CRATES)
 pub mod prelude {
     pub use crate::adapters::libp2p::Libp2pAdapter;
+    pub use crate::EgressPort;
+    pub use crate::IngressPort;
     pub use crate::NetworkTransport;
     pub use crate::PeerMapper;
     pub use crate::TransportAdapter;

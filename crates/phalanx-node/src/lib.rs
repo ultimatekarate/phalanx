@@ -1,6 +1,7 @@
 // crates/phalanx-node/src/lib.rs
 
 pub mod actors {
+    pub mod egress;
     pub mod ingress;
     pub mod meshsentinel;
     pub mod playback;

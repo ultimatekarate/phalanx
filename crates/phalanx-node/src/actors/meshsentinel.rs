@@ -1,4 +1,5 @@
 // --- crates/phalanx-node/src/actors/meshsentinel.rs ---
+use crate::actors::egress::{EgressActor, EgressCommand};
 use crate::actors::playback::PlaybackCoordinator;
 use crate::actors::storage::NoOpJournal;
 use crate::actors::storage::StorageCommand;
@@ -17,6 +18,8 @@ use phalanx_forensics::prelude::*;
 use phalanx_forensics::ReputationGate;
 use phalanx_proto::prelude::*;
 use phalanx_proto::types::Unverified;
+use phalanx_transport::identity_ext::Libp2pExt;
+use phalanx_transport::{EgressPort, IngressPort};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -31,12 +34,9 @@ use phalanx_proto::time::CausalitySession;
 use phalanx_proto::trust::Offense;
 use phalanx_proto::types::{ForensicUnit, NodeMode, TaskCost, Verified};
 use phalanx_proto::VolleyRequest;
-use phalanx_transport::identity_ext::Libp2pExt;
-use phalanx_transport::NetworkTransport;
-use std::collections::VecDeque;
 use std::error::Error;
 use tokio::task::JoinHandle;
-use tokio::time::{interval, Duration};
+use tokio::time::{interval, timeout, Duration};
 
 /// A lightweight request broadcast to the mesh when a playback gap is detected.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -45,10 +45,11 @@ struct ShardDiscoveryRequest {
     sequence_id: StorageSequence,
 }
 
-pub struct SentinelDependencies<T: NetworkTransport, J: TransientJournal> {
+pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJournal> {
     pub config: NodeConfig,
     pub identity: PhalanxIdentity,
-    pub network: T,
+    pub ingress: I,
+    pub egress: E,
     pub journal: J,
     pub trust_registry: TrustRegistry,
     pub reputation_cache: ReputationProjection,
@@ -57,7 +58,7 @@ pub struct SentinelDependencies<T: NetworkTransport, J: TransientJournal> {
     pub system_governor: Arc<SystemGovernor>,
 }
 
-pub struct MeshSentinel<T: NetworkTransport, J: TransientJournal> {
+pub struct MeshSentinel<I: IngressPort, E: EgressPort, J: TransientJournal> {
     pub trust_registry: TrustRegistry,
     pub reputation_cache: ReputationProjection,
     pub health_tracker: HealthTracker,
@@ -66,24 +67,27 @@ pub struct MeshSentinel<T: NetworkTransport, J: TransientJournal> {
     pub config: NodeConfig,
     pub identity: Arc<PhalanxIdentity>,
     pub clock: Arc<TrustedClock>,
-    pub network: T,
+    pub ingress: I,
+    pub egress: E,
     pub video_rx: mpsc::Receiver<VideoShard>,
     pub audio_rx: mpsc::Receiver<AudioShard>,
     pub seq_counter: u64,
     pub network_key: SymmetricKey,
     pub storage_task: JoinHandle<()>,
     pub storage_tx: mpsc::Sender<StorageCommand>,
+    pub egress_tx: mpsc::Sender<EgressCommand>,
     pub _journal_phantom: std::marker::PhantomData<J>,
     pub session: CausalitySession,
-    pub pending_egress: VecDeque<PendingEgress>,
     pub discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
     pub discovery_rx: mpsc::Receiver<(VolleyId, StorageSequence)>,
     pub ingress_governor: IngressGovernor,
     pub system_governor: Arc<SystemGovernor>,
 }
 
-impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, J> {
-    pub async fn new(mut deps: SentinelDependencies<T, J>) -> Result<Self, Box<dyn Error>> {
+impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'static>
+    MeshSentinel<I, E, J>
+{
+    pub async fn new(mut deps: SentinelDependencies<I, E, J>) -> Result<Self, Box<dyn Error>> {
         let local_did = deps.identity.did.clone();
         let local_network_id = deps.identity.to_network_id();
         let reassembler = Reassembler::new();
@@ -96,6 +100,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         // Vault Interface
         let (storage_tx, storage_rx) = mpsc::channel(phys_capacity);
         let ingress_governor = IngressGovernor::new(phys_capacity);
+        let (egress_tx, egress_rx) = mpsc::channel(100);
 
         // Stateless Recovery: Pull salvaged egress from the journal
         let salvaged_queue = deps
@@ -125,6 +130,13 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             storage_actor.run(storage_rx).await;
         });
 
+        // Egress Actor instantiation
+        let egress_actor = EgressActor::new(deps.egress.clone(), egress_rx, salvaged_queue);
+
+        tokio::spawn(async move {
+            egress_actor.run().await;
+        });
+
         let arc_identity = Arc::new(deps.identity.clone());
         let session = CausalitySession::new(arc_identity.clone(), local_network_id.clone());
         let raw_clock = TrustedClock::new();
@@ -134,7 +146,8 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             config: deps.config,
             identity: arc_identity,
             clock: clock_handle,
-            network: deps.network,
+            ingress: deps.ingress,
+            egress: deps.egress,
             trust_registry: deps.trust_registry,
             reputation_cache: deps.reputation_cache,
             health_tracker: HealthTracker::new(),
@@ -146,9 +159,9 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             network_key: SymmetricKey([0x42; 32]),
             storage_task,
             storage_tx,
+            egress_tx,
             _journal_phantom: std::marker::PhantomData,
             session,
-            pending_egress: VecDeque::from(salvaged_queue),
             discovery_rx: deps.discovery_rx,
             discovery_tx: deps.discovery_tx,
             ingress_governor,
@@ -158,7 +171,6 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
 
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
         let local_network_id = self.identity.to_network_id();
-        let mut retry_tick = interval(Duration::from_millis(500));
         let mut heartbeat_tick = interval(Duration::from_secs(1));
 
         let base_throttle = 5;
@@ -178,8 +190,6 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
             }
 
             tokio::select! {
-                _ = retry_tick.tick() => { self.process_pending_egress().await; }
-
                 _ = heartbeat_tick.tick() => {
                     let load = 1.0 - self.system_governor.ingestion_scaler().0;
                     let storage = self.check_available_storage();
@@ -190,7 +200,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                     }
                 }
 
-                Some(event) = self.network.next_event(), if scale.0 > 0.01 => {
+                Some(event) = self.ingress.next_event(), if scale.0 > 0.01 => {
                     match event {
                         NetworkEvent::DataReceived { origin, topic, data } => {
                             self.handle_network_ingress(origin, &data, topic).await;
@@ -200,8 +210,12 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                         }
                         NetworkEvent::Shutdown => {
                             tracing::info!("Engine: Initiating emergency salvage");
-                            let payload = self.pending_egress.drain(..).collect();
-                            let _ = self.storage_tx.send(StorageCommand::EmergencySalvage(payload)).await;
+                            let (tx, rx) = tokio::sync::oneshot::channel();
+                            if self.egress_tx.send(EgressCommand::DrainForSalvage { reply_to: tx }).await.is_ok() {
+                                if let Ok(payload) = timeout(Duration::from_millis(500), rx).await {
+                                    let _ = self.storage_tx.send(StorageCommand::EmergencySalvage(payload.unwrap_or_default())).await;
+                                }
+                            }
                             tokio::time::sleep(Duration::from_millis(100)).await;
                             break;
                         }
@@ -242,7 +256,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         let topic = &self.config.network.control_topic;
         let data = postcard::to_allocvec(&message)?;
 
-        self.network.publish(topic, data).await?;
+        self.egress.publish(topic, data).await?;
 
         Ok(())
     }
@@ -280,7 +294,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
 
         match postcard::to_allocvec(&request) {
             Ok(data) => {
-                if let Err(e) = self.network.publish(&topic, data).await {
+                if let Err(e) = self.egress.publish(&topic, data).await {
                     tracing::error!("Failed to broadcast discovery request: {}", e);
                 }
             }
@@ -300,7 +314,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
 
         match postcard::to_allocvec(&evidence) {
             Ok(data) => {
-                if let Err(e) = self.network.publish(topic, data).await {
+                if let Err(e) = self.egress.publish(topic, data).await {
                     tracing::error!("Failed to publish media egress: {}", e);
                 }
             }
@@ -425,57 +439,18 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
         self.dispatch_resilient_response(channel_id, response).await;
     }
 
-    async fn process_pending_egress(&mut self) {
-        let now = PhalanxTimestamp::now();
-        let mut retry_queue = VecDeque::new();
-
-        while let Some(mut pending) = self.pending_egress.pop_front() {
-            if pending.next_attempt > now {
-                retry_queue.push_back(pending);
-                continue;
-            }
-
-            match self
-                .network
-                .send_response(&pending.channel_id, pending.response.clone())
-                .await
-            {
-                Ok(_) => {
-                    tracing::info!(channel = %pending.channel_id, "Redelivery successful");
-                }
-                Err(_) => {
-                    pending.attempt_count += 1;
-                    if pending.attempt_count < 3 {
-                        let delay = Duration::from_millis(500 * (2u64.pow(pending.attempt_count)));
-                        pending.next_attempt =
-                            PhalanxTimestamp::from_millis(now.0 + delay.as_millis() as u64);
-                        retry_queue.push_back(pending);
-                    }
-                }
-            }
-        }
-        self.pending_egress = retry_queue;
-    }
-
     pub async fn dispatch_resilient_response(
         &mut self,
         channel_id: String,
         response: VolleyResponse,
     ) {
-        if self
-            .network
-            .send_response(&channel_id, response.clone())
-            .await
-            .is_err()
-        {
-            tracing::warn!(channel = %channel_id, "Response dispatch failed, queuing for retry");
-            self.pending_egress.push_back(PendingEgress {
+        let _ = self
+            .egress_tx
+            .send(EgressCommand::Dispatch {
                 channel_id,
                 response,
-                attempt_count: 1,
-                next_attempt: PhalanxTimestamp::from_millis(PhalanxTimestamp::now().0 + 1000),
-            });
-        }
+            })
+            .await;
     }
 
     pub async fn handle_forensic_violation(
@@ -514,7 +489,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                     %owner_did,
                     "CRITICAL: Peer blacklisted. Severing connection."
                 );
-                self.network.ban_peer(&peer_id).await;
+                self.egress.ban_peer(&peer_id).await;
             }
         }
     }
@@ -569,7 +544,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                 if !self.system_governor.is_peer_coupled(&peer_id.to_string())
                     || self.trust_registry.is_blacklisted(&sender_did)
                 {
-                    self.network.ban_peer(&peer_id).await;
+                    self.egress.ban_peer(&peer_id).await;
                     return;
                 }
 
@@ -604,7 +579,7 @@ impl<T: NetworkTransport, J: TransientJournal + Send + 'static> MeshSentinel<T, 
                     .try_allocate(peer_id.clone(), trust_level, stress)
                 {
                     Ok(Some(evicted)) => {
-                        self.network.ban_peer(&evicted).await;
+                        self.egress.ban_peer(&evicted).await;
                     }
                     Ok(None) => {}
                     Err(_) => {
@@ -693,8 +668,8 @@ impl<'a> Drop for SlotGuard<'a> {
 }
 
 // Ephemeral Bootstrap
-impl<T: NetworkTransport> MeshSentinel<T, NoOpJournal> {
-    pub async fn new_at_path(path: &str, network: T) -> Result<Self, Box<dyn Error>> {
+impl<I: IngressPort, E: EgressPort + 'static> MeshSentinel<I, E, NoOpJournal> {
+    pub async fn new_at_path(path: &str, ingress: I, egress: E) -> Result<Self, Box<dyn Error>> {
         let mut config = NodeConfig::default();
         config.storage.vault_path = path.to_string();
         let identity = PhalanxIdentity::new_ephemeral();
@@ -705,7 +680,8 @@ impl<T: NetworkTransport> MeshSentinel<T, NoOpJournal> {
         let deps = SentinelDependencies {
             config,
             identity,
-            network,
+            ingress,
+            egress,
             journal: NoOpJournal,
             trust_registry,
             reputation_cache,

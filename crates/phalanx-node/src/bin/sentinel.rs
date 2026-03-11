@@ -67,7 +67,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let deps = SentinelDependencies {
         config,
         identity: my_identity,
-        network,
         journal,
         trust_registry,
         reputation_cache: reputation_projection,
