@@ -93,14 +93,6 @@ impl IngestionActor {
             return;
         }
 
-        // Control messages are handled by Sentinel before Ingestion, or here if we moved it.
-        // Sentinel seems to handle control messages in the loop before dispatching to Ingestion?
-        // No, Sentinel logic had it inside handle_network_ingress.
-        // But Sentinel needs to update health_tracker.
-        // For this refactor, we assume Control Messages are filtered out by Sentinel or we handle them here.
-        // Since Sentinel owns HealthTracker, Sentinel should handle Control Messages.
-        // We will assume Sentinel filters Control Messages.
-
         let scale = self.system_governor.ingestion_scaler();
         let delay = scale.as_throttle_delay(10);
         if !delay.is_zero() {
@@ -130,8 +122,9 @@ impl IngestionActor {
                         response: VolleyResponse::Unauthorized,
                     })
                     .await;
-                // The EgressActor will need a way to ban peers. For now, this sends a message
-                // that will likely fail, but the important part is we drop the ingress.
+                // The EgressActor does not need a way to ban peers. Banning on egress is purely
+                // about preserving capacity, not about violating trust. The integral equations handle
+                // that.
                 return;
             }
 
