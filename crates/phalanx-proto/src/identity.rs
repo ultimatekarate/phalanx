@@ -58,6 +58,32 @@ impl Did {
         Self(val.into())
     }
 
+    /// Derives a `did:key` identifier from a raw Ed25519 public key.
+    /// Uses the Ed25519 multicodec prefix (0xed, 0x01) and multibase 'z' (base58btc).
+    pub fn derive_did_key(public_key: &[u8; 32]) -> Self {
+        let mut multicodec_payload = vec![0xed, 0x01];
+        multicodec_payload.extend_from_slice(public_key);
+        let multibase_pubkey = bs58::encode(multicodec_payload).into_string();
+        Self(format!("did:key:z{}", multibase_pubkey))
+    }
+
+    /// Converts a `did:key:` DID to a NetworkId by stripping the `did:key:` prefix.
+    #[must_use]
+    pub fn to_network_id(&self) -> NetworkId {
+        NetworkId(
+            self.0
+                .strip_prefix("did:key:")
+                .unwrap_or(&self.0)
+                .to_string(),
+        )
+    }
+
+    /// Constructs a `did:key:` DID from a NetworkId.
+    #[must_use]
+    pub fn from_network_id(id: &NetworkId) -> Self {
+        Self(format!("did:key:{}", id.0))
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -182,11 +208,7 @@ impl PhalanxIdentity {
         let network_id = NetworkId(network_id_string);
 
         // 2. Derive Decentralized Identifier (DID)
-        // Follows the did:key format using the Ed25519 multicodec prefix (0xed01)
-        let mut multicodec_payload = vec![0xed, 0x01];
-        multicodec_payload.extend_from_slice(&public_key_bytes);
-        let multibase_pubkey = bs58::encode(multicodec_payload).into_string();
-        let did = Did(format!("did:key:z{}", multibase_pubkey));
+        let did = Did::derive_did_key(&public_key_bytes);
 
         Self {
             version: IDENTITY_VERSION,
