@@ -10,7 +10,7 @@ use phalanx_node::actors::storage::{NoOpJournal, StorageActor, StorageCommand};
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::journal::FileJournal;
-use phalanx_node::persistence::vault::Guardian;
+use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
 use phalanx_proto::evidence::{ChunkType, DataPayload, Evidence, StorageSequence, VideoShard};
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
 use phalanx_proto::prelude::{PendingEgress, ShardChunk, ShardError};
@@ -57,11 +57,13 @@ async fn setup_mock_storage() -> (
     config.storage.vault_path = temp.path().to_string_lossy().into_owned();
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
+    let vault_key = derive_vault_key(&identity);
     let guardian = Guardian::new(
         &config.storage.vault_path,
         &config,
         identity.did.clone(),
         Arc::new(SystemClock),
+        vault_key,
     );
 
     let (actor, cmd_rx, cmd_tx) = build_test_actor(config, identity, NoOpJournal, guardian);
@@ -118,11 +120,13 @@ async fn test_pillar_salvage_under_disk_pressure() {
         .expect("Failed to seal forensic evidence");
 
     // 3. Setup the Guardian & Actor
+    let vault_key = derive_vault_key(&identity);
     let guardian = Guardian::new(
         &temp.path().to_string_lossy(),
         &config,
         identity.did.clone(),
         Arc::new(SystemClock),
+        vault_key,
     );
 
     let (actor, storage_rx, storage_tx) =
@@ -198,11 +202,13 @@ async fn test_reputation_gate_signature_mismatch() {
     };
 
     // 3. Setup Channels and Actor
+    let vault_key = derive_vault_key(&my_identity);
     let guardian = Guardian::new(
         &temp.path().to_string_lossy(),
         &config,
         my_identity.did.clone(),
         Arc::new(SystemClock),
+        vault_key,
     );
     let (actor, storage_rx, storage_tx) =
         build_test_actor(config.clone(), my_identity.clone(), NoOpJournal, guardian);
@@ -268,6 +274,7 @@ async fn test_salvage_on_node_death() {
     config.storage.vault_path = vault_path.to_string_lossy().into_owned();
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
+    let vault_key = derive_vault_key(&identity);
     let identity_did = identity.did.clone();
 
     // 1. Create a valid envelope and chunkify it into 4 pieces
@@ -297,12 +304,15 @@ async fn test_salvage_on_node_death() {
 
     // 2. PHASE 1: First actor ingests 3 of 4 chunks, then "dies"
     {
-        let journal = FileJournal::new(&wal_path).await.unwrap();
+        let journal = FileJournal::new(&wal_path, vault_key.clone())
+            .await
+            .unwrap();
         let guardian = Guardian::new(
             &vault_path.to_string_lossy(),
             &config,
             identity.did.clone(),
             Arc::new(SystemClock),
+            vault_key.clone(),
         );
 
         let (actor, storage_rx, storage_tx) =
@@ -339,12 +349,15 @@ async fn test_salvage_on_node_death() {
 
     // 3. PHASE 2: "Reboot" — new actor recovers from WAL, receives final chunk
     {
-        let journal2 = FileJournal::new(&wal_path).await.unwrap();
+        let journal2 = FileJournal::new(&wal_path, vault_key.clone())
+            .await
+            .unwrap();
         let guardian2 = Guardian::new(
             &vault_path.to_string_lossy(),
             &config,
             identity.did.clone(),
             Arc::new(SystemClock),
+            vault_key.clone(),
         );
 
         let (actor2, storage_rx2, storage_tx2) =
@@ -434,11 +447,13 @@ async fn test_stronghold_ingestion_and_persistence() {
     };
 
     // 3. Wire up a StorageActor directly (no harness needed)
+    let vault_key = derive_vault_key(&identity);
     let guardian = Guardian::new(
         &config.storage.vault_path,
         &config,
         identity.did.clone(),
         Arc::new(SystemClock),
+        vault_key,
     );
 
     let (actor, storage_rx, storage_tx) =
@@ -539,11 +554,13 @@ async fn test_storage_actor_metric_pipeline() {
         counter: Arc::clone(&storage_load),
     };
 
+    let vault_key = derive_vault_key(&identity);
     let guardian = Guardian::new(
         &config.storage.vault_path,
         &config,
         identity.did.clone(),
         Arc::new(SystemClock),
+        vault_key,
     );
     // 3. Initialize StorageActor
     let (storage_actor, command_rx, command_tx) =

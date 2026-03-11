@@ -7,7 +7,7 @@ use phalanx_node::actors::playback::PlaybackCoordinator;
 use phalanx_node::actors::storage::StorageCommand;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
-use phalanx_node::persistence::vault::Guardian;
+use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
 use phalanx_node::playback::sink::VideoPlayerSink;
 use phalanx_proto::evidence::{
     DataPayload, EnvelopeState, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
@@ -29,6 +29,7 @@ async fn test_exodus_resurrection_logic() {
     let (disc_tx, mut disc_rx) = mpsc::channel(1);
     let (ui_tx, mut ui_rx) = mpsc::channel(10);
 
+    let vault_key = derive_vault_key(&identity);
     let identity_clone = identity.clone();
     tokio::spawn(async move {
         let mut guardian = Guardian::new(
@@ -36,6 +37,7 @@ async fn test_exodus_resurrection_logic() {
             &config,
             identity_clone.did,
             Arc::new(SystemClock),
+            vault_key,
         );
         while let Some(cmd) = storage_rx.recv().await {
             match cmd {
@@ -150,6 +152,7 @@ async fn test_playback_resurrection_with_mesh_gap() {
     let (disc_tx, mut disc_rx) = mpsc::channel::<(VolleyId, StorageSequence)>(100);
     let (ui_tx, mut ui_rx) = mpsc::channel(10);
 
+    let vault_key = derive_vault_key(&identity);
     let identity_clone = identity.clone();
     tokio::spawn(async move {
         let mut guardian = Guardian::new(
@@ -157,6 +160,7 @@ async fn test_playback_resurrection_with_mesh_gap() {
             &config,
             identity_clone.did,
             Arc::new(SystemClock),
+            vault_key,
         );
         while let Some(cmd) = storage_rx.recv().await {
             match cmd {
@@ -271,8 +275,15 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
     let (disc_tx, mut disc_rx) = mpsc::channel::<(VolleyId, StorageSequence)>(100);
     let (ui_tx, mut ui_rx) = mpsc::channel(100);
 
+    let vault_key = derive_vault_key(&identity);
     tokio::spawn(async move {
-        let mut guardian = Guardian::new(&vault_path, &config, identity.did, Arc::new(SystemClock));
+        let mut guardian = Guardian::new(
+            &vault_path,
+            &config,
+            identity.did,
+            Arc::new(SystemClock),
+            vault_key,
+        );
         while let Some(cmd) = storage_rx.recv().await {
             match cmd {
                 StorageCommand::GetShard {

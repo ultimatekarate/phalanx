@@ -1,6 +1,6 @@
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
-use phalanx_node::persistence::vault::Guardian;
+use phalanx_node::persistence::vault::{derive_vault_key, read_encrypted_file, Guardian};
 use phalanx_node::vitals::init_observability;
 use phalanx_proto::evidence::{EnvelopeState, Evidence, StorageSequence, Volley, WitnessEnvelope};
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
@@ -31,11 +31,13 @@ async fn test_legal_identity_handover() {
     let vid = VolleyId::new("handover_stream_01");
 
     // Initialize Guardian (Vault) under Identity A's ownership
+    let vault_key = derive_vault_key(&identity_a);
     let mut guardian = Guardian::new(
         temp_dir.path().to_string_lossy().as_ref(),
         &config,
         identity_a.did.clone(),
         Arc::new(SystemClock),
+        vault_key.clone(),
     );
 
     // PHASE 1: Identity A owns the stream
@@ -106,7 +108,9 @@ async fn test_legal_identity_handover() {
         "Volley was not saved under the new Identity's storage silo"
     );
 
-    let saved_bytes = std::fs::read(&expected_path).unwrap();
+    let saved_bytes = read_encrypted_file(&expected_path, &vault_key)
+        .await
+        .unwrap();
     let saved_volley: Volley = postcard::from_bytes(&saved_bytes).unwrap();
 
     assert_eq!(
@@ -130,11 +134,13 @@ async fn test_illegal_identity_swap_rejected() {
     let vid = VolleyId::new("illegal_stream");
 
     let config = NodeConfig::test_defaults();
+    let vault_key = derive_vault_key(&identity_a);
     let mut guardian = Guardian::new(
         "sim_vault/illegal_test",
         &config,
         identity_a.did.clone(),
         Arc::new(SystemClock),
+        vault_key,
     );
 
     // -- Frame 1 (Identity A) --

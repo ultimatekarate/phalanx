@@ -1,15 +1,21 @@
 use async_trait::async_trait;
+use phalanx_forensics::cryptography::{decrypt_bytes, encrypt_bytes};
+use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::prelude::*;
 use std::path::PathBuf;
-use tokio::io::{AsyncReadExt, AsyncWriteExt}; // Kept strictly out of the trait definition
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+const MAX_WORKBENCH_STATE_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
+const AEAD_NONCE_LEN: usize = 24;
 
 pub struct FileJournal {
     pub file_path: PathBuf,
     pub handle: tokio::fs::File,
+    pub vault_key: SymmetricKey,
 }
 
 impl FileJournal {
-    pub async fn new<P: Into<PathBuf>>(path: P) -> std::io::Result<Self> {
+    pub async fn new<P: Into<PathBuf>>(path: P, vault_key: SymmetricKey) -> std::io::Result<Self> {
         let path_buf = path.into();
         let handle = tokio::fs::OpenOptions::new()
             .create(true)
@@ -21,6 +27,7 @@ impl FileJournal {
         Ok(Self {
             file_path: path_buf,
             handle,
+            vault_key,
         })
     }
 }
@@ -79,19 +86,26 @@ impl TransientJournal for FileJournal {
     }
 
     async fn record_workbench_state(&mut self, state_bytes: &[u8]) -> Result<(), ShardError> {
-        // 1. Write state with a length-prefixed header for safe framing
+        // 1. Encrypt the state
+        let (nonce, ciphertext) = encrypt_bytes(&self.vault_key, state_bytes)
+            .map_err(|e| ShardError::Encryption(e.to_string()))?;
+
+        // 2. Frame: [8-byte BE len][24-byte nonce][ciphertext]
+        let frame_len = (nonce.len() + ciphertext.len()) as u64;
         self.handle
-            .write_u64(state_bytes.len() as u64)
+            .write_u64(frame_len)
             .await
             .map_err(|e| ShardError::Io(format!("Failed to write state length: {}", e)))?;
-
-        // 2. Write the actual postcard-encoded bytes
         self.handle
-            .write_all(state_bytes)
+            .write_all(&nonce)
+            .await
+            .map_err(|e| ShardError::Io(format!("Failed to write state nonce: {}", e)))?;
+        self.handle
+            .write_all(&ciphertext)
             .await
             .map_err(|e| ShardError::Io(format!("Failed to write state payload: {}", e)))?;
 
-        // 3. Ensure physical commit to NVMe so the Lab can trust the state is saved
+        // 3. Ensure physical commit to NVMe
         self.sync().await
     }
 
@@ -103,13 +117,29 @@ impl TransientJournal for FileJournal {
             .await
             .map_err(|e| ShardError::Io(format!("Failed to read state length: {}", e)))?;
 
-        // 2. Read the exact byte frame
+        // 2. Bounds check
+        if length > MAX_WORKBENCH_STATE_BYTES {
+            return Err(ShardError::SerializationError(
+                "Workbench state exceeds 256 MiB limit".to_string(),
+            ));
+        }
+
+        if (length as usize) < AEAD_NONCE_LEN {
+            return Err(ShardError::SerializationError(
+                "Workbench state too small for AEAD frame".to_string(),
+            ));
+        }
+
+        // 3. Read the encrypted frame
         let mut buffer = vec![0u8; length as usize];
         self.handle
             .read_exact(&mut buffer)
             .await
             .map_err(|e| ShardError::Io(format!("Failed to read state payload: {}", e)))?;
 
-        Ok(buffer)
+        // 4. Split and decrypt
+        let (nonce, ciphertext) = buffer.split_at(AEAD_NONCE_LEN);
+        decrypt_bytes(&self.vault_key, nonce, ciphertext)
+            .map_err(|e| ShardError::Encryption(e.to_string()))
     }
 }

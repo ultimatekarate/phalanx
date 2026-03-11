@@ -2,7 +2,7 @@ use phalanx_forensics::crucible::EnvelopeHashExt;
 use phalanx_forensics::witness::WitnessAuthority;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
-use phalanx_node::persistence::vault::Guardian;
+use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
 use phalanx_proto::evidence::{
     DataPayload, EnvelopeState, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
 };
@@ -20,6 +20,7 @@ async fn test_reliability_timeline_integrity() {
     let vault_path = temp_dir.path().to_string_lossy().to_string();
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
+    let vault_key = derive_vault_key(&identity);
     let config = NodeConfig::default();
 
     let mut guardian = Guardian::new(
@@ -27,6 +28,7 @@ async fn test_reliability_timeline_integrity() {
         &config,
         identity.did.clone(),
         Arc::new(SystemClock),
+        vault_key,
     );
     let volley_id = VolleyId::new("v_timeline");
 
