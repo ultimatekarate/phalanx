@@ -3,7 +3,7 @@ use crate::actors::egress::{EgressActor, EgressCommand};
 use crate::actors::ingestion::{IngestionActor, IngestionCommand};
 use crate::actors::media_egress::MediaEgressActor;
 use crate::actors::playback::PlaybackCoordinator;
-use crate::actors::retrieval::{RetrievalActor, RetrievalCommand};
+use crate::actors::retrieval::{RetrievalActor, RetrievalCommand, TrustCommand};
 use crate::actors::storage::NoOpJournal;
 use crate::actors::storage::StorageCommand;
 use crate::actors::trust_actor::{TrustActor, TrustCommand};
@@ -36,44 +36,37 @@ use std::error::Error;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, timeout, Duration};
 
-/// A lightweight request broadcast to the mesh when a playback gap is detected.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ShardDiscoveryRequest {
-    volley_id: VolleyId,
-    sequence_id: StorageSequence,
-}
-
 pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJournal> {
     pub config: NodeConfig,
     pub identity: PhalanxIdentity,
     pub ingress: I,
     pub egress: E,
     pub journal: J,
-    pub discovery_rx: mpsc::Receiver<(VolleyId, StorageSequence)>,
-    pub discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
     pub system_governor: Arc<SystemGovernor>,
 }
 
 pub struct MeshSentinel<I: IngressPort, E: EgressPort, J: TransientJournal> {
-    pub health_tracker: HealthTracker,
-    pub mode: NodeMode,
-    pub config: NodeConfig,
+    // Core router dependencies
+    pub config: Arc<NodeConfig>,
     pub identity: Arc<PhalanxIdentity>,
-    pub clock: Arc<TrustedClock>,
     pub ingress: I,
-    pub egress: E,
-    pub seq_counter: u64,
-    pub network_key: SymmetricKey,
-    pub storage_task: JoinHandle<()>,
+
+    // For processing inbound control messages
+    pub health_tracker: HealthTracker,
+
+    // For the playback factory method
     pub storage_tx: mpsc::Sender<StorageCommand>,
+    pub network_key: SymmetricKey,
+    pub discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
+
+    // Actor dispatch channels
     pub ingestion_tx: mpsc::Sender<IngestionCommand>,
     pub retrieval_tx: mpsc::Sender<RetrievalCommand>,
     pub egress_tx: mpsc::Sender<EgressCommand>,
+
+    // Keep a reference to the storage task to ensure it's not dropped.
+    pub storage_task: JoinHandle<()>,
     pub _journal_phantom: std::marker::PhantomData<J>,
-    pub session: CausalitySession,
-    pub discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
-    pub discovery_rx: mpsc::Receiver<(VolleyId, StorageSequence)>,
-    pub system_governor: Arc<SystemGovernor>,
 }
 
 impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'static>
@@ -93,6 +86,9 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
         let (ingestion_tx, ingestion_rx) = mpsc::channel(phys_capacity);
         let ingress_governor = IngressGovernor::new(phys_capacity);
         let (egress_tx, egress_rx) = mpsc::channel(100);
+        let (retrieval_tx, retrieval_rx) = mpsc::channel(100);
+        let (trust_tx, trust_rx) = mpsc::channel(100);
+        let (discovery_tx, _discovery_rx) = mpsc::channel(100);
 
         // Stateless Recovery: Pull salvaged egress from the journal
         let salvaged_queue = deps
@@ -134,14 +130,11 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
         let clock_handle = Arc::new(raw_clock);
 
         // Trust Manager Actor
-        let mut trust_registry = TrustRegistry::build(&deps.config).await;
+        let trust_registry = TrustRegistry::build(&deps.config).await;
         let reputation_projection = trust_registry.projection_handle();
-        let (trust_tx, trust_rx) = mpsc::channel(100);
         let trust_actor = TrustActor::new(trust_registry, trust_rx);
         tokio::spawn(trust_actor.run());
 
-        // Retrieval Actor
-        let (retrieval_tx, retrieval_rx) = mpsc::channel(100);
         let retrieval_actor = RetrievalActor::new(
             arc_identity.clone(),
             clock_handle.clone(),
@@ -149,7 +142,7 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
             storage_tx.clone(),
             egress_tx.clone(),
             reputation_projection.clone(),
-            trust_tx.clone(),
+            trust_tx.clone(), // Pass the sender to the retrieval actor
             retrieval_rx,
         );
         tokio::spawn(retrieval_actor.run());
@@ -182,70 +175,44 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
 
         tokio::spawn(media_actor.run());
 
-        let session = CausalitySession::new(arc_identity.clone(), local_network_id.clone());
+        let config_arc = Arc::new(deps.config);
 
         Ok(Self {
-            config: deps.config,
+            config: config_arc,
             identity: arc_identity,
-            clock: clock_handle,
             ingress: deps.ingress,
-            egress: deps.egress,
             health_tracker: HealthTracker::new(),
-            mode: NodeMode::Standard,
-            seq_counter: 0,
             network_key: SymmetricKey([0x42; 32]),
             storage_task,
             storage_tx,
             ingestion_tx,
             retrieval_tx,
             egress_tx,
+            discovery_tx,
             _journal_phantom: std::marker::PhantomData,
-            session,
-            discovery_rx: deps.discovery_rx,
-            discovery_tx: deps.discovery_tx,
-            system_governor: deps.system_governor,
         })
     }
 
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
-        let local_network_id = self.identity.to_network_id();
-        let mut heartbeat_tick = interval(Duration::from_secs(1));
-
-        let base_throttle = 5;
         loop {
-            let scale: IngestionScale = self.system_governor.ingestion_scaler();
-
-            tracing::error!(
-                target: "siege_debug",
-                scale = scale.0,
-                "Loop tick: Checking network guard (Requires scale > 0.01)"
-            );
-
-            if scale.0 < 1.0 {
-                let delay = scale.as_throttle_delay(base_throttle);
-                tracing::trace!(target: "phalanx::metabolism", "Throttling loop for {}ms", delay.as_millis());
-                tokio::time::sleep(delay).await;
-            }
-
             tokio::select! {
-                _ = heartbeat_tick.tick() => {
-                    let load = 1.0 - self.system_governor.ingestion_scaler().0;
-                    let storage = self.check_available_storage();
-
-                    // The Sentinel asks the Tracker: "Is my metabolic drift significant?"
-                    if self.health_tracker.should_broadcast_self(load as f32, storage) {
-                        self.broadcast_metabolic_pulse().await?;
-                    }
-                }
-
-                Some(event) = self.ingress.next_event(), if scale.0 > 0.01 => {
+                Some(event) = self.ingress.next_event() => {
                     match event {
                         NetworkEvent::DataReceived { origin, topic, data } => {
-                            let _ = self.ingestion_tx.try_send(IngestionCommand::ProcessChunk {
-                                peer_id: origin,
-                                data,
-                                topic,
-                            });
+                            if topic.as_str() == self.config.network.control_topic.as_str() {
+                                if let Ok(msg) = postcard::from_bytes::<ControlMessage>(&data) {
+                                    self.health_tracker.register_activity(msg);
+                                }
+                            } else {
+                                // Apply backpressure. If the ingestion channel is full, drop the chunk.
+                                if self.ingestion_tx.try_send(IngestionCommand::ProcessChunk {
+                                    peer_id: origin,
+                                    data,
+                                    topic,
+                                }).is_err() {
+                                    tracing::warn!("Ingestion channel full, dropping chunk.");
+                                }
+                            }
                         }
                         NetworkEvent::VolleyRequested { origin, request, channel_id } => {
                             let _ = self.retrieval_tx.send(
@@ -270,78 +237,9 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
                         _ => {}
                     }
                 }
-                Some((volley_id, gap_sequence)) = self.discovery_rx.recv() => {
-                    self.handle_gap_discovery(volley_id, gap_sequence).await;
-                }
             }
         }
         Ok(())
-    }
-
-    async fn broadcast_metabolic_pulse(&mut self) -> Result<(), Box<dyn Error>> {
-        // Capture the current "Breath" of the node
-        let scale = self.system_governor.ingestion_scaler(); //
-
-        // Map scale (1.0 = Empty) to load (0.0 = Busy)
-        // If scale is 0.2 (80% throttled), load_factor is 0.8.
-        let metabolic_load: f64 = 1.0 - scale.0;
-
-        let message = ControlMessage {
-            sender: self.identity.to_network_id(),
-            load_factor: metabolic_load as f32,
-            storage_remaining_mb: 10_000,
-            heartbeat_ms: self.clock.now()?.0,
-            is_leaf: self.mode == NodeMode::Leaf,
-        };
-
-        // Publish to the mesh control topic
-        let topic = &self.config.network.control_topic;
-        let data = postcard::to_allocvec(&message)?;
-
-        self.egress.publish(topic, data).await?;
-
-        Ok(())
-    }
-
-    fn check_available_storage(&self) -> u64 {
-        // 1. Convert usize to u64 explicitly.
-        // 'as u64' is safe here because usize is at most 64-bit on modern systems.
-        let max_bytes = self.config.storage.max_storage_bytes.as_u64();
-
-        // 2. TODO: In a production 'Mighty' node, you'd query the disk or the Guardian
-        // for the actual used bytes. For now, we'll assume the vault is empty.
-        let used_bytes = 0u64;
-
-        // 3. Subtract and convert to MB (1024 * 1024 bytes)
-        // saturating_sub ensures we never underflow if the disk is over-full
-        max_bytes.saturating_sub(used_bytes) / (1024 * 1024)
-    }
-
-    pub async fn handle_gap_discovery(
-        &mut self,
-        volley_id: VolleyId,
-        gap_sequence: StorageSequence,
-    ) {
-        tracing::info!(
-            "Playback gap detected for Volley {:?} at sequence {}. Initiating mesh discovery.",
-            volley_id,
-            gap_sequence.0
-        );
-
-        let topic = MeshTopic::new("phalanx/discovery/1.0.0");
-        let request = ShardDiscoveryRequest {
-            volley_id,
-            sequence_id: gap_sequence,
-        };
-
-        match postcard::to_allocvec(&request) {
-            Ok(data) => {
-                if let Err(e) = self.egress.publish(&topic, data).await {
-                    tracing::error!("Failed to broadcast discovery request: {}", e);
-                }
-            }
-            Err(e) => tracing::error!("Failed to serialize discovery request: {}", e),
-        }
     }
 
     pub fn spawn_playback<S: PlaybackSink + 'static>(
@@ -360,40 +258,6 @@ impl<I: IngressPort, E: EgressPort + 'static, J: TransientJournal + Send + 'stat
             if let Err(e) = coordinator.run(volley_id).await {
                 tracing::error!("Playback Coordinator terminated with error: {:?}", e);
             }
-        })
-    }
-
-    pub async fn dispatch_resilient_response(
-        &mut self,
-        channel_id: String,
-        response: VolleyResponse,
-    ) {
-        let _ = self
-            .egress_tx
-            .send(EgressCommand::Dispatch {
-                channel_id,
-                response,
-            })
-            .await;
-    }
-}
-
-// Ephemeral Bootstrap
-impl<I: IngressPort, E: EgressPort + 'static> MeshSentinel<I, E, NoOpJournal> {
-    pub async fn new_at_path(path: &str, ingress: I, egress: E) -> Result<Self, Box<dyn Error>> {
-        let mut config = NodeConfig::default();
-        config.storage.vault_path = path.to_string();
-        let identity = PhalanxIdentity::new_ephemeral();
-        let (discovery_tx, discovery_rx) = mpsc::channel(100);
-
-        let deps = SentinelDependencies {
-            config,
-            identity,
-            ingress,
-            egress,
-            journal: NoOpJournal,
-            discovery_rx,
-            discovery_tx,
             system_governor: Arc::new(SystemGovernor::new()),
         };
 
