@@ -709,7 +709,7 @@ mod ingress_boundary_tests {
     };
     use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
     use phalanx_proto::prelude::ShardChunk;
-    use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
+    use phalanx_proto::time::PhalanxTimestamp;
     use phalanx_proto::types::{ForensicUnit, Unverified, Verified};
     use tokio::sync::oneshot;
 
