@@ -1,3 +1,4 @@
+use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*;
 use phalanx_proto::trust::MonotonicClock;
@@ -177,10 +178,13 @@ impl EgressGovernor {
     /// Evaluates physical and social constraints to determine if a verified unit
     /// is authorized to be promoted for mesh egress.
     pub fn authorize(
-        unit: ForensicUnit<WitnessEnvelope, Verified>,
+        mut unit: ForensicUnit<WitnessEnvelope, Verified>,
         trust: &TrustLevel,
         stress: &SystemStress,
+        encryption_key: &SymmetricKey,
     ) -> Result<ForensicUnit<WitnessEnvelope, Sealed>, GuardianError> {
+        use crate::gate::PrivacyGate;
+
         // 1. Physical Constraint: Hardware Preservation
         // Prevent heavy network egress if the device battery is dying or thermal throttling.
         if matches!(stress, SystemStress::Critical | SystemStress::Serious) {
@@ -197,10 +201,14 @@ impl EgressGovernor {
             ));
         }
 
-        // Optional: If you want to restrict egress to ONLY explicitly Verified/Ally peers,
-        // you could also block TrustLevel::Unknown here. For now, we block the known-bad.
+        // 3. Privacy Gate: Encrypt evidence payload before egress
+        unit.data.evidence = unit
+            .data
+            .evidence
+            .safeguard(encryption_key)
+            .map_err(|e| GuardianError::VerificationFailed(e.to_string()))?;
 
-        // 3. Typestate Promotion (The core architectural lock)
+        // 4. Typestate Promotion (The core architectural lock)
         // This is the ONLY place in the entire codebase where .seal() is called,
         // physically proving to the compiler that the data passed the policy gates.
         Ok(unit.seal())

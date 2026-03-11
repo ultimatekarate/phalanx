@@ -13,6 +13,7 @@ use tracing::{error, warn};
 // Extension traits from sibling modules that provide methods on proto types.
 use crate::crucible::EvidenceExt;
 use crate::judge::{PayloadCipher, TimeJudge};
+use crate::trust::ReputationGate;
 use crate::witness::WitnessAuthority;
 
 use sha2::{Digest, Sha256};
@@ -26,6 +27,23 @@ pub fn unmarshal<T: serde::de::DeserializeOwned>(
         warn!(event = "deserialization_failure", context, error = %e);
         ShardError::SerializationError(e.to_string())
     })
+}
+
+/// Gate 0: The Trust Gate (Peer Standing)
+pub trait TrustGate {
+    fn verify_standing(&self, oracle: &dyn ReputationGate) -> Result<(), ShardError>;
+}
+
+impl TrustGate for Did {
+    fn verify_standing(&self, oracle: &dyn ReputationGate) -> Result<(), ShardError> {
+        if oracle.is_blacklisted(self) {
+            warn!(event = "trust_gate_rejection", did = %self, "Blacklisted DID rejected");
+            return Err(ShardError::Unauthorized(
+                "Trust Gate: DID is blacklisted".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Gate 1: The Witnessing Gate
@@ -248,7 +266,12 @@ impl PromotionGate for ForensicUnit<WitnessEnvelope, Unverified> {
             .data
             .check_integrity(node_id, clock, tolerance, anchor)?;
 
-        // 2. Continuity Gate (Chain Enforcement)
+        // 2. Coasting Gate (Fast hash on anchored path)
+        if anchor.is_some() && anchor == envelope.prev_hash {
+            envelope = envelope.verify_fast_hash(node_id)?;
+        }
+
+        // 3. Continuity Gate (Chain Enforcement)
         if let Some(ref a) = anchor {
             envelope = envelope.verify_link(a)?;
         }

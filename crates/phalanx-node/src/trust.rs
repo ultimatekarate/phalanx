@@ -67,6 +67,12 @@ impl PeerEvaluator for ReputationProjection {
     }
 }
 
+impl ReputationGate for ReputationProjection {
+    fn is_blacklisted(&self, did: &Did) -> bool {
+        self.is_blacklisted_by_did(did)
+    }
+}
+
 pub trait ClockProvider {
     fn current_monotonic(&self) -> MonotonicClock;
 }
