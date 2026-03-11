@@ -200,7 +200,7 @@ impl<I: IngressPort> MeshSentinel<I> {
                     match event {
                         NetworkEvent::DataReceived { origin, topic, data } => {
                             if topic.as_str() == self.config.network.control_topic.as_str() {
-                                if let Ok(msg) = postcard::from_bytes::<ControlMessage>(&data) {
+                                if let Ok(msg) = phalanx_forensics::gate::unmarshal::<ControlMessage>(&data, "control_message") {
                                     self.health_tracker.register_activity(msg);
                                 }
                             } else {
