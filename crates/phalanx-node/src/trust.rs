@@ -481,7 +481,7 @@ impl TrustRegistry {
         self.core
             .peers
             .get(did)
-            .map_or(false, |record| record.reputation.is_blacklisted)
+            .is_some_and(|record| record.reputation.is_blacklisted)
     }
 
     /// Checks if a network-level ID is blacklisted by resolving it to a DID.

@@ -1,7 +1,6 @@
 use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tracing::info;
 
 // Internal Modules from Workspace
@@ -45,6 +44,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let journal = FileJournal::new("sentinel_transient_wal.bin").await?;
 
     // --- ZERO-TRUST DEPENDENCY GRAPH ---
+    // External registry for swarm's gossipsub validator.
+    // MeshSentinel::new() builds its own internal registry for actor operations.
     let trust_registry = TrustRegistry::build(&config).await;
     let reputation_projection = trust_registry.projection_handle();
 
@@ -55,27 +56,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &config,
         &physics,
         psk,
-        Arc::new(reputation_projection.clone()) as Arc<dyn PeerEvaluator>,
+        Arc::new(reputation_projection) as Arc<dyn PeerEvaluator>,
     )?;
 
     let adapter = Libp2pAdapter::new(swarm);
-    let network = Libp2pBridge::new(adapter);
-
-    let (discovery_tx, discovery_rx) = mpsc::channel(100);
+    let bridge = Libp2pBridge::new(adapter);
+    let (ingress, egress) = bridge.split();
 
     // 5. Engine Initialization via Parameter Object
     let deps = SentinelDependencies {
         config,
         identity: my_identity,
+        ingress,
+        egress,
         journal,
-        trust_registry,
-        reputation_cache: reputation_projection,
-        discovery_rx,
-        discovery_tx,
         system_governor: Arc::new(phalanx_node::vitals::SystemGovernor::new()),
     };
 
-    let mut engine: MeshSentinel<Libp2pBridge, FileJournal, J> = MeshSentinel::new(deps).await?;
+    let mut engine = MeshSentinel::new(deps).await?;
 
     println!("--- PHALANX SENSOR: ONLINE (WAN + LAN) ---");
 
