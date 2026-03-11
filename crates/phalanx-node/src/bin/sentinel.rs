@@ -11,7 +11,6 @@ use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::network::bridge::Libp2pBridge;
 use phalanx_node::network::orchestrator::setup_phalanx_swarm;
 use phalanx_node::psk::load_swarm_key;
-use phalanx_node::state::SyncReputationCache;
 use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::init_observability;
 use phalanx_node::FileJournal;
