@@ -1,3 +1,6 @@
+use phalanx_node::identity::PhalanxNodeIdentityExt;
+use phalanx_node::trust::TrustRegistry;
+
 use phalanx_forensics::gate::IntegrityGate;
 use phalanx_forensics::gate::WitnessGate;
 use phalanx_forensics::policy::EgressGovernor;
@@ -65,6 +68,7 @@ async fn build_test_sentinel(
     config.storage.vault_path = temp.path().to_string_lossy().to_string();
 
     let identity = PhalanxIdentity::new_ephemeral();
+    let trust_registry = TrustRegistry::build(&config).await;
 
     let deps = SentinelDependencies {
         config,
@@ -72,6 +76,7 @@ async fn build_test_sentinel(
         ingress: TestIngress { ingress_rx },
         egress: TestEgress,
         journal: NoOpJournal,
+        trust_registry,
         system_governor: Arc::new(SystemGovernor::new()),
     };
 

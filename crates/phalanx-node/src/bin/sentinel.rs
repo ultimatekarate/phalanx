@@ -70,6 +70,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ingress,
         egress,
         journal,
+        trust_registry,
         system_governor: Arc::new(phalanx_node::vitals::SystemGovernor::new()),
     };
 
