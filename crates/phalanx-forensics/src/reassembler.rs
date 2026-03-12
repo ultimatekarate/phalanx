@@ -164,6 +164,11 @@ impl ShardBuffer {
             .filter(|i| !self.parts.contains_key(i))
             .collect()
     }
+
+    /// Total bytes currently held across all received parts.
+    pub fn accumulated_bytes(&self) -> usize {
+        self.parts.values().map(|v| v.len()).sum()
+    }
 }
 
 // --- THE SHARD MOLD ---

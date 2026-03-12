@@ -36,6 +36,8 @@ pub struct NetworkConfig {
     pub bootstrap_peers: Vec<String>,
     #[serde(default = "default_service_key")]
     pub guardian_service_key: String,
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
 }
 
 impl NodeConfig {
@@ -80,6 +82,9 @@ pub struct StorageConfig {
     pub max_storage_bytes: ByteCapacity,
     #[serde(default = "default_max_foreign")]
     pub max_foreign_storage_bytes: ByteCapacity,
+    /// Fixed TTL for stored evidence, independent of dynamic temporal tolerance.
+    #[serde(default = "default_evidence_ttl")]
+    pub evidence_ttl_secs: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -103,6 +108,12 @@ fn default_max_storage() -> ByteCapacity {
 fn default_max_foreign() -> ByteCapacity {
     ByteCapacity(500_000_000)
 }
+fn default_evidence_ttl() -> u64 {
+    300
+}
+fn default_max_connections() -> usize {
+    192
+}
 
 impl Default for NetworkConfig {
     fn default() -> Self {
@@ -115,6 +126,7 @@ impl Default for NetworkConfig {
             cleanup_interval_secs: 60,
             bootstrap_peers: vec![],
             guardian_service_key: default_service_key(),
+            max_connections: default_max_connections(),
         }
     }
 }
@@ -130,6 +142,7 @@ impl Default for StorageConfig {
             shards_needed_to_archive: 10,
             max_storage_bytes: default_max_storage(),
             max_foreign_storage_bytes: default_max_foreign(),
+            evidence_ttl_secs: default_evidence_ttl(),
         }
     }
 }

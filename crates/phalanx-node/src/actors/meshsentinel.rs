@@ -10,7 +10,7 @@ use crate::actors::trust_actor::TrustActor;
 use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
 
-use crate::vitals::{HealthTracker, SystemGovernor};
+use crate::vitals::{HealthTracker, Homeostasis, SystemGovernor};
 use crate::Guardian;
 use crate::{trust::TrustRegistry, StorageActor};
 
@@ -53,6 +53,9 @@ pub struct MeshSentinel<I: IngressPort> {
     pub storage_tx: mpsc::Sender<StorageCommand>,
     pub network_key: Arc<SymmetricKey>,
     pub discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
+
+    // Homeostasis feedback
+    pub system_governor: Arc<SystemGovernor>,
 
     // Actor dispatch channels
     pub ingestion_tx: mpsc::Sender<IngestionCommand>,
@@ -116,6 +119,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             config: deps.config.clone(),
             identity: deps.identity.clone(),
             current_tolerance: Duration::from_millis(1000),
+            system_governor: deps.system_governor.clone(),
         };
 
         let storage_task = tokio::spawn(async move {
@@ -198,6 +202,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             identity: arc_identity,
             ingress: deps.ingress,
             health_tracker: HealthTracker::new(),
+            system_governor: deps.system_governor.clone(),
             network_key: network_key.clone(),
             storage_task,
             storage_tx,
@@ -214,17 +219,30 @@ impl<I: IngressPort> MeshSentinel<I> {
                 Some(event) = self.ingress.next_event() => {
                     match event {
                         NetworkEvent::DataReceived { origin, topic, data } => {
+                            // Record bandwidth pressure for every received message
+                            self.system_governor.record_bandwidth_pressure(data.len());
+
                             if topic.as_str() == self.config.network.control_topic.as_str() {
                                 if let Ok(msg) = phalanx_forensics::gate::unmarshal::<ControlMessage>(&data, "control_message") {
                                     self.health_tracker.register_activity(msg);
                                 }
                             } else {
-                                // Apply backpressure. If the ingestion channel is full, drop the chunk.
-                                if self.ingestion_tx.try_send(IngestionCommand::ProcessChunk {
+                                // Bandwidth gate: reject at the edge when saturated
+                                if self.system_governor.bandwidth_scaler().0 < 0.05 {
+                                    tracing::warn!(
+                                        size = data.len(),
+                                        peer = %origin,
+                                        "Bandwidth saturated, dropping chunk"
+                                    );
+                                } else if self.ingestion_tx.try_send(IngestionCommand::ProcessChunk {
                                     peer_id: origin,
                                     data,
                                     topic,
                                 }).is_err() {
+                                    // Channel full — record memory pressure from the backlog
+                                    self.system_governor.record_memory_pressure(
+                                        self.config.network.max_chunk_size_bytes * 200
+                                    );
                                     tracing::warn!("Ingestion channel full, dropping chunk.");
                                 }
                             }

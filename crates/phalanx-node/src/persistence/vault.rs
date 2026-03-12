@@ -215,6 +215,18 @@ impl Guardian {
         Ok(())
     }
 
+    /// Estimates the total bytes held across all active volley contexts in the crucible.
+    /// Used by the StorageActor to feed WAL/storage pressure into the integral loop.
+    pub fn wal_bytes_estimate(&self) -> u64 {
+        // Conservative per-envelope estimate: signature (64) + evidence (~4KB avg) + metadata
+        const AVG_ENVELOPE_BYTES: u64 = 4096;
+        self.crucible
+            .contexts
+            .values()
+            .map(|ctx| ctx.accumulator.artifacts.len() as u64 * AVG_ENVELOPE_BYTES)
+            .sum()
+    }
+
     pub fn get_active_volley_shards(
         &self,
         volley_id: &VolleyId,
