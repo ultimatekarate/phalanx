@@ -98,6 +98,11 @@ pub struct ForensicMetrics {
     pub v_energy: f32,
     /// Photo Response Non-Uniformity variance (sensor fingerprint).
     pub prnu_var: f32,
+    /// Mean luminance of the analysis crop (0.0–255.0).
+    /// Used by LensGate to scale calibrated thresholds for auto-exposure
+    /// resilience: `raw_metric > T_calibrated × mean_luminance`.
+    /// Computed once during Y-plane extraction — no SIMD changes needed.
+    pub mean_luminance: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

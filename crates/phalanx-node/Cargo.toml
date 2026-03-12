@@ -17,6 +17,7 @@ path = "src/bin/sentinel.rs"
 phalanx-proto = { path = "../phalanx-proto" }
 phalanx-forensics = { path = "../phalanx-forensics" }
 phalanx-transport = { path = "../phalanx-transport" }
+phalanx-lens = { path = "../phalanx-lens" }
 
 # Runtime & Async
 tokio = { version = "1.0", features = ["full"] }

@@ -4,9 +4,10 @@ use crate::config::HardwareConfig;
 use phalanx_forensics::judge::PayloadCipher;
 use phalanx_forensics::reassembler::compress_frame;
 use phalanx_forensics::reassembler::create_video_shard;
+use phalanx_lens::ForensicLens;
 use phalanx_proto::crypto::SymmetricKey;
-use phalanx_proto::evidence::StorageSequence;
-use phalanx_proto::evidence::VideoShard;
+use phalanx_proto::evidence::{ForensicMetrics, StorageSequence, VideoShard};
+use phalanx_proto::types::BlackLevel;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -19,6 +20,35 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use phalanx_proto::prelude::*;
+
+/// Default analog black level offset for 8-bit sensors.
+/// Accounts for the analog black offset inherent in most CMOS sensors.
+const DEFAULT_BLACK_LEVEL: f32 = 16.0;
+
+/// Extracts the Y (luma) plane from an RGB pixel buffer.
+///
+/// Uses the ITU-R BT.601 coefficients: Y = 0.299·R + 0.587·G + 0.114·B.
+/// The ForensicLens operates on the Y-plane to compute sensor fingerprints
+/// (Moiré energy + PRNU variance) before the JPEG compression stage
+/// destroys the raw sensor signal.
+fn extract_y_plane(rgb_data: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let pixel_count = width * height;
+    let mut y_plane = Vec::with_capacity(pixel_count);
+
+    for i in 0..pixel_count {
+        let base = i * 3;
+        // Safe access via .get() — returns 0 for out-of-bounds (satisfies indexing_slicing = "deny")
+        let r = rgb_data.get(base).copied().unwrap_or(0) as f32;
+        let g = rgb_data.get(base + 1).copied().unwrap_or(0) as f32;
+        let b = rgb_data.get(base + 2).copied().unwrap_or(0) as f32;
+
+        // BT.601 luma conversion — truncated to u8 (matches sensor ADC precision)
+        let y = (0.299 * r + 0.587 * g + 0.114 * b) as u8;
+        y_plane.push(y);
+    }
+
+    y_plane
+}
 
 /// Internal driver handling Time Drift and I/O.
 struct CameraDriver {
@@ -169,6 +199,11 @@ impl PhalanxCameraThread {
     /// COMPATIBILITY BRIDGE
     /// Matches the signature expected by main.rs.
     /// Spawns the Watchdog AND the Processor to feed the main channel.
+    ///
+    /// `lens` — The ForensicLens implementation for computing sensor fingerprints.
+    /// Each raw RGB frame is analyzed (Y-plane extraction → center crop → Laplacian +
+    /// PRNU) before JPEG compression destroys the raw sensor signal.
+    /// Default: `ScalarLens` (pure-Rust fallback for x86_64 dev/test).
     pub fn spawn(
         self,
         index: Option<usize>,
@@ -176,6 +211,7 @@ impl PhalanxCameraThread {
         hw_config: HardwareConfig,
         volley_id: String,
         secret_key: Option<[u8; 32]>,
+        lens: Arc<dyn ForensicLens>,
     ) {
         // 1. Ignite the Hardware Watchdog
         let device_idx = index.unwrap_or(0);
@@ -185,31 +221,55 @@ impl PhalanxCameraThread {
         let fps = hw_config.camera_fps;
 
         // 2. Spawn the Processor (Thread B)
-        // Consumes raw frames, compresses, shards, encrypts -> Main Channel
+        // Consumes raw frames, analyzes sensor fingerprint, compresses,
+        // shards, encrypts -> Main Channel
         tokio::spawn(async move {
             info!("Camera Processor: STARTED");
 
             let mut frame_buffer = Vec::new();
             let mut sequence_id = StorageSequence(0);
+            // Safety fallback: if no frame arrives before batching triggers,
+            // the shard carries all-zero metrics (a forensic signal itself).
+            #[allow(unused_assignments)]
+            let mut latest_metrics = ForensicMetrics::default();
 
             // "While the camera is producing frames..."
             while let Ok(frame) = rx.recv().await {
-                // A. Compression (Simulated or Real JPEG)
+                // A. Forensic Lens Analysis (BEFORE compression)
+                // Extract Y (luma) plane from raw RGB data — the ForensicLens
+                // operates on luminance to compute Moiré energy + PRNU variance.
+                // Must happen before JPEG compression destroys the raw sensor signal.
+                let y_plane =
+                    extract_y_plane(&frame.data, frame.width as usize, frame.height as usize);
+                latest_metrics = lens.analyze(
+                    &y_plane,
+                    frame.width as usize,
+                    frame.height as usize,
+                    BlackLevel(DEFAULT_BLACK_LEVEL),
+                );
+
+                // B. Compression (Simulated or Real JPEG)
                 // Using the dimensions provided by the frame itself
                 if let Ok(jpeg) = compress_frame(frame.data, frame.width, frame.height) {
                     frame_buffer.push(jpeg);
                 }
 
-                // B. Batching
+                // C. Batching
                 if frame_buffer.len() >= fps as usize {
                     let chunk = frame_buffer.split_off(0); // Take all
                     let volley_id = VolleyId::new(volley_id.clone());
 
-                    let shard_result = create_video_shard(chunk, sequence_id, fps as u8, volley_id);
+                    let shard_result = create_video_shard(
+                        chunk,
+                        sequence_id,
+                        fps as u8,
+                        volley_id,
+                        latest_metrics,
+                    );
 
                     match shard_result {
                         Ok(mut actual_shard) => {
-                            // C. Encryption
+                            // D. Encryption
                             if let Some(key) = secret_key {
                                 if let Err(e) =
                                     actual_shard.payload.apply_encryption(&SymmetricKey(key))
@@ -219,7 +279,7 @@ impl PhalanxCameraThread {
                                 }
                             }
 
-                            // D. Transmission
+                            // E. Transmission
                             if tx.send(actual_shard).await.is_err() {
                                 error!("Main channel closed. Stopping Camera Processor.");
                                 self.stop(); // Kill the watchdog too
@@ -242,6 +302,7 @@ impl PhalanxCameraThread {
 mod tests {
     use super::*;
     use crate::config::HardwareConfig;
+    use phalanx_lens::scalar::ScalarLens;
     use tokio::sync::mpsc;
 
     #[tokio::test]
@@ -288,7 +349,14 @@ mod tests {
 
         let cam = PhalanxCameraThread::new(&config);
 
-        cam.spawn(Some(0), tx, config, "test_volley".to_string(), None);
+        cam.spawn(
+            Some(0),
+            tx,
+            config,
+            "test_volley".to_string(),
+            None,
+            Arc::new(ScalarLens),
+        );
 
         // Wait for 1 shard (which requires 10 frames at 10fps = ~1 sec)
         // Set timeout to 2s to be safe

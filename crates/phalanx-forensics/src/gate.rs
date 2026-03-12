@@ -4,7 +4,7 @@
 // Each gate is a trait that can be chained in a Result pipeline.
 
 use phalanx_proto::crypto::SymmetricKey;
-use phalanx_proto::evidence::{Evidence, SignatureHash, WitnessEnvelope};
+use phalanx_proto::evidence::{Evidence, ForensicMetrics, SignatureHash, WitnessEnvelope};
 use phalanx_proto::prelude::*;
 use phalanx_proto::time::TrustedClock;
 use std::collections::HashMap;
@@ -172,6 +172,133 @@ impl PrivacyGate for Evidence {
     }
 }
 
+/// Per-device calibrated thresholds for the LensGate.
+///
+/// Established during device setup by running ForensicLens on N test frames
+/// from the actual camera sensor to measure baseline PRNU and Moiré profiles.
+/// Stored in the device's `NodeConfig`.
+///
+/// **Auto-exposure resilience:** Raw metrics from the ForensicLens scale with
+/// luminance. Rather than per-pixel normalization in the kernel (expensive SIMD
+/// division), the LensGate scales these thresholds by `mean_luminance` at
+/// comparison time: `raw_metric > T_calibrated × mean_luminance`.
+/// One scalar multiply per check — no SIMD changes needed.
+#[derive(Debug, Clone, Copy)]
+pub struct LensThresholds {
+    /// Minimum expected PRNU variance per unit luminance.
+    /// Below `prnu_floor × mean_luminance` → possible synthetic/AI-generated
+    /// image (no sensor noise). Typical calibrated value: 0.5–2.0.
+    pub prnu_floor: f32,
+    /// Maximum expected Moiré energy per unit luminance.
+    /// Above `moire_ceiling × mean_luminance` → possible screen recapture.
+    /// Typical calibrated value: 50.0–200.0.
+    pub moire_ceiling: f32,
+}
+
+impl Default for LensThresholds {
+    /// Conservative defaults. Per-device calibration should override these.
+    fn default() -> Self {
+        Self {
+            prnu_floor: 1.0,
+            moire_ceiling: 100.0,
+        }
+    }
+}
+
+/// Gate 3: The Lens Gate (Sensor Provenance)
+///
+/// Mandatory forensic gate that verifies sensor fingerprint authenticity.
+/// Evidence with suspicious metrics is blocked before entering the pipeline.
+///
+/// Detection rules:
+/// - All-zero metrics → bypass attempt (evidence generated without lens analysis)
+/// - PRNU variance below threshold → possible synthetic/AI-generated image
+/// - Moiré energy above threshold → possible screen recapture
+///
+/// Thresholds are scaled by `mean_luminance` for auto-exposure resilience.
+pub trait LensGate {
+    fn check_provenance(&self, thresholds: &LensThresholds) -> Result<(), ShardError>;
+}
+
+impl LensGate for ForensicMetrics {
+    fn check_provenance(&self, thresholds: &LensThresholds) -> Result<(), ShardError> {
+        // Rule 1: All-zero metrics → bypass attempt.
+        // A real sensor always produces non-zero PRNU variance and some luminance.
+        if self.h_energy == 0.0
+            && self.v_energy == 0.0
+            && self.prnu_var == 0.0
+            && self.mean_luminance == 0.0
+        {
+            warn!(
+                event = "lens_gate_rejection",
+                reason = "all_zero_metrics",
+                "LensGate: All-zero metrics detected — possible bypass attempt"
+            );
+            return Err(ShardError::InvalidConfiguration(
+                "LensGate: All-zero forensic metrics — evidence lacks sensor fingerprint".into(),
+            ));
+        }
+
+        // Scale calibrated thresholds by mean luminance for auto-exposure resilience.
+        // Guard: if mean_luminance is near-zero, the frame is too dark for reliable
+        // fingerprinting. Accept it with a warning — the all-zero check above
+        // catches the true bypass case.
+        if self.mean_luminance < 1.0 {
+            warn!(
+                event = "lens_gate_low_luminance",
+                mean_luminance = self.mean_luminance,
+                "LensGate: Very low luminance — threshold scaling unreliable"
+            );
+            return Ok(());
+        }
+
+        let scaled_prnu_floor = thresholds.prnu_floor * self.mean_luminance;
+        let scaled_moire_ceiling = thresholds.moire_ceiling * self.mean_luminance;
+
+        // Rule 2: PRNU variance below scaled threshold → possible synthetic image.
+        // Real camera sensors always exhibit photo response non-uniformity.
+        if self.prnu_var < scaled_prnu_floor {
+            warn!(
+                event = "lens_gate_rejection",
+                reason = "low_prnu",
+                prnu_var = self.prnu_var,
+                threshold = scaled_prnu_floor,
+                mean_luminance = self.mean_luminance,
+                "LensGate: PRNU variance below threshold — possible synthetic image"
+            );
+            return Err(ShardError::InvalidConfiguration(
+                "LensGate: PRNU variance below threshold — possible synthetic/AI-generated image"
+                    .into(),
+            ));
+        }
+
+        // Rule 3: Moiré energy above scaled threshold → possible screen recapture.
+        // Screen recapture produces characteristic interference patterns.
+        let max_moire = if self.h_energy > self.v_energy {
+            self.h_energy
+        } else {
+            self.v_energy
+        };
+
+        if max_moire > scaled_moire_ceiling {
+            warn!(
+                event = "lens_gate_rejection",
+                reason = "high_moire",
+                h_energy = self.h_energy,
+                v_energy = self.v_energy,
+                threshold = scaled_moire_ceiling,
+                mean_luminance = self.mean_luminance,
+                "LensGate: Moiré energy above threshold — possible screen recapture"
+            );
+            return Err(ShardError::InvalidConfiguration(
+                "LensGate: Moiré energy above threshold — possible screen recapture".into(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 /// Gate 5: The Memory Buffer Gate
 pub trait BufferCapacityGate {
     fn enforce_capacity_limit(
@@ -316,5 +443,159 @@ impl PromotionGate for ForensicUnit<WitnessEnvelope, Unverified> {
             data: envelope,
             _state: std::marker::PhantomData,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lens_gate_all_zero_rejected() {
+        // All-zero metrics = bypass attempt (evidence generated without lens analysis)
+        let metrics = ForensicMetrics::default();
+        let thresholds = LensThresholds::default();
+
+        let result = metrics.check_provenance(&thresholds);
+        assert!(result.is_err(), "All-zero metrics should be rejected");
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("All-zero"),
+            "Error should mention all-zero: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_lens_gate_legitimate_metrics_accepted() {
+        // Real camera metrics: moderate PRNU, low Moiré, medium luminance
+        let metrics = ForensicMetrics {
+            h_energy: 5.0,
+            v_energy: 3.0,
+            prnu_var: 200.0,
+            mean_luminance: 128.0,
+        };
+        let thresholds = LensThresholds::default(); // prnu_floor=1.0, moire_ceiling=100.0
+
+        // prnu_var (200) > prnu_floor (1.0) × mean_luminance (128) = 128 ✓
+        // max_moire (5) < moire_ceiling (100) × mean_luminance (128) = 12800 ✓
+        let result = metrics.check_provenance(&thresholds);
+        assert!(
+            result.is_ok(),
+            "Legitimate metrics should pass: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_lens_gate_synthetic_image_rejected() {
+        // Synthetic/AI-generated image: near-zero PRNU (no real sensor noise)
+        let metrics = ForensicMetrics {
+            h_energy: 2.0,
+            v_energy: 1.5,
+            prnu_var: 0.5, // Suspiciously low for real sensor
+            mean_luminance: 128.0,
+        };
+        let thresholds = LensThresholds::default();
+
+        // prnu_var (0.5) < prnu_floor (1.0) × mean_luminance (128) = 128 → REJECT
+        let result = metrics.check_provenance(&thresholds);
+        assert!(result.is_err(), "Low PRNU should be rejected as synthetic");
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("PRNU"), "Error should mention PRNU: {}", err);
+    }
+
+    #[test]
+    fn test_lens_gate_screen_recapture_rejected() {
+        // Screen recapture: very high Moiré energy (interference patterns)
+        let metrics = ForensicMetrics {
+            h_energy: 50000.0, // Massive horizontal interference
+            v_energy: 40000.0,
+            prnu_var: 300.0, // Normal PRNU
+            mean_luminance: 128.0,
+        };
+        let thresholds = LensThresholds::default();
+
+        // max_moire (50000) > moire_ceiling (100) × mean_luminance (128) = 12800 → REJECT
+        let result = metrics.check_provenance(&thresholds);
+        assert!(
+            result.is_err(),
+            "High Moiré should be rejected as screen recapture"
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Moiré") || err.contains("recapture"),
+            "Error should mention Moiré/recapture: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_lens_gate_low_luminance_accepted() {
+        // Very dark frame: mean_luminance < 1.0 → threshold scaling unreliable.
+        // Accept with warning rather than reject (all-zero check catches bypasses).
+        let metrics = ForensicMetrics {
+            h_energy: 0.1,
+            v_energy: 0.1,
+            prnu_var: 0.05,
+            mean_luminance: 0.5, // Very dark but not zero
+        };
+        let thresholds = LensThresholds::default();
+
+        let result = metrics.check_provenance(&thresholds);
+        assert!(
+            result.is_ok(),
+            "Very dark frames should be accepted: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_lens_gate_auto_exposure_scaling() {
+        // The same sensor fingerprint at different exposure levels should be
+        // treated consistently. A bright frame naturally has higher raw metrics.
+        let thresholds = LensThresholds {
+            prnu_floor: 2.0,
+            moire_ceiling: 50.0,
+        };
+
+        // Dark frame (mean_luminance = 50): threshold = 2.0 × 50 = 100
+        let dark = ForensicMetrics {
+            h_energy: 10.0,
+            v_energy: 8.0,
+            prnu_var: 150.0, // 150 > 100 ✓
+            mean_luminance: 50.0,
+        };
+        assert!(
+            dark.check_provenance(&thresholds).is_ok(),
+            "Dark frame should pass"
+        );
+
+        // Bright frame (mean_luminance = 200): threshold = 2.0 × 200 = 400
+        let bright = ForensicMetrics {
+            h_energy: 40.0,
+            v_energy: 32.0,
+            prnu_var: 500.0, // 500 > 400 ✓
+            mean_luminance: 200.0,
+        };
+        assert!(
+            bright.check_provenance(&thresholds).is_ok(),
+            "Bright frame should pass"
+        );
+
+        // Same bright frame but low PRNU (synthetic at high exposure)
+        let synthetic_bright = ForensicMetrics {
+            h_energy: 10.0,
+            v_energy: 8.0,
+            prnu_var: 50.0, // 50 < 400 → REJECT
+            mean_luminance: 200.0,
+        };
+        assert!(
+            synthetic_bright.check_provenance(&thresholds).is_err(),
+            "Synthetic image at high exposure should be rejected"
+        );
     }
 }
