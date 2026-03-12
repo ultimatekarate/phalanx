@@ -6,6 +6,7 @@ members = [
     "crates/phalanx-node",
     "crates/phalanx-sim",
     "crates/phalanx-dashboard", # Your Ratatui Dashboard
+    "crates/phalanx-ui",
 ]
 resolver = "2"
 
@@ -21,7 +22,8 @@ phalanx-forensics = { path = "crates/phalanx-forensics" }
 phalanx-transport = { path = "crates/phalanx-transport" }
 phalanx-node = { path = "crates/phalanx-node" }
 phalanx-sim = { path = "crates/phalanx-sim" }
-phalanx-ui = { path = "crates/phalanx-ffi" }
+phalanx-ffi = { path = "crates/phalanx-ffi" }
+phalanx-ui = { path = "crates/phalanx-ui" }
 phalanx-dashboard = { path = "crates/phalanx-dashboard" }
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1.49", features = ["full"] }
