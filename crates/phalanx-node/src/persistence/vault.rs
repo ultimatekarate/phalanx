@@ -26,6 +26,9 @@ use zeroize::Zeroizing;
 const MAX_WAL_CHUNK_BYTES: u32 = 16 * 1024 * 1024; // 16 MiB
 const _MAX_WORKBENCH_STATE_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 const MAX_EGRESS_SALVAGE_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
+/// P2 FIX: Maximum aggregate WAL size before rejecting new writes.
+/// Prevents unbounded WAL growth that could exhaust disk space.
+const MAX_WAL_AGGREGATE_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
 const AEAD_NONCE_LEN: usize = 24;
 
 /// M7 FIX: Vault key derivation now includes a random 32-byte salt.
@@ -129,11 +132,13 @@ impl Guardian {
                 let node_id = envelope.witness_peer_id.clone();
 
                 let unit = ForensicUnit::new(envelope);
-                let absolute_max_ms = 30_000; // TODO: hard coded for now, move this to a config file
-                let dynamic_limit = (current_tolerance.as_millis() as u64).min(absolute_max_ms);
+                // T4 FIX: Pass Duration directly instead of raw u64.
+                // Clamp dynamic tolerance to an absolute max of 30 seconds.
+                let max_tolerance = Duration::from_secs(30);
+                let clamped_tolerance = current_tolerance.min(max_tolerance);
 
                 let verified_unit = unit
-                    .promote(&node_id, &*self.clock, dynamic_limit, anchor)
+                    .promote(&node_id, &*self.clock, clamped_tolerance, anchor)
                     .map_err(|e| match e {
                         ShardError::InvalidConfiguration(ref msg)
                             if msg.contains("Causality Break") =>
@@ -319,6 +324,20 @@ pub async fn read_encrypted_file(
 #[async_trait]
 impl TransientJournal for FileJournal {
     async fn record_chunk(&mut self, chunk: &ShardChunk) -> Result<(), ShardError> {
+        // P2 FIX: Check aggregate WAL size before writing.
+        // Prevents unbounded WAL growth from sustained high-volume ingestion.
+        let current_wal_size = self.handle.metadata().await.map(|m| m.len()).unwrap_or(0);
+        if current_wal_size >= MAX_WAL_AGGREGATE_BYTES {
+            tracing::warn!(
+                wal_size = current_wal_size,
+                limit = MAX_WAL_AGGREGATE_BYTES,
+                "P2: WAL aggregate size limit reached, rejecting write"
+            );
+            return Err(ShardError::Io(
+                "WAL aggregate size limit exceeded".to_string(),
+            ));
+        }
+
         // 1. Serialize → encrypt
         let plaintext = postcard::to_allocvec(chunk)
             .map_err(|e| ShardError::SerializationError(e.to_string()))?;

@@ -63,7 +63,9 @@ impl PeerEvaluator for ReputationProjection {
             .read()
             .unwrap()
             .get(peer_id)
-            .map_or(1.0, |info| info.score)
+            // E4 FIX: Unknown peers start at 0.1 (minimum trust), not 1.0 (maximum).
+            // This prevents Sybil attackers from receiving full trust on first contact.
+            .map_or(0.1, |info| info.score)
     }
 }
 
@@ -96,6 +98,11 @@ impl ClockProvider for TrustedClock {
         MonotonicClock(millis / 1000)
     }
 }
+
+/// E6 FIX: Maximum number of lazily-registered peers.
+/// Prevents Sybil attackers from filling the peer registry with millions of fake DIDs
+/// by triggering offenses from unique identities.
+const MAX_LAZY_REGISTRATIONS: usize = 10_000;
 
 /// Manages the "Social Graph" of the node with bi-directional lookup.
 #[derive(Debug, Serialize, Deserialize)]
@@ -278,6 +285,19 @@ impl TrustRegistry {
         );
         // LAZY REGISTRATION: Never ignore a forensic offense, even from unknown peers
         if !self.peers.contains_key(did) {
+            // E6 FIX: Rate-limit lazy registrations to prevent Sybil registry flooding.
+            // An attacker sending offenses from millions of unique DIDs would fill
+            // the HashMap unboundedly. Cap at MAX_LAZY_REGISTRATIONS.
+            if self.peers.len() >= MAX_LAZY_REGISTRATIONS {
+                tracing::warn!(
+                    target: "phalanx::trust",
+                    offender_did = %did,
+                    registry_size = self.peers.len(),
+                    "E6: Lazy registration rejected — registry at capacity"
+                );
+                return;
+            }
+
             tracing::info!(
                 target: "phalanx::trust",
                 offender_did = %did,
@@ -517,7 +537,9 @@ impl PeerEvaluator for TrustRegistry {
 
         let record = match self.peers.get(&target_did) {
             Some(r) => r,
-            None => return 1.0, // Baseline neutral reputation for untracked peers
+            // E4 FIX: Unknown peers start at minimum trust (0.1), not maximum (1.0).
+            // This forces new peers to earn reputation before receiving preferential treatment.
+            None => return 0.1,
         };
 
         if record.reputation.is_blacklisted {

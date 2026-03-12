@@ -125,11 +125,23 @@ impl<J: TransientJournal> StorageActor<J> {
         &mut self,
         unit: ForensicUnit<ShardChunk, Verified>,
     ) -> Result<(), GuardianError> {
-        // Storage pressure gate: reject when WAL/disk is near capacity
+        // Storage pressure gate: reject when WAL/disk is near capacity (soft limit via integral)
         if self.system_governor.storage_scaler().0 < 0.05 {
             return Err(GuardianError::StorageFailure(
                 "Storage pressure critical: WAL near capacity".into(),
             ));
+        }
+
+        // P6 FIX: Hard enforcement of max_storage_bytes.
+        // The soft integral-based gate above can lag behind rapid ingestion bursts.
+        // This hard check provides an absolute ceiling that cannot be exceeded.
+        let current_storage = self.guardian.wal_bytes_estimate();
+        let max_storage = self.config.storage.max_storage_bytes.as_u64();
+        if current_storage >= max_storage {
+            return Err(GuardianError::StorageFailure(format!(
+                "P6: Hard storage limit reached ({} >= {} bytes)",
+                current_storage, max_storage
+            )));
         }
 
         let chunk = unit.unpack();

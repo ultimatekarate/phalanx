@@ -90,14 +90,23 @@ impl DhtPayloadAuthority for DhtPayload {
         Ok(())
     }
 
+    /// N1 FIX: Ownership verification uses exact prefix matching instead of substring.
+    /// The previous `contains()` check allowed attackers to embed another peer's DID
+    /// as a substring in their own payload, bypassing ownership validation.
     fn verify_ownership(&self, expected_owner_prefix: &str) -> bool {
         if self.data.is_empty() {
             return false;
         }
 
+        // N1 FIX: Use starts_with for exact prefix match instead of contains.
+        // This prevents substring injection attacks where an attacker embeds
+        // the victim's DID prefix within their own payload data.
         let payload_str = String::from_utf8_lossy(&self.data);
-        if !payload_str.contains(expected_owner_prefix) {
-            tracing::warn!(expected = %expected_owner_prefix, "DHT: Ownership mismatch");
+        if !payload_str.starts_with(expected_owner_prefix) {
+            tracing::warn!(
+                expected = %expected_owner_prefix,
+                "DHT: Ownership prefix mismatch (N1 hardened)"
+            );
             return false;
         }
         true

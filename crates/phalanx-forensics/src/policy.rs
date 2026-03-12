@@ -35,7 +35,18 @@ impl TrustArbiter {
             let intervals = elapsed / interval_secs;
 
             if intervals > 0 {
-                let total_recovery = (intervals as i64) * recovery_step;
+                // E7 FIX: Diminishing recovery — peers with lower scores recover slower.
+                // Linear recovery allows penalized peers to regain full trust too quickly.
+                // Scale recovery by the ratio of current score to MAX, with a minimum of 10%.
+                // A peer at score 50 recovers at 50% rate; at score 10, at 10% rate.
+                let recovery_factor = if record.reputation.score <= 0 {
+                    0.1_f64 // Minimum recovery rate for deeply penalized peers
+                } else {
+                    (record.reputation.score as f64 / MAX_REPUTATION as f64).max(0.1)
+                };
+                let scaled_step = ((recovery_step as f64) * recovery_factor) as i64;
+                let effective_step = scaled_step.max(1); // At least 1 per interval
+                let total_recovery = (intervals as i64) * effective_step;
 
                 // ENFORCEMENT: Reputation cannot exceed the ceiling
                 record.reputation.score =
@@ -267,20 +278,24 @@ mod tests {
             "Should not recover before interval"
         );
 
-        // 3. Advance time past the full interval (Recovery: 50 -> 60)
+        // 3. Advance time past the full interval
+        // E7 FIX: Diminishing recovery — at score 50, factor = 0.5, step = 5
+        // Recovery: 50 -> 55
         clock.tick(31); // Total 61s elapsed
         TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 60, 10);
         assert_eq!(
-            peers[&peer_did].reputation.score, 60,
-            "Reputation should have increased by recovery_step"
+            peers[&peer_did].reputation.score, 55,
+            "Reputation should have increased by scaled recovery_step (diminishing returns)"
         );
 
-        // 4. Advance time by multiple intervals (Recovery: 60 -> 90)
+        // 4. Advance time by multiple intervals
+        // E7 FIX: At score 55, factor = 0.55, step = 5 (truncated), 2 intervals = +10
+        // Recovery: 55 -> 65
         clock.tick(120); // 2 more intervals
         TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 60, 10);
         assert_eq!(
-            peers[&peer_did].reputation.score, 80,
-            "Reputation should follow multi-cycle recovery"
+            peers[&peer_did].reputation.score, 65,
+            "Reputation should follow diminishing multi-cycle recovery"
         );
 
         // 5. Ensure it caps at the baseline (100)

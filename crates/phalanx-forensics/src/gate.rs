@@ -18,11 +18,32 @@ use crate::witness::WitnessAuthority;
 
 use sha2::{Digest, Sha256};
 
+/// S2 FIX: Maximum input size for deserialization.
+/// Prevents amplification attacks where an attacker submits enormous byte buffers
+/// to exhaust memory during postcard deserialization.
+const MAX_UNMARSHAL_INPUT_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
+
 /// Deserialization Gate: Unified postcard deserialization with forensic logging.
 pub fn unmarshal<T: serde::de::DeserializeOwned>(
     data: &[u8],
     context: &str,
 ) -> Result<T, ShardError> {
+    // S2 FIX: Reject oversized inputs before attempting deserialization.
+    if data.len() > MAX_UNMARSHAL_INPUT_BYTES {
+        warn!(
+            event = "deserialization_rejected",
+            context,
+            size = data.len(),
+            limit = MAX_UNMARSHAL_INPUT_BYTES,
+            "S2: Input exceeds maximum unmarshal size"
+        );
+        return Err(ShardError::SerializationError(format!(
+            "Input size {} exceeds unmarshal limit of {} bytes",
+            data.len(),
+            MAX_UNMARSHAL_INPUT_BYTES
+        )));
+    }
+
     postcard::from_bytes(data).map_err(|e| {
         warn!(event = "deserialization_failure", context, error = %e);
         ShardError::SerializationError(e.to_string())
@@ -76,7 +97,7 @@ pub trait IntegrityGate {
         self,
         node_id: &NetworkId,
         clock: &dyn TrustedClock,
-        tolerance: u64,
+        tolerance: std::time::Duration,
         anchor: Option<SignatureHash>,
     ) -> Result<Self, ShardError>
     where
@@ -88,7 +109,7 @@ impl IntegrityGate for WitnessEnvelope {
         self,
         node_id: &NetworkId,
         clock: &dyn TrustedClock,
-        tolerance: u64,
+        tolerance: std::time::Duration,
         anchor: Option<SignatureHash>,
     ) -> Result<Self, ShardError> {
         // 1. UNCONDITIONAL CRYPTOGRAPHIC VERIFICATION
@@ -259,7 +280,7 @@ pub trait PromotionGate {
         self,
         node_id: &NetworkId,
         clock: &dyn TrustedClock,
-        tolerance: u64,
+        tolerance: std::time::Duration,
         anchor: Option<SignatureHash>,
     ) -> Result<ForensicUnit<WitnessEnvelope, Verified>, ShardError>;
 }
@@ -273,7 +294,7 @@ impl PromotionGate for ForensicUnit<WitnessEnvelope, Unverified> {
         self,
         node_id: &NetworkId,
         clock: &dyn TrustedClock,
-        tolerance: u64,
+        tolerance: std::time::Duration,
         anchor: Option<SignatureHash>,
     ) -> Result<ForensicUnit<WitnessEnvelope, Verified>, ShardError> {
         // 1. Integrity Gate (Signature + Time + Sticky Trust)

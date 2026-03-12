@@ -17,6 +17,7 @@ futures = "0.3"
 # Real-world QUIC transport
 s2n-quic = "1.75.0" 
 # For P2P Mesh logic (Gossipsub/DHT)
+# E1 FIX: connection_limits module is unconditionally available in libp2p 0.56
 libp2p = { version = "0.56", features = ["gossipsub", "noise", "yamux", "tcp", "tokio", "macros", "dns", "kad", "request-response", "identify", "autonat", "relay", "dcutr", "mdns", "pnet"] }
 
 # Utilities

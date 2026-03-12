@@ -219,6 +219,19 @@ impl<I: IngressPort> MeshSentinel<I> {
                 Some(event) = self.ingress.next_event() => {
                     match event {
                         NetworkEvent::DataReceived { origin, topic, data } => {
+                            // P5 FIX: Reject oversized messages before any processing.
+                            // This prevents memory amplification from messages that exceed
+                            // the configured chunk size, protecting the ingestion pipeline.
+                            if data.len() > self.config.network.max_chunk_size_bytes * 2 {
+                                tracing::warn!(
+                                    size = data.len(),
+                                    limit = self.config.network.max_chunk_size_bytes * 2,
+                                    peer = %origin,
+                                    "P5: Oversized message rejected pre-queue"
+                                );
+                                continue;
+                            }
+
                             // Record bandwidth pressure for every received message
                             self.system_governor.record_bandwidth_pressure(data.len());
 

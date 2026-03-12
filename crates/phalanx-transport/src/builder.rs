@@ -1,8 +1,9 @@
 use crate::builder::kad::store::RecordStore;
 use futures::future::Either;
 use libp2p::{
-    autonat, core::upgrade::Version, dcutr, gossipsub, identify, identity::Keypair, kad, mdns,
-    noise, pnet, relay, request_response, tcp, yamux, PeerId, StreamProtocol, Transport,
+    autonat, connection_limits, core::upgrade::Version, dcutr, gossipsub, identify,
+    identity::Keypair, kad, mdns, noise, pnet, relay, request_response, tcp, yamux, PeerId,
+    StreamProtocol, Transport,
 };
 use std::error::Error;
 use std::time::Duration;
@@ -76,18 +77,43 @@ where
     let local_peer_id = local_key.public().to_peer_id();
 
     // Calculate gossipsub heartbeat based on physics simulation state
-    // Note: Requires VitalityRate and UnitInterval definitions to compile properly
     let gossip_heartbeat = VitalityRate::new(physics.tau_rtt).as_duration();
 
-    let gossipsub = gossipsub::Behaviour::new(
+    let gossipsub_config = gossipsub::ConfigBuilder::default()
+        .heartbeat_interval(gossip_heartbeat)
+        .validation_mode(gossipsub::ValidationMode::Strict)
+        .max_transmit_size(max_chunk_size_bytes * 2)
+        .build()
+        .map_err(std::io::Error::other)?;
+
+    let mut gossipsub = gossipsub::Behaviour::new(
         gossipsub::MessageAuthenticity::Signed(local_key.clone()),
-        gossipsub::ConfigBuilder::default()
-            .heartbeat_interval(gossip_heartbeat)
-            .validation_mode(gossipsub::ValidationMode::Strict)
-            .max_transmit_size(max_chunk_size_bytes * 2)
-            .build()
-            .map_err(std::io::Error::other)?,
+        gossipsub_config,
     )?;
+
+    // E2 FIX: Enable gossipsub peer scoring to penalize misbehaving peers.
+    // Without scoring, an attacker can flood the mesh with invalid messages
+    // and gossipsub has no mechanism to deprioritize them.
+    let peer_score_params = gossipsub::PeerScoreParams {
+        // Decay scoring data slowly (retain misbehaviour memory)
+        decay_interval: Duration::from_secs(60),
+        decay_to_zero: 0.01,
+        // IP colocation penalty: penalize multiple peers from same IP
+        ip_colocation_factor_weight: -5.0,
+        ip_colocation_factor_threshold: 3.0,
+        ..Default::default()
+    };
+
+    let peer_score_thresholds = gossipsub::PeerScoreThresholds {
+        gossip_threshold: -100.0,
+        publish_threshold: -200.0,
+        graylist_threshold: -400.0,
+        ..Default::default()
+    };
+
+    gossipsub
+        .with_peer_score(peer_score_params, peer_score_thresholds)
+        .map_err(std::io::Error::other)?;
 
     kademlia.set_mode(Some(kad::Mode::Server));
 
@@ -95,7 +121,16 @@ where
         identify::Behaviour::new(identify::Config::new(protocol_version, local_key.public()));
 
     let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
-    let relay_server = relay::Behaviour::new(local_peer_id, relay::Config::default());
+    // N2 FIX: Configure relay with explicit circuit and reservation limits.
+    // Default relay config allows unbounded reservations, enabling resource exhaustion.
+    let relay_config = relay::Config {
+        max_reservations: 64,
+        max_reservations_per_peer: 4,
+        max_circuits: 128,
+        max_circuits_per_peer: 4,
+        ..relay::Config::default()
+    };
+    let relay_server = relay::Behaviour::new(local_peer_id, relay_config);
     let dcutr = dcutr::Behaviour::new(local_peer_id);
     let autonat = autonat::Behaviour::new(local_peer_id, autonat::Config::default());
 
@@ -110,6 +145,19 @@ where
         retrieval_config,
     );
 
+    // E1/E5 FIX: Connection limits to prevent eclipse attacks.
+    // Caps the total number of established connections and per-peer connections.
+    // max_established_per_peer prevents a single PeerId from opening many connections.
+    let connection_limits = connection_limits::Behaviour::new(
+        connection_limits::ConnectionLimits::default()
+            .with_max_established(Some(192))
+            .with_max_established_incoming(Some(128))
+            .with_max_established_outgoing(Some(64))
+            .with_max_established_per_peer(Some(4))
+            .with_max_pending_incoming(Some(64))
+            .with_max_pending_outgoing(Some(32)),
+    );
+
     Ok(PhalanxBehaviour {
         gossipsub,
         mdns,
@@ -120,6 +168,7 @@ where
         dcutr,
         autonat,
         retrieval,
+        connection_limits,
     })
 }
 
