@@ -22,16 +22,17 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tracing::info;
-
+use zeroize::Zeroizing;
 const MAX_WAL_CHUNK_BYTES: u32 = 16 * 1024 * 1024; // 16 MiB
 const _MAX_WORKBENCH_STATE_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 const MAX_EGRESS_SALVAGE_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
 const AEAD_NONCE_LEN: usize = 24;
 
 pub fn derive_vault_key(identity: &PhalanxIdentity) -> SymmetricKey {
+    let bytes = Zeroizing::new(identity.keypair.to_bytes());
     SymmetricKey(blake3::derive_key(
         "phalanx.vault.v1.disk-encryption",
-        &identity.keypair.to_bytes(),
+        &*bytes,
     ))
 }
 

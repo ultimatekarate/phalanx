@@ -2,6 +2,7 @@ use libp2p::identity::Keypair;
 
 use phalanx_proto::prelude::PhalanxIdentity;
 use phalanx_proto::prelude::*;
+use zeroize::Zeroizing;
 
 pub trait Libp2pExt {
     fn to_libp2p_keypair(&self) -> Keypair;
@@ -10,7 +11,7 @@ pub trait Libp2pExt {
 
 impl Libp2pExt for PhalanxIdentity {
     fn to_libp2p_keypair(&self) -> Keypair {
-        let mut bytes = self.keypair.to_bytes();
+        let mut bytes = Zeroizing::new(self.keypair.to_bytes());
         Keypair::ed25519_from_bytes(&mut bytes)
             .expect("Critical: PhalanxIdentity contains invalid Ed25519 material")
     }
