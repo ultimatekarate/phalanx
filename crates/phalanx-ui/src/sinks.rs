@@ -1,7 +1,14 @@
-use phalanx_proto::prelude::*;
-use zeroize::Zeroize;
-use c2pa::create_signer;
+use std::io::Cursor;
+use std::path::PathBuf;
 
+use anyhow::Result;
+use async_trait::async_trait;
+use c2pa::{create_signer, Builder, SigningAlg};
+use tokio::sync::mpsc;
+use zeroize::Zeroize;
+
+use phalanx_proto::evidence::StorageSequence;
+use phalanx_proto::playback::PlaybackSink;
 pub struct VideoPlayerSink {
     /// Channel to the native UI layer (e.g., a FrameBuffer or MediaSource)
     ui_tx: mpsc::Sender<Vec<u8>>,
@@ -54,27 +61,25 @@ impl VideoExportSink {
         }
     }
 
-    impl VideoExportSink {
-        async fn sign_and_embed(
-            &self, 
-            payload: &[u8], 
-            unsigned_manifest: Vec<u8>
-        ) -> Result<Vec<u8>, SinkError> {
-            // This is the "Hands" responsibility: Secret management.
-            let signer = create_signer::from_files("node_cert.pem", "node_key.pem", None)
-                .map_err(|_| SinkError::CryptoFailure)?;
+    /// Signs and embeds a C2PA manifest into the media payload.
+    /// This is "The Hands" responsibility: secret management and signing.
+    async fn sign_and_embed(
+        &self,
+        builder: &mut Builder,
+        payload: &[u8],
+        format: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        // The Hands provide signing credentials.
+        // TODO: load cert/key paths from node configuration instead of hardcoding.
+        let signer =
+            create_signer::from_files("node_cert.pem", "node_key.pem", SigningAlg::Ed25519, None)?;
 
-            // Use the c2pa crate to embed the manifest into the MP4 stream
-            let mut signed_output = Vec::new();
-            c2pa::embed_bytes(
-                "video/mp4", 
-                payload, 
-                &unsigned_manifest, 
-                signer.as_ref(), 
-                &mut signed_output
-            ).map_err(|_| SinkError::ExportFailed)?;
+        // Builder::sign reads the source asset, embeds the signed C2PA manifest,
+        // and writes the result to dest — all in one shot.
+        let mut source = Cursor::new(payload);
+        let mut dest = Cursor::new(Vec::new());
+        builder.sign(signer.as_ref(), format, &mut source, &mut dest)?;
 
-            Ok(signed_output)
-        }
+        Ok(dest.into_inner())
     }
 }
