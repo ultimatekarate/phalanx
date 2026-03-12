@@ -34,6 +34,7 @@ flate2 = "1.1.9"
 image = "0.25.9"
 bs58 = "0.5.1"
 lz4_flex = "0.11"
+c2pa = "0.78.0"
 [dev-dependencies]
 # For testing the Weaver without a network
 tokio = { version = "1.0", features = ["macros", "rt"] }

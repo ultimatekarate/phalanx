@@ -222,3 +222,37 @@ pub struct Volley {
     pub gaps: Vec<ForensicGap>,
     pub is_complete: bool,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MediaType {
+    #[serde(rename = "video/mp4")]
+    VideoMp4,
+    #[serde(rename = "application/json")]
+    ForensicManifest,
+    #[serde(rename = "image/jpeg")]
+    StillImage,
+}
+
+impl MediaType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::VideoMp4 => "video/mp4",
+            Self::ForensicManifest => "application/json",
+            Self::StillImage => "image/jpeg",
+        }
+    }
+
+    pub fn extension(&self) -> &'static str {
+        match self {
+            Self::VideoMp4 => "mp4",
+            Self::ForensicManifest => "json",
+            Self::StillImage => "jpg",
+        }
+    }
+}
+
+impl fmt::Display for MediaType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
