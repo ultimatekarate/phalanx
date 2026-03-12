@@ -91,23 +91,38 @@ impl IntegrityGate for WitnessEnvelope {
         tolerance: u64,
         anchor: Option<SignatureHash>,
     ) -> Result<Self, ShardError> {
-        // Sticky Trust Pipeline:
-        // If the envelope's prev_hash matches the trusted anchor, we skip
-        // the expensive signature verification. This is the "Fast" path.
-        let is_anchored = anchor.is_some() && anchor == self.prev_hash;
-
-        if !is_anchored && !self.verify_envelope() {
-            error!(event = "integrity_failure", node = %node_id, peer = %self.did, "SIGNATURE_INVALID");
+        // 1. UNCONDITIONAL CRYPTOGRAPHIC VERIFICATION
+        // Forensic Zero-Trust: Never operate on data without signature verification.
+        if !self.verify_envelope() {
+            error!(
+                event = "integrity_failure",
+                node = %node_id,
+                peer = %self.did,
+                "SIGNATURE_INVALID"
+            );
             return Err(ShardError::SigningError(
-                "Signature verification failed".into(),
+                "Cryptographic verification failed: Signature mismatch".into(),
             ));
         }
 
+        // 2. STICKY TRUST OPTIMIZATION (POST-VERIFICATION)
+        // If anchored, we trust the chain continuity and can skip secondary checks.
+        let is_anchored = anchor.is_some() && anchor == self.prev_hash;
+        if is_anchored {
+            return Ok(self);
+        }
+
+        // 3. TEMPORAL GATE (Only for non-anchored or genesis units)
         let now = clock.now();
         match self.evidence.timestamp().verify_freshness(now, tolerance) {
             Ok(_) => Ok(self),
             Err(e) => {
-                error!(event = "temporal_failure", node = %node_id, peer = %self.did, "TIME_INVALID");
+                error!(
+                    event = "temporal_failure",
+                    node = %node_id,
+                    peer = %self.did,
+                    "TIME_INVALID"
+                );
                 Err(ShardError::InvalidConfiguration(e.to_string()))
             }
         }
