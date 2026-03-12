@@ -1,5 +1,4 @@
 // crates/phalanx-forensics/src/cryptography/grant.rs
-
 use crate::cryptography::bridge::{ed_to_x25519_pk, ed_to_x25519_sk, resolve_did_pk};
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
@@ -7,6 +6,8 @@ use chacha20poly1305::{
 };
 use phalanx_proto::crypto::{CryptoError, SealedLocator};
 use phalanx_proto::prelude::*;
+use rand_core::OsRng;
+use rand_core::RngCore;
 
 /// The Verb "To Authorize": Defines the forensic capability to secure and recover
 /// symmetric keys using asymmetric identities.
@@ -44,7 +45,8 @@ impl GrantAuthority for SealedLocator {
 
         // 4. Authenticated Encryption (AEAD)
         let cipher = XChaCha20Poly1305::new(shared_secret.as_bytes().into());
-        let nonce_bytes = rand::random::<[u8; 24]>();
+        let mut nonce_bytes = [0u8; 24];
+        OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = XNonce::from_slice(&nonce_bytes);
 
         // Include Sender DID in Authenticated Associated Data (AAD) to prevent spoofing

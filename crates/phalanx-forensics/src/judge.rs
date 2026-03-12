@@ -85,7 +85,8 @@ impl PayloadCipher for DataPayload {
 
         use chacha20poly1305::KeyInit; // Local scope only
         let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
-        let nonce_bytes = rand::random::<[u8; 24]>();
+        let mut nonce_bytes = [0u8; 24];
+        OsRng.fill_bytes(&mut nonce_bytes);
         let x_nonce = XNonce::from_slice(&nonce_bytes);
 
         use chacha20poly1305::aead::Aead; // Local scope only
