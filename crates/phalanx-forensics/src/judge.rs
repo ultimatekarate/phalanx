@@ -82,7 +82,7 @@ impl PayloadCipher for DataPayload {
             DataPayload::Clear(data) => data.clone(),
             DataPayload::Compressed(data) => data.clone(),
             DataPayload::Encrypted { .. } => return Ok(()), // Already encrypted; idempotent
-            DataPayload::Missing(_) => return Err(CryptoError::EncryptionFailure),
+            DataPayload::Missing => return Err(CryptoError::EncryptionFailure),
         };
 
         use chacha20poly1305::KeyInit; // Local scope only

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use phalanx_forensics::gate::WitnessGate;
 use phalanx_forensics::prelude::TransientJournal;
-use phalanx_forensics::reassembler::Chunkifier;
+use phalanx_forensics::reassembler::FountainChunkifier;
 use phalanx_forensics::Reassembler;
 use phalanx_node::actors::storage::{NoOpJournal, StorageActor, StorageCommand};
 use phalanx_node::config::NodeConfig;
@@ -16,7 +16,9 @@ use phalanx_proto::evidence::{
     ChunkType, DataPayload, Evidence, ForensicMetrics, StorageSequence, VideoShard,
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
-use phalanx_proto::prelude::{EncodingSymbolId, PendingEgress, ShardChunk, ShardError};
+use phalanx_proto::prelude::{
+    EncodingSymbolId, PendingEgress, RepairRatio, ShardChunk, ShardError, SymbolSize,
+};
 use phalanx_proto::retrieval::VolleyResponse;
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
@@ -195,19 +197,19 @@ async fn test_reputation_gate_signature_mismatch() {
         *sig_byte ^= 0xFF;
     }
 
+    // 3. Fountain-encode the poisoned envelope into real RaptorQ symbols
     let poisoned_data = postcard::to_allocvec(&envelope).expect("Serialization failed");
-    let timestamp = PhalanxTimestamp::now();
-    let chunk = ShardChunk {
-        shard_id: ShardId(666),
-        encoding_symbol_id: EncodingSymbolId(0),
-        chunk_type: ChunkType::Witnessed,
-        is_terminal: true,
-        data: poisoned_data,
-        owner_did: attacker_identity.did.clone(),
-        timestamp,
-    };
+    let chunks = poisoned_data
+        .fountain_chunkify(
+            ShardId(666),
+            attacker_identity.did.clone(),
+            SymbolSize(128),
+            ChunkType::Witnessed,
+            RepairRatio::new(1.0), // Source only — all symbols needed to trigger decode
+        )
+        .unwrap();
 
-    // 3. Setup Channels and Actor
+    // 4. Setup Channels and Actor
     let vault_key = derive_vault_key(&my_identity, &[0u8; 32]);
     let guardian = Guardian::new(
         &temp.path().to_string_lossy(),
@@ -219,9 +221,29 @@ async fn test_reputation_gate_signature_mismatch() {
     let (actor, storage_rx, storage_tx) =
         build_test_actor(config.clone(), my_identity.clone(), NoOpJournal, guardian);
 
-    // 4. Inject Poisoned Chunk via Ingest Command
+    // 5. Start Actor
+    let actor_handle = tokio::spawn(async move {
+        actor.run(storage_rx).await;
+    });
+
+    // 6. Send all fountain symbols. The last one triggers decode → integrity gate
+    // catches the poisoned signature. Earlier symbols return Ok(()) (still accumulating).
+    for chunk in chunks.iter().take(chunks.len() - 1) {
+        let (tx, _) = oneshot::channel(); // Ignore intermediate replies
+        let unit = ForensicUnit::<_, Verified>::new_verified(chunk.clone());
+        storage_tx
+            .send(StorageCommand::Ingest {
+                unit,
+                reply_to: tx,
+                ttl: Duration::from_secs(1),
+            })
+            .await
+            .unwrap();
+    }
+
+    // Send the final symbol and keep its reply channel
     let (reply_tx, reply_rx) = oneshot::channel();
-    let unit = ForensicUnit::<_, Verified>::new_verified(chunk);
+    let unit = ForensicUnit::<_, Verified>::new_verified(chunks.last().unwrap().clone());
     storage_tx
         .send(StorageCommand::Ingest {
             unit,
@@ -231,12 +253,7 @@ async fn test_reputation_gate_signature_mismatch() {
         .await
         .unwrap();
 
-    // 5. Start Actor
-    let actor_handle = tokio::spawn(async move {
-        actor.run(storage_rx).await;
-    });
-
-    // 6. Verification: Listen for the Forensic Escalation
+    // 7. Verification: Listen for the Forensic Escalation
     let result = tokio::time::timeout(Duration::from_millis(500), reply_rx).await;
 
     // Cleanup
@@ -300,16 +317,22 @@ async fn test_salvage_on_node_death() {
         .unwrap();
 
     let serialized_envelope = postcard::to_allocvec(&envelope).unwrap();
-    let chunk_size = serialized_envelope.len().div_ceil(4);
+    // Fountain-encode with no repair symbols (RepairRatio 1.0) so we need ALL
+    // source symbols. Small symbol size → multiple symbols for partial-send test.
     let chunks = serialized_envelope
-        .chunkify(
+        .fountain_chunkify(
             ShardId(999),
             identity_did.clone(),
-            chunk_size,
+            SymbolSize(128),
             ChunkType::Witnessed,
+            RepairRatio::new(1.0), // Source only — every symbol is needed
         )
         .unwrap();
-    assert_eq!(chunks.len(), 4, "Expected exactly 4 chunks");
+    let total_chunks = chunks.len();
+    assert!(
+        total_chunks >= 2,
+        "Need at least 2 fountain symbols for salvage test"
+    );
 
     // 2. PHASE 1: First actor ingests 3 of 4 chunks, then "dies"
     {
@@ -332,8 +355,8 @@ async fn test_salvage_on_node_death() {
             actor.run(storage_rx).await;
         });
 
-        // Send 3 of 4 chunks
-        for chunk in chunks.iter().take(3) {
+        // Send all but the last chunk (not enough for decoder without repair)
+        for chunk in chunks.iter().take(total_chunks - 1) {
             let (tx, _) = oneshot::channel();
             let unit = ForensicUnit::<_, Verified>::new_verified(chunk.clone());
             storage_tx
@@ -354,7 +377,7 @@ async fn test_salvage_on_node_death() {
         actor_handle.abort();
         let _ = actor_handle.await;
     }
-    // Actor is now dead. WAL should contain 3 chunks on disk.
+    // Actor is now dead. WAL should contain N-1 fountain symbols on disk.
 
     // 3. PHASE 2: "Reboot" — new actor recovers from WAL, receives final chunk
     {
@@ -377,9 +400,9 @@ async fn test_salvage_on_node_death() {
             actor2.run(storage_rx2).await;
         });
 
-        // Send the 4th and final chunk
+        // Send the final chunk (triggers fountain decode completion)
         let (tx, _) = oneshot::channel();
-        let unit = ForensicUnit::<_, Verified>::new_verified(chunks[3].clone());
+        let unit = ForensicUnit::<_, Verified>::new_verified(chunks[total_chunks - 1].clone());
         storage_tx2
             .send(StorageCommand::Ingest {
                 unit,
@@ -442,18 +465,17 @@ async fn test_stronghold_ingestion_and_persistence() {
         .seal(&peer_identity, peer_net_id.clone(), None)
         .expect("Failed to seal evidence");
 
-    // Serialize the envelope into a single-chunk ShardChunk
+    // Fountain-encode the envelope into real RaptorQ symbols
     let valid_envelope_data = postcard::to_allocvec(&envelope).expect("Serialization failed");
-    let timestamp = PhalanxTimestamp::now();
-    let chunk = ShardChunk {
-        shard_id: ShardId(101),
-        encoding_symbol_id: EncodingSymbolId(0),
-        chunk_type: ChunkType::Witnessed,
-        is_terminal: true,
-        data: valid_envelope_data,
-        owner_did: peer_identity.did.clone(),
-        timestamp,
-    };
+    let chunks = valid_envelope_data
+        .fountain_chunkify(
+            ShardId(101),
+            peer_identity.did.clone(),
+            SymbolSize(128),
+            ChunkType::Witnessed,
+            RepairRatio::new(1.0),
+        )
+        .unwrap();
 
     // 3. Wire up a StorageActor directly (no harness needed)
     let vault_key = derive_vault_key(&identity, &[0u8; 32]);
@@ -472,17 +494,19 @@ async fn test_stronghold_ingestion_and_persistence() {
         actor.run(storage_rx).await;
     });
 
-    // 4. Inject the chunk via StorageCommand::Ingest
-    let (tx, _) = oneshot::channel();
-    let unit = ForensicUnit::<_, Verified>::new_verified(chunk);
-    storage_tx
-        .send(StorageCommand::Ingest {
-            unit,
-            reply_to: tx,
-            ttl: Duration::from_secs(1),
-        })
-        .await
-        .expect("Injection failed");
+    // 4. Inject all fountain symbols via StorageCommand::Ingest
+    for chunk in &chunks {
+        let (tx, _) = oneshot::channel();
+        let unit = ForensicUnit::<_, Verified>::new_verified(chunk.clone());
+        storage_tx
+            .send(StorageCommand::Ingest {
+                unit,
+                reply_to: tx,
+                ttl: Duration::from_secs(1),
+            })
+            .await
+            .expect("Injection failed");
+    }
 
     // 5. Wait for the Crucible TTL to flush the volley to disk
     // test_defaults uses cleanup_interval_secs=5, but the crucible has a 1s internal TTL

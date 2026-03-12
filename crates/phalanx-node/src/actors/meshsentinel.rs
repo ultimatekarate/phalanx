@@ -181,6 +181,8 @@ impl<I: IngressPort> MeshSentinel<I> {
             deps.config.network.video_topic.clone(),
             deps.config.network.audio_topic.clone(),
             local_network_id.clone(),
+            deps.config.network.symbol_size,
+            deps.config.network.repair_ratio,
         );
 
         tokio::spawn(media_actor.run());

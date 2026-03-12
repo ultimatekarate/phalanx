@@ -24,8 +24,8 @@ pub mod prelude {
 
     // Evidence Nouns
     pub use crate::evidence::{
-        AudioFrame, DataPayload, EnvelopeState, ForensicMetrics, FragmentedEnvelope, ShardChunk,
-        ShardGapReport, SignatureHash, VideoFrame,
+        AudioFrame, DataPayload, EnvelopeState, ForensicMetrics, ShardChunk, SignatureHash,
+        VideoFrame,
     };
 
     pub use crate::constants::{VOLLEY_SIZE_THRESHOLD, VOLLEY_TIME_THRESHOLD};

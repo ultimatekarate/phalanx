@@ -4,16 +4,24 @@ use crate::crucible::{Crucible, Mold};
 use crate::prelude::TransientJournal;
 use image::DynamicImage;
 use phalanx_proto::evidence::{
-    AudioShard, ChunkType, ForensicMetrics, StorageSequence, VideoShard, WitnessEnvelope,
+    AudioShard, ChunkType, EnvelopeState, ForensicMetrics, StorageSequence, VideoShard,
+    WitnessEnvelope,
 };
 use phalanx_proto::identity::{Did, ShardId};
 use phalanx_proto::prelude::{
-    DataPayload, EnvelopeState, FragmentedEnvelope, PhalanxTimestamp, ShardChunk, ShardError,
-    ShardGapReport, VolleyId,
+    DataPayload, EncodingSymbolId, PhalanxTimestamp, RepairRatio, ShardChunk, ShardError,
+    SymbolSize, VolleyId,
 };
 use phalanx_proto::types::PowerState;
+use raptorq::{Decoder, Encoder, EncodingPacket, ObjectTransmissionInformation, PayloadId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// OTI (ObjectTransmissionInformation) prefix length in bytes.
+/// Every fountain symbol's data field starts with 12 bytes of OTI,
+/// making each symbol self-describing — the receiver can initialize
+/// the decoder from ANY received symbol.
+const OTI_PREFIX_LEN: usize = 12;
 
 // BRIDGE API (Restored for Hardware Drivers) ---
 pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, String> {
@@ -155,26 +163,9 @@ impl Reassembler {
         journal.record_chunk(&chunk).await?;
         journal.sync().await?;
 
-        let shard_id = chunk.shard_id;
-        let owner_did = chunk.owner_did.clone();
-
         match self.active_shards.process(chunk) {
             Ok(Some(envelope)) => Ok(Some(EnvelopeState::Intact(envelope))),
-            Ok(None) => {
-                if let Some(buffer) = self.active_shards.get(&shard_id) {
-                    Ok(Some(EnvelopeState::Fragmented(FragmentedEnvelope {
-                        shard_id,
-                        owner_did,
-                        gap_report: ShardGapReport {
-                            shard_id,
-                            missing_indices: buffer.missing_indices(),
-                        },
-                        partial_data: buffer.parts.clone(),
-                    })))
-                } else {
-                    Err(ShardError::CapacityExceeded(0))
-                }
-            }
+            Ok(None) => Ok(None),
             // THE FIX: Map the Crucible's generic GuardianError back to a ShardError
             Err(guardian_error) => Err(ShardError::SerializationError(format!(
                 "Reassembly rejected by Crucible: {:?}",
@@ -196,45 +187,44 @@ impl Reassembler {
     }
 }
 
-// --- THE SHARD BUFFER (Evolution of ReassemblyBuffer) ---
+// --- THE SHARD BUFFER (Fountain-mode RaptorQ decoder state) ---
 
 /// M1 FIX: Maximum bytes a single shard reassembly may accumulate.
 /// Prevents memory amplification from attackers sending oversized chunks.
 const MAX_SHARD_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
+
+/// Resource guard: hard cap of 2,000 symbols per context.
+/// Domain grounding: 1MB frame at 1,200-byte MTU = 834 chunks. 2,000 gives 2.4× headroom.
+const MAX_SYMBOLS_PER_CONTEXT: u32 = 2_000;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ShardBuffer {
     pub received_count: u32,
     /// Set when a symbol with `is_terminal == true` arrives.
     pub terminal_received: bool,
-    /// Parts keyed by encoding symbol ID (u32 inner value).
+    /// Raw symbol data keyed by ESI. Stored for:
+    /// 1. Duplicate detection (skip already-received ESIs)
+    /// 2. WAL recovery (decoder reconstructed by replaying stored symbols)
+    /// 3. accumulated_bytes() resource accounting
     pub parts: BTreeMap<u32, Vec<u8>>,
     pub owner_did: Did,
+    /// RaptorQ fountain decoder. Not serializable — reconstructed from
+    /// stored symbols during WAL recovery (journal replay through Crucible).
+    #[serde(skip)]
+    fountain_decoder: Option<Decoder>,
+    /// Set when the decoder reports successful decode.
+    #[serde(skip)]
+    decoded_data: Option<Vec<u8>>,
 }
 
 impl ShardBuffer {
-    /// Highest symbol ID we've received, or 0 if empty.
-    pub fn max_symbol_id(&self) -> u32 {
-        self.parts.keys().next_back().copied().unwrap_or(0)
-    }
-
-    /// Indices missing in the range 0..=max_symbol_id.
-    /// Only meaningful once `terminal_received` is true (we know the range).
-    pub fn missing_indices(&self) -> Vec<u32> {
-        if self.parts.is_empty() {
-            return vec![];
-        }
-        let max = self.max_symbol_id();
-        (0..=max).filter(|i| !self.parts.contains_key(i)).collect()
-    }
-
     /// Total bytes currently held across all received parts.
     pub fn accumulated_bytes(&self) -> usize {
         self.parts.values().map(|v| v.len()).sum()
     }
 }
 
-// --- THE SHARD MOLD ---
+// --- THE SHARD MOLD (Fountain-only) ---
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ShardMold;
@@ -256,6 +246,8 @@ impl Mold for ShardMold {
             terminal_received: item.is_terminal,
             parts: BTreeMap::new(),
             owner_did: item.owner_did.clone(),
+            fountain_decoder: None,
+            decoded_data: None,
         }
     }
 
@@ -275,9 +267,9 @@ impl Mold for ShardMold {
             ));
         }
 
-        // Resource guard: hard cap of 2,000 chunks per context (Phase 0a).
-        if acc.received_count >= 2_000 {
-            return Err(ShardError::CapacityExceeded(2_000));
+        // Resource guard: hard cap of 2,000 symbols per context.
+        if acc.received_count >= MAX_SYMBOLS_PER_CONTEXT {
+            return Err(ShardError::CapacityExceeded(MAX_SYMBOLS_PER_CONTEXT as u64));
         }
 
         let esi = item.encoding_symbol_id.0;
@@ -285,47 +277,70 @@ impl Mold for ShardMold {
             acc.terminal_received = true;
         }
 
-        if let std::collections::btree_map::Entry::Vacant(e) = acc.parts.entry(esi) {
-            e.insert(item.data);
-            acc.received_count += 1;
+        // Skip duplicate symbols
+        if acc.parts.contains_key(&esi) {
+            return Ok(());
         }
 
-        // Raw chunks have no causality, so we just return Ok
+        let raw_data = item.data;
+
+        // Validate OTI prefix
+        if raw_data.len() < OTI_PREFIX_LEN {
+            return Err(ShardError::InvalidSize(
+                "Symbol data too short for OTI prefix".into(),
+            ));
+        }
+
+        // Extract OTI and symbol payload (copy symbol data before moving raw_data)
+        let oti_bytes: [u8; 12] = raw_data[..OTI_PREFIX_LEN]
+            .try_into()
+            .expect("OTI slice is exactly 12 bytes");
+        let symbol_data = raw_data[OTI_PREFIX_LEN..].to_vec();
+
+        // Initialize decoder on first symbol (lazy — any symbol carries the OTI)
+        if acc.fountain_decoder.is_none() {
+            let config = ObjectTransmissionInformation::deserialize(&oti_bytes);
+            acc.fountain_decoder = Some(Decoder::new(config));
+        }
+
+        // Store raw data (OTI + symbol) for WAL recovery and dedup tracking
+        acc.parts.insert(esi, raw_data);
+        acc.received_count += 1;
+
+        // Feed to fountain decoder (only if not already decoded)
+        if acc.decoded_data.is_none() {
+            let payload_id = PayloadId::new(0, esi); // source_block_number = 0 (per-envelope encoding)
+            let packet = EncodingPacket::new(payload_id, symbol_data);
+            if let Some(decoder) = acc.fountain_decoder.as_mut() {
+                if let Some(decoded) = decoder.decode(packet) {
+                    acc.decoded_data = Some(decoded);
+                }
+            }
+        }
+
         Ok(())
     }
 
     fn is_ready(acc: &Self::Accumulator, _elapsed: std::time::Duration) -> bool {
-        // Completeness derived from data: terminal received AND no gaps in sequence.
-        acc.terminal_received && acc.missing_indices().is_empty()
+        // Fountain completeness: the decoder has successfully reconstructed the original data.
+        acc.decoded_data.is_some()
     }
 
     fn assemble(&self, _key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output> {
-        // 1. O(n) Capacity Calculation: Prevent multiple reallocations
-        let total_size: usize = acc.parts.values().map(|v| v.len()).sum();
+        let decoded = acc.decoded_data?;
 
-        // S3 FIX: Assembly size bound. Reject payloads that exceed our memory budget.
-        if total_size > MAX_SHARD_BYTES {
+        // S3 FIX: Assembly size bound.
+        if decoded.len() > MAX_SHARD_BYTES {
             tracing::warn!(
-                total_size,
+                total_size = decoded.len(),
                 limit = MAX_SHARD_BYTES,
-                "S3: Assembly rejected — total size exceeds safe limit"
+                "S3: Assembly rejected — decoded size exceeds safe limit"
             );
             return None;
         }
 
-        // 2. Exact Allocation
-        let mut full_payload = Vec::with_capacity(total_size);
-
-        // 3. Sequential Assembly
-        // BTreeMap iteration is ordered. Concatenate 0..=max_symbol_id.
-        let max_esi = acc.max_symbol_id();
-        for i in 0..=max_esi {
-            let chunk_data = acc.parts.get(&i)?;
-            full_payload.extend_from_slice(chunk_data);
-        }
-
-        // 4. Deserialization Gate
-        crate::gate::unmarshal(&full_payload, "ShardMold::assemble").ok()
+        // Deserialization Gate: unmarshal the decoded bytes into a WitnessEnvelope.
+        crate::gate::unmarshal(&decoded, "ShardMold::assemble").ok()
     }
 }
 
@@ -390,57 +405,105 @@ impl VideoWeaver for Vec<u8> {
     }
 }
 
-/// The formal trait for slicing forensic evidence into network packets.
-pub trait Chunkifier {
-    fn chunkify(
+// --- FOUNTAIN CHUNKIFIER (Phase 1b) ---
+
+/// The formal trait for slicing forensic evidence into RaptorQ fountain-coded
+/// network symbols. Each symbol is self-describing: prefixed with 12 bytes of
+/// ObjectTransmissionInformation so the receiver can initialize the decoder
+/// from ANY received symbol.
+pub trait FountainChunkifier {
+    fn fountain_chunkify(
         &self,
         shard_id: ShardId,
         owner_did: Did,
-        chunk_size: usize,
+        symbol_size: SymbolSize,
         chunk_type: ChunkType,
+        repair_ratio: RepairRatio,
     ) -> Result<Vec<ShardChunk>, ShardError>;
 }
 
-impl Chunkifier for Vec<u8> {
-    fn chunkify(
+impl FountainChunkifier for Vec<u8> {
+    fn fountain_chunkify(
         &self,
         shard_id: ShardId,
         owner_did: Did,
-        chunk_size: usize,
+        symbol_size: SymbolSize,
         chunk_type: ChunkType,
+        repair_ratio: RepairRatio,
     ) -> Result<Vec<ShardChunk>, ShardError> {
-        use phalanx_proto::types::EncodingSymbolId;
-
-        // 1. Safety check for empty data or invalid chunk sizes
         if self.is_empty() {
             return Ok(Vec::new());
         }
-        if chunk_size == 0 {
-            return Err(ShardError::InvalidSize("Chunk size cannot be zero".into()));
+        if symbol_size.0 == 0 {
+            return Err(ShardError::InvalidSize("Symbol size cannot be zero".into()));
         }
 
-        let timestamp = PhalanxTimestamp::now();
-        let slices: Vec<&[u8]> = self.chunks(chunk_size).collect();
-        let last_index = slices.len().saturating_sub(1);
+        // 1. Create RaptorQ encoder
+        let encoder = Encoder::with_defaults(self, symbol_size.0 as u16);
+        let config = encoder.get_config();
+        let oti_bytes = config.serialize(); // [u8; 12]
 
-        // Slice and Map — encoding_symbol_id is the sequential index,
-        // is_terminal is true on the last chunk only.
-        let chunks = slices
+        // 2. Calculate repair symbol count from ratio
+        // source_symbols ≈ ceil(data_len / symbol_size)
+        let source_symbol_count = (self.len() as f32 / symbol_size.0 as f32).ceil() as u32;
+        let repair_count =
+            ((source_symbol_count as f32) * (repair_ratio.get() - 1.0)).ceil() as u32;
+
+        // 3. Generate source + repair packets
+        let packets = encoder.get_encoded_packets(repair_count);
+        let total = packets.len();
+        let last_index = total.saturating_sub(1);
+        let timestamp = PhalanxTimestamp::now();
+
+        // 4. Build ShardChunks with OTI prefix on each symbol
+        let chunks = packets
             .into_iter()
             .enumerate()
-            .map(|(index, data)| ShardChunk {
-                shard_id,
-                encoding_symbol_id: EncodingSymbolId(index as u32),
-                is_terminal: index == last_index,
-                data: data.to_vec(),
-                owner_did: owner_did.clone(),
-                chunk_type,
-                timestamp,
+            .map(|(i, packet)| {
+                let esi = packet.payload_id().encoding_symbol_id();
+                let symbol_data = packet.data().to_vec();
+
+                // Prefix with OTI (12 bytes) — 1% overhead at 1,200-byte symbols
+                let mut data = Vec::with_capacity(OTI_PREFIX_LEN + symbol_data.len());
+                data.extend_from_slice(&oti_bytes);
+                data.extend_from_slice(&symbol_data);
+
+                ShardChunk {
+                    shard_id,
+                    encoding_symbol_id: EncodingSymbolId(esi),
+                    is_terminal: i == last_index,
+                    data,
+                    owner_did: owner_did.clone(),
+                    chunk_type,
+                    timestamp,
+                }
             })
             .collect();
 
         Ok(chunks)
     }
+}
+
+// --- TEST UTILITIES ---
+
+/// Test helper: creates fountain-coded ShardChunks from raw data.
+/// Uses the actual production encode path — no dead code under test.
+#[cfg(test)]
+pub fn make_test_fountain_chunks(
+    data: &[u8],
+    shard_id: ShardId,
+    owner: Did,
+    symbol_size: SymbolSize,
+) -> Vec<ShardChunk> {
+    data.to_vec()
+        .fountain_chunkify(
+            shard_id,
+            owner,
+            symbol_size,
+            ChunkType::Witnessed,
+            RepairRatio::default(), // 1.5× repair
+        )
+        .expect("Test fountain encoding should not fail")
 }
 
 #[cfg(test)]
@@ -451,7 +514,7 @@ mod tests {
     use phalanx_proto::crypto::SymmetricKey;
     use phalanx_proto::evidence::{Evidence, SignatureHash};
     use phalanx_proto::identity::PhalanxIdentity;
-    use phalanx_proto::prelude::{EncodingSymbolId, PendingEgress};
+    use phalanx_proto::prelude::PendingEgress;
     use phalanx_proto::storage::HandoverProof;
 
     fn get_test_key() -> SymmetricKey {
@@ -590,156 +653,223 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_reassembler_chunk_reassembly() {
-        let identity = PhalanxIdentity::new_ephemeral();
-        let mut reassembler = Reassembler::new();
-        let mut journal = MockJournal;
-        let local_peer = identity.network_id.clone();
+    // --- FOUNTAIN CODE TESTS ---
 
-        // 1. Create a valid, fully-populated VideoShard
+    #[test]
+    fn test_fountain_roundtrip_encode_decode() {
+        // 1. Create a real WitnessEnvelope
+        let identity = PhalanxIdentity::new_ephemeral();
         let evidence = Evidence::Video(VideoShard {
             timestamp: PhalanxTimestamp::now(),
             sequence_id: StorageSequence(1),
             fps: 30,
-            volley_id: VolleyId::new("id"),
+            volley_id: VolleyId::new("fountain_test"),
             payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             lens_metrics: ForensicMetrics::default(),
         });
-
-        // 2. Wrap in an envelope and sign it
         let original_envelope =
-            WitnessEnvelope::sign_envelope(evidence, &identity.clone(), local_peer.clone(), None)
+            WitnessEnvelope::sign_envelope(evidence, &identity, identity.network_id.clone(), None)
                 .expect("Failed to sign envelope");
 
-        let serialized_envelope =
-            postcard::to_allocvec(&original_envelope).expect("Failed to serialize envelope");
+        let serialized = postcard::to_allocvec(&original_envelope).expect("serialize");
 
-        // 3. Shard the serialized bytes into two halves
-        let mid = serialized_envelope.len() / 2;
-        let (part1, part2) = serialized_envelope.split_at(mid);
-        let timestamp = PhalanxTimestamp::now();
+        // 2. Fountain-encode into symbols
+        let shard_id = ShardId(42);
+        let chunks =
+            make_test_fountain_chunks(&serialized, shard_id, identity.did.clone(), SymbolSize(256));
+        assert!(!chunks.is_empty(), "Should produce at least one symbol");
+        assert!(
+            chunks.last().unwrap().is_terminal,
+            "Last symbol must be terminal"
+        );
 
-        let chunk_1 = ShardChunk {
-            shard_id: ShardId(99),
-            encoding_symbol_id: EncodingSymbolId(0),
-            is_terminal: false,
-            data: part1.to_vec(),
-            owner_did: identity.did.clone(),
-            chunk_type: ChunkType::Witnessed,
-            timestamp,
-        };
-
-        let chunk_2 = ShardChunk {
-            shard_id: ShardId(99),
-            encoding_symbol_id: EncodingSymbolId(1),
-            is_terminal: true,
-            data: part2.to_vec(),
-            owner_did: identity.did.clone(),
-            chunk_type: ChunkType::Witnessed,
-            timestamp,
-        };
-
-        // 4. First chunk: returns Fragmented (not yet complete)
-        let result_1 = reassembler
-            .ingest_chunk(chunk_1, &mut journal)
-            .await
-            .expect("ingest_chunk failed");
+        // 3. Decode by feeding ALL symbols through ShardMold
+        let mold = ShardMold;
+        let mut acc = ShardMold::init_accumulator(&chunks[0]);
+        for chunk in &chunks {
+            let _ = ShardMold::ingest(&mut acc, chunk.clone());
+        }
 
         assert!(
-            matches!(result_1, Some(EnvelopeState::Fragmented(_))),
-            "Buffer should return Fragmented state after first chunk"
+            ShardMold::is_ready(&acc, std::time::Duration::ZERO),
+            "Decoder should complete with all symbols"
         );
 
-        // 5. Second chunk: completes reassembly
-        let result_2 = reassembler
-            .ingest_chunk(chunk_2, &mut journal)
-            .await
-            .expect("ingest_chunk failed");
-
-        assert!(result_2.is_some(), "Reassembly should be complete");
-        let recovered_envelope = match result_2.unwrap() {
-            EnvelopeState::Intact(env) => env,
-            EnvelopeState::Fragmented(gap) => {
-                panic!(
-                    "Expected Intact envelope, but received Fragmented state: {:?}",
-                    gap
-                );
-            }
-        };
-
-        // Assert cryptographic integrity survived the sharding/ingestion process
+        let recovered = mold
+            .assemble(shard_id, acc)
+            .expect("Assembly should succeed");
         assert_eq!(
-            recovered_envelope.witness_signature,
-            original_envelope.witness_signature
-        );
-        assert_eq!(
-            reassembler.active_shards.active_count(),
-            0,
-            "Memory leak: Buffer not cleared"
+            recovered.witness_signature, original_envelope.witness_signature,
+            "Cryptographic integrity must survive fountain encode/decode"
         );
     }
 
     #[test]
-    fn test_shard_mold_gap_reporting() {
-        // 1. Setup metadata
+    fn test_fountain_survives_30_percent_loss() {
+        // 1. Create and serialize envelope
         let identity = PhalanxIdentity::new_ephemeral();
-        let shard_id = ShardId(505);
-        let vid = VolleyId::new("gap_test");
+        let evidence = Evidence::Video(VideoShard {
+            timestamp: PhalanxTimestamp::now(),
+            sequence_id: StorageSequence(1),
+            fps: 30,
+            volley_id: VolleyId::new("loss_test"),
+            payload: DataPayload::Clear(vec![0xCA; 2048]), // Large enough to produce multiple symbols
+            lens_metrics: ForensicMetrics::default(),
+        });
+        let original_envelope =
+            WitnessEnvelope::sign_envelope(evidence, &identity, identity.network_id.clone(), None)
+                .expect("sign");
 
-        // 2. Create a real WitnessEnvelope to simulate serialized data
-        let video_shard =
-            create_video_shard(vec![vec![0xAA, 0xBB]], StorageSequence(1), 30, vid).unwrap();
+        let serialized = postcard::to_allocvec(&original_envelope).expect("serialize");
 
-        let envelope = WitnessEnvelope::sign_envelope(
-            Evidence::Video(video_shard),
-            &identity.clone(),
-            identity.network_id.clone(),
-            None,
-        )
-        .unwrap();
-
-        let full_serialized_data = postcard::to_allocvec(&envelope).unwrap();
-
-        // Split data into 3 mock chunks
-        let chunk_size = (full_serialized_data.len() / 3) + 1;
-        let mut parts = BTreeMap::new();
-        parts.insert(0, full_serialized_data[0..chunk_size].to_vec());
-        // We SKIP index 1 to simulate a network drop
-        parts.insert(2, full_serialized_data[(chunk_size * 2)..].to_vec());
-
-        // 3. Manually populate the Accumulator (ShardBuffer)
-        let acc = ShardBuffer {
-            received_count: 2,       // 0 and 2 arrived, 1 is missing
-            terminal_received: true, // we know the full extent
-            parts,
-            owner_did: identity.did.clone(),
-        };
-
-        // 4. EXECUTE ASSEMBLE (The Triage Path)
-        let strategy = ShardMold;
-        // assemble returns None when parts are missing (can't concatenate with gaps)
-        let result = strategy.assemble(shard_id, acc);
-
-        // ShardMold::assemble returns None when a chunk is missing because
-        // the loop `acc.parts.get(&i)?` short-circuits. Verify the buffer's
-        // gap detection works correctly instead.
-        assert!(
-            result.is_none(),
-            "Assemble should return None when chunks are missing"
+        // 2. Fountain-encode with 1.5× repair ratio (50% redundancy)
+        let shard_id = ShardId(99);
+        let all_chunks = make_test_fountain_chunks(
+            &serialized,
+            shard_id,
+            identity.did.clone(),
+            SymbolSize(128), // Small symbols → more symbols → better loss test
         );
 
-        // Verify the gap reporting logic independently
-        let mut parts2 = BTreeMap::new();
-        parts2.insert(0, vec![1]);
-        parts2.insert(2, vec![3]);
-        let buffer = ShardBuffer {
-            received_count: 2,
-            terminal_received: true,
-            parts: parts2,
-            owner_did: identity.did.clone(),
+        // Verify we have enough symbols to lose 30%
+        assert!(
+            all_chunks.len() >= 4,
+            "Need enough symbols for meaningful loss test, got {}",
+            all_chunks.len()
+        );
+
+        // 3. Drop 30% of symbols (simulating network loss)
+        let keep_count = (all_chunks.len() as f64 * 0.7).ceil() as usize;
+        let surviving_chunks: Vec<_> = all_chunks.into_iter().take(keep_count).collect();
+
+        // 4. Attempt decode with only surviving symbols
+        let mold = ShardMold;
+        let mut acc = ShardMold::init_accumulator(&surviving_chunks[0]);
+        for chunk in &surviving_chunks {
+            let _ = ShardMold::ingest(&mut acc, chunk.clone());
+        }
+
+        assert!(
+            ShardMold::is_ready(&acc, std::time::Duration::ZERO),
+            "Decoder should recover from 30% symbol loss (had {}/{} symbols)",
+            surviving_chunks.len(),
+            keep_count
+        );
+
+        let recovered = mold
+            .assemble(shard_id, acc)
+            .expect("Assembly should succeed despite packet loss");
+        assert_eq!(
+            recovered.witness_signature, original_envelope.witness_signature,
+            "Integrity preserved after loss recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reassembler_fountain_roundtrip() {
+        let identity = PhalanxIdentity::new_ephemeral();
+        let mut reassembler = Reassembler::new();
+        let mut journal = MockJournal;
+
+        // 1. Create and serialize a real WitnessEnvelope
+        let evidence = Evidence::Video(VideoShard {
+            timestamp: PhalanxTimestamp::now(),
+            sequence_id: StorageSequence(1),
+            fps: 30,
+            volley_id: VolleyId::new("reassembler_test"),
+            payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            lens_metrics: ForensicMetrics::default(),
+        });
+        let original_envelope =
+            WitnessEnvelope::sign_envelope(evidence, &identity, identity.network_id.clone(), None)
+                .expect("sign");
+
+        let serialized = postcard::to_allocvec(&original_envelope).expect("serialize");
+
+        // 2. Fountain-encode
+        let chunks = make_test_fountain_chunks(
+            &serialized,
+            ShardId(77),
+            identity.did.clone(),
+            SymbolSize(256),
+        );
+
+        // 3. Feed chunks through the Reassembler
+        let mut final_result = None;
+        for chunk in chunks {
+            let result = reassembler
+                .ingest_chunk(chunk, &mut journal)
+                .await
+                .expect("ingest should not fail");
+
+            if let Some(state) = result {
+                final_result = Some(state);
+                break; // Decoder completed
+            }
+        }
+
+        // 4. Verify
+        let recovered = match final_result.expect("Should have decoded") {
+            EnvelopeState::Intact(env) => env,
         };
-        assert_eq!(buffer.missing_indices(), vec![1]);
+        assert_eq!(
+            recovered.witness_signature, original_envelope.witness_signature,
+            "Full pipeline: camera → encode → reassemble → envelope"
+        );
+        assert_eq!(
+            reassembler.active_shards.active_count(),
+            0,
+            "Memory leak: Buffer not cleared after successful assembly"
+        );
+    }
+
+    #[test]
+    fn test_fountain_chunkifier_empty_data() {
+        let result = Vec::<u8>::new().fountain_chunkify(
+            ShardId(1),
+            Did("test".into()),
+            SymbolSize(256),
+            ChunkType::Witnessed,
+            RepairRatio::default(),
+        );
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_fountain_chunkifier_zero_symbol_size() {
+        let result = vec![1, 2, 3].fountain_chunkify(
+            ShardId(1),
+            Did("test".into()),
+            SymbolSize(0),
+            ChunkType::Witnessed,
+            RepairRatio::default(),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_fountain_symbols_carry_oti_prefix() {
+        let data = vec![0xAB; 500];
+        let chunks = data
+            .fountain_chunkify(
+                ShardId(1),
+                Did("test".into()),
+                SymbolSize(256),
+                ChunkType::Witnessed,
+                RepairRatio::new(1.0), // source only, minimum symbols
+            )
+            .unwrap();
+
+        for chunk in &chunks {
+            assert!(
+                chunk.data.len() >= OTI_PREFIX_LEN,
+                "Every symbol must carry the 12-byte OTI prefix"
+            );
+            // All symbols should carry the same OTI
+            let oti = &chunk.data[..OTI_PREFIX_LEN];
+            let first_oti = &chunks[0].data[..OTI_PREFIX_LEN];
+            assert_eq!(oti, first_oti, "All symbols in a shard share the same OTI");
+        }
     }
 
     #[test]
@@ -747,7 +877,7 @@ mod tests {
         let identity = PhalanxIdentity::new_ephemeral();
         let shard_id = ShardId(707);
 
-        // 1. Create a REAL envelope so postcard can deserialize it successfully
+        // 1. Create a REAL envelope
         use ed25519_dalek::Signer;
         let envelope = WitnessEnvelope::sign_envelope(
             Evidence::Handover(HandoverProof {
@@ -765,24 +895,21 @@ mod tests {
         )
         .unwrap();
 
-        let data = postcard::to_allocvec(&envelope).unwrap();
+        let serialized = postcard::to_allocvec(&envelope).unwrap();
 
-        let mut parts = BTreeMap::new();
-        parts.insert(0, data.clone());
+        // 2. Fountain-encode and decode
+        let chunks =
+            make_test_fountain_chunks(&serialized, shard_id, identity.did.clone(), SymbolSize(256));
 
-        let acc = ShardBuffer {
-            received_count: 1,
-            terminal_received: true,
-            parts,
-            owner_did: identity.did.clone(),
-        };
+        let mold = ShardMold;
+        let mut acc = ShardMold::init_accumulator(&chunks[0]);
+        for chunk in &chunks {
+            let _ = ShardMold::ingest(&mut acc, chunk.clone());
+        }
 
-        let strategy = ShardMold;
-        let result = strategy
+        let result = mold
             .assemble(shard_id, acc)
             .expect("Should assemble successfully");
-
-        // Verify the reassembled envelope matches the original
         assert_eq!(result.witness_signature, envelope.witness_signature);
     }
 }

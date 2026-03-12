@@ -1,8 +1,8 @@
 use phalanx_forensics::crucible::EnvelopeHashExt;
 use phalanx_forensics::gate::WitnessGate;
-use phalanx_proto::evidence::{AudioShard, Evidence, SignatureHash, VideoShard};
-use phalanx_proto::identity::NetworkId;
-use phalanx_proto::identity::PhalanxIdentity;
+use phalanx_forensics::reassembler::FountainChunkifier;
+use phalanx_proto::evidence::{AudioShard, ChunkType, Evidence, SignatureHash, VideoShard};
+use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId};
 use phalanx_proto::prelude::*;
 use phalanx_transport::EgressPort;
 use std::sync::Arc;
@@ -18,6 +18,11 @@ pub struct MediaEgressActor<E: EgressPort> {
     local_id: NetworkId,
     video_prev_hash: Option<SignatureHash>,
     audio_prev_hash: Option<SignatureHash>,
+    symbol_size: SymbolSize,
+    repair_ratio: RepairRatio,
+    /// Monotonic shard ID counter. Each sealed envelope gets a unique ShardId
+    /// so the receiver's Crucible can track reassembly contexts independently.
+    next_shard_id: u64,
 }
 
 impl<E: EgressPort> MediaEgressActor<E> {
@@ -29,6 +34,8 @@ impl<E: EgressPort> MediaEgressActor<E> {
         video_topic: MeshTopic,
         audio_topic: MeshTopic,
         local_id: NetworkId,
+        symbol_size: SymbolSize,
+        repair_ratio: RepairRatio,
     ) -> Self {
         Self {
             egress,
@@ -40,6 +47,9 @@ impl<E: EgressPort> MediaEgressActor<E> {
             local_id,
             video_prev_hash: None,
             audio_prev_hash: None,
+            symbol_size,
+            repair_ratio,
+            next_shard_id: 0,
         }
     }
 
@@ -88,13 +98,67 @@ impl<E: EgressPort> MediaEgressActor<E> {
             self.audio_prev_hash = Some(new_hash);
         }
 
-        match postcard::to_allocvec(&envelope) {
-            Ok(data) => {
-                if let Err(e) = self.egress.publish(topic, data).await {
-                    tracing::error!("Failed to publish media egress: {}", e);
-                }
+        // Serialize the sealed envelope
+        let envelope_bytes = match postcard::to_allocvec(&envelope) {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::error!("Failed to serialize media envelope: {}", e);
+                return;
             }
-            Err(e) => tracing::error!("Failed to serialize media envelope: {}", e),
+        };
+
+        // Phase 1e: Fountain-encode into ShardChunks.
+        // Each symbol is self-describing (12-byte OTI prefix) so the receiver
+        // can initialize the decoder from ANY received symbol.
+        let shard_id = ShardId(self.next_shard_id);
+        self.next_shard_id += 1;
+
+        let chunks = match envelope_bytes.fountain_chunkify(
+            shard_id,
+            self.identity.did.clone(),
+            self.symbol_size,
+            ChunkType::Witnessed,
+            self.repair_ratio,
+        ) {
+            Ok(chunks) => chunks,
+            Err(e) => {
+                tracing::error!(event = "fountain_encode_failed", error = %e,
+                    "Failed to fountain-encode evidence");
+                return;
+            }
+        };
+
+        // Publish each fountain symbol as a separate gossipsub message.
+        // The receiver's ingestion pipeline deserializes each as a ShardChunk
+        // and feeds it to the Reassembler's fountain decoder.
+        let symbol_count = chunks.len();
+        let mut published = 0;
+        for chunk in chunks {
+            match postcard::to_allocvec(&chunk) {
+                Ok(data) => {
+                    if let Err(e) = self.egress.publish(topic, data).await {
+                        tracing::error!(
+                            event = "symbol_publish_failed",
+                            shard_id = shard_id.0,
+                            symbol = published,
+                            error = %e,
+                            "Failed to publish fountain symbol"
+                        );
+                        // TODO: Phase 0e — enqueue to OutboundQueue for retry
+                    } else {
+                        published += 1;
+                    }
+                }
+                Err(e) => tracing::error!("Failed to serialize fountain symbol: {}", e),
+            }
         }
+
+        tracing::debug!(
+            event = "media_egress_complete",
+            shard_id = shard_id.0,
+            symbols_published = published,
+            symbols_total = symbol_count,
+            is_video = is_video,
+        );
     }
 }

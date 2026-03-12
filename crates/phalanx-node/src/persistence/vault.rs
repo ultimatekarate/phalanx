@@ -166,61 +166,51 @@ impl Guardian {
     ) -> Result<(), GuardianError> {
         tracing::debug!("Guardian: Received envelope for ingestion. Verifying...");
 
-        match state {
-            EnvelopeState::Intact(envelope) => {
-                let vid = envelope.evidence.volley_id().clone();
-                let seq = envelope.evidence.sequence_id();
-                let sender_did = envelope.witness_peer_id.clone(); // The DID we SHOULD be banning
+        let EnvelopeState::Intact(envelope) = state;
+        let vid = envelope.evidence.volley_id().clone();
+        let seq = envelope.evidence.sequence_id();
+        let sender_did = envelope.witness_peer_id.clone();
 
-                // Log the attempt
-                tracing::info!(volley = %vid, seq = %seq.0, from = %sender_did, "Guardian: Processing frame");
+        // Log the attempt
+        tracing::info!(volley = %vid, seq = %seq.0, from = %sender_did, "Guardian: Processing frame");
 
-                let seq = envelope.evidence.sequence_id();
-                let volley_id = envelope.evidence.volley_id().clone();
-                let mut anchor = None;
+        let seq = envelope.evidence.sequence_id();
+        let volley_id = envelope.evidence.volley_id().clone();
+        let mut anchor = None;
 
-                if seq.0 > 1 {
-                    let prev_seq = StorageSequence(seq.0 - 1);
+        if seq.0 > 1 {
+            let prev_seq = StorageSequence(seq.0 - 1);
 
-                    // Look up the previous anchor in the vault
-                    if let Some(prev_envelope) = self.get_shard(&volley_id, prev_seq) {
-                        anchor = Some(prev_envelope.signature_hash());
-                    }
-                }
-
-                // Promotion Gate (Integrity + Continuity + Time)
-                let node_id = envelope.witness_peer_id.clone();
-
-                let unit = ForensicUnit::new(envelope);
-                // T4 FIX: Pass Duration directly instead of raw u64.
-                // Clamp dynamic tolerance to an absolute max of 30 seconds.
-                let max_tolerance = Duration::from_secs(30);
-                let clamped_tolerance = current_tolerance.min(max_tolerance);
-
-                let verified_unit = unit
-                    .promote(&node_id, &*self.clock, clamped_tolerance, anchor)
-                    .map_err(|e| match e {
-                        ShardError::InvalidConfiguration(ref msg)
-                            if msg.contains("Causality Break") =>
-                        {
-                            GuardianError::ChainIntegrityViolation(msg.clone())
-                        }
-                        _ => GuardianError::VerificationFailed(e.to_string()),
-                    })?;
-
-                // 2. Volley Aggregation
-                // The Crucible now accepts only Verified units
-                let maybe_volley = self.crucible.process(verified_unit)?;
-
-                if let Some(volley) = maybe_volley {
-                    self.commit_volley_to_disk(&volley).await?;
-                }
+            // Look up the previous anchor in the vault
+            if let Some(prev_envelope) = self.get_shard(&volley_id, prev_seq) {
+                anchor = Some(prev_envelope.signature_hash());
             }
-            EnvelopeState::Fragmented(fragmented) => {
-                // 3. Forensic Gap Archival
-                // We persist the gap report to ensure the timeline remains continuous
-                self.archive_fragmented_shard(fragmented).await?;
-            }
+        }
+
+        // Promotion Gate (Integrity + Continuity + Time)
+        let node_id = envelope.witness_peer_id.clone();
+
+        let unit = ForensicUnit::new(envelope);
+        // T4 FIX: Pass Duration directly instead of raw u64.
+        // Clamp dynamic tolerance to an absolute max of 30 seconds.
+        let max_tolerance = Duration::from_secs(30);
+        let clamped_tolerance = current_tolerance.min(max_tolerance);
+
+        let verified_unit = unit
+            .promote(&node_id, &*self.clock, clamped_tolerance, anchor)
+            .map_err(|e| match e {
+                ShardError::InvalidConfiguration(ref msg) if msg.contains("Causality Break") => {
+                    GuardianError::ChainIntegrityViolation(msg.clone())
+                }
+                _ => GuardianError::VerificationFailed(e.to_string()),
+            })?;
+
+        // 2. Volley Aggregation
+        // The Crucible now accepts only Verified units
+        let maybe_volley = self.crucible.process(verified_unit)?;
+
+        if let Some(volley) = maybe_volley {
+            self.commit_volley_to_disk(&volley).await?;
         }
 
         // Trigger TTL checks, stale volley flushing, and workbench cleanup
@@ -250,25 +240,6 @@ impl Guardian {
         self.get_active_volley_shards(volley_id)
             .and_then(|shards| shards.get(&sequence_id))
             .cloned()
-    }
-
-    async fn archive_fragmented_shard(
-        &mut self,
-        fragmented: FragmentedEnvelope,
-    ) -> Result<(), GuardianError> {
-        tracing::warn!(
-            shard_id = %fragmented.shard_id,
-            missing_chunks = fragmented.gap_report.missing_indices.len(),
-            "Guardian: Committing forensic gap record to disk"
-        );
-
-        let gap_data = postcard::to_allocvec(&fragmented)
-            .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
-
-        let file_name = format!("{}.gap", fragmented.shard_id);
-        let path = std::path::Path::new(&self.vault_path).join(file_name);
-
-        atomic_encrypted_write(&path, &gap_data, &self.vault_key).await
     }
 
     /// Explicit salvage command for node termination sequences.

@@ -71,7 +71,7 @@ impl<S: PlaybackSink> PlaybackCoordinator<S> {
                             )?;
                             payload.decrypt(key)?
                         }
-                        DataPayload::Missing(_) => {
+                        DataPayload::Missing => {
                             self.current_sequence.0 += 1;
                             continue;
                         }
