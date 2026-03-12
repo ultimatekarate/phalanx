@@ -1,3 +1,4 @@
+use phalanx_forensics::reassembler::FountainChunkifier;
 use phalanx_forensics::witness::WitnessAuthority;
 use phalanx_forensics::Reassembler;
 use phalanx_node::actors::storage::NoOpJournal;
@@ -8,11 +9,9 @@ use phalanx_proto::evidence::VideoShard;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*;
 
-fn create_mock_chunks(
-    identity: &PhalanxIdentity,
-    shard_id: ShardId,
-    total: u32,
-) -> Vec<ShardChunk> {
+/// Creates real fountain-coded ShardChunks from a signed WitnessEnvelope.
+/// Uses the production encode path — no fake sequential splitting.
+fn create_mock_fountain_chunks(identity: &PhalanxIdentity, shard_id: ShardId) -> Vec<ShardChunk> {
     // 1. Create a REAL WitnessEnvelope
     let evidence = Evidence::Video(VideoShard {
         timestamp: PhalanxTimestamp::now(),
@@ -29,31 +28,23 @@ fn create_mock_chunks(
 
     // 2. Serialize it to actual bytes
     let full_bytes = postcard::to_allocvec(&envelope).unwrap();
-    let last_index = total.saturating_sub(1);
 
-    // 3. Split those bytes into chunks
-    let chunk_size = (full_bytes.len() + total as usize - 1) / total as usize;
-
-    (0..total)
-        .map(|i| {
-            let start = i as usize * chunk_size;
-            let end = std::cmp::min(start + chunk_size, full_bytes.len());
-            let data = full_bytes[start..end].to_vec();
-            let timestamp = PhalanxTimestamp::now();
-
-            ShardChunk {
-                shard_id,
-                encoding_symbol_id: EncodingSymbolId(i),
-                chunk_type: ChunkType::Witnessed,
-                is_terminal: i == last_index,
-                data,
-                owner_did: identity.did.clone(),
-                timestamp,
-            }
-        })
-        .collect()
+    // 3. Fountain-encode into symbols (small symbol size → multiple symbols)
+    full_bytes
+        .fountain_chunkify(
+            shard_id,
+            identity.did.clone(),
+            SymbolSize(64), // Small symbols → many symbols → good for partial tests
+            ChunkType::Witnessed,
+            RepairRatio::new(1.5), // 50% redundancy
+        )
+        .expect("Fountain encoding should succeed")
 }
 
+/// Verifies that the fountain deduplication guard works correctly:
+/// - Duplicate symbols are silently dropped (ShardMold::ingest skips same ESI)
+/// - Duplicate ingestion does not cause false completion
+/// - After all unique symbols arrive, the decoder completes successfully
 #[tokio::test]
 async fn test_reliability_deduplication_gate() {
     let identity = PhalanxIdentity::new_ephemeral();
@@ -61,43 +52,54 @@ async fn test_reliability_deduplication_gate() {
     let mut journal = NoOpJournal;
     let shard_id = ShardId(202);
 
-    // Use 2 chunks so the shard isn't completed and cleared from RAM immediately
-    let chunks = create_mock_chunks(&identity, shard_id, 2);
+    // Create fountain-coded chunks (multiple symbols from the encoder)
+    let chunks = create_mock_fountain_chunks(&identity, shard_id);
+    assert!(chunks.len() >= 3, "Need multiple symbols for dedup test");
+
+    // Take only the FIRST chunk — not enough for the decoder to complete
     let chunk = chunks[0].clone();
 
-    // First ingestion: returns Some(Fragmented) with chunk 1 missing
+    // First ingestion: decoder can't complete yet → returns None
     let first_result = reassembler
         .ingest_chunk(chunk.clone(), &mut journal)
         .await
         .unwrap();
 
     assert!(
-        matches!(&first_result, Some(EnvelopeState::Fragmented(_))),
-        "First chunk should be accepted and return Fragmented state"
+        first_result.is_none(),
+        "Single symbol should not complete fountain decoding"
     );
 
-    let first_missing = match first_result.unwrap() {
-        EnvelopeState::Fragmented(f) => f.gap_report.missing_indices.clone(),
-        _ => panic!("Expected Fragmented"),
-    };
-
-    // Subsequent ingestions of the same chunk: buffer state must not change.
-    // The dedup guard in ShardMold::ingest silently drops duplicate chunk indices,
-    // so the gap report remains identical.
+    // Subsequent ingestions of the SAME chunk: dedup guard in ShardMold::ingest
+    // silently drops duplicate ESIs. The decoder still can't complete.
     for _ in 0..10 {
         let dup_result = reassembler
             .ingest_chunk(chunk.clone(), &mut journal)
             .await
             .unwrap();
 
-        let dup_missing = match dup_result.unwrap() {
-            EnvelopeState::Fragmented(f) => f.gap_report.missing_indices.clone(),
-            _ => panic!("Duplicate ingestion should not complete reassembly"),
-        };
-
-        assert_eq!(
-            dup_missing, first_missing,
-            "Deduplication failed: buffer state changed on redundant chunk"
+        assert!(
+            dup_result.is_none(),
+            "Duplicate symbol ingestion should not complete reassembly"
         );
     }
+
+    // Now send the remaining UNIQUE symbols — decoder should complete
+    let mut completed = false;
+    for c in chunks.iter().skip(1) {
+        let result = reassembler
+            .ingest_chunk(c.clone(), &mut journal)
+            .await
+            .unwrap();
+
+        if result.is_some() {
+            completed = true;
+            break;
+        }
+    }
+
+    assert!(
+        completed,
+        "Feeding all unique symbols should complete fountain decoding"
+    );
 }

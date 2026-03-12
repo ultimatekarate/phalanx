@@ -35,6 +35,7 @@ flate2 = "1.1.9"
 image = "0.25.9"
 bs58 = "0.5.1"
 lz4_flex = "0.11"
+raptorq = "2"
 c2pa = {version="0.78.0", default-features = false, features = ["rust_native_crypto"]}
 
 [dev-dependencies]

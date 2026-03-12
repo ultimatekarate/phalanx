@@ -23,7 +23,7 @@ pub use crucible::{Crucible, Mold, VolleyAmalgam};
 pub use cryptography::{decrypt_bytes, encrypt_bytes, generate_session_key};
 pub use judge::{Decryptor, HandoverJudge, PayloadCipher};
 pub use policy::TrafficGovernor;
-pub use reassembler::{AudioWeaver, Chunkifier, Reassembler, ShardMold, VideoWeaver};
+pub use reassembler::{AudioWeaver, FountainChunkifier, Reassembler, ShardMold, VideoWeaver};
 pub use trust::{PeerEvaluator, ReputationGate};
 
 /// The Laboratory Prelude: Bringing the Verbs into scope for the Actors.

@@ -1,7 +1,7 @@
 // crates/phalanx-node/src/config.rs
 
 use phalanx_proto::prelude::{Did, MeshTopic};
-use phalanx_proto::types::ByteCapacity;
+use phalanx_proto::types::{ByteCapacity, RepairRatio, SymbolSize};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -43,6 +43,13 @@ pub struct NetworkConfig {
     /// is missing or corrupt.
     #[serde(default)]
     pub require_psk: bool,
+    /// RaptorQ fountain code repair ratio. 1.0 = source symbols only, 1.5 = 50% extra.
+    /// Higher ratios increase resilience to packet loss at the cost of bandwidth.
+    #[serde(default)]
+    pub repair_ratio: RepairRatio,
+    /// RaptorQ symbol payload size in bytes. Must fit within a single UDP datagram.
+    #[serde(default)]
+    pub symbol_size: SymbolSize,
 }
 
 impl NodeConfig {
@@ -133,6 +140,8 @@ impl Default for NetworkConfig {
             guardian_service_key: default_service_key(),
             max_connections: default_max_connections(),
             require_psk: false,
+            repair_ratio: RepairRatio::default(),
+            symbol_size: SymbolSize::default(),
         }
     }
 }

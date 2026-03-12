@@ -4,7 +4,6 @@ use crate::storage::HandoverProof;
 use crate::time::PhalanxTimestamp;
 use crate::types::EncodingSymbolId;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::{Add, AddAssign, Deref, Sub};
 
@@ -12,9 +11,13 @@ use std::ops::{Add, AddAssign, Deref, Sub};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum DataPayload {
     Clear(Vec<u8>),
-    Encrypted { nonce: Vec<u8>, ciphertext: Vec<u8> },
+    Encrypted {
+        nonce: Vec<u8>,
+        ciphertext: Vec<u8>,
+    },
     Compressed(Vec<u8>),
-    Missing(ShardGapReport),
+    /// Placeholder for gap markers in forensic timelines.
+    Missing,
 }
 
 impl DataPayload {
@@ -147,25 +150,13 @@ pub enum ChunkType {
     Witnessed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ShardGapReport {
-    pub shard_id: ShardId,
-    pub missing_indices: Vec<u32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FragmentedEnvelope {
-    pub shard_id: ShardId,
-    pub owner_did: Did,
-    pub gap_report: ShardGapReport,
-    pub partial_data: BTreeMap<u32, Vec<u8>>,
-}
-
+/// Fountain-mode evidence state. Sequential gap reporting is removed —
+/// the RaptorQ decoder handles completeness internally.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EnvelopeState {
+    /// Decoder succeeded — full envelope recovered from fountain symbols.
     Intact(WitnessEnvelope),
-    Fragmented(FragmentedEnvelope),
 }
 
 // --- Deref/Ops Impls ---
