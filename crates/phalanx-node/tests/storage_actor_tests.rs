@@ -12,9 +12,11 @@ use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::journal::FileJournal;
 use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
 use phalanx_node::vitals::SystemGovernor;
-use phalanx_proto::evidence::{ChunkType, DataPayload, Evidence, StorageSequence, VideoShard};
+use phalanx_proto::evidence::{
+    ChunkType, DataPayload, Evidence, ForensicMetrics, StorageSequence, VideoShard,
+};
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
-use phalanx_proto::prelude::{PendingEgress, ShardChunk, ShardError};
+use phalanx_proto::prelude::{EncodingSymbolId, PendingEgress, ShardChunk, ShardError};
 use phalanx_proto::retrieval::VolleyResponse;
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
@@ -115,6 +117,7 @@ async fn test_pillar_salvage_under_disk_pressure() {
         fps: 30,
         volley_id: VolleyId::new("v1"),
         payload: DataPayload::Clear(vec![0xCA, 0xFE, 0xBA, 0xBE]),
+        lens_metrics: ForensicMetrics::default(),
     };
 
     let envelope = Evidence::Video(video_shard)
@@ -179,6 +182,7 @@ async fn test_reputation_gate_signature_mismatch() {
         fps: 30,
         volley_id: VolleyId::new("v1"),
         payload: DataPayload::Clear(vec![0xBA, 0xAD, 0xF0, 0x0D]),
+        lens_metrics: ForensicMetrics::default(),
     };
 
     // Seal it legitimately first
@@ -195,11 +199,11 @@ async fn test_reputation_gate_signature_mismatch() {
     let timestamp = PhalanxTimestamp::now();
     let chunk = ShardChunk {
         shard_id: ShardId(666),
-        chunk_index: 0,
-        total_chunks: 1,
+        encoding_symbol_id: EncodingSymbolId(0),
+        chunk_type: ChunkType::Witnessed,
+        is_terminal: true,
         data: poisoned_data,
         owner_did: attacker_identity.did.clone(),
-        chunk_type: ChunkType::Witnessed,
         timestamp,
     };
 
@@ -288,6 +292,7 @@ async fn test_salvage_on_node_death() {
         fps: 30,
         volley_id: VolleyId::new("salvage_volley_01"),
         payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        lens_metrics: ForensicMetrics::default(),
     };
 
     let envelope = Evidence::Video(real_shard)
@@ -442,11 +447,11 @@ async fn test_stronghold_ingestion_and_persistence() {
     let timestamp = PhalanxTimestamp::now();
     let chunk = ShardChunk {
         shard_id: ShardId(101),
-        chunk_index: 0,
-        total_chunks: 1,
+        encoding_symbol_id: EncodingSymbolId(0),
+        chunk_type: ChunkType::Witnessed,
+        is_terminal: true,
         data: valid_envelope_data,
         owner_did: peer_identity.did.clone(),
-        chunk_type: ChunkType::Witnessed,
         timestamp,
     };
 
@@ -583,6 +588,7 @@ async fn test_storage_actor_metric_pipeline() {
         fps: 30,
         volley_id: VolleyId::new("v1"),
         payload: DataPayload::Clear(vec![0xBA, 0xAD, 0xF0, 0x0D]),
+        lens_metrics: ForensicMetrics::default(),
     };
 
     // Seal via WitnessGate
@@ -595,11 +601,11 @@ async fn test_storage_actor_metric_pipeline() {
     let timestamp = PhalanxTimestamp::now();
     let chunk = ShardChunk {
         shard_id: ShardId(101),
-        chunk_index: 0,
-        total_chunks: 1,
+        encoding_symbol_id: EncodingSymbolId(0),
+        chunk_type: ChunkType::Witnessed,
+        is_terminal: true,
         data: valid_data,
         owner_did: identity.did.clone(),
-        chunk_type: ChunkType::Witnessed,
         timestamp,
     };
 
@@ -681,6 +687,7 @@ async fn test_pure_vault_ingest_contract() {
         fps: 30,
         volley_id: VolleyId::new("v_pure_ingest"),
         payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        lens_metrics: ForensicMetrics::default(),
     };
 
     let envelope = Evidence::Video(video_shard)
@@ -693,11 +700,11 @@ async fn test_pure_vault_ingest_contract() {
     let timestamp = PhalanxTimestamp::now();
     let chunk = ShardChunk {
         shard_id: ShardId(1),
-        chunk_index: 0,
-        total_chunks: 1,
+        encoding_symbol_id: EncodingSymbolId(0),
+        chunk_type: ChunkType::Witnessed,
+        is_terminal: true,
         data: valid_envelope_data, // Use valid serialized envelope
         owner_did: identity.did.clone(),
-        chunk_type: ChunkType::Witnessed,
         timestamp,
     };
 
@@ -750,6 +757,7 @@ mod ingress_boundary_tests {
             fps: 30,
             volley_id: VolleyId::new("v_secure_ingress"),
             payload: DataPayload::Clear(vec![0xAA, 0xBB, 0xCC]),
+            lens_metrics: ForensicMetrics::default(),
         };
 
         let envelope = WitnessEnvelope::sign_envelope(
@@ -766,11 +774,11 @@ mod ingress_boundary_tests {
         let timestamp = PhalanxTimestamp::now();
         let raw_chunk = ShardChunk {
             shard_id: ShardId(1),
-            chunk_index: 0,
-            total_chunks: 1,
+            encoding_symbol_id: EncodingSymbolId(0),
+            chunk_type: ChunkType::Witnessed,
+            is_terminal: true,
             data: valid_data,
             owner_did: identity.did.clone(),
-            chunk_type: ChunkType::Witnessed,
             timestamp,
         };
 

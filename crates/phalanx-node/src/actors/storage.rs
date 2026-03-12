@@ -146,6 +146,29 @@ impl<J: TransientJournal> StorageActor<J> {
 
         let chunk = unit.unpack();
 
+        // Foreign storage enforcement: reject foreign data when over the configured limit.
+        let is_foreign = chunk.owner_did != self.guardian.local_did;
+        if is_foreign {
+            let foreign_total = self.guardian.ledger.total_foreign_bytes();
+            let max_foreign = self.config.storage.max_foreign_storage_bytes.as_u64();
+            if foreign_total >= max_foreign {
+                tracing::warn!(
+                    event = "foreign_storage_rejected",
+                    foreign_bytes = foreign_total,
+                    max_foreign_bytes = max_foreign,
+                    owner_did = %chunk.owner_did,
+                    "Foreign storage limit reached"
+                );
+                return Err(GuardianError::StorageFailure(format!(
+                    "Foreign storage limit reached ({} >= {} bytes)",
+                    foreign_total, max_foreign
+                )));
+            }
+        }
+
+        // Track chunk size for ledger accounting before consumption
+        let chunk_bytes = chunk.data.len() as u64;
+
         let reassembly_result = self
             .reassembler
             .ingest_chunk(chunk, &mut self.journal)
@@ -153,6 +176,15 @@ impl<J: TransientJournal> StorageActor<J> {
 
         if let Err(e) = self.journal.sync().await {
             tracing::error!(error = %e, "Forensics: Critical failure to sync WAL to disk");
+        }
+
+        // Update storage ledger (own vs foreign accounting)
+        if reassembly_result.is_ok() {
+            if is_foreign {
+                self.guardian.ledger.record_foreign_ingestion(chunk_bytes);
+            } else {
+                self.guardian.ledger.record_own_ingestion(chunk_bytes);
+            }
         }
 
         // Record storage pressure after WAL write

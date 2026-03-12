@@ -7,10 +7,11 @@ use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
 use phalanx_proto::evidence::{
-    ChunkType, DataPayload, EnvelopeState, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
+    ChunkType, DataPayload, EnvelopeState, Evidence, ForensicMetrics, StorageSequence, VideoShard,
+    WitnessEnvelope,
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
-use phalanx_proto::prelude::ShardChunk;
+use phalanx_proto::prelude::{EncodingSymbolId, ShardChunk};
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
 use phalanx_transport::identity_ext::Libp2pExt;
 use std::sync::Arc;
@@ -24,6 +25,7 @@ fn create_test_shard(seq: u32, volley_id: VolleyId) -> VideoShard {
         fps: 30,
         volley_id,
         payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        lens_metrics: ForensicMetrics::default(),
     }
 }
 
@@ -159,6 +161,7 @@ async fn test_leaf_mode_isolation() {
         fps: 30,
         volley_id: VolleyId::new("v_leaf"),
         payload: DataPayload::Clear(vec![0x00; 4]),
+        lens_metrics: ForensicMetrics::default(),
     });
     let env = WitnessEnvelope::sign_envelope(
         evidence,
@@ -172,11 +175,11 @@ async fn test_leaf_mode_isolation() {
 
     let foreign_chunk = ShardChunk {
         shard_id: ShardId(1),
-        chunk_index: 0,
-        total_chunks: 1,
+        encoding_symbol_id: EncodingSymbolId(0),
+        chunk_type: ChunkType::Witnessed,
+        is_terminal: true,
         data: valid_bytes,
         owner_did: foreign_identity.did.clone(),
-        chunk_type: ChunkType::Witnessed,
         timestamp: now,
     };
 

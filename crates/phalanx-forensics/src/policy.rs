@@ -87,9 +87,9 @@ impl TrafficGovernor {
     #[must_use]
     pub fn should_accept(&self, peer_id: &NetworkId, local_peer_id: &NetworkId) -> bool {
         match self.power_state {
-            PowerState::Normal => true,
+            PowerState::Normal | PowerState::Conserving => true,
             // Pre-allocation check: only allow loopback traffic when in survival mode
-            PowerState::Leaf => peer_id == local_peer_id,
+            PowerState::Leaf | PowerState::Dormant => peer_id == local_peer_id,
         }
     }
 
@@ -233,11 +233,13 @@ impl HeartbeatGovernor {
         let mut dynamic_ms = base_latency_ms * (1.0 + load.as_f32());
 
         // Apply Power State Modifier
-        if state == PowerState::Leaf {
-            // Leaf nodes prioritize radio silence and energy preservation.
-            const LEAF_PRESERVATION_MULTIPLIER: f32 = 5.0;
-            dynamic_ms *= LEAF_PRESERVATION_MULTIPLIER;
-        }
+        let power_multiplier = match state {
+            PowerState::Normal => 1.0,
+            PowerState::Conserving => 2.0,
+            PowerState::Leaf => 5.0,
+            PowerState::Dormant => 10.0,
+        };
+        dynamic_ms *= power_multiplier;
 
         HeartbeatInterval(dynamic_ms as u64)
     }

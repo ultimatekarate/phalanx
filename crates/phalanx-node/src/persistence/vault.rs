@@ -14,7 +14,9 @@ use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*;
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::TrustedClock;
+use phalanx_proto::types::ByteCapacity;
 use phalanx_proto::types::ForensicUnit;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -73,12 +75,69 @@ pub fn load_or_create_vault_salt(vault_path: &str) -> std::io::Result<[u8; 32]> 
     }
 }
 
+/// Per-node storage accounting. Distinguishes own evidence from foreign
+/// (relay/replica) data to support fair contribution tracking and eviction policy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StorageLedger {
+    /// Bytes of MY evidence stored in the local vault.
+    pub own_bytes: ByteCapacity,
+    /// Foreign shards I'm a K-replica for (long-term committed storage).
+    pub foreign_committed_bytes: ByteCapacity,
+    /// Foreign shards in the relay buffer (transient, evictable).
+    pub foreign_transient_bytes: ByteCapacity,
+    /// Cumulative bytes of my evidence pushed to the mesh.
+    pub own_bytes_pushed: ByteCapacity,
+}
+
+impl StorageLedger {
+    /// Total foreign bytes (committed + transient).
+    pub fn total_foreign_bytes(&self) -> u64 {
+        self.foreign_committed_bytes.as_u64() + self.foreign_transient_bytes.as_u64()
+    }
+
+    /// Total bytes held locally (own + all foreign).
+    pub fn total_local_bytes(&self) -> u64 {
+        self.own_bytes.as_u64() + self.total_foreign_bytes()
+    }
+
+    /// Record ingestion of own evidence.
+    pub fn record_own_ingestion(&mut self, bytes: u64) {
+        self.own_bytes = ByteCapacity(self.own_bytes.as_u64() + bytes);
+    }
+
+    /// Record ingestion of foreign evidence (transient until promoted to committed).
+    pub fn record_foreign_ingestion(&mut self, bytes: u64) {
+        self.foreign_transient_bytes = ByteCapacity(self.foreign_transient_bytes.as_u64() + bytes);
+    }
+
+    /// Promote transient foreign storage to committed (K-replica confirmed).
+    pub fn promote_to_committed(&mut self, bytes: u64) {
+        let moved = bytes.min(self.foreign_transient_bytes.as_u64());
+        self.foreign_transient_bytes =
+            ByteCapacity(self.foreign_transient_bytes.as_u64().saturating_sub(moved));
+        self.foreign_committed_bytes = ByteCapacity(self.foreign_committed_bytes.as_u64() + moved);
+    }
+
+    /// Record bytes of own evidence successfully pushed to the mesh.
+    pub fn record_own_push(&mut self, bytes: u64) {
+        self.own_bytes_pushed = ByteCapacity(self.own_bytes_pushed.as_u64() + bytes);
+    }
+
+    /// Evict foreign transient bytes (e.g., relay buffer cleanup).
+    pub fn evict_transient(&mut self, bytes: u64) {
+        self.foreign_transient_bytes =
+            ByteCapacity(self.foreign_transient_bytes.as_u64().saturating_sub(bytes));
+    }
+}
+
 pub struct Guardian {
     pub crucible: Crucible<VolleyAmalgam>,
     pub vault_path: String,
     pub local_did: Did,
     pub clock: Arc<dyn TrustedClock>,
     pub vault_key: SymmetricKey,
+    /// Per-node storage accounting for fairness and eviction policy.
+    pub ledger: StorageLedger,
 }
 
 impl Guardian {
@@ -95,6 +154,7 @@ impl Guardian {
             local_did,
             clock,
             vault_key,
+            ledger: StorageLedger::default(),
         }
     }
 
@@ -538,6 +598,7 @@ mod tests {
     use super::*;
     use phalanx_forensics::witness::WitnessAuthority;
     use phalanx_proto::evidence::Evidence;
+    use phalanx_proto::evidence::ForensicMetrics;
     use phalanx_proto::evidence::VideoShard;
     use phalanx_proto::time::SystemClock;
     use tempfile::tempdir;
@@ -568,6 +629,7 @@ mod tests {
             fps: 30,
             volley_id: vid.clone(), // Use the VolleyId here
             payload: DataPayload::Clear(vec![1, 2, 3]),
+            lens_metrics: ForensicMetrics::default(),
         };
 
         // 2. Seal the unit (The 4th argument is None for the start of the chain)
@@ -621,6 +683,7 @@ mod tests {
             fps: 30,
             volley_id: VolleyId::new("v1"),
             payload: DataPayload::Clear(vec![1, 2, 3]),
+            lens_metrics: ForensicMetrics::default(),
         };
 
         // FIX: Add 'None' as the 4th argument (the causality link)
@@ -637,5 +700,112 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
+    }
+
+    // ── StorageLedger Tests ──
+
+    #[test]
+    fn test_storage_ledger_defaults_to_zero() {
+        let ledger = StorageLedger::default();
+        assert_eq!(ledger.own_bytes.as_u64(), 0);
+        assert_eq!(ledger.foreign_committed_bytes.as_u64(), 0);
+        assert_eq!(ledger.foreign_transient_bytes.as_u64(), 0);
+        assert_eq!(ledger.own_bytes_pushed.as_u64(), 0);
+        assert_eq!(ledger.total_foreign_bytes(), 0);
+        assert_eq!(ledger.total_local_bytes(), 0);
+    }
+
+    #[test]
+    fn test_storage_ledger_own_ingestion_tracking() {
+        let mut ledger = StorageLedger::default();
+        ledger.record_own_ingestion(1000);
+        assert_eq!(ledger.own_bytes.as_u64(), 1000);
+        assert_eq!(ledger.total_local_bytes(), 1000);
+
+        ledger.record_own_ingestion(500);
+        assert_eq!(ledger.own_bytes.as_u64(), 1500);
+        assert_eq!(
+            ledger.total_foreign_bytes(),
+            0,
+            "Foreign should be unaffected"
+        );
+    }
+
+    #[test]
+    fn test_storage_ledger_foreign_ingestion_is_transient() {
+        let mut ledger = StorageLedger::default();
+        ledger.record_foreign_ingestion(2000);
+
+        // Foreign ingestion lands in transient first
+        assert_eq!(ledger.foreign_transient_bytes.as_u64(), 2000);
+        assert_eq!(ledger.foreign_committed_bytes.as_u64(), 0);
+        assert_eq!(ledger.total_foreign_bytes(), 2000);
+        assert_eq!(ledger.total_local_bytes(), 2000);
+    }
+
+    #[test]
+    fn test_storage_ledger_promote_transient_to_committed() {
+        let mut ledger = StorageLedger::default();
+        ledger.record_foreign_ingestion(3000);
+
+        // Promote 1000 bytes to committed (K-replica confirmed)
+        ledger.promote_to_committed(1000);
+        assert_eq!(ledger.foreign_transient_bytes.as_u64(), 2000);
+        assert_eq!(ledger.foreign_committed_bytes.as_u64(), 1000);
+        assert_eq!(
+            ledger.total_foreign_bytes(),
+            3000,
+            "Total foreign unchanged"
+        );
+
+        // Promote more than available transient — clamped to available
+        ledger.promote_to_committed(5000);
+        assert_eq!(ledger.foreign_transient_bytes.as_u64(), 0);
+        assert_eq!(ledger.foreign_committed_bytes.as_u64(), 3000);
+    }
+
+    #[test]
+    fn test_storage_ledger_own_push_tracking() {
+        let mut ledger = StorageLedger::default();
+        ledger.record_own_push(500);
+        assert_eq!(ledger.own_bytes_pushed.as_u64(), 500);
+        ledger.record_own_push(300);
+        assert_eq!(ledger.own_bytes_pushed.as_u64(), 800);
+    }
+
+    #[test]
+    fn test_storage_ledger_evict_transient() {
+        let mut ledger = StorageLedger::default();
+        ledger.record_foreign_ingestion(5000);
+
+        ledger.evict_transient(2000);
+        assert_eq!(ledger.foreign_transient_bytes.as_u64(), 3000);
+
+        // Evict more than available — saturating subtraction, no underflow
+        ledger.evict_transient(10000);
+        assert_eq!(ledger.foreign_transient_bytes.as_u64(), 0);
+    }
+
+    #[test]
+    fn test_storage_ledger_combined_accounting() {
+        let mut ledger = StorageLedger::default();
+
+        // Simulate a node that stores own evidence and hosts foreign replicas
+        ledger.record_own_ingestion(10_000);
+        ledger.record_foreign_ingestion(8_000);
+        ledger.promote_to_committed(3_000); // 3K committed, 5K transient
+        ledger.record_own_push(6_000);
+
+        assert_eq!(ledger.own_bytes.as_u64(), 10_000);
+        assert_eq!(ledger.foreign_committed_bytes.as_u64(), 3_000);
+        assert_eq!(ledger.foreign_transient_bytes.as_u64(), 5_000);
+        assert_eq!(ledger.own_bytes_pushed.as_u64(), 6_000);
+        assert_eq!(ledger.total_foreign_bytes(), 8_000);
+        assert_eq!(ledger.total_local_bytes(), 18_000);
+
+        // Evict transient relay buffer
+        ledger.evict_transient(5_000);
+        assert_eq!(ledger.total_foreign_bytes(), 3_000);
+        assert_eq!(ledger.total_local_bytes(), 13_000);
     }
 }

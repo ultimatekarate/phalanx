@@ -13,11 +13,11 @@ use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{
-    ChunkType, DataPayload, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
+    ChunkType, DataPayload, Evidence, ForensicMetrics, StorageSequence, VideoShard, WitnessEnvelope,
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
 use phalanx_proto::network::NetworkEvent;
-use phalanx_proto::prelude::{ShardChunk, VolleyResponse};
+use phalanx_proto::prelude::{EncodingSymbolId, ShardChunk, VolleyResponse};
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
 use phalanx_proto::topic::MeshTopic;
@@ -151,6 +151,7 @@ fn mock_valid_envelope() -> WitnessEnvelope {
         fps: 30,
         volley_id: VolleyId::new("mock"),
         payload: DataPayload::Clear(vec![]),
+        lens_metrics: ForensicMetrics::default(),
     });
     evidence
         .seal(&identity, identity.network_id.clone(), None)
@@ -186,6 +187,7 @@ async fn test_ingress_valid_chunk_forwarded_to_storage() {
         fps: 30,
         volley_id: VolleyId::new("v_ingress"),
         payload: DataPayload::Clear(vec![0xAB; 4]),
+        lens_metrics: ForensicMetrics::default(),
     });
     let envelope = evidence
         .seal(&identity, identity.network_id.clone(), None)
@@ -193,11 +195,11 @@ async fn test_ingress_valid_chunk_forwarded_to_storage() {
     let now = PhalanxTimestamp::now();
     let chunk = ShardChunk {
         shard_id: ShardId(1),
-        chunk_index: 0,
-        total_chunks: 1,
+        encoding_symbol_id: EncodingSymbolId(0),
+        chunk_type: ChunkType::Witnessed,
+        is_terminal: true,
         data: postcard::to_allocvec(&envelope).unwrap(),
         owner_did: identity.did.clone(),
-        chunk_type: ChunkType::Witnessed,
         timestamp: now,
     };
     let chunk_bytes = postcard::to_allocvec(&chunk).unwrap();
@@ -229,6 +231,7 @@ async fn test_ingress_rejected_in_leaf_mode() {
         fps: 30,
         volley_id: VolleyId::new("v_leaf"),
         payload: DataPayload::Clear(vec![0x00; 4]),
+        lens_metrics: ForensicMetrics::default(),
     });
     let envelope = evidence
         .seal(&identity, identity.network_id.clone(), None)
@@ -236,11 +239,11 @@ async fn test_ingress_rejected_in_leaf_mode() {
     let timestamp = PhalanxTimestamp::now();
     let chunk = ShardChunk {
         shard_id: ShardId(1),
-        chunk_index: 0,
-        total_chunks: 1,
+        encoding_symbol_id: EncodingSymbolId(0),
+        chunk_type: ChunkType::Witnessed,
+        is_terminal: true,
         data: postcard::to_allocvec(&envelope).unwrap(),
         owner_did: identity.did.clone(),
-        chunk_type: ChunkType::Witnessed,
         timestamp,
     };
     let chunk_bytes = postcard::to_allocvec(&chunk).unwrap();

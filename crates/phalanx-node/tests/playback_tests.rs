@@ -10,7 +10,8 @@ use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
 use phalanx_node::playback::sink::VideoPlayerSink;
 use phalanx_proto::evidence::{
-    DataPayload, EnvelopeState, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
+    DataPayload, EnvelopeState, Evidence, ForensicMetrics, StorageSequence, VideoShard,
+    WitnessEnvelope,
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
@@ -76,6 +77,7 @@ async fn test_exodus_resurrection_logic() {
         fps: 30,
         volley_id: volley_id.clone(),
         payload: DataPayload::Clear(b"Frame 1".to_vec()),
+        lens_metrics: ForensicMetrics::default(),
     };
     let envelope_1 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_1),
@@ -117,6 +119,7 @@ async fn test_exodus_resurrection_logic() {
         fps: 30,
         volley_id: volley_id.clone(),
         payload: DataPayload::Clear(b"Frame 2".to_vec()),
+        lens_metrics: ForensicMetrics::default(),
     };
     let envelope_2 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_2),
@@ -197,6 +200,7 @@ async fn test_playback_resurrection_with_mesh_gap() {
         fps: 30,
         volley_id: volley_id.clone(),
         payload: DataPayload::Clear(b"Frame 1 Data".to_vec()),
+        lens_metrics: ForensicMetrics::default(),
     };
     let envelope_1 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_1),
@@ -238,6 +242,7 @@ async fn test_playback_resurrection_with_mesh_gap() {
         fps: 30,
         volley_id: _v_id,
         payload: DataPayload::Clear(b"Frame 2 Data".to_vec()),
+        lens_metrics: ForensicMetrics::default(),
     };
     let envelope_2 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_2),
@@ -319,6 +324,7 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
             fps: 30,
             volley_id: volley_id.clone(),
             payload: DataPayload::Clear(format!("Frame {}", i).into_bytes()),
+            lens_metrics: ForensicMetrics::default(),
         };
         let envelope = WitnessEnvelope::sign_envelope(
             Evidence::Video(shard),

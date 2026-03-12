@@ -32,6 +32,7 @@ pub mod psk;
 pub mod persistence {
     pub mod journal;
     pub mod kademlia;
+    pub mod outbound;
     pub mod vault;
 }
 

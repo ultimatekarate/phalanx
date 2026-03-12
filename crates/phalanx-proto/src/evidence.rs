@@ -2,6 +2,7 @@
 use crate::identity::{Did, NetworkId, ShardId, VolleyId};
 use crate::storage::HandoverProof;
 use crate::time::PhalanxTimestamp;
+use crate::types::EncodingSymbolId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -36,12 +37,17 @@ impl Default for DataPayload {
 }
 
 /// A physical slice of an envelope for network transport.
+/// Each chunk carries a single RaptorQ encoding symbol (fountain-coded).
+/// Completeness is derived from data, never from sender-declared fields.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ShardChunk {
     pub shard_id: ShardId,
-    pub chunk_index: u32,
+    /// RaptorQ encoding symbol identifier. Not an array index — it's a symbol address.
+    pub encoding_symbol_id: EncodingSymbolId,
     pub chunk_type: ChunkType,
-    pub total_chunks: u32,
+    /// `true` on the last emitted symbol in a source block (graceful completion signal).
+    pub is_terminal: bool,
+    /// Payload: 12-byte OTI prefix + RaptorQ symbol data.
     pub data: Vec<u8>,
     pub owner_did: Did,
     pub timestamp: PhalanxTimestamp,
@@ -77,6 +83,20 @@ pub enum Evidence {
     Handover(HandoverProof),
 }
 
+/// Sensor fingerprint metrics computed by the ForensicLens pipeline.
+/// Non-optional: every VideoShard MUST carry a sensor fingerprint.
+/// Zero-valued metrics (all 0.0) are themselves a forensic signal —
+/// the LensGate can flag them as a possible bypass attempt.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
+pub struct ForensicMetrics {
+    /// Horizontal Moiré energy (Laplacian).
+    pub h_energy: f32,
+    /// Vertical Moiré energy (Laplacian).
+    pub v_energy: f32,
+    /// Photo Response Non-Uniformity variance (sensor fingerprint).
+    pub prnu_var: f32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VideoShard {
     pub timestamp: PhalanxTimestamp,
@@ -84,6 +104,8 @@ pub struct VideoShard {
     pub fps: u8,
     pub volley_id: VolleyId,
     pub payload: DataPayload,
+    /// Mandatory sensor fingerprint from the ForensicLens pipeline.
+    pub lens_metrics: ForensicMetrics,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
