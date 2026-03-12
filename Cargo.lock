@@ -4308,7 +4308,7 @@ dependencies = [
  "phalanx-proto",
  "postcard",
  "rand 0.8.5",
- "rand_core 0.10.0",
+ "rand_core 0.6.4",
  "serde",
  "sha2",
  "thiserror 1.0.69",
