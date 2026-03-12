@@ -3,10 +3,11 @@ use ed25519_dalek::SigningKey;
 
 use anyhow::Result;
 use argon2::{self, Argon2};
-use phalanx_forensics::cryptography::{decrypt_bytes, encrypt_bytes}; // Assumed to exist
+use phalanx_forensics::cryptography::{decrypt_bytes, encrypt_bytes};
 use phalanx_proto::crypto::SymmetricKey;
 use rand_core::OsRng;
 use rand_core::RngCore;
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 use phalanx_proto::identity::PhalanxLocator;
@@ -19,6 +20,37 @@ use rand::Rng;
 use std::fs;
 use std::path::Path;
 pub const IDENTITY_VERSION: u32 = 1;
+
+/// M6 FIX: Private struct used exclusively for encrypted disk persistence.
+/// This is the only path through which private keypair bytes are serialized,
+/// and it is always encrypted with Argon2-derived AEAD before touching disk.
+#[derive(Serialize, Deserialize)]
+struct IdentityDiskFormat {
+    version: u32,
+    did: Did,
+    network_id: NetworkId,
+    keypair_bytes: [u8; 32],
+}
+
+impl IdentityDiskFormat {
+    fn from_identity(identity: &PhalanxIdentity) -> Self {
+        Self {
+            version: identity.version,
+            did: identity.did.clone(),
+            network_id: identity.network_id.clone(),
+            keypair_bytes: identity.keypair.to_bytes(),
+        }
+    }
+
+    fn into_identity(self) -> PhalanxIdentity {
+        PhalanxIdentity {
+            version: self.version,
+            did: self.did,
+            network_id: self.network_id,
+            keypair: SigningKey::from_bytes(&self.keypair_bytes),
+        }
+    }
+}
 
 pub trait PhalanxNodeIdentityExt: Sized {
     fn generate() -> Result<(Self, String), IdentityError>;
@@ -86,8 +118,9 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
     /// - 24-byte AEAD nonce (for a cipher like XChaCha20-Poly1305)
     /// - Encrypted postcard-serialized identity data
     fn save_to_disk<P: AsRef<Path>>(&self, path: P, passphrase: &str) -> Result<(), IdentityError> {
-        // 1. Serialize the identity to bytes. This is the plaintext.
-        let plaintext = postcard::to_allocvec(self)
+        // M6 FIX: Serialize via IdentityDiskFormat, not PhalanxIdentity directly.
+        let disk_format = IdentityDiskFormat::from_identity(self);
+        let plaintext = postcard::to_allocvec(&disk_format)
             .map_err(|e| IdentityError::SerializationError(e.to_string()))?;
 
         // 2. Generate a random 16-byte salt for Argon2.
@@ -177,8 +210,8 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
             )
         })?;
 
-        // 5. Deserialize the plaintext back into an identity struct.
-        let identity: PhalanxIdentity = postcard::from_bytes(&plaintext).map_err(|e| {
+        // M6 FIX: Deserialize via IdentityDiskFormat, not PhalanxIdentity directly.
+        let disk_format: IdentityDiskFormat = postcard::from_bytes(&plaintext).map_err(|e| {
             IdentityError::SerializationError(format!(
                 "Failed to deserialize decrypted identity. File may be corrupt: {}",
                 e
@@ -188,7 +221,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         // 6. Securely erase the derived key from memory.
         key_bytes.zeroize();
 
-        Ok(identity)
+        Ok(disk_format.into_identity())
     }
 
     fn verify_retrieval_auth(&self, request: &VolleyRequest) -> Result<(), IdentityError> {

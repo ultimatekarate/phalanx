@@ -59,7 +59,7 @@ async fn setup_mock_storage() -> (
     config.storage.vault_path = temp.path().to_string_lossy().into_owned();
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let vault_key = derive_vault_key(&identity);
+    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
     let guardian = Guardian::new(
         &config.storage.vault_path,
         &config,
@@ -122,7 +122,7 @@ async fn test_pillar_salvage_under_disk_pressure() {
         .expect("Failed to seal forensic evidence");
 
     // 3. Setup the Guardian & Actor
-    let vault_key = derive_vault_key(&identity);
+    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
     let guardian = Guardian::new(
         &temp.path().to_string_lossy(),
         &config,
@@ -204,7 +204,7 @@ async fn test_reputation_gate_signature_mismatch() {
     };
 
     // 3. Setup Channels and Actor
-    let vault_key = derive_vault_key(&my_identity);
+    let vault_key = derive_vault_key(&my_identity, &[0u8; 32]);
     let guardian = Guardian::new(
         &temp.path().to_string_lossy(),
         &config,
@@ -278,7 +278,7 @@ async fn test_salvage_on_node_death() {
     config.storage.vault_path = vault_path.to_string_lossy().into_owned();
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let vault_key = derive_vault_key(&identity);
+    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
     let identity_did = identity.did.clone();
 
     // 1. Create a valid envelope and chunkify it into 4 pieces
@@ -451,7 +451,7 @@ async fn test_stronghold_ingestion_and_persistence() {
     };
 
     // 3. Wire up a StorageActor directly (no harness needed)
-    let vault_key = derive_vault_key(&identity);
+    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
     let guardian = Guardian::new(
         &config.storage.vault_path,
         &config,
@@ -558,7 +558,7 @@ async fn test_storage_actor_metric_pipeline() {
         counter: Arc::clone(&storage_load),
     };
 
-    let vault_key = derive_vault_key(&identity);
+    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
     let guardian = Guardian::new(
         &config.storage.vault_path,
         &config,

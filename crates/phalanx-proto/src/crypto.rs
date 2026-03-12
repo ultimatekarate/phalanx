@@ -19,7 +19,9 @@ pub enum CryptoError {
     EncodingError(String),
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+/// M5 FIX: Removed Serialize/Deserialize to prevent accidental key leakage.
+/// Added Zeroize + ZeroizeOnDrop so key material is wiped from memory on drop.
+#[derive(Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct SymmetricKey(pub [u8; 32]);
 
 impl SymmetricKey {

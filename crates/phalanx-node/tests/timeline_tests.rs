@@ -20,7 +20,7 @@ async fn test_reliability_timeline_integrity() {
     let vault_path = temp_dir.path().to_string_lossy().to_string();
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let vault_key = derive_vault_key(&identity);
+    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
     let config = NodeConfig::default();
 
     let mut guardian = Guardian::new(

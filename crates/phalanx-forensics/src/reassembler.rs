@@ -150,6 +150,10 @@ impl Reassembler {
 
 // --- THE SHARD BUFFER (Evolution of ReassemblyBuffer) ---
 
+/// M1 FIX: Maximum bytes a single shard reassembly may accumulate.
+/// Prevents memory amplification from attackers sending oversized chunks.
+const MAX_SHARD_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ShardBuffer {
     pub total_chunks: u32,
@@ -204,6 +208,15 @@ impl Mold for ShardMold {
     }
 
     fn ingest(acc: &mut Self::Accumulator, item: Self::Input) -> Result<(), Self::Error> {
+        // M1 FIX: Enforce per-shard byte budget before accepting the chunk.
+        let incoming_bytes = item.data.len();
+        let current_bytes = acc.accumulated_bytes();
+        if current_bytes + incoming_bytes > MAX_SHARD_BYTES {
+            return Err(ShardError::CapacityExceeded(
+                (current_bytes + incoming_bytes) as u64,
+            ));
+        }
+
         if let std::collections::btree_map::Entry::Vacant(e) = acc.parts.entry(item.chunk_index) {
             e.insert(item.data);
             acc.received_count += 1;

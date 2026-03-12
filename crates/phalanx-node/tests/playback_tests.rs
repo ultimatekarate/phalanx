@@ -29,7 +29,7 @@ async fn test_exodus_resurrection_logic() {
     let (disc_tx, mut disc_rx) = mpsc::channel(1);
     let (ui_tx, mut ui_rx) = mpsc::channel(10);
 
-    let vault_key = derive_vault_key(&identity);
+    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
     let identity_clone = identity.clone();
     tokio::spawn(async move {
         let mut guardian = Guardian::new(
@@ -152,7 +152,7 @@ async fn test_playback_resurrection_with_mesh_gap() {
     let (disc_tx, mut disc_rx) = mpsc::channel::<(VolleyId, StorageSequence)>(100);
     let (ui_tx, mut ui_rx) = mpsc::channel(10);
 
-    let vault_key = derive_vault_key(&identity);
+    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
     let identity_clone = identity.clone();
     tokio::spawn(async move {
         let mut guardian = Guardian::new(
@@ -275,7 +275,7 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
     let (disc_tx, mut disc_rx) = mpsc::channel::<(VolleyId, StorageSequence)>(100);
     let (ui_tx, mut ui_rx) = mpsc::channel(100);
 
-    let vault_key = derive_vault_key(&identity);
+    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
     tokio::spawn(async move {
         let mut guardian = Guardian::new(
             &vault_path,

@@ -89,11 +89,40 @@ impl Did {
         self.0.is_empty()
     }
 
-    /// Sanitizes the DID string for use in file paths or unsafe contexts.
-    /// Replaces colons `:` with underscores `_`.
+    /// Sanitizes the DID string for use in file paths.
+    ///
+    /// M2 FIX: Defensive sanitization — replaces all characters that are not
+    /// alphanumeric, hyphen, or underscore with underscores, then rejects any
+    /// result containing path traversal components.
     #[must_use]
     pub fn to_safe_name(&self) -> String {
-        self.0.replace(":", "_")
+        let sanitized: String = self
+            .0
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+
+        // Verify no traversal components survived (defense-in-depth)
+        debug_assert!(
+            !std::path::Path::new(&sanitized)
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_))),
+            "to_safe_name produced a traversal path: {}",
+            sanitized
+        );
+
+        // Final guard: if empty after sanitization, return a fixed placeholder
+        if sanitized.is_empty() {
+            "_empty_".to_string()
+        } else {
+            sanitized
+        }
     }
 
     #[must_use]
@@ -182,7 +211,11 @@ impl fmt::Display for NetworkId {
 pub struct SignatureHash(pub [u8; 32]);
 
 /// The sovereign cryptographic root for a Phalanx Node.
-#[derive(Clone, Serialize, Deserialize)]
+///
+/// M6 FIX: Removed Serialize/Deserialize to prevent accidental private key leakage.
+/// Disk persistence is handled via an explicit `IdentityDiskFormat` in the node crate
+/// that serializes keypair bytes only through the encrypted save/load path.
+#[derive(Clone)]
 pub struct PhalanxIdentity {
     pub version: u32,
     pub did: Did,
@@ -341,6 +374,50 @@ impl Ownership {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_to_safe_name_normal_did() {
+        let did = Did::new("did:key:z6MkqAWvMbaN66Vt");
+        let safe = did.to_safe_name();
+        assert_eq!(safe, "did_key_z6MkqAWvMbaN66Vt");
+    }
+
+    #[test]
+    fn test_to_safe_name_traversal_unix() {
+        let did = Did::new("did:key:../../../etc/passwd");
+        let safe = did.to_safe_name();
+        // All slashes and dots become underscores — no traversal possible
+        assert!(!safe.contains(".."));
+        assert!(!safe.contains('/'));
+    }
+
+    #[test]
+    fn test_to_safe_name_traversal_windows() {
+        let did = Did::new("did:key:..\\..\\windows\\system32");
+        let safe = did.to_safe_name();
+        assert!(!safe.contains(".."));
+        assert!(!safe.contains('\\'));
+    }
+
+    #[test]
+    fn test_to_safe_name_absolute_path() {
+        let did = Did::new("/absolute/path");
+        let safe = did.to_safe_name();
+        assert!(!safe.contains('/'));
+        assert!(
+            !safe.starts_with('_') && safe.starts_with('_')
+                || safe
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        );
+    }
+
+    #[test]
+    fn test_to_safe_name_empty() {
+        let did = Did::new("");
+        let safe = did.to_safe_name();
+        assert_eq!(safe, "_empty_");
+    }
 
     #[test]
     fn test_locator_roundtrip() {

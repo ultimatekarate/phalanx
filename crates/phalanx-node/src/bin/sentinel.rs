@@ -10,7 +10,7 @@ use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::network::bridge::Libp2pBridge;
 use phalanx_node::network::orchestrator::setup_phalanx_swarm;
-use phalanx_node::persistence::vault::derive_vault_key;
+use phalanx_node::persistence::vault::{derive_vault_key, load_or_create_vault_salt};
 use phalanx_node::psk::load_swarm_key;
 use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::init_observability;
@@ -46,7 +46,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     info!("Initializing Transient WAL");
-    let vault_key = derive_vault_key(&my_identity);
+    let vault_salt = load_or_create_vault_salt("vault")?;
+    let vault_key = derive_vault_key(&my_identity, &vault_salt);
     let journal = FileJournal::new("sentinel_transient_wal.bin", vault_key.clone()).await?;
 
     // --- ZERO-TRUST DEPENDENCY GRAPH ---

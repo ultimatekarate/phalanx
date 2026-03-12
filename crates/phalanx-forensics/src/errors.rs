@@ -17,6 +17,7 @@ impl ForensicPromotion for AmalgamError {
             AmalgamError::AmbiguousOwnership => GuardianError::PolicyViolation(
                 "Ambiguous Ownership: We require additional evidence to determine ownership. Dropping packet.".to_string(),
             ),
+            AmalgamError::SequenceConflict(seq) => GuardianError::SequenceConflict(seq.0.into()),
         }
     }
 }
