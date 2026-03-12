@@ -69,7 +69,7 @@ async fn build_test_sentinel(
     config.storage.vault_path = temp.path().to_string_lossy().to_string();
 
     let identity = PhalanxIdentity::new_ephemeral();
-    let vault_key = derive_vault_key(&identity);
+    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
     let trust_registry = TrustRegistry::build(&config).await;
 
     let deps = SentinelDependencies {
@@ -129,7 +129,7 @@ async fn setup_mock_storage() -> (
     config.storage.vault_path = temp.path().to_string_lossy().into_owned();
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let vault_key = derive_vault_key(&identity);
+    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
     let guardian = Guardian::new(
         &config.storage.vault_path,
         &config,

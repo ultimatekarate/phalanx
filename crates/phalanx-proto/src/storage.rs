@@ -56,6 +56,12 @@ pub enum GuardianError {
 
     #[error("Ambiguous ownership: Multiple unproven identities claiming Volley")]
     AmbiguousOwnership,
+
+    #[error("Crucible capacity exhausted: {0} active contexts at limit")]
+    CapacityExhausted(usize),
+
+    #[error("Sequence conflict: sequence {0} already exists with different content")]
+    SequenceConflict(u64),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -30,7 +30,7 @@ fn create_test_shard(seq: u32, volley_id: VolleyId) -> VideoShard {
 #[tokio::test]
 async fn test_out_of_sequence_salvage_on_node_death() {
     let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let vault_key = derive_vault_key(&identity);
+    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
     let config = NodeConfig::default();
     let volley_id = VolleyId::new("v_salvage");
 
@@ -90,7 +90,7 @@ async fn test_stronghold_crash_recovery() {
     let vault_path = temp_dir.path().to_string_lossy().to_string();
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let vault_key = derive_vault_key(&identity);
+    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
     let peer_id = NetworkId::random();
     let seq = StorageSequence(101);
     let vid = VolleyId::new("crash_volley");

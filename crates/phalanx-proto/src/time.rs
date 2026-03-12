@@ -47,11 +47,19 @@ impl TrustedClock for SystemClock {
 }
 
 /// A stateful session that maintains the causality chain for a specific timeline.
+///
+/// M6: The identity field is skipped during serialization to prevent
+/// accidental private key leakage. It must be re-injected after deserialization.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CausalitySession {
+    #[serde(skip, default = "default_identity")]
     pub identity: Arc<PhalanxIdentity>,
     pub peer_id: NetworkId,
     pub last_hash: Option<SignatureHash>,
+}
+
+fn default_identity() -> Arc<PhalanxIdentity> {
+    Arc::new(PhalanxIdentity::default())
 }
 
 impl CausalitySession {

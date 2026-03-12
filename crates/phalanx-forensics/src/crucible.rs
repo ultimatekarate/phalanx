@@ -8,7 +8,7 @@ use phalanx_proto::prelude::*;
 use phalanx_proto::types::{ForensicUnit, Verified};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::collections::btree_map::Entry;
+use std::collections::btree_map::Entry as MapEntry;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use std::time::Instant;
@@ -158,7 +158,7 @@ impl<S: Mold> Crucible<S> {
 
         // UNIFIED: The match block now produces the final Result<Option<S::Output>, GuardianError>
         match self.contexts.entry(key.clone()) {
-            Entry::Occupied(mut entry) => {
+            MapEntry::Occupied(mut entry) => {
                 let ctx = entry.get_mut();
 
                 // 1. Ingest & Map Errors
@@ -186,10 +186,16 @@ impl<S: Mold> Crucible<S> {
                     Ok(None)
                 }
             }
-            Entry::Vacant(entry) => {
+            MapEntry::Vacant(entry) => {
                 if active_contexts >= self.max_capacity {
-                    warn!("Crucible capacity exceeded. Dropping item.");
-                    return Ok(None);
+                    // M3 FIX: Return a proper error instead of silently dropping.
+                    // Callers can now distinguish backpressure from "not ready."
+                    warn!(
+                        capacity = self.max_capacity,
+                        active = active_contexts,
+                        "Crucible capacity exhausted. Rejecting new item."
+                    );
+                    return Err(GuardianError::CapacityExhausted(active_contexts));
                 }
 
                 let mut acc = S::init_accumulator(&item);
@@ -344,6 +350,8 @@ pub enum AmalgamError {
     IdentityMismatch,
     #[error("Ambiguous Ownership: We require additional evidence to determine ownership")]
     AmbiguousOwnership,
+    #[error("Sequence Conflict: seq {0} already exists with different content")]
+    SequenceConflict(StorageSequence),
 }
 
 impl Mold for VolleyAmalgam {
@@ -389,6 +397,23 @@ impl Mold for VolleyAmalgam {
     fn ingest(acc: &mut Self::Accumulator, item: Self::Input) -> Result<(), Self::Error> {
         let incoming_did = &item.data.did;
         let seq = item.data.evidence.sequence_id();
+
+        // M4 FIX: Check for sequence collision before any insert.
+        // If seq already exists with different content, reject; if identical, skip (dedup).
+        if let Some(existing) = acc.artifacts.get(&seq) {
+            if existing.witness_signature == item.data.witness_signature {
+                // Identical evidence — deduplicate silently
+                return Ok(());
+            } else {
+                // Different evidence at same sequence — conflict
+                warn!(
+                    seq = seq.0,
+                    volley = %acc.volley_id,
+                    "M4: Sequence collision detected — rejecting conflicting evidence"
+                );
+                return Err(AmalgamError::SequenceConflict(seq));
+            }
+        }
 
         // 1. Determine if the incoming shard is an "Authority Signal"
         let provides_authority = match &item.data.evidence {

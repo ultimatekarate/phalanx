@@ -28,12 +28,46 @@ const _MAX_WORKBENCH_STATE_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 const MAX_EGRESS_SALVAGE_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
 const AEAD_NONCE_LEN: usize = 24;
 
-pub fn derive_vault_key(identity: &PhalanxIdentity) -> SymmetricKey {
-    let bytes = Zeroizing::new(identity.keypair.to_bytes());
+/// M7 FIX: Vault key derivation now includes a random 32-byte salt.
+/// This ensures that identity key compromise does not directly yield the vault key.
+/// The salt is stored unencrypted in a `.vault_salt` file next to the vault directory.
+pub fn derive_vault_key(identity: &PhalanxIdentity, salt: &[u8; 32]) -> SymmetricKey {
+    let key_bytes = Zeroizing::new(identity.keypair.to_bytes());
+    // Concatenate domain separator with salt for the BLAKE3 derivation context
+    let mut context_input = Vec::with_capacity(key_bytes.len() + salt.len());
+    context_input.extend_from_slice(&*key_bytes);
+    context_input.extend_from_slice(salt);
     SymmetricKey(blake3::derive_key(
         "phalanx.vault.v1.disk-encryption",
-        &*bytes,
+        &context_input,
     ))
+}
+
+/// Load or create the vault salt file. Generated once with OsRng on first vault creation.
+pub fn load_or_create_vault_salt(vault_path: &str) -> std::io::Result<[u8; 32]> {
+    let salt_path = std::path::Path::new(vault_path).join(".vault_salt");
+    if salt_path.exists() {
+        let bytes = std::fs::read(&salt_path)?;
+        if bytes.len() != 32 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Vault salt file is not 32 bytes",
+            ));
+        }
+        let mut salt = [0u8; 32];
+        salt.copy_from_slice(&bytes);
+        Ok(salt)
+    } else {
+        use rand_core::{OsRng, RngCore};
+        let mut salt = [0u8; 32];
+        OsRng.fill_bytes(&mut salt);
+        // Ensure parent directory exists
+        if let Some(parent) = salt_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&salt_path, salt)?;
+        Ok(salt)
+    }
 }
 
 pub struct Guardian {
@@ -496,7 +530,7 @@ mod tests {
         let vault_path = temp_dir.path().to_string_lossy().to_string();
 
         let identity = PhalanxIdentity::new_ephemeral();
-        let vault_key = derive_vault_key(&identity);
+        let vault_key = derive_vault_key(&identity, &[0u8; 32]);
         let config = NodeConfig::default();
         let mut guardian = Guardian::new(
             &vault_path,
@@ -552,7 +586,7 @@ mod tests {
         let vault_path = temp_dir.path().to_string_lossy().to_string();
 
         let identity = PhalanxIdentity::new_ephemeral();
-        let vault_key = derive_vault_key(&identity);
+        let vault_key = derive_vault_key(&identity, &[0u8; 32]);
         let config = NodeConfig::default();
         let mut guardian = Guardian::new(
             &vault_path,

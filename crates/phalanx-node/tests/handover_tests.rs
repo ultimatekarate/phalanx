@@ -31,7 +31,7 @@ async fn test_legal_identity_handover() {
     let vid = VolleyId::new("handover_stream_01");
 
     // Initialize Guardian (Vault) under Identity A's ownership
-    let vault_key = derive_vault_key(&identity_a);
+    let vault_key = derive_vault_key(&identity_a, &[0u8; 32]);
     let mut guardian = Guardian::new(
         temp_dir.path().to_string_lossy().as_ref(),
         &config,
@@ -134,7 +134,7 @@ async fn test_illegal_identity_swap_rejected() {
     let vid = VolleyId::new("illegal_stream");
 
     let config = NodeConfig::test_defaults();
-    let vault_key = derive_vault_key(&identity_a);
+    let vault_key = derive_vault_key(&identity_a, &[0u8; 32]);
     let mut guardian = Guardian::new(
         "sim_vault/illegal_test",
         &config,
