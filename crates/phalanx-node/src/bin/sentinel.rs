@@ -30,8 +30,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config = NodeConfig::load_from_env();
     let physics = PhalanxPhysics::default_wan();
 
+    // TODO: Hard coded for now, this will come from the UI once it is built.
+    let identity_passphrase = std::env::var("PHALANX_IDENTITY_PASSPHRASE")
+        .map_err(|_| "Security Violation: PHALANX_IDENTITY_PASSPHRASE not set")?;
+
     // 3. Identity & Security Setup
-    let my_identity = PhalanxIdentity::init("identity.bin")?;
+    let my_identity = PhalanxIdentity::init("identity.bin", &identity_passphrase)?;
     let psk_path = Path::new("swarm.key");
     let psk = load_swarm_key(psk_path);
 
