@@ -13,6 +13,8 @@ use phalanx_proto::prelude::SignatureHash;
 use phalanx_proto::storage::HandoverProof;
 use phalanx_proto::time::{PhalanxTimestamp, TimeError};
 
+use rand_core::OsRng;
+use rand_core::RngCore;
 pub trait HandoverJudge {
     fn verify_signatures(&self) -> Result<SignatureHash, ShardError>;
 }

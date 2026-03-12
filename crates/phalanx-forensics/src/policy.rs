@@ -11,7 +11,7 @@ use phalanx_proto::types::SystemStress;
 use phalanx_proto::types::UnitInterval;
 use phalanx_proto::types::Verified;
 use phalanx_proto::vitals::HeartbeatInterval;
-use rand::Rng;
+
 use std::collections::HashMap;
 
 pub struct TrustArbiter;
@@ -31,7 +31,6 @@ impl TrustArbiter {
                 continue;
             }
 
-            // last_update is now also a MonotonicClock
             let elapsed = now.elapsed_since(record.reputation.last_update_secs);
             let intervals = elapsed / interval_secs;
 
@@ -51,22 +50,13 @@ impl TrustArbiter {
         }
     }
 
-    pub fn should_verify_signature<R: Rng>(record: &PeerRecord, rng: &mut R) -> bool {
-        // Always verify if they are near the "Suspicion" zone
-        if record.reputation.score < 80 {
-            return true;
-        }
-
-        // Probabilistic sampling for high-trust peers
-        // 100 Rep = 5% check rate
-        // 80 Rep = 20% check rate
-        let check_threshold: f64 = match record.reputation.score {
-            100..=i64::MAX => 0.05,
-            80..=99 => 0.20,
-            _ => 1.0,
-        };
-
-        rng.gen_bool(check_threshold)
+    /// Forensic Zero-Trust: Unconditional Cryptographic Verification.
+    /// We no longer rely on probabilistic trust sampling. All signatures MUST be verified.
+    #[inline(always)]
+    pub fn should_verify_signature(record: &PeerRecord) -> bool {
+        // We still reject blacklisted peers immediately, but for all others,
+        // we demand 100% verification.
+        !record.reputation.is_blacklisted
     }
 }
 

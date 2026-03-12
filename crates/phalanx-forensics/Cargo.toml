@@ -18,7 +18,8 @@ postcard = "1.0"
 # These live here so the proto crate stays lightweight
 ed25519-dalek = { version = "2.1", features = ["serde"] }
 aes-gcm = "0.10" # For the .decrypt() and .encrypt() Verbs
-rand = "0.8"
+rand = {version = "0.10.0", features = ["std"]}
+rand_core = { version = "0.6", features = ["std"] }
 
 # Utilities
 async-trait = "0.1" # If we have async Verbs (like database checks)
@@ -35,7 +36,7 @@ image = "0.25.9"
 bs58 = "0.5.1"
 lz4_flex = "0.11"
 c2pa = {version="0.78.0", default-features = false, features = ["rust_native_crypto"]}
-rand_core = { version = "0.6", features = ["std"] }
+
 [dev-dependencies]
 # For testing the Weaver without a network
 tokio = { version = "1.0", features = ["macros", "rt"] }
