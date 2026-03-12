@@ -155,23 +155,33 @@ impl JudgeExt for PhalanxIdentity {
     }
 }
 
+/// T4 FIX: TimeJudge now accepts Duration instead of raw u64.
+/// This eliminates unit confusion (seconds vs milliseconds) that previously
+/// allowed attackers to exploit misconfigured tolerance values.
 pub trait TimeJudge {
     fn verify_freshness(
         &self,
         current_now: PhalanxTimestamp,
-        tolerance: u64,
+        tolerance: std::time::Duration,
     ) -> Result<(), TimeError>;
 }
 
 impl TimeJudge for PhalanxTimestamp {
-    fn verify_freshness(&self, now: PhalanxTimestamp, tolerance: u64) -> Result<(), TimeError> {
+    fn verify_freshness(
+        &self,
+        now: PhalanxTimestamp,
+        tolerance: std::time::Duration,
+    ) -> Result<(), TimeError> {
         let claimed = self.as_u64();
         let current = now.as_u64();
+        // T4 FIX: Convert Duration to milliseconds explicitly.
+        // PhalanxTimestamp values are in milliseconds, so tolerance must match.
+        let tolerance_ms = tolerance.as_millis() as u64;
 
-        if claimed > current + tolerance {
+        if claimed > current + tolerance_ms {
             return Err(TimeError::Future(claimed - current));
         }
-        if claimed < current.saturating_sub(tolerance) {
+        if claimed < current.saturating_sub(tolerance_ms) {
             return Err(TimeError::Stale(current - claimed));
         }
         Ok(())
@@ -230,10 +240,12 @@ mod tests {
         .expect("Failed to initialize valid WitnessEnvelope");
 
         // 3. BASELINE: Verify check_integrity passes on clean data (Gate 3)
-        let integrity_result =
-            envelope
-                .clone()
-                .check_integrity(&witness_peer_id, &clock, 10_000, None);
+        let integrity_result = envelope.clone().check_integrity(
+            &witness_peer_id,
+            &clock,
+            std::time::Duration::from_millis(10_000),
+            None,
+        );
         assert!(
             integrity_result.is_ok(),
             "Integrity Gate failed on clean data"
@@ -251,7 +263,12 @@ mod tests {
 
         // 5. THE TEST: Gate 3 (Integrity) must catch the modification
         // Re-serializing and comparing against the stored signature must fail.
-        let tamper_result = envelope.check_integrity(&witness_peer_id, &clock, 10_000, None);
+        let tamper_result = envelope.check_integrity(
+            &witness_peer_id,
+            &clock,
+            std::time::Duration::from_millis(10_000),
+            None,
+        );
 
         assert!(
             tamper_result.is_err(),

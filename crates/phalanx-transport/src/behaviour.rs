@@ -3,7 +3,9 @@ use crate::codec::PhalanxRetrievalProtocol;
 use crate::events::PhalanxEvent;
 use libp2p::kad::RecordKey;
 use libp2p::swarm::NetworkBehaviour;
-use libp2p::{autonat, dcutr, gossipsub, identify, kad, mdns, relay, request_response};
+use libp2p::{
+    autonat, connection_limits, dcutr, gossipsub, identify, kad, mdns, relay, request_response,
+};
 use phalanx_proto::constants::DiscoveryError;
 use phalanx_proto::prelude::*;
 // Also, define STRONGHOLD_NAMESPACE if it was lost in the proto move:
@@ -23,6 +25,9 @@ pub struct PhalanxBehaviour<S: RecordStore + Send + Sync + 'static> {
     pub dcutr: dcutr::Behaviour,
     pub autonat: autonat::Behaviour,
     pub retrieval: request_response::Behaviour<PhalanxRetrievalProtocol>,
+    /// E1 FIX: Swarm-level connection limits to prevent eclipse attacks.
+    /// Enforces hard caps on total connections and per-peer connections.
+    pub connection_limits: connection_limits::Behaviour,
 }
 
 impl<S> PhalanxBehaviour<S>

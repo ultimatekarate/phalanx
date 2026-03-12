@@ -140,7 +140,12 @@ impl RetrievalActor {
 
         for env in raw_envelopes {
             let sequence_id = env.evidence.sequence_id();
-            if let Ok(valid_env) = env.check_integrity(local_id, &*self.clock, 10_000, None) {
+            if let Ok(valid_env) = env.check_integrity(
+                local_id,
+                &*self.clock,
+                std::time::Duration::from_millis(10_000),
+                None,
+            ) {
                 let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
                 if let Ok(sealed) = EgressGovernor::authorize(
                     unit,

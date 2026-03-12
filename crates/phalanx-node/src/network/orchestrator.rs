@@ -28,15 +28,32 @@ pub fn setup_phalanx_swarm(
     let local_peer_id = local_key.public().to_peer_id();
     tracing::info!(target: "phalanx_node::orchestrator", peer_id = %local_peer_id, "Initializing Network Stack");
 
+    // N3 FIX: Enforce PSK requirement when configured.
+    // Prevents silent fallback to unencrypted transport when the swarm key
+    // is missing or corrupt, which would expose all traffic.
+    if config.network.require_psk && psk.is_none() {
+        return Err(
+            "N3: require_psk is set but no Pre-Shared Key was provided. \
+                    The node cannot start without transport-layer encryption."
+                .into(),
+        );
+    }
+
     // 1. Persistent Kademlia Store Construction
     let dht_db_path = Path::new(&config.storage.vault_path).join("dht_store.redb");
     let local_network_id = NetworkId::from(local_peer_id.to_string());
     let persistent_store = RedbStore::new(&dht_db_path, local_network_id, evaluator)?;
 
     // 2. Kademlia Protocol Validation
+    // E3 FIX: Harden Kademlia configuration against routing table poisoning.
     let protocol_str = format!("/phalanx/kad/{}", config.network.protocol_version);
     let kad_protocol = StreamProtocol::try_from_owned(protocol_str)?;
-    let kad_config = kad::Config::new(kad_protocol);
+    let mut kad_config = kad::Config::new(kad_protocol);
+    kad_config.set_replication_factor(std::num::NonZeroUsize::new(20).unwrap());
+    kad_config.set_query_timeout(Duration::from_secs(30));
+    kad_config.set_record_ttl(Some(Duration::from_secs(3600)));
+    kad_config.set_provider_record_ttl(Some(Duration::from_secs(3600)));
+    kad_config.set_record_filtering(kad::StoreInserts::FilterBoth);
     let kademlia_behaviour =
         kad::Behaviour::with_config(local_peer_id, persistent_store, kad_config);
 
@@ -69,8 +86,10 @@ pub fn setup_phalanx_swarm(
                 .multiplex(yamux_config))
         })?
         .with_behaviour(|_| composite_behaviour)?
+        // E1 FIX: Enforce connection limits to prevent eclipse attacks.
         .with_swarm_config(|c: libp2p::swarm::Config| {
             c.with_idle_connection_timeout(Duration::from_secs(60))
+                .with_max_negotiating_inbound_streams(128)
         })
         .build();
 

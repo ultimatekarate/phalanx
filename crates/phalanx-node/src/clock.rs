@@ -72,6 +72,9 @@ pub struct TrustedClock {
     /// The difference between Local System Time and True Network Time in milliseconds.
     /// Positive = Local is behind. Negative = Local is ahead.
     offset_ms: Arc<RwLock<i64>>,
+    /// T1 FIX: Last successfully computed timestamp.
+    /// Falls back to local system time instead of catastrophic epoch-zero.
+    last_known_good: Arc<RwLock<u64>>,
 }
 
 pub type TimeResult<T> = Result<T, TimeError>;
@@ -79,8 +82,14 @@ pub type TimeResult<T> = Result<T, TimeError>;
 impl TrustedClock {
     #[must_use]
     pub fn new() -> Self {
+        // Initialize last_known_good with current system time
+        let initial_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64;
         Self {
             offset_ms: Arc::new(RwLock::new(0)),
+            last_known_good: Arc::new(RwLock::new(initial_time)),
         }
     }
 
@@ -105,7 +114,14 @@ impl TrustedClock {
         let offset_sec = *offset_guard;
 
         // Ensure we don't return negative time if offset is massive
-        Ok(PhalanxTimestamp((local + offset_sec).max(0) as u64))
+        let result = (local + offset_sec).max(0) as u64;
+
+        // T1 FIX: Record last successful timestamp for fallback
+        if let Ok(mut guard) = self.last_known_good.write() {
+            *guard = result;
+        }
+
+        Ok(PhalanxTimestamp(result))
     }
 
     /// Updates the offset manually (for testing or external sync mechanisms)
@@ -172,8 +188,23 @@ impl TrustedClock {
 
 impl TrustedClockTrait for TrustedClock {
     fn now(&self) -> PhalanxTimestamp {
-        self.now()
-            .unwrap_or_else(|_| PhalanxTimestamp::from_millis(0))
+        self.now().unwrap_or_else(|_| {
+            // T1 FIX: Fall back to last_known_good instead of epoch zero.
+            // Epoch zero causes ALL temporal checks to fail catastrophically,
+            // which an attacker can exploit by inducing clock errors.
+            let fallback = self.last_known_good.read().map(|g| *g).unwrap_or_else(|_| {
+                // Final fallback: use local system time (still better than epoch 0)
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or(Duration::from_secs(0))
+                    .as_millis() as u64
+            });
+            tracing::warn!(
+                fallback_ms = fallback,
+                "T1: Clock error — using last_known_good instead of epoch zero"
+            );
+            PhalanxTimestamp::from_millis(fallback)
+        })
     }
 }
 

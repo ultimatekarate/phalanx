@@ -70,7 +70,25 @@ pub fn create_audio_shard(
 
 // --- BLOCK-LEVEL UTILITIES ---
 
+/// S1 FIX: Decompression bomb guard.
+/// Reads the claimed decompressed size from the LZ4 prepended header and rejects
+/// payloads that would expand beyond MAX_DECOMPRESSED_BYTES, preventing OOM attacks.
+const MAX_DECOMPRESSED_BYTES: usize = 128 * 1024 * 1024; // 128 MiB hard ceiling
+
 pub fn decompress_payload(data: &[u8]) -> Result<Vec<u8>, String> {
+    // S1 FIX: Check the claimed decompressed size before allocating.
+    // lz4_flex prepends a 4-byte little-endian uncompressed size.
+    if data.len() < 4 {
+        return Err("LZ4 Decompression error: input too short for size header".into());
+    }
+    let claimed_size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if claimed_size > MAX_DECOMPRESSED_BYTES {
+        return Err(format!(
+            "LZ4 Decompression bomb: claimed size {} exceeds {} byte limit",
+            claimed_size, MAX_DECOMPRESSED_BYTES
+        ));
+    }
+
     lz4_flex::decompress_size_prepended(data).map_err(|e| format!("LZ4 Decompression error: {}", e))
 }
 
@@ -79,6 +97,11 @@ pub fn compress_payload(data: &[u8]) -> Vec<u8> {
 }
 
 // --- THE REASSEMBLER ---
+
+/// P1 FIX: Maximum number of concurrent shard reassembly contexts per peer.
+/// Prevents a single attacker from monopolizing the Crucible's capacity
+/// by opening thousands of unique shard IDs from the same DID.
+const MAX_CONTEXTS_PER_PEER: usize = 50;
 
 pub struct Reassembler {
     pub active_shards: Crucible<ShardMold>,
@@ -99,11 +122,35 @@ impl Reassembler {
         }
     }
 
+    /// P1 FIX: Count how many active contexts belong to a specific peer.
+    fn peer_context_count(&self, owner_did: &Did) -> usize {
+        self.active_shards
+            .contexts
+            .values()
+            .filter(|ctx| ctx.accumulator.owner_did == *owner_did)
+            .count()
+    }
+
     pub async fn ingest_chunk<J: TransientJournal>(
         &mut self,
         chunk: ShardChunk,
         journal: &mut J,
     ) -> Result<Option<EnvelopeState>, ShardError> {
+        // P1 FIX: Per-peer quota enforcement.
+        // Check if this peer already has too many active reassembly contexts.
+        // Only enforce for NEW shard IDs (existing ones are already tracked).
+        if !self.active_shards.contexts.contains_key(&chunk.shard_id)
+            && self.peer_context_count(&chunk.owner_did) >= MAX_CONTEXTS_PER_PEER
+        {
+            tracing::warn!(
+                peer = %chunk.owner_did,
+                active_contexts = self.peer_context_count(&chunk.owner_did),
+                limit = MAX_CONTEXTS_PER_PEER,
+                "P1: Per-peer crucible quota exceeded"
+            );
+            return Err(ShardError::CapacityExceeded(MAX_CONTEXTS_PER_PEER as u64));
+        }
+
         journal.record_chunk(&chunk).await?;
         journal.sync().await?;
 
@@ -234,6 +281,16 @@ impl Mold for ShardMold {
         // 1. O(n) Capacity Calculation: Prevent multiple reallocations
         // We sum the lengths of all chunks before allocating the final buffer.
         let total_size: usize = acc.parts.values().map(|v| v.len()).sum();
+
+        // S3 FIX: Assembly size bound. Reject payloads that exceed our memory budget.
+        if total_size > MAX_SHARD_BYTES {
+            tracing::warn!(
+                total_size,
+                limit = MAX_SHARD_BYTES,
+                "S3: Assembly rejected — total size exceeds safe limit"
+            );
+            return None;
+        }
 
         // 2. Exact Allocation
         let mut full_payload = Vec::with_capacity(total_size);

@@ -38,6 +38,11 @@ pub struct NetworkConfig {
     pub guardian_service_key: String,
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
+    /// N3 FIX: When true, the node will refuse to start without a valid PSK.
+    /// This prevents silent fallback to unencrypted transport when the swarm key
+    /// is missing or corrupt.
+    #[serde(default)]
+    pub require_psk: bool,
 }
 
 impl NodeConfig {
@@ -127,6 +132,7 @@ impl Default for NetworkConfig {
             bootstrap_peers: vec![],
             guardian_service_key: default_service_key(),
             max_connections: default_max_connections(),
+            require_psk: false,
         }
     }
 }

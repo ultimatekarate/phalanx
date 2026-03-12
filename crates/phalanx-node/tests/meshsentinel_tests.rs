@@ -306,7 +306,12 @@ async fn test_sentinel_egress_promotion_logic() {
 
     // 2. Sentinel performs Gate 3: Integrity
     let valid_env = raw_env
-        .check_integrity(&local_net_id, &SystemClock, 1000, None)
+        .check_integrity(
+            &local_net_id,
+            &SystemClock,
+            std::time::Duration::from_millis(1000),
+            None,
+        )
         .expect("Integrity check failed");
 
     // 3. Sentinel performs Gate 4: Policy Promotion
@@ -339,7 +344,12 @@ async fn test_sentinel_blocks_untrusted_egress() {
 
     let raw_env = mock_valid_envelope();
     let valid_env = raw_env
-        .check_integrity(&local_net_id, &SystemClock, 1000, None)
+        .check_integrity(
+            &local_net_id,
+            &SystemClock,
+            std::time::Duration::from_millis(1000),
+            None,
+        )
         .unwrap();
     let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
 
