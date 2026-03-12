@@ -213,10 +213,22 @@ impl Mold for ShardMold {
     }
 
     fn assemble(&self, _key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output> {
-        let mut full_payload = Vec::new();
+        // 1. O(n) Capacity Calculation: Prevent multiple reallocations
+        // We sum the lengths of all chunks before allocating the final buffer.
+        let total_size: usize = acc.parts.values().map(|v| v.len()).sum();
+
+        // 2. Exact Allocation
+        let mut full_payload = Vec::with_capacity(total_size);
+
+        // 3. Sequential Assembly
+        // Since we use a BTreeMap, iterating through 0..total_chunks
+        // ensures the data is concatenated in the correct sequence.
         for i in 0..acc.total_chunks {
-            full_payload.extend(acc.parts.get(&i)?);
+            let chunk_data = acc.parts.get(&i)?;
+            full_payload.extend_from_slice(chunk_data);
         }
+
+        // 4. Deserialization Gate
         crate::gate::unmarshal(&full_payload, "ShardMold::assemble").ok()
     }
 }
@@ -280,8 +292,6 @@ impl VideoWeaver for Vec<u8> {
         }
     }
 }
-
-// crates/phalanx-forensics/src/reassembler.rs
 
 /// The formal trait for slicing forensic evidence into network packets.
 pub trait Chunkifier {
