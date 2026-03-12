@@ -4307,7 +4307,7 @@ dependencies = [
  "lz4_flex",
  "phalanx-proto",
  "postcard",
- "rand 0.8.5",
+ "rand 0.10.0",
  "rand_core 0.6.4",
  "serde",
  "sha2",
