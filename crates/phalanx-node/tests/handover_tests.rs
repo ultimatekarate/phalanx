@@ -2,7 +2,9 @@ use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::vault::{derive_vault_key, read_encrypted_file, Guardian};
 use phalanx_node::vitals::init_observability;
-use phalanx_proto::evidence::{EnvelopeState, Evidence, StorageSequence, Volley, WitnessEnvelope};
+use phalanx_proto::evidence::{
+    EnvelopeState, Evidence, ForensicMetrics, StorageSequence, Volley, WitnessEnvelope,
+};
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
 use phalanx_proto::prelude::GuardianError;
 use phalanx_proto::storage::HandoverProof;
@@ -41,8 +43,14 @@ async fn test_legal_identity_handover() {
     );
 
     // PHASE 1: Identity A owns the stream
-    let shard_1 =
-        create_video_shard(vec![vec![0x01]], StorageSequence(1), 30, vid.clone()).unwrap();
+    let shard_1 = create_video_shard(
+        vec![vec![0x01]],
+        StorageSequence(1),
+        30,
+        vid.clone(),
+        ForensicMetrics::default(),
+    )
+    .unwrap();
     let env_1 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_1),
         &identity_a,
@@ -72,8 +80,14 @@ async fn test_legal_identity_handover() {
     let hash_2 = env_2.signature_hash();
 
     // PHASE 3: Identity B takes over seamlessly
-    let shard_3 =
-        create_video_shard(vec![vec![0x03]], StorageSequence(3), 30, vid.clone()).unwrap();
+    let shard_3 = create_video_shard(
+        vec![vec![0x03]],
+        StorageSequence(3),
+        30,
+        vid.clone(),
+        ForensicMetrics::default(),
+    )
+    .unwrap();
     let env_3 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_3),
         &identity_b,
@@ -144,8 +158,14 @@ async fn test_illegal_identity_swap_rejected() {
     );
 
     // -- Frame 1 (Identity A) --
-    let shard_1 =
-        create_video_shard(vec![vec![0x01]], StorageSequence(0), 30, vid.clone()).unwrap();
+    let shard_1 = create_video_shard(
+        vec![vec![0x01]],
+        StorageSequence(0),
+        30,
+        vid.clone(),
+        ForensicMetrics::default(),
+    )
+    .unwrap();
     let env_1 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_1),
         &identity_a,
@@ -156,8 +176,14 @@ async fn test_illegal_identity_swap_rejected() {
     let hash_1 = env_1.signature_hash();
 
     // -- Frame 2 (Identity B - THE ATTACKER) --
-    let shard_2 =
-        create_video_shard(vec![vec![0x02]], StorageSequence(2), 30, vid.clone()).unwrap();
+    let shard_2 = create_video_shard(
+        vec![vec![0x02]],
+        StorageSequence(2),
+        30,
+        vid.clone(),
+        ForensicMetrics::default(),
+    )
+    .unwrap();
     let env_2 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_2),
         &identity_b,

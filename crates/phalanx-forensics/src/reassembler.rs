@@ -39,11 +39,16 @@ pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<
 }
 
 /// RESTORED: Factory for creating a network-ready VideoShard from a batch of frames.
+///
+/// `lens_metrics` carries the sensor fingerprint computed by the ForensicLens pipeline.
+/// Every VideoShard MUST carry real metrics — `ForensicMetrics::default()` (all zeros)
+/// is itself a forensic signal that the LensGate can flag as a bypass attempt.
 pub fn create_video_shard(
     frames: Vec<Vec<u8>>,
     sequence: StorageSequence,
     fps: u8,
     volley: VolleyId,
+    lens_metrics: ForensicMetrics,
 ) -> Result<VideoShard, ShardError> {
     let raw_bytes = postcard::to_allocvec(&frames)
         .map_err(|e| ShardError::InvalidSize(format!("Serialization fail: {}", e)))?;
@@ -55,7 +60,7 @@ pub fn create_video_shard(
         payload: DataPayload::Compressed(compress_payload(&raw_bytes)),
         fps,
         volley_id: volley,
-        lens_metrics: ForensicMetrics::default(),
+        lens_metrics,
     })
 }
 
@@ -553,7 +558,13 @@ mod tests {
         let frames = vec![vec![1, 2, 3], vec![4, 5, 6]];
         let seq = StorageSequence(100);
 
-        let mut shard = create_video_shard(frames.clone(), seq, 30, "volley_1".into())?;
+        let mut shard = create_video_shard(
+            frames.clone(),
+            seq,
+            30,
+            "volley_1".into(),
+            ForensicMetrics::default(),
+        )?;
 
         // create_video_shard produces Compressed payload
         if let DataPayload::Compressed(data) = &shard.payload {
@@ -604,7 +615,13 @@ mod tests {
     #[test]
     fn test_double_encryption_idempotency() -> Result<(), Box<dyn std::error::Error>> {
         let frames = vec![vec![1]];
-        let mut shard = create_video_shard(frames, StorageSequence(1), 30, "v1".into())?;
+        let mut shard = create_video_shard(
+            frames,
+            StorageSequence(1),
+            30,
+            "v1".into(),
+            ForensicMetrics::default(),
+        )?;
         let key = get_test_key();
 
         shard.payload.apply_encryption(&key)?;
@@ -634,7 +651,13 @@ mod tests {
     #[test]
     fn test_serialization_roundtrip_encrypted() -> Result<(), Box<dyn std::error::Error>> {
         let frames = vec![vec![255, 0, 255]];
-        let mut shard = create_video_shard(frames, StorageSequence(50), 60, "v_net".into())?;
+        let mut shard = create_video_shard(
+            frames,
+            StorageSequence(50),
+            60,
+            "v_net".into(),
+            ForensicMetrics::default(),
+        )?;
         let key = get_test_key();
 
         shard.payload.apply_encryption(&key)?;

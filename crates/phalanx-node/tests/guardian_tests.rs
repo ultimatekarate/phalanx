@@ -105,8 +105,14 @@ async fn test_stronghold_crash_recovery() {
         vault_key.clone(),
     );
 
-    let shard = create_video_shard(vec![vec![0xAA]], seq, 30, vid.clone())
-        .expect("Failed to generate shard");
+    let shard = create_video_shard(
+        vec![vec![0xAA]],
+        seq,
+        30,
+        vid.clone(),
+        ForensicMetrics::default(),
+    )
+    .expect("Failed to generate shard");
 
     let envelope = WitnessEnvelope::sign_envelope(Evidence::Video(shard), &identity, peer_id, None)
         .expect("Failed to sign envelope");

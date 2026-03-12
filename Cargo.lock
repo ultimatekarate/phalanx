@@ -4319,6 +4319,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "phalanx-lens"
+version = "0.1.0"
+dependencies = [
+ "phalanx-proto",
+]
+
+[[package]]
 name = "phalanx-node"
 version = "0.1.0"
 dependencies = [
@@ -4337,6 +4344,7 @@ dependencies = [
  "lru",
  "oneshot",
  "phalanx-forensics",
+ "phalanx-lens",
  "phalanx-proto",
  "phalanx-transport",
  "postcard",

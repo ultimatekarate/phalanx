@@ -458,6 +458,7 @@ async fn test_stronghold_ingestion_and_persistence() {
         StorageSequence(1),
         30,
         VolleyId::new("v1"),
+        ForensicMetrics::default(),
     )
     .expect("Failed to create video shard");
 
