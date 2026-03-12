@@ -1,7 +1,7 @@
 // crates/phalanx-forensics/src/storage/handover.rs
 
 use crate::judge::JudgeExt;
-use ed25519_dalek::Verifier;
+// H5 FIX: Removed Verifier import — using verify_strict() directly on VerifyingKey
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::prelude::*;
 use phalanx_proto::storage::HandoverProof;
@@ -88,13 +88,13 @@ impl HandoverAuthority for HandoverProof {
 
         // 5. Verify Signatures
         old_pk
-            .verify(&hash_bytes, &self.old_signature)
+            .verify_strict(&hash_bytes, &self.old_signature)
             .map_err(|_| {
                 ShardError::InvalidConfiguration("Old identity signature mismatch".to_string())
             })?;
 
         new_pk
-            .verify(&hash_bytes, &self.new_signature)
+            .verify_strict(&hash_bytes, &self.new_signature)
             .map_err(|_| {
                 ShardError::InvalidConfiguration("New identity signature mismatch".to_string())
             })?;
