@@ -28,6 +28,7 @@ postcard.workspace = true
 tempfile = "3.26.0"
 rand_core = "0.10.0"
 rand = "0.8.0"
+zeroize = "1.8.2"
 
 [dev-dependencies]
 # For testing our Prepositional logic
