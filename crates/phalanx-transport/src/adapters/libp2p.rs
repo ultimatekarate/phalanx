@@ -6,11 +6,14 @@ use futures::StreamExt; // Required to bring StreamExt::select_next_some into sc
 use libp2p::kad::store::RecordStore;
 use libp2p::swarm::Swarm;
 use libp2p::swarm::SwarmEvent;
+use libp2p::PeerId;
 use phalanx_proto::identity::NetworkId;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::topic::MeshTopic;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 pub enum TransportCommand {
     Publish(MeshTopic, Vec<u8>),
@@ -56,17 +59,46 @@ pub fn translate_swarm_event(event: SwarmEvent<PhalanxEvent>) -> Option<NetworkE
     }
 }
 
+/// H3 FIX: Configurable event channel capacity and per-peer rate limits.
+pub struct AdapterConfig {
+    /// Event channel capacity (default: 2048)
+    pub event_channel_capacity: usize,
+    /// Max events per peer per second before dropping (default: 100)
+    pub max_events_per_peer_per_sec: u64,
+}
+
+impl Default for AdapterConfig {
+    fn default() -> Self {
+        Self {
+            event_channel_capacity: 2048,
+            max_events_per_peer_per_sec: 100,
+        }
+    }
+}
+
 impl Libp2pAdapter {
     /// Initializes the Actor Pattern.
     /// The Swarm is moved into a detached Tokio task to preserve thread safety (Sync).
-    pub fn new<S>(mut swarm: Swarm<PhalanxBehaviour<S>>) -> Self
+    pub fn new<S>(swarm: Swarm<PhalanxBehaviour<S>>) -> Self
+    where
+        S: RecordStore + Send + Sync + 'static,
+    {
+        Self::with_config(swarm, AdapterConfig::default())
+    }
+
+    pub fn with_config<S>(mut swarm: Swarm<PhalanxBehaviour<S>>, config: AdapterConfig) -> Self
     where
         S: RecordStore + Send + Sync + 'static,
     {
         let (command_tx, mut command_rx) = mpsc::channel::<TransportCommand>(128);
-        let (_event_tx, event_rx) = mpsc::channel::<NetworkEvent>(1024);
+        let (_event_tx, event_rx) = mpsc::channel::<NetworkEvent>(config.event_channel_capacity);
+        let max_per_sec = config.max_events_per_peer_per_sec;
 
         tokio::spawn(async move {
+            // H3 FIX: Per-peer rate limiting state
+            let mut peer_event_counts: HashMap<PeerId, (u64, Instant)> = HashMap::new();
+            let mut dropped_events: u64 = 0;
+
             loop {
                 tokio::select! {
                     command_option = command_rx.recv() => {
@@ -85,17 +117,30 @@ impl Libp2pAdapter {
                             Some(TransportCommand::SendDirect(target, data)) => {
                                 match PeerMapper::from_network_id(&target) {
                                     Ok(peer_id) => {
-                                        match postcard::from_bytes::<phalanx_proto::retrieval::VolleyRequest>(&data) {
-                                            Ok(request) => {
-                                                swarm.behaviour_mut().retrieval.send_request(&peer_id, request);
-                                            }
-                                            Err(decode_error) => {
-                                                tracing::error!(
-                                                    target: "phalanx::transport",
-                                                    "Failed to decode VolleyRequest for {}: {:?}",
-                                                    target.0,
-                                                    decode_error
-                                                );
+                                        // H2 FIX: Verify peer is connected before sending.
+                                        // libp2p's Noise protocol authenticates the transport-layer
+                                        // peer identity, so once connected the PeerId is
+                                        // cryptographically verified. Sending to unconnected peers
+                                        // risks targeting a spoofed NetworkId.
+                                        if !swarm.is_connected(&peer_id) {
+                                            tracing::warn!(
+                                                target: "phalanx::transport",
+                                                "Rejecting SendDirect to unconnected peer: {}",
+                                                target.0,
+                                            );
+                                        } else {
+                                            match postcard::from_bytes::<phalanx_proto::retrieval::VolleyRequest>(&data) {
+                                                Ok(request) => {
+                                                    swarm.behaviour_mut().retrieval.send_request(&peer_id, request);
+                                                }
+                                                Err(decode_error) => {
+                                                    tracing::error!(
+                                                        target: "phalanx::transport",
+                                                        "Failed to decode VolleyRequest for {}: {:?}",
+                                                        target.0,
+                                                        decode_error
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -134,8 +179,59 @@ impl Libp2pAdapter {
                     },
 
                     swarm_event = swarm.select_next_some() => {
-                        if let Some(network_event) = translate_swarm_event(swarm_event) {
-                            let _ = _event_tx.send(network_event).await;
+                        // H3 FIX: Extract source peer for rate limiting
+                        let source_peer = match &swarm_event {
+                            SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(
+                                libp2p::gossipsub::Event::Message { propagation_source, .. }
+                            )) => Some(*propagation_source),
+                            SwarmEvent::Behaviour(PhalanxEvent::Retrieval(
+                                libp2p::request_response::Event::Message { peer, .. }
+                            )) => Some(*peer),
+                            _ => None,
+                        };
+
+                        // Per-peer rate limiting
+                        let rate_ok = if let Some(peer) = source_peer {
+                            let now = Instant::now();
+                            let entry = peer_event_counts
+                                .entry(peer)
+                                .or_insert((0, now));
+
+                            // Reset window if >1 second elapsed
+                            if now.duration_since(entry.1).as_secs() >= 1 {
+                                entry.0 = 0;
+                                entry.1 = now;
+                            }
+
+                            entry.0 += 1;
+                            entry.0 <= max_per_sec
+                        } else {
+                            true
+                        };
+
+                        if rate_ok {
+                            if let Some(network_event) = translate_swarm_event(swarm_event) {
+                                if _event_tx.try_send(network_event).is_err() {
+                                    dropped_events += 1;
+                                    if dropped_events % 100 == 1 {
+                                        tracing::warn!(
+                                            target: "phalanx::transport",
+                                            total_dropped = dropped_events,
+                                            "Event channel full, dropping events"
+                                        );
+                                    }
+                                }
+                            }
+                        } else if let Some(peer) = source_peer {
+                            dropped_events += 1;
+                            if dropped_events % 100 == 1 {
+                                tracing::warn!(
+                                    target: "phalanx::transport",
+                                    peer = %peer,
+                                    total_dropped = dropped_events,
+                                    "Per-peer rate limit exceeded, dropping event"
+                                );
+                            }
                         }
                     }
                 }

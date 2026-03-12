@@ -1,6 +1,6 @@
 // crates/phalanx-forensics/src/evidence/witness.rs
 
-use ed25519_dalek::{Signature, Signer, Verifier};
+use ed25519_dalek::{Signature, Signer};
 use phalanx_proto::evidence::{ChunkType, Evidence, ShardChunk, SignatureHash, WitnessEnvelope};
 use phalanx_proto::prelude::ShardError;
 use phalanx_proto::prelude::*;
@@ -71,7 +71,7 @@ impl WitnessAuthority for WitnessEnvelope {
         };
         let signature = Signature::from_bytes(sig_bytes);
 
-        verifying_key.verify(&data_bytes, &signature).is_ok()
+        verifying_key.verify_strict(&data_bytes, &signature).is_ok()
     }
 
     fn calculate_anchor(&self) -> SignatureHash {
