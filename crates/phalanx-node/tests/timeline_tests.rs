@@ -4,7 +4,8 @@ use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
 use phalanx_proto::evidence::{
-    DataPayload, EnvelopeState, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
+    DataPayload, EnvelopeState, Evidence, ForensicMetrics, StorageSequence, VideoShard,
+    WitnessEnvelope,
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
 use phalanx_proto::storage::GuardianError;
@@ -39,6 +40,7 @@ async fn test_reliability_timeline_integrity() {
         fps: 30,
         volley_id: volley_id.clone(),
         payload: DataPayload::Clear(b"Anchor Frame".to_vec()),
+        lens_metrics: ForensicMetrics::default(),
     };
     let anchor_envelope = WitnessEnvelope::sign_envelope(
         Evidence::Video(anchor_shard),
@@ -63,6 +65,7 @@ async fn test_reliability_timeline_integrity() {
         fps: 30,
         volley_id: volley_id.clone(),
         payload: DataPayload::Clear(b"Valid Frame".to_vec()),
+        lens_metrics: ForensicMetrics::default(),
     };
     let valid_envelope = WitnessEnvelope::sign_envelope(
         Evidence::Video(valid_shard),
@@ -87,6 +90,7 @@ async fn test_reliability_timeline_integrity() {
         fps: 30,
         volley_id: volley_id.clone(),
         payload: DataPayload::Clear(b"Hijacked Frame".to_vec()),
+        lens_metrics: ForensicMetrics::default(),
     };
     // Intentionally forge the causality chain by pointing to anchor_hash instead of valid_envelope's hash
     let hijacked_envelope = WitnessEnvelope::sign_envelope(

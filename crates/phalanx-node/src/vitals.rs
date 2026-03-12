@@ -130,8 +130,9 @@ pub struct IntegralState {
     pub w_integral: f64, // WAL/storage pressure (ratio of max capacity)
     pub b_integral: f64, // Bandwidth pressure (MiB ingress per event)
     pub c_integral: f64, // Connection pressure (ratio of max connections)
-    pub leaf_trigger_count: u8, // Consecutive vitals ticks above composite threshold
-    pub normal_trigger_count: u8, // Consecutive vitals ticks below recovery threshold
+    pub conserving_trigger_count: u8, // Consecutive ticks above Conserving threshold (0.50)
+    pub leaf_trigger_count: u8, // Consecutive vitals ticks above composite threshold (0.85)
+    pub normal_trigger_count: u8, // Consecutive vitals ticks below recovery threshold (0.30)
 }
 
 pub trait Homeostasis {
@@ -213,6 +214,7 @@ impl SystemGovernor {
                 w_integral: 0.0,
                 b_integral: 0.0,
                 c_integral: 0.0,
+                conserving_trigger_count: 0,
                 leaf_trigger_count: 0,
                 normal_trigger_count: 0,
             }),
@@ -333,24 +335,34 @@ impl SystemGovernor {
     }
 
     /// Returns the recommended power state based on composite stress with hysteresis.
-    /// 3 consecutive ticks above 0.85 → Leaf, 5 below 0.3 → Normal.
+    /// 3 consecutive ticks above 0.85 → Leaf, 3 above 0.50 → Conserving, 5 below 0.30 → Normal.
     pub fn recommended_power_state(&self) -> PowerState {
         let composite = self.composite_stress();
         let mut integrals = self.integrals.write().unwrap_or_else(|e| e.into_inner());
 
         if composite > 0.85 {
             integrals.leaf_trigger_count = integrals.leaf_trigger_count.saturating_add(1);
+            integrals.conserving_trigger_count = 0;
+            integrals.normal_trigger_count = 0;
+        } else if composite > 0.50 {
+            integrals.conserving_trigger_count =
+                integrals.conserving_trigger_count.saturating_add(1);
+            integrals.leaf_trigger_count = 0;
             integrals.normal_trigger_count = 0;
         } else if composite < 0.3 {
             integrals.normal_trigger_count = integrals.normal_trigger_count.saturating_add(1);
             integrals.leaf_trigger_count = 0;
+            integrals.conserving_trigger_count = 0;
         } else {
             integrals.leaf_trigger_count = 0;
+            integrals.conserving_trigger_count = 0;
             integrals.normal_trigger_count = 0;
         }
 
         if integrals.leaf_trigger_count >= 3 {
             PowerState::Leaf
+        } else if integrals.conserving_trigger_count >= 3 {
+            PowerState::Conserving
         } else if integrals.normal_trigger_count >= 5 {
             PowerState::Normal
         } else {
@@ -750,6 +762,7 @@ mod tests {
                 w_integral: 0.0,
                 b_integral: 0.0,
                 c_integral: 0.0,
+                conserving_trigger_count: 0,
                 leaf_trigger_count: 0,
                 normal_trigger_count: 0,
             }),

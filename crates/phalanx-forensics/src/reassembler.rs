@@ -4,7 +4,7 @@ use crate::crucible::{Crucible, Mold};
 use crate::prelude::TransientJournal;
 use image::DynamicImage;
 use phalanx_proto::evidence::{
-    AudioShard, ChunkType, StorageSequence, VideoShard, WitnessEnvelope,
+    AudioShard, ChunkType, ForensicMetrics, StorageSequence, VideoShard, WitnessEnvelope,
 };
 use phalanx_proto::identity::{Did, ShardId};
 use phalanx_proto::prelude::{
@@ -47,6 +47,7 @@ pub fn create_video_shard(
         payload: DataPayload::Compressed(compress_payload(&raw_bytes)),
         fps,
         volley_id: volley,
+        lens_metrics: ForensicMetrics::default(),
     })
 }
 
@@ -203,17 +204,28 @@ const MAX_SHARD_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ShardBuffer {
-    pub total_chunks: u32,
     pub received_count: u32,
+    /// Set when a symbol with `is_terminal == true` arrives.
+    pub terminal_received: bool,
+    /// Parts keyed by encoding symbol ID (u32 inner value).
     pub parts: BTreeMap<u32, Vec<u8>>,
     pub owner_did: Did,
 }
 
 impl ShardBuffer {
+    /// Highest symbol ID we've received, or 0 if empty.
+    pub fn max_symbol_id(&self) -> u32 {
+        self.parts.keys().next_back().copied().unwrap_or(0)
+    }
+
+    /// Indices missing in the range 0..=max_symbol_id.
+    /// Only meaningful once `terminal_received` is true (we know the range).
     pub fn missing_indices(&self) -> Vec<u32> {
-        (0..self.total_chunks)
-            .filter(|i| !self.parts.contains_key(i))
-            .collect()
+        if self.parts.is_empty() {
+            return vec![];
+        }
+        let max = self.max_symbol_id();
+        (0..=max).filter(|i| !self.parts.contains_key(i)).collect()
     }
 
     /// Total bytes currently held across all received parts.
@@ -240,9 +252,8 @@ impl Mold for ShardMold {
 
     fn init_accumulator(item: &Self::Input) -> Self::Accumulator {
         ShardBuffer {
-            // FIXED: Clamp the requested chunks to our safe ceiling
-            total_chunks: std::cmp::min(item.total_chunks, 10_000),
             received_count: 0,
+            terminal_received: item.is_terminal,
             parts: BTreeMap::new(),
             owner_did: item.owner_did.clone(),
         }
@@ -264,7 +275,17 @@ impl Mold for ShardMold {
             ));
         }
 
-        if let std::collections::btree_map::Entry::Vacant(e) = acc.parts.entry(item.chunk_index) {
+        // Resource guard: hard cap of 2,000 chunks per context (Phase 0a).
+        if acc.received_count >= 2_000 {
+            return Err(ShardError::CapacityExceeded(2_000));
+        }
+
+        let esi = item.encoding_symbol_id.0;
+        if item.is_terminal {
+            acc.terminal_received = true;
+        }
+
+        if let std::collections::btree_map::Entry::Vacant(e) = acc.parts.entry(esi) {
             e.insert(item.data);
             acc.received_count += 1;
         }
@@ -274,12 +295,12 @@ impl Mold for ShardMold {
     }
 
     fn is_ready(acc: &Self::Accumulator, _elapsed: std::time::Duration) -> bool {
-        acc.received_count == acc.total_chunks
+        // Completeness derived from data: terminal received AND no gaps in sequence.
+        acc.terminal_received && acc.missing_indices().is_empty()
     }
 
     fn assemble(&self, _key: Self::Key, acc: Self::Accumulator) -> Option<Self::Output> {
         // 1. O(n) Capacity Calculation: Prevent multiple reallocations
-        // We sum the lengths of all chunks before allocating the final buffer.
         let total_size: usize = acc.parts.values().map(|v| v.len()).sum();
 
         // S3 FIX: Assembly size bound. Reject payloads that exceed our memory budget.
@@ -296,9 +317,9 @@ impl Mold for ShardMold {
         let mut full_payload = Vec::with_capacity(total_size);
 
         // 3. Sequential Assembly
-        // Since we use a BTreeMap, iterating through 0..total_chunks
-        // ensures the data is concatenated in the correct sequence.
-        for i in 0..acc.total_chunks {
+        // BTreeMap iteration is ordered. Concatenate 0..=max_symbol_id.
+        let max_esi = acc.max_symbol_id();
+        for i in 0..=max_esi {
             let chunk_data = acc.parts.get(&i)?;
             full_payload.extend_from_slice(chunk_data);
         }
@@ -364,6 +385,7 @@ impl VideoWeaver for Vec<u8> {
             payload: DataPayload::Compressed(compress_payload(&raw_bytes)),
             fps,
             volley_id: volley,
+            lens_metrics: ForensicMetrics::default(),
         }
     }
 }
@@ -387,6 +409,8 @@ impl Chunkifier for Vec<u8> {
         chunk_size: usize,
         chunk_type: ChunkType,
     ) -> Result<Vec<ShardChunk>, ShardError> {
+        use phalanx_proto::types::EncodingSymbolId;
+
         // 1. Safety check for empty data or invalid chunk sizes
         if self.is_empty() {
             return Ok(Vec::new());
@@ -395,20 +419,20 @@ impl Chunkifier for Vec<u8> {
             return Err(ShardError::InvalidSize("Chunk size cannot be zero".into()));
         }
 
-        // 2. Calculate the "Forensic Bound" (Total Chunks)
-        let total_chunks = (self.len() as f32 / chunk_size as f32).ceil() as u32;
         let timestamp = PhalanxTimestamp::now();
+        let slices: Vec<&[u8]> = self.chunks(chunk_size).collect();
+        let last_index = slices.len().saturating_sub(1);
 
-        // 3. Slice and Map
-        // We use the standard library's .chunks() for memory-efficient slicing
-        let chunks = self
-            .chunks(chunk_size)
+        // Slice and Map — encoding_symbol_id is the sequential index,
+        // is_terminal is true on the last chunk only.
+        let chunks = slices
+            .into_iter()
             .enumerate()
             .map(|(index, data)| ShardChunk {
                 shard_id,
-                chunk_index: index as u32,
-                total_chunks,
-                data: data.to_vec(), // Convert slice to owned Vec for transport
+                encoding_symbol_id: EncodingSymbolId(index as u32),
+                is_terminal: index == last_index,
+                data: data.to_vec(),
                 owner_did: owner_did.clone(),
                 chunk_type,
                 timestamp,
@@ -427,7 +451,7 @@ mod tests {
     use phalanx_proto::crypto::SymmetricKey;
     use phalanx_proto::evidence::{Evidence, SignatureHash};
     use phalanx_proto::identity::PhalanxIdentity;
-    use phalanx_proto::prelude::PendingEgress;
+    use phalanx_proto::prelude::{EncodingSymbolId, PendingEgress};
     use phalanx_proto::storage::HandoverProof;
 
     fn get_test_key() -> SymmetricKey {
@@ -580,6 +604,7 @@ mod tests {
             fps: 30,
             volley_id: VolleyId::new("id"),
             payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            lens_metrics: ForensicMetrics::default(),
         });
 
         // 2. Wrap in an envelope and sign it
@@ -597,8 +622,8 @@ mod tests {
 
         let chunk_1 = ShardChunk {
             shard_id: ShardId(99),
-            chunk_index: 0,
-            total_chunks: 2,
+            encoding_symbol_id: EncodingSymbolId(0),
+            is_terminal: false,
             data: part1.to_vec(),
             owner_did: identity.did.clone(),
             chunk_type: ChunkType::Witnessed,
@@ -607,8 +632,8 @@ mod tests {
 
         let chunk_2 = ShardChunk {
             shard_id: ShardId(99),
-            chunk_index: 1,
-            total_chunks: 2,
+            encoding_symbol_id: EncodingSymbolId(1),
+            is_terminal: true,
             data: part2.to_vec(),
             owner_did: identity.did.clone(),
             chunk_type: ChunkType::Witnessed,
@@ -685,8 +710,8 @@ mod tests {
 
         // 3. Manually populate the Accumulator (ShardBuffer)
         let acc = ShardBuffer {
-            total_chunks: 3,
-            received_count: 2, // 0 and 2 arrived, 1 is missing
+            received_count: 2,       // 0 and 2 arrived, 1 is missing
+            terminal_received: true, // we know the full extent
             parts,
             owner_did: identity.did.clone(),
         };
@@ -709,8 +734,8 @@ mod tests {
         parts2.insert(0, vec![1]);
         parts2.insert(2, vec![3]);
         let buffer = ShardBuffer {
-            total_chunks: 3,
             received_count: 2,
+            terminal_received: true,
             parts: parts2,
             owner_did: identity.did.clone(),
         };
@@ -746,8 +771,8 @@ mod tests {
         parts.insert(0, data.clone());
 
         let acc = ShardBuffer {
-            total_chunks: 1,
             received_count: 1,
+            terminal_received: true,
             parts,
             owner_did: identity.did.clone(),
         };

@@ -203,7 +203,7 @@ mod tests {
     use super::*;
     use crate::policy::EgressGovernor;
     use phalanx_proto::evidence::{
-        DataPayload, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
+        DataPayload, Evidence, ForensicMetrics, StorageSequence, VideoShard, WitnessEnvelope,
     };
     use phalanx_proto::identity::{PhalanxIdentity, VolleyId};
     use phalanx_proto::time::SystemClock;
@@ -228,6 +228,7 @@ mod tests {
             fps: 30,
             volley_id: vid,
             payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            lens_metrics: ForensicMetrics::default(),
         };
 
         // Seal the evidence legitimately

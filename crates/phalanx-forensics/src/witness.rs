@@ -93,14 +93,16 @@ impl WitnessAuthority for WitnessEnvelope {
         let timestamp = PhalanxTimestamp::now();
 
         // Slice into physical MTU-sized chunks
-        let chunks = full_data
-            .chunks(mtu)
+        let slices: Vec<&[u8]> = full_data.chunks(mtu).collect();
+        let last_index = slices.len().saturating_sub(1);
+        let chunks = slices
+            .into_iter()
             .enumerate()
             .map(|(i, slice)| ShardChunk {
                 shard_id,
-                chunk_index: i as u32,
+                encoding_symbol_id: phalanx_proto::types::EncodingSymbolId(i as u32),
                 chunk_type: ChunkType::Witnessed,
-                total_chunks: full_data.len().div_ceil(mtu) as u32,
+                is_terminal: i == last_index,
                 data: slice.to_vec(),
                 owner_did: owner_did.clone(),
                 timestamp,

@@ -20,6 +20,7 @@ fn create_mock_chunks(
         fps: 30,
         volley_id: VolleyId::new("test_volley"),
         payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        lens_metrics: ForensicMetrics::default(),
     });
 
     let envelope =
@@ -28,6 +29,7 @@ fn create_mock_chunks(
 
     // 2. Serialize it to actual bytes
     let full_bytes = postcard::to_allocvec(&envelope).unwrap();
+    let last_index = total.saturating_sub(1);
 
     // 3. Split those bytes into chunks
     let chunk_size = (full_bytes.len() + total as usize - 1) / total as usize;
@@ -41,11 +43,11 @@ fn create_mock_chunks(
 
             ShardChunk {
                 shard_id,
-                chunk_index: i,
-                total_chunks: total,
-                owner_did: identity.did.clone(),
+                encoding_symbol_id: EncodingSymbolId(i),
                 chunk_type: ChunkType::Witnessed,
+                is_terminal: i == last_index,
                 data,
+                owner_did: identity.did.clone(),
                 timestamp,
             }
         })

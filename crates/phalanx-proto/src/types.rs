@@ -242,12 +242,20 @@ impl VitalityRate {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// Device power/resource conservation state.
+/// Ordered by restrictiveness: Normal < Conserving < Leaf < Dormant.
+/// Two-stage evaluation: `recommended_power_state() = max(battery_gate, stress_recommendation)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub enum PowerState {
+    /// Full participation — no constraints.
     #[default]
     Normal,
-    /// Focus strictly on self-preservation: Only accept local data
+    /// Battery 20–50% (not charging): 2× heartbeat interval, half FPS.
+    Conserving,
+    /// Battery <20% or critical stress: local-only, 5× heartbeat, minimal FPS.
     Leaf,
+    /// App backgrounded: WAL drain + heartbeat only (capture if OS allows).
+    Dormant,
 }
 
 pub trait ValidationState {}
@@ -310,6 +318,125 @@ impl<T, S: ValidationState> ForensicUnit<T, S> {
     }
 }
 
+// ─── Four Pillars Newtypes (Phase 0-pre) ───────────────────────────────────
+// Every new domain concept gets a newtype. Primitive obsession is forbidden.
+
+/// RaptorQ encoding symbol identifier (ESI). Not an index — it's a symbol address.
+/// Lives here because ShardChunk (evidence.rs) carries it across the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub struct EncodingSymbolId(pub u32);
+
+impl fmt::Display for EncodingSymbolId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "esi:{}", self.0)
+    }
+}
+
+/// Frames per second. Floor of 1 enforced on construction via `new()`.
+/// `zero()` is explicitly opt-in for Dormant (no capture) only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Fps(u32);
+
+impl Fps {
+    /// Construct with a floor of 1 FPS. Prevents zero-FPS bugs from integer division.
+    #[must_use]
+    pub fn new(fps: u32) -> Self {
+        Self(fps.max(1))
+    }
+
+    /// Explicitly zero FPS — only valid for Dormant state (no capture).
+    #[must_use]
+    pub fn zero() -> Self {
+        Self(0)
+    }
+
+    #[must_use]
+    pub fn get(&self) -> u32 {
+        self.0
+    }
+
+    /// Convert to a per-frame interval. Returns None for zero FPS.
+    #[must_use]
+    pub fn as_interval(&self) -> Option<Duration> {
+        if self.0 == 0 {
+            None
+        } else {
+            Some(Duration::from_millis(1000 / self.0 as u64))
+        }
+    }
+}
+
+impl Default for Fps {
+    fn default() -> Self {
+        Self(30)
+    }
+}
+
+impl fmt::Display for Fps {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} fps", self.0)
+    }
+}
+
+/// RaptorQ repair ratio (≥ 1.0). 1.0 = source symbols only, 1.5 = 50% extra repair symbols.
+/// Validated on construction — invalid ratios panic in debug, clamp in release.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RepairRatio(f32);
+
+impl RepairRatio {
+    /// Construct a repair ratio. Must be ≥ 1.0.
+    /// Panics in debug builds if ratio < 1.0. Clamps to 1.0 in release.
+    #[must_use]
+    pub fn new(ratio: f32) -> Self {
+        debug_assert!(ratio >= 1.0, "RepairRatio must be >= 1.0, got {}", ratio);
+        Self(ratio.max(1.0))
+    }
+
+    #[must_use]
+    pub fn get(&self) -> f32 {
+        self.0
+    }
+}
+
+impl Default for RepairRatio {
+    fn default() -> Self {
+        Self(1.5)
+    }
+}
+
+impl fmt::Display for RepairRatio {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}×", self.0)
+    }
+}
+
+/// RaptorQ symbol payload size in bytes. Constrains MTU-level chunking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SymbolSize(pub usize);
+
+impl Default for SymbolSize {
+    fn default() -> Self {
+        Self(1200) // Fits in a single UDP datagram under typical MTU
+    }
+}
+
+impl fmt::Display for SymbolSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} bytes/symbol", self.0)
+    }
+}
+
+/// Sensor analog black level offset. Wraps f32 to match NEON float32x4 pipeline.
+/// Typical value: 16.0 for 8-bit sensors (accounts for analog black offset).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct BlackLevel(pub f32);
+
+impl Default for BlackLevel {
+    fn default() -> Self {
+        Self(16.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,6 +464,55 @@ mod tests {
 
         let healthy = UnitInterval::new(0.2);
         assert!(!healthy.is_critical());
+    }
+
+    #[test]
+    fn test_fps_floor_guard() {
+        // Fps::new enforces minimum of 1
+        assert_eq!(Fps::new(0).get(), 1);
+        assert_eq!(Fps::new(30).get(), 30);
+
+        // Integer division that would floor to 0 is caught
+        let base = Fps::new(4);
+        let leaf = Fps::new(base.get() / 5); // 4/5 = 0 → clamped to 1
+        assert_eq!(leaf.get(), 1);
+
+        // Fps::zero is explicitly opt-in
+        assert_eq!(Fps::zero().get(), 0);
+        assert!(Fps::zero().as_interval().is_none());
+
+        // Normal FPS gives a valid interval
+        assert!(Fps::new(30).as_interval().is_some());
+    }
+
+    #[test]
+    fn test_repair_ratio_validation() {
+        // Valid ratios
+        assert_eq!(RepairRatio::new(1.0).get(), 1.0);
+        assert_eq!(RepairRatio::new(1.5).get(), 1.5);
+        assert_eq!(RepairRatio::new(2.0).get(), 2.0);
+
+        // Default is 1.5
+        assert_eq!(RepairRatio::default().get(), 1.5);
+    }
+
+    #[test]
+    fn test_encoding_symbol_id() {
+        let esi = EncodingSymbolId(42);
+        assert_eq!(esi.0, 42);
+        assert_eq!(format!("{}", esi), "esi:42");
+    }
+
+    #[test]
+    fn test_symbol_size_default() {
+        let ss = SymbolSize::default();
+        assert_eq!(ss.0, 1200);
+    }
+
+    #[test]
+    fn test_black_level_default() {
+        let bl = BlackLevel::default();
+        assert_eq!(bl.0, 16.0);
     }
 
     #[test]

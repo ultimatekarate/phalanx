@@ -24,8 +24,8 @@ pub mod prelude {
 
     // Evidence Nouns
     pub use crate::evidence::{
-        AudioFrame, DataPayload, EnvelopeState, FragmentedEnvelope, ShardChunk, ShardGapReport,
-        SignatureHash, VideoFrame,
+        AudioFrame, DataPayload, EnvelopeState, ForensicMetrics, FragmentedEnvelope, ShardChunk,
+        ShardGapReport, SignatureHash, VideoFrame,
     };
 
     pub use crate::constants::{VOLLEY_SIZE_THRESHOLD, VOLLEY_TIME_THRESHOLD};
@@ -33,6 +33,9 @@ pub mod prelude {
     pub use crate::time::{PhalanxTimestamp, TrustedClock};
     pub use crate::topic::MeshTopic;
     pub use crate::types::PhalanxPhysics;
+
+    // Four Pillars Newtypes (Phase 0-pre)
+    pub use crate::types::{BlackLevel, EncodingSymbolId, Fps, RepairRatio, SymbolSize};
 
     // Error Nouns
     pub use crate::error::*;
