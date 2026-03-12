@@ -1,4 +1,5 @@
 // crates/phalanx-forensics/src/lib.rs
+pub mod c2pa_ext;
 pub mod crucible;
 pub mod cryptography;
 pub mod errors;
@@ -11,7 +12,6 @@ pub mod reassembler;
 pub mod test_utils;
 pub mod trust;
 pub mod witness;
-pub mod c2pa_ext;
 pub mod storage {
     pub mod handover;
     pub mod journal;
