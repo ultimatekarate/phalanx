@@ -2,6 +2,7 @@
 
 use phalanx_proto::prelude::*;
 use phalanx_proto::telemetry::SimEvent;
+use phalanx_proto::types::PowerState;
 use phalanx_proto::types::SystemStress;
 use phalanx_proto::types::TaskCost;
 use phalanx_proto::types::VitalityRate;
@@ -32,6 +33,18 @@ pub struct FinalizationScale(pub f64);
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct SybilEndowment(pub f64);
 
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct MemoryScale(pub f64);
+
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct StorageScale(pub f64);
+
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct BandwidthScale(pub f64);
+
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct ConnectionScale(pub f64);
+
 impl IngestionScale {
     pub fn as_throttle_delay(&self, base_delay_ms: u64) -> Duration {
         if self.0 <= 0.01 {
@@ -59,6 +72,16 @@ pub struct HomeostaticConfig {
     pub psi_max: f64,
     pub k_sybil: f64,
     pub base_temporal_drift: Duration,
+    // Resource pressure decay constants (Volterra kernel parameters)
+    pub lambda_mem: f64,                  // Memory pressure decay rate
+    pub m_crit: f64,                      // Memory critical threshold (MiB)
+    pub lambda_wal: f64,                  // WAL/storage pressure decay rate
+    pub w_crit: f64,                      // Storage critical ratio (0.0-1.0)
+    pub lambda_bw: f64,                   // Bandwidth pressure decay rate
+    pub b_crit: f64,                      // Bandwidth critical threshold (MiB)
+    pub lambda_conn: f64,                 // Connection pressure decay rate
+    pub c_crit: f64,                      // Connection critical ratio (0.0-1.0)
+    pub max_temporal_tolerance: Duration, // Hard clamp on temporal_tolerance (T2 fix)
 }
 
 impl HomeostaticConfig {
@@ -82,6 +105,15 @@ impl Default for HomeostaticConfig {
             psi_max: 50.0,
             k_sybil: 2.0,
             base_temporal_drift: Duration::from_millis(500),
+            lambda_mem: 0.3,
+            m_crit: 512.0,
+            lambda_wal: 0.05,
+            w_crit: 0.8,
+            lambda_bw: 0.5,
+            b_crit: 50.0,
+            lambda_conn: 0.2,
+            c_crit: 0.9,
+            max_temporal_tolerance: Duration::from_secs(10),
         }
     }
 }
@@ -93,6 +125,13 @@ pub struct IntegralState {
     pub l_integral: f64, // Latency (Network/Scheduling Age)
     pub r_integrals: HashMap<String, f64>,
     pub last_sys_tick: Instant,
+    // Volterra second-kind extensions for resource pressure feedback
+    pub m_integral: f64, // Memory/buffer pressure (MiB held in reassembler + channels)
+    pub w_integral: f64, // WAL/storage pressure (ratio of max capacity)
+    pub b_integral: f64, // Bandwidth pressure (MiB ingress per event)
+    pub c_integral: f64, // Connection pressure (ratio of max connections)
+    pub leaf_trigger_count: u8, // Consecutive vitals ticks above composite threshold
+    pub normal_trigger_count: u8, // Consecutive vitals ticks below recovery threshold
 }
 
 pub trait Homeostasis {
@@ -104,6 +143,15 @@ pub trait Homeostasis {
     fn ingestion_scaler(&self) -> IngestionScale;
     fn finalization_scaler(&self) -> FinalizationScale;
     fn sybil_endowment(&self) -> SybilEndowment;
+    // Resource pressure integrals (Volterra extensions)
+    fn record_memory_pressure(&self, bytes_held: usize);
+    fn record_storage_pressure(&self, used_bytes: u64, max_bytes: u64);
+    fn record_bandwidth_pressure(&self, bytes: usize);
+    fn record_connection_pressure(&self, active: usize, max: usize);
+    fn memory_scaler(&self) -> MemoryScale;
+    fn storage_scaler(&self) -> StorageScale;
+    fn bandwidth_scaler(&self) -> BandwidthScale;
+    fn connection_scaler(&self) -> ConnectionScale;
 }
 
 // =====================================================================
@@ -116,6 +164,7 @@ pub struct SystemGovernor {
     battery_path: Option<PathBuf>,
     pub config: HomeostaticConfig,
     pub integrals: RwLock<IntegralState>,
+    pub recommended_state: RwLock<PowerState>,
 }
 
 impl Default for SystemGovernor {
@@ -160,7 +209,14 @@ impl SystemGovernor {
                 l_integral: 0.0,
                 r_integrals: HashMap::new(),
                 last_sys_tick: Instant::now(),
+                m_integral: 0.0,
+                w_integral: 0.0,
+                b_integral: 0.0,
+                c_integral: 0.0,
+                leaf_trigger_count: 0,
+                normal_trigger_count: 0,
             }),
+            recommended_state: RwLock::new(PowerState::Normal),
         }
     }
 
@@ -208,6 +264,14 @@ impl SystemGovernor {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         *state = new_stress;
+
+        // Automatic power state transition driven by composite integral stress
+        let new_power = self.recommended_power_state();
+        let mut power = self
+            .recommended_state
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *power = new_power;
     }
 
     fn calculate_dt_and_decay(state: &mut IntegralState, lambda: f64) -> f64 {
@@ -230,6 +294,80 @@ impl SystemGovernor {
 
     pub fn is_peer_coupled(&self, peer_id: &str) -> bool {
         self.with_state(|s| *s.r_integrals.get(peer_id).unwrap_or(&0.0) >= 0.0)
+    }
+
+    /// Per-peer bandwidth check via the r_integrals namespace.
+    /// Peers accumulate +1.0 per event under a "bw:{peer_id}" key.
+    /// Returns false when accumulated bandwidth pressure exceeds the sybil ceiling.
+    pub fn is_peer_bandwidth_ok(&self, peer_id: &str) -> bool {
+        let key = format!("bw:{}", peer_id);
+        self.with_state(|s| {
+            let pressure = s.r_integrals.get(&key).unwrap_or(&0.0);
+            *pressure < self.config.psi_max
+        })
+    }
+
+    /// Records per-peer bandwidth event into the r_integrals namespace.
+    pub fn record_peer_bandwidth(&self, peer_id: &str) {
+        let key = format!("bw:{}", peer_id);
+        self.with_state_mut(|s| {
+            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_rep);
+            let current = s.r_integrals.get(&key).unwrap_or(&0.0) * decay;
+            s.r_integrals.insert(key, current + 1.0);
+        });
+    }
+
+    /// Weighted composite of all integral pressures for power state transitions.
+    /// Returns 0.0 (idle) to 1.0+ (saturated).
+    pub fn composite_stress(&self) -> f64 {
+        self.with_state(|s| {
+            let terms = [
+                (0.25, s.s_integral / self.config.s_crit),
+                (0.20, s.d_integral / self.config.d_crit),
+                (0.20, s.m_integral / self.config.m_crit),
+                (0.15, s.w_integral / self.config.w_crit),
+                (0.20, s.b_integral / self.config.b_crit),
+            ];
+            terms.iter().map(|(w, n)| w * n.min(1.0)).sum()
+        })
+    }
+
+    /// Returns the recommended power state based on composite stress with hysteresis.
+    /// 3 consecutive ticks above 0.85 → Leaf, 5 below 0.3 → Normal.
+    pub fn recommended_power_state(&self) -> PowerState {
+        let composite = self.composite_stress();
+        let mut integrals = self.integrals.write().unwrap_or_else(|e| e.into_inner());
+
+        if composite > 0.85 {
+            integrals.leaf_trigger_count = integrals.leaf_trigger_count.saturating_add(1);
+            integrals.normal_trigger_count = 0;
+        } else if composite < 0.3 {
+            integrals.normal_trigger_count = integrals.normal_trigger_count.saturating_add(1);
+            integrals.leaf_trigger_count = 0;
+        } else {
+            integrals.leaf_trigger_count = 0;
+            integrals.normal_trigger_count = 0;
+        }
+
+        if integrals.leaf_trigger_count >= 3 {
+            PowerState::Leaf
+        } else if integrals.normal_trigger_count >= 5 {
+            PowerState::Normal
+        } else {
+            // Maintain current state during hysteresis window
+            *self
+                .recommended_state
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+        }
+    }
+
+    /// Reads the current recommended power state (updated by update_vitals polling).
+    pub fn current_power_state(&self) -> PowerState {
+        *self
+            .recommended_state
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     // --- Hardware Discovery & Probes ---
@@ -322,7 +460,8 @@ impl Homeostasis for SystemGovernor {
         self.with_state(|s| {
             let base = self.config.base_temporal_drift;
             let expansion = Duration::from_secs_f64(s.l_integral);
-            base + expansion
+            let total = base + expansion;
+            total.min(self.config.max_temporal_tolerance) // T2: Hard clamp
         })
     }
 
@@ -338,6 +477,66 @@ impl Homeostasis for SystemGovernor {
         self.with_state(|s| {
             SybilEndowment(self.config.psi_max / (1.0 + self.config.k_sybil * s.e_integral))
         })
+    }
+
+    // --- Resource Pressure Recording (Volterra second-kind convolution) ---
+
+    fn record_memory_pressure(&self, bytes_held: usize) {
+        self.with_state_mut(|s| {
+            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_mem);
+            let mib = bytes_held as f64 / 1_048_576.0;
+            s.m_integral = mib + (s.m_integral * decay);
+        });
+    }
+
+    fn record_storage_pressure(&self, used_bytes: u64, max_bytes: u64) {
+        self.with_state_mut(|s| {
+            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_wal);
+            let ratio = if max_bytes > 0 {
+                used_bytes as f64 / max_bytes as f64
+            } else {
+                1.0
+            };
+            s.w_integral = ratio + (s.w_integral * decay);
+        });
+    }
+
+    fn record_bandwidth_pressure(&self, bytes: usize) {
+        self.with_state_mut(|s| {
+            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_bw);
+            let mib = bytes as f64 / 1_048_576.0;
+            s.b_integral = mib + (s.b_integral * decay);
+        });
+    }
+
+    fn record_connection_pressure(&self, active: usize, max: usize) {
+        self.with_state_mut(|s| {
+            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_conn);
+            let ratio = if max > 0 {
+                active as f64 / max as f64
+            } else {
+                1.0
+            };
+            s.c_integral = ratio + (s.c_integral * decay);
+        });
+    }
+
+    // --- Resource Scalers (1.0 = nominal, 0.0 = saturated) ---
+
+    fn memory_scaler(&self) -> MemoryScale {
+        self.with_state(|s| MemoryScale((1.0 - (s.m_integral / self.config.m_crit)).max(0.0)))
+    }
+
+    fn storage_scaler(&self) -> StorageScale {
+        self.with_state(|s| StorageScale((1.0 - (s.w_integral / self.config.w_crit)).max(0.0)))
+    }
+
+    fn bandwidth_scaler(&self) -> BandwidthScale {
+        self.with_state(|s| BandwidthScale((1.0 - (s.b_integral / self.config.b_crit)).max(0.0)))
+    }
+
+    fn connection_scaler(&self) -> ConnectionScale {
+        self.with_state(|s| ConnectionScale((1.0 - (s.c_integral / self.config.c_crit)).max(0.0)))
     }
 }
 
@@ -547,7 +746,14 @@ mod tests {
                 l_integral: 0.0,
                 r_integrals: HashMap::new(),
                 last_sys_tick: Instant::now(),
+                m_integral: 0.0,
+                w_integral: 0.0,
+                b_integral: 0.0,
+                c_integral: 0.0,
+                leaf_trigger_count: 0,
+                normal_trigger_count: 0,
             }),
+            recommended_state: RwLock::new(PowerState::Normal),
         };
 
         gov.update_vitals();
@@ -561,5 +767,141 @@ mod tests {
         fs::write(&b_file, "10\n").unwrap();
         gov.update_vitals();
         assert_eq!(gov.current_stress(), SystemStress::Serious);
+    }
+
+    #[test]
+    fn test_memory_scaler_decay() {
+        let gov = SystemGovernor::new();
+
+        // Record 256 MiB of memory pressure
+        gov.record_memory_pressure(256 * 1024 * 1024);
+        let scale1 = gov.memory_scaler();
+        // 256 MiB / 512 MiB crit = 0.5 ratio → scaler ≈ 0.5
+        assert!(
+            scale1.0 > 0.0 && scale1.0 < 1.0,
+            "Scale should be between 0 and 1, got {}",
+            scale1.0
+        );
+
+        // Wait briefly and record zero pressure — integral should decay
+        std::thread::sleep(Duration::from_millis(50));
+        gov.record_memory_pressure(0);
+        let scale2 = gov.memory_scaler();
+        assert!(
+            scale2.0 > scale1.0,
+            "After decay with zero forcing, scaler should increase (pressure drop)"
+        );
+    }
+
+    #[test]
+    fn test_storage_gate_rejects_when_full() {
+        let gov = SystemGovernor::new();
+
+        // Slam storage to 100% repeatedly to overwhelm the scaler
+        for _ in 0..20 {
+            gov.record_storage_pressure(1_000_000, 1_000_000); // 100% ratio
+        }
+        let scale = gov.storage_scaler();
+        assert!(
+            scale.0 < 0.05,
+            "Storage scaler should be near zero at 100% usage, got {}",
+            scale.0
+        );
+    }
+
+    #[test]
+    fn test_bandwidth_scaler_responds_to_load() {
+        let gov = SystemGovernor::new();
+
+        // Record 100 MiB bandwidth pressure repeatedly
+        for _ in 0..20 {
+            gov.record_bandwidth_pressure(100 * 1024 * 1024);
+        }
+        let scale = gov.bandwidth_scaler();
+        assert!(
+            scale.0 < 0.1,
+            "Bandwidth scaler should be near zero under heavy load, got {}",
+            scale.0
+        );
+    }
+
+    #[test]
+    fn test_temporal_tolerance_clamped() {
+        let config = HomeostaticConfig {
+            max_temporal_tolerance: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let gov = SystemGovernor::with_config(config);
+
+        // Pump up latency integral to force tolerance expansion
+        for _ in 0..50 {
+            gov.record_latency_pressure(Duration::from_secs(10));
+        }
+        let tolerance = gov.temporal_tolerance();
+        assert!(
+            tolerance <= Duration::from_secs(5),
+            "Tolerance {} should be clamped to 5s",
+            tolerance.as_secs_f64()
+        );
+    }
+
+    #[test]
+    fn test_composite_stress_triggers_leaf() {
+        let config = HomeostaticConfig {
+            s_crit: 1.0,
+            d_crit: 1.0,
+            m_crit: 1.0,
+            w_crit: 1.0,
+            b_crit: 1.0,
+            ..Default::default()
+        };
+        let gov = SystemGovernor::with_config(config);
+
+        // Saturate all integrals (composite uses s, d, m, w, b)
+        for _ in 0..30 {
+            gov.record_metabolic_pressure(Duration::from_secs(5));
+            gov.record_io_pressure(Duration::from_secs(5));
+            gov.record_memory_pressure(10 * 1024 * 1024);
+            gov.record_storage_pressure(900, 1000);
+            gov.record_bandwidth_pressure(10 * 1024 * 1024);
+        }
+
+        let composite = gov.composite_stress();
+        assert!(
+            composite > 0.85,
+            "Composite stress should exceed 0.85, got {}",
+            composite
+        );
+
+        // Three consecutive calls should trigger Leaf
+        let _p1 = gov.recommended_power_state();
+        let _p2 = gov.recommended_power_state();
+        let p3 = gov.recommended_power_state();
+        assert_eq!(
+            p3,
+            PowerState::Leaf,
+            "Should transition to Leaf after 3 ticks above threshold"
+        );
+    }
+
+    #[test]
+    fn test_per_peer_bandwidth_gate() {
+        let config = HomeostaticConfig {
+            psi_max: 5.0, // Low ceiling for testing
+            ..Default::default()
+        };
+        let gov = SystemGovernor::with_config(config);
+
+        let peer = "test_peer";
+        assert!(gov.is_peer_bandwidth_ok(peer), "Fresh peer should be OK");
+
+        // Exceed the bandwidth ceiling
+        for _ in 0..10 {
+            gov.record_peer_bandwidth(peer);
+        }
+        assert!(
+            !gov.is_peer_bandwidth_ok(peer),
+            "Peer should be throttled after exceeding ceiling"
+        );
     }
 }

@@ -109,6 +109,17 @@ impl IngestionActor {
         let start_cpu = tokio::time::Instant::now();
 
         if let Ok(raw_chunk) = phalanx_forensics::gate::unmarshal::<ShardChunk>(data, "ingestion") {
+            // Per-peer bandwidth tracking via Volterra integral
+            self.system_governor
+                .record_peer_bandwidth(&peer_id.to_string());
+            if !self
+                .system_governor
+                .is_peer_bandwidth_ok(&peer_id.to_string())
+            {
+                tracing::warn!(peer = %peer_id, "Per-peer bandwidth exceeded, dropping");
+                return;
+            }
+
             let unverified = ForensicUnit::<_, Unverified>::new(raw_chunk);
             let sender_did = unverified.data.owner_did.clone();
 
@@ -164,12 +175,16 @@ impl IngestionActor {
             let (reply_tx, reply_rx) = oneshot::channel();
             let verified_unit = ForensicUnit::<_, Verified>::new_verified(unverified.unpack());
 
+            // T6 FIX: Evidence TTL is fixed from config, not coupled to dynamic tolerance.
+            // Dynamic tolerance is only used for staleness checks above.
+            let evidence_ttl = Duration::from_secs(self.config.storage.evidence_ttl_secs);
+
             if self
                 .storage_tx
                 .send(StorageCommand::Ingest {
                     unit: verified_unit,
                     reply_to: reply_tx,
-                    ttl: tolerance,
+                    ttl: evidence_ttl,
                 })
                 .await
                 .is_err()

@@ -11,6 +11,7 @@ use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::journal::FileJournal;
 use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
+use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::evidence::{ChunkType, DataPayload, Evidence, StorageSequence, VideoShard};
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
 use phalanx_proto::prelude::{PendingEgress, ShardChunk, ShardError};
@@ -40,6 +41,7 @@ fn build_test_actor<J: TransientJournal + Send + 'static>(
         config: config.clone(),
         identity: identity.clone(),
         current_tolerance: Duration::from_millis(1000),
+        system_governor: Arc::new(SystemGovernor::new()),
     };
 
     (actor, storage_rx, storage_tx)

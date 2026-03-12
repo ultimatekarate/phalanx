@@ -112,6 +112,7 @@ fn build_test_actor<J: TransientJournal + Send + 'static>(
         config: config.clone(),
         identity: identity.clone(),
         current_tolerance: Duration::from_millis(1000),
+        system_governor: Arc::new(SystemGovernor::new()),
     };
 
     (actor, storage_rx, storage_tx)

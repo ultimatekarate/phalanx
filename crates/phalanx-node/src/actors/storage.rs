@@ -1,6 +1,7 @@
 // crates/phalanx-node/src/actors/storage.rs
 use crate::config::NodeConfig;
 use crate::persistence::vault::Guardian;
+use crate::vitals::{Homeostasis, SystemGovernor};
 use phalanx_forensics::prelude::TransientJournal;
 use phalanx_forensics::prelude::*;
 use phalanx_proto::evidence::EnvelopeState;
@@ -12,6 +13,7 @@ use phalanx_proto::prelude::{PendingEgress, ShardChunk, ShardError};
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::types::ForensicUnit;
 use phalanx_proto::types::Verified;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::interval;
@@ -24,6 +26,7 @@ pub struct StorageActor<J: TransientJournal> {
     pub config: NodeConfig,
     pub identity: PhalanxIdentity,
     pub current_tolerance: Duration,
+    pub system_governor: Arc<SystemGovernor>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -122,6 +125,13 @@ impl<J: TransientJournal> StorageActor<J> {
         &mut self,
         unit: ForensicUnit<ShardChunk, Verified>,
     ) -> Result<(), GuardianError> {
+        // Storage pressure gate: reject when WAL/disk is near capacity
+        if self.system_governor.storage_scaler().0 < 0.05 {
+            return Err(GuardianError::StorageFailure(
+                "Storage pressure critical: WAL near capacity".into(),
+            ));
+        }
+
         let chunk = unit.unpack();
 
         let reassembly_result = self
@@ -132,6 +142,22 @@ impl<J: TransientJournal> StorageActor<J> {
         if let Err(e) = self.journal.sync().await {
             tracing::error!(error = %e, "Forensics: Critical failure to sync WAL to disk");
         }
+
+        // Record storage pressure after WAL write
+        self.system_governor.record_storage_pressure(
+            self.guardian.wal_bytes_estimate(),
+            self.config.storage.max_storage_bytes.as_u64(),
+        );
+
+        // Record memory pressure from reassembler buffers
+        let buffer_bytes: usize = self
+            .reassembler
+            .active_shards
+            .contexts
+            .values()
+            .map(|ctx| ctx.accumulator.accumulated_bytes())
+            .sum();
+        self.system_governor.record_memory_pressure(buffer_bytes);
 
         match reassembly_result {
             Ok(Some(envelope_state)) => {
