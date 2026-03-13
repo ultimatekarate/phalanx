@@ -199,7 +199,10 @@ impl<I: IngressPort> MeshSentinel<I> {
         );
         tokio::spawn(ingestion_actor.run());
 
-        // Media Egress Actor instantiation
+        // Media Egress Actor instantiation — WAL-backed outbound queue for retry
+        // with integral feedback: outbound queue pressure → w_integral → FPS self-regulation.
+        let outbound_wal_dir =
+            std::path::PathBuf::from(&deps.config.storage.vault_path).join("outbound_wal");
         let media_actor = MediaEgressActor::new(
             deps.egress.clone(),
             arc_identity.clone(),
@@ -211,8 +214,13 @@ impl<I: IngressPort> MeshSentinel<I> {
                 audio_topic: deps.config.network.audio_topic.clone(),
                 symbol_size: deps.config.network.symbol_size,
                 repair_ratio: deps.config.network.repair_ratio,
+                wal_dir: outbound_wal_dir,
+                system_governor: deps.system_governor.clone(),
+                max_storage_bytes: deps.config.storage.max_storage_bytes.as_u64(),
             },
-        );
+        )
+        .await
+        .expect("Failed to initialize MediaEgressActor outbound queue");
 
         tokio::spawn(media_actor.run());
 

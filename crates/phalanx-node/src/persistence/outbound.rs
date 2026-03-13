@@ -161,6 +161,15 @@ impl OutboundQueue {
         Ok(())
     }
 
+    /// Re-enqueue an entry without incrementing attempts (backoff not yet elapsed).
+    /// Pushes to front to preserve FIFO ordering. No WAL write needed — entry is
+    /// already persisted on disk from the original `enqueue()` call.
+    pub fn requeue_unchanged(&mut self, entry: OutboundEntry) {
+        let byte_len = entry.envelope_bytes.len() as u64;
+        self.entries.push_front(entry);
+        self.total_bytes = ByteCapacity(self.total_bytes.0 + byte_len);
+    }
+
     /// Current queue depth (number of entries).
     pub fn len(&self) -> usize {
         self.entries.len()
