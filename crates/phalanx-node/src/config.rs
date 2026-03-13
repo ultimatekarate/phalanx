@@ -1,7 +1,7 @@
 // crates/phalanx-node/src/config.rs
 
 use phalanx_proto::prelude::{Did, MeshTopic};
-use phalanx_proto::types::{ByteCapacity, RepairRatio, SymbolSize};
+use phalanx_proto::types::{ByteCapacity, ChannelCount, Fps, RepairRatio, SampleRate, SymbolSize};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -58,7 +58,9 @@ impl NodeConfig {
             .add_source(config::File::from(path))
             .add_source(config::Environment::with_prefix("PHALANX"))
             .build()?;
-        s.try_deserialize()
+        let mut config: Self = s.try_deserialize()?;
+        config.hardware = config.hardware.validated();
+        Ok(config)
     }
 }
 
@@ -101,9 +103,23 @@ pub struct StorageConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct HardwareConfig {
-    pub camera_fps: u32,
-    pub audio_sample_rate: u32,
-    pub audio_channels: u8,
+    pub camera_fps: Fps,
+    pub audio_sample_rate: SampleRate,
+    pub audio_channels: ChannelCount,
+}
+
+impl HardwareConfig {
+    /// Re-wraps deserialized values through validating constructors.
+    /// Call after TOML/env deserialization to enforce invariants that
+    /// `#[serde(transparent)]` alone cannot guarantee (e.g. zero FPS).
+    #[must_use]
+    pub fn validated(self) -> Self {
+        Self {
+            camera_fps: Fps::new(self.camera_fps.get()),
+            audio_sample_rate: SampleRate::new(self.audio_sample_rate.get()),
+            audio_channels: ChannelCount::new(self.audio_channels.get()),
+        }
+    }
 }
 
 // --- Helper Functions and Initializers ---
@@ -165,9 +181,9 @@ impl Default for StorageConfig {
 impl Default for HardwareConfig {
     fn default() -> Self {
         Self {
-            camera_fps: 10,
-            audio_sample_rate: 16000,
-            audio_channels: 1,
+            camera_fps: Fps::new(10),
+            audio_sample_rate: SampleRate::new(16_000),
+            audio_channels: ChannelCount::new(1),
         }
     }
 }
@@ -176,7 +192,8 @@ impl NodeConfig {
     #[allow(clippy::missing_errors_doc)]
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let content = fs::read_to_string(path)?;
-        let config: NodeConfig = toml::from_str(&content)?;
+        let mut config: NodeConfig = toml::from_str(&content)?;
+        config.hardware = config.hardware.validated();
         Ok(config)
     }
 

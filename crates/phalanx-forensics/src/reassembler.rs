@@ -12,7 +12,7 @@ use phalanx_proto::prelude::{
     DataPayload, EncodingSymbolId, PhalanxTimestamp, RepairRatio, ShardChunk, ShardError,
     SymbolSize, VolleyId,
 };
-use phalanx_proto::types::PowerState;
+use phalanx_proto::types::{ChannelCount, Fps, PowerState, SampleRate};
 use raptorq::{Decoder, Encoder, EncodingPacket, ObjectTransmissionInformation, PayloadId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -44,7 +44,7 @@ pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<
 pub fn create_video_shard(
     frames: Vec<Vec<u8>>,
     sequence: StorageSequence,
-    fps: u8,
+    fps: Fps,
     volley: VolleyId,
     lens_metrics: ForensicMetrics,
 ) -> Result<VideoShard, ShardError> {
@@ -66,8 +66,8 @@ pub fn create_video_shard(
 pub fn create_audio_shard(
     data: Vec<u8>,
     sequence: StorageSequence,
-    rate: u32,
-    channels: u8,
+    rate: SampleRate,
+    channels: ChannelCount,
     volley: VolleyId,
 ) -> Result<AudioShard, ShardError> {
     Ok(AudioShard {
@@ -353,8 +353,8 @@ pub trait AudioWeaver {
     fn weave_audio(
         &self,
         sequence: StorageSequence,
-        rate: u32,
-        channels: u8,
+        rate: SampleRate,
+        channels: ChannelCount,
         volley: VolleyId,
     ) -> AudioShard;
 }
@@ -363,8 +363,8 @@ impl AudioWeaver for Vec<u8> {
     fn weave_audio(
         &self,
         sequence: StorageSequence,
-        rate: u32,
-        channels: u8,
+        rate: SampleRate,
+        channels: ChannelCount,
         volley: VolleyId,
     ) -> AudioShard {
         AudioShard {
@@ -383,7 +383,7 @@ pub trait VideoWeaver {
         &self,
         frames: Vec<Vec<u8>>,
         sequence: StorageSequence,
-        fps: u8,
+        fps: Fps,
         volley: VolleyId,
     ) -> VideoShard;
 }
@@ -393,7 +393,7 @@ impl VideoWeaver for Vec<u8> {
         &self,
         frames: Vec<Vec<u8>>,
         sequence: StorageSequence,
-        fps: u8,
+        fps: Fps,
         volley: VolleyId,
     ) -> VideoShard {
         let raw_bytes = postcard::to_allocvec(&frames).unwrap_or_default();
@@ -559,7 +559,7 @@ mod tests {
         let mut shard = create_video_shard(
             frames.clone(),
             seq,
-            30,
+            Fps::new(30),
             "volley_1".into(),
             ForensicMetrics::default(),
         )?;
@@ -597,7 +597,13 @@ mod tests {
     fn test_audio_shard_encryption_cycle() -> Result<(), Box<dyn std::error::Error>> {
         let audio_data = vec![10, 20, 30, 40];
         let seq = StorageSequence(200);
-        let mut shard = create_audio_shard(audio_data.clone(), seq, 44100, 2, "volley_2".into())?;
+        let mut shard = create_audio_shard(
+            audio_data.clone(),
+            seq,
+            SampleRate::new(44100),
+            ChannelCount::new(2),
+            "volley_2".into(),
+        )?;
 
         let key = get_test_key();
         shard.payload.apply_encryption(&key)?;
@@ -616,7 +622,7 @@ mod tests {
         let mut shard = create_video_shard(
             frames,
             StorageSequence(1),
-            30,
+            Fps::new(30),
             "v1".into(),
             ForensicMetrics::default(),
         )?;
@@ -652,7 +658,7 @@ mod tests {
         let mut shard = create_video_shard(
             frames,
             StorageSequence(50),
-            60,
+            Fps::new(60),
             "v_net".into(),
             ForensicMetrics::default(),
         )?;
@@ -683,7 +689,7 @@ mod tests {
         let evidence = Evidence::Video(VideoShard {
             timestamp: PhalanxTimestamp::now(),
             sequence_id: StorageSequence(1),
-            fps: 30,
+            fps: Fps::new(30),
             volley_id: VolleyId::new("fountain_test"),
             payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             lens_metrics: ForensicMetrics::default(),
@@ -732,7 +738,7 @@ mod tests {
         let evidence = Evidence::Video(VideoShard {
             timestamp: PhalanxTimestamp::now(),
             sequence_id: StorageSequence(1),
-            fps: 30,
+            fps: Fps::new(30),
             volley_id: VolleyId::new("loss_test"),
             payload: DataPayload::Clear(vec![0xCA; 2048]), // Large enough to produce multiple symbols
             lens_metrics: ForensicMetrics::default(),
@@ -796,7 +802,7 @@ mod tests {
         let evidence = Evidence::Video(VideoShard {
             timestamp: PhalanxTimestamp::now(),
             sequence_id: StorageSequence(1),
-            fps: 30,
+            fps: Fps::new(30),
             volley_id: VolleyId::new("reassembler_test"),
             payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             lens_metrics: ForensicMetrics::default(),

@@ -10,6 +10,7 @@ use phalanx_proto::evidence::{
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
+use phalanx_proto::types::Fps;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -37,7 +38,7 @@ async fn test_reliability_timeline_integrity() {
     let anchor_shard = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id: volley_id.clone(),
         payload: DataPayload::Clear(b"Anchor Frame".to_vec()),
         lens_metrics: ForensicMetrics::default(),
@@ -62,7 +63,7 @@ async fn test_reliability_timeline_integrity() {
     let valid_shard = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(2),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id: volley_id.clone(),
         payload: DataPayload::Clear(b"Valid Frame".to_vec()),
         lens_metrics: ForensicMetrics::default(),
@@ -87,7 +88,7 @@ async fn test_reliability_timeline_integrity() {
     let bogus_shard = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(3),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id: volley_id.clone(),
         payload: DataPayload::Clear(b"Hijacked Frame".to_vec()),
         lens_metrics: ForensicMetrics::default(),

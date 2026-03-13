@@ -15,6 +15,7 @@ use phalanx_proto::evidence::{
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
+use phalanx_proto::types::Fps;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -74,7 +75,7 @@ async fn test_exodus_resurrection_logic() {
     let shard_1 = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id: volley_id.clone(),
         payload: DataPayload::Clear(b"Frame 1".to_vec()),
         lens_metrics: ForensicMetrics::default(),
@@ -116,7 +117,7 @@ async fn test_exodus_resurrection_logic() {
     let shard_2 = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(2),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id: volley_id.clone(),
         payload: DataPayload::Clear(b"Frame 2".to_vec()),
         lens_metrics: ForensicMetrics::default(),
@@ -197,7 +198,7 @@ async fn test_playback_resurrection_with_mesh_gap() {
     let shard_1 = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id: volley_id.clone(),
         payload: DataPayload::Clear(b"Frame 1 Data".to_vec()),
         lens_metrics: ForensicMetrics::default(),
@@ -239,7 +240,7 @@ async fn test_playback_resurrection_with_mesh_gap() {
     let shard_2 = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(2),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id: _v_id,
         payload: DataPayload::Clear(b"Frame 2 Data".to_vec()),
         lens_metrics: ForensicMetrics::default(),
@@ -321,7 +322,7 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
         let shard = VideoShard {
             timestamp: PhalanxTimestamp::now(),
             sequence_id: StorageSequence(i),
-            fps: 30,
+            fps: Fps::new(30),
             volley_id: volley_id.clone(),
             payload: DataPayload::Clear(format!("Frame {}", i).into_bytes()),
             lens_metrics: ForensicMetrics::default(),

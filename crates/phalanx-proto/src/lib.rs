@@ -35,7 +35,9 @@ pub mod prelude {
     pub use crate::types::PhalanxPhysics;
 
     // Four Pillars Newtypes
-    pub use crate::types::{BlackLevel, EncodingSymbolId, Fps, RepairRatio, SymbolSize};
+    pub use crate::types::{
+        BlackLevel, ChannelCount, EncodingSymbolId, Fps, RepairRatio, SampleRate, SymbolSize,
+    };
 
     // Error Nouns
     pub use crate::error::*;

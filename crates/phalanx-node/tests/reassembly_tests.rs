@@ -8,6 +8,7 @@ use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::VideoShard;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*;
+use phalanx_proto::types::Fps;
 
 /// Creates real fountain-coded ShardChunks from a signed WitnessEnvelope.
 /// Uses the production encode path — no fake sequential splitting.
@@ -16,7 +17,7 @@ fn create_mock_fountain_chunks(identity: &PhalanxIdentity, shard_id: ShardId) ->
     let evidence = Evidence::Video(VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id: VolleyId::new("test_volley"),
         payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         lens_metrics: ForensicMetrics::default(),
