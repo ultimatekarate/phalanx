@@ -1,13 +1,14 @@
 // crates/phalanx-node/src/hardware/camera.rs
 
 use crate::config::HardwareConfig;
+use crate::vitals::SystemGovernor;
 use phalanx_forensics::judge::PayloadCipher;
 use phalanx_forensics::reassembler::compress_frame;
 use phalanx_forensics::reassembler::create_video_shard;
 use phalanx_lens::ForensicLens;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{ForensicMetrics, StorageSequence, VideoShard};
-use phalanx_proto::types::BlackLevel;
+use phalanx_proto::types::{BlackLevel, Fps, PowerState};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -24,6 +25,60 @@ use phalanx_proto::prelude::*;
 /// Default analog black level offset for 8-bit sensors.
 /// Accounts for the analog black offset inherent in most CMOS sensors.
 const DEFAULT_BLACK_LEVEL: f32 = 16.0;
+
+// =====================================================================
+// PHASE 4b: ADAPTIVE FPS DUTY CYCLING
+// =====================================================================
+
+/// Compute target FPS based on the current power state.
+///
+/// - Normal: full base FPS
+/// - Conserving: half base FPS (`.max(1)` enforced by `Fps::new()`)
+/// - Leaf: 1/5th base FPS (`.max(1)` enforced by `Fps::new()`)
+/// - Dormant: zero FPS (no capture — platform-dependent; see `can_capture_in_background()`)
+///
+/// `Fps::new()` internally enforces `.max(1)`, preventing zero-FPS bugs from
+/// integer floor division (e.g., base 4 / 5 = 0 → clamped to 1).
+/// `Fps::zero()` is explicitly opt-in for Dormant only.
+pub fn target_fps(base: Fps, power: PowerState) -> Fps {
+    match power {
+        PowerState::Normal => base,
+        PowerState::Conserving => Fps::new(base.get() / 2),
+        PowerState::Leaf => Fps::new(base.get() / 5),
+        PowerState::Dormant => Fps::zero(),
+    }
+}
+
+/// Computes the effective FPS interval, handling asymmetric ramp:
+/// - Ramping UP (fewer → more frames): Instant — every frame not captured is lost evidence.
+/// - Ramping DOWN (more → fewer frames): Smooth over 1 second — prevents burst of old-rate
+///   frames flooding the egress pipeline.
+///
+/// Returns the new interval to use for frame capture timing.
+pub fn compute_adaptive_interval(current_interval: Duration, target: Fps) -> Duration {
+    match target.as_interval() {
+        None => {
+            // Dormant — no capture. Return a large interval as a sentinel.
+            Duration::from_secs(3600)
+        }
+        Some(target_interval) => {
+            if target_interval < current_interval {
+                // Ramping UP (shorter interval = higher FPS): instant transition
+                target_interval
+            } else if target_interval > current_interval {
+                // Ramping DOWN (longer interval = lower FPS): smooth over 1s
+                // Blend: move 50% of the way toward target each call.
+                // At 30fps this converges within ~1s (30 steps × 50% each).
+                let current_ms = current_interval.as_millis() as f64;
+                let target_ms = target_interval.as_millis() as f64;
+                let blended_ms = current_ms + (target_ms - current_ms) * 0.5;
+                Duration::from_millis(blended_ms as u64)
+            } else {
+                current_interval
+            }
+        }
+    }
+}
 
 /// Extracts the Y (luma) plane from an RGB pixel buffer.
 ///
@@ -204,6 +259,10 @@ impl PhalanxCameraThread {
     /// Each raw RGB frame is analyzed (Y-plane extraction → center crop → Laplacian +
     /// PRNU) before JPEG compression destroys the raw sensor signal.
     /// Default: `ScalarLens` (pure-Rust fallback for x86_64 dev/test).
+    ///
+    /// `governor` — Optional SystemGovernor for Phase 4 adaptive FPS duty cycling.
+    /// When provided, the camera processor reads `current_power_state()` each batch
+    /// cycle and adjusts frame batching accordingly. When `None`, full FPS is used.
     pub fn spawn(
         self,
         index: Option<usize>,
@@ -212,17 +271,23 @@ impl PhalanxCameraThread {
         volley_id: String,
         secret_key: Option<[u8; 32]>,
         lens: Arc<dyn ForensicLens>,
+        governor: Option<Arc<SystemGovernor>>,
     ) {
         // 1. Ignite the Hardware Watchdog
         let device_idx = index.unwrap_or(0);
         self.start_watchdog(device_idx);
 
         let mut rx = self.subscribe();
-        let fps = hw_config.camera_fps;
+        let base_fps = Fps::new(hw_config.camera_fps);
 
         // 2. Spawn the Processor (Thread B)
         // Consumes raw frames, analyzes sensor fingerprint, compresses,
         // shards, encrypts -> Main Channel
+        //
+        // Phase 4b: Each batch cycle, the processor reads the current PowerState
+        // and adjusts frame batching accordingly. Asymmetric ramp:
+        // - UP (more capture): instant — every frame we don't capture is lost evidence
+        // - DOWN (less capture): smooth over 1s — prevents burst flooding egress
         tokio::spawn(async move {
             info!("Camera Processor: STARTED");
 
@@ -235,6 +300,21 @@ impl PhalanxCameraThread {
 
             // "While the camera is producing frames..."
             while let Ok(frame) = rx.recv().await {
+                // Phase 4b: Read current power state to determine effective FPS
+                let effective_fps = match &governor {
+                    Some(gov) => {
+                        let power = gov.current_power_state();
+                        let target = target_fps(base_fps, power);
+
+                        // Dormant: skip capture entirely (platform-dependent)
+                        if target.get() == 0 {
+                            continue; // Drop frame — Dormant means no capture
+                        }
+                        target
+                    }
+                    None => base_fps,
+                };
+
                 // A. Forensic Lens Analysis (BEFORE compression)
                 // Extract Y (luma) plane from raw RGB data — the ForensicLens
                 // operates on luminance to compute Moiré energy + PRNU variance.
@@ -254,15 +334,15 @@ impl PhalanxCameraThread {
                     frame_buffer.push(jpeg);
                 }
 
-                // C. Batching
-                if frame_buffer.len() >= fps as usize {
+                // C. Batching — uses effective FPS from power state
+                if frame_buffer.len() >= effective_fps.get() as usize {
                     let chunk = frame_buffer.split_off(0); // Take all
                     let volley_id = VolleyId::new(volley_id.clone());
 
                     let shard_result = create_video_shard(
                         chunk,
                         sequence_id,
-                        fps as u8,
+                        effective_fps.get() as u8,
                         volley_id,
                         latest_metrics,
                     );
@@ -356,6 +436,7 @@ mod tests {
             "test_volley".to_string(),
             None,
             Arc::new(ScalarLens),
+            None, // No governor — full FPS
         );
 
         // Wait for 1 shard (which requires 10 frames at 10fps = ~1 sec)
@@ -364,5 +445,97 @@ mod tests {
 
         assert!(shard.is_ok(), "Timed out waiting for shard via bridge");
         assert!(shard.unwrap().is_some(), "Received empty shard");
+    }
+
+    // --- Phase 4b: Adaptive FPS Tests ---
+
+    #[test]
+    fn test_target_fps_normal_returns_base() {
+        let base = Fps::new(30);
+        assert_eq!(target_fps(base, PowerState::Normal).get(), 30);
+    }
+
+    #[test]
+    fn test_target_fps_conserving_halves() {
+        let base = Fps::new(30);
+        assert_eq!(target_fps(base, PowerState::Conserving).get(), 15);
+    }
+
+    #[test]
+    fn test_target_fps_leaf_fifths() {
+        let base = Fps::new(30);
+        assert_eq!(target_fps(base, PowerState::Leaf).get(), 6);
+    }
+
+    #[test]
+    fn test_target_fps_dormant_zero() {
+        let base = Fps::new(30);
+        assert_eq!(target_fps(base, PowerState::Dormant).get(), 0);
+    }
+
+    #[test]
+    fn test_target_fps_floor_guard() {
+        // Base 4 FPS / 5 = 0 → clamped to 1 by Fps::new()
+        let base = Fps::new(4);
+        assert_eq!(
+            target_fps(base, PowerState::Leaf).get(),
+            1,
+            "Floor guard: 4/5=0 should clamp to 1"
+        );
+    }
+
+    #[test]
+    fn test_target_fps_conserving_floor_guard() {
+        // Base 1 FPS / 2 = 0 → clamped to 1 by Fps::new()
+        let base = Fps::new(1);
+        assert_eq!(
+            target_fps(base, PowerState::Conserving).get(),
+            1,
+            "Floor guard: 1/2=0 should clamp to 1"
+        );
+    }
+
+    #[test]
+    fn test_adaptive_interval_ramp_up_instant() {
+        // Going from low FPS (long interval) to high FPS (short interval)
+        // should be INSTANT — no smoothing
+        let current = Duration::from_millis(100); // 10 FPS
+        let target = Fps::new(30); // 30 FPS = ~33ms
+
+        let result = compute_adaptive_interval(current, target);
+        assert_eq!(
+            result,
+            Duration::from_millis(33),
+            "Ramp UP should be instant"
+        );
+    }
+
+    #[test]
+    fn test_adaptive_interval_ramp_down_smooth() {
+        // Going from high FPS (short interval) to low FPS (long interval)
+        // should be SMOOTH — blended partway
+        let current = Duration::from_millis(33); // ~30 FPS
+        let target = Fps::new(10); // 10 FPS = 100ms
+
+        let result = compute_adaptive_interval(current, target);
+        // Blended: 33 + (100-33)*0.5 = 33 + 33.5 = 66.5 → 66ms
+        assert!(
+            result > current && result < Duration::from_millis(100),
+            "Ramp DOWN should blend, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_adaptive_interval_dormant_returns_sentinel() {
+        let current = Duration::from_millis(33);
+        let target = Fps::zero();
+
+        let result = compute_adaptive_interval(current, target);
+        assert_eq!(
+            result,
+            Duration::from_secs(3600),
+            "Dormant should return large sentinel"
+        );
     }
 }

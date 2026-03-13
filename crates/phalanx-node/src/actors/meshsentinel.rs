@@ -10,7 +10,7 @@ use crate::actors::trust_actor::TrustActor;
 use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
 
-use crate::vitals::{HealthTracker, Homeostasis, SystemGovernor};
+use crate::vitals::{HealthTracker, Homeostasis, LifecycleEvent, SystemGovernor};
 use crate::Guardian;
 use crate::{trust::TrustRegistry, StorageActor};
 
@@ -72,6 +72,11 @@ pub struct MeshSentinel<I: IngressPort> {
     // Phase 3: Optional local mesh transport (BLE, WiFi Direct).
     // When available, the select! loop polls for local mesh events.
     local_mesh: Option<Box<dyn LocalMeshPort>>,
+
+    // Phase 4c: Lifecycle event receiver for mobile foreground/background transitions.
+    // When a `Foregrounded` event arrives, immediately recalculate PowerState.
+    // Desktop: always `None` (no foreground/background concept).
+    lifecycle_rx: Option<tokio::sync::mpsc::Receiver<LifecycleEvent>>,
 }
 
 impl<I: IngressPort> MeshSentinel<I> {
@@ -195,12 +200,14 @@ impl<I: IngressPort> MeshSentinel<I> {
 
         tokio::spawn(media_actor.run());
 
-        // Vitals polling task — feeds hardware stress into s_integral
+        // Phase 4c: Adaptive vitals polling — interval scales with PowerState.
+        // Normal: 5s, Conserving: 15s, Leaf: 30s, Dormant: 60s.
+        // Uses dynamic sleep instead of fixed interval to adapt each cycle.
         let vitals_governor = deps.system_governor.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(5));
             loop {
-                tick.tick().await;
+                let interval = vitals_governor.vitals_polling_interval();
+                tokio::time::sleep(interval).await;
                 vitals_governor.update_vitals();
             }
         });
@@ -214,6 +221,11 @@ impl<I: IngressPort> MeshSentinel<I> {
                 tracing::debug!("Phase 3: Local mesh transport provided but not available");
             }
         }
+
+        // Phase 4c: Extract lifecycle event receiver from hardware probe.
+        // Mobile implementations push OS lifecycle callbacks into this channel.
+        // Desktop (SysfsProbe) returns None.
+        let lifecycle_rx = deps.system_governor.probe().lifecycle_events();
 
         Ok(Self {
             config: config_arc,
@@ -229,6 +241,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             egress_tx,
             discovery_tx,
             local_mesh: deps.local_mesh,
+            lifecycle_rx,
         })
     }
 
@@ -250,6 +263,36 @@ impl<I: IngressPort> MeshSentinel<I> {
                 } => {
                     tracing::debug!(event = "local_mesh_event", "Received event from local transport");
                     self.handle_network_event(local_event).await
+                }
+
+                // Phase 4c: Lifecycle events from mobile OS (foreground/background).
+                // When the app transitions to foreground, immediately recalculate
+                // PowerState and update vitals — don't wait for the polling tick.
+                // This ensures capture resumes within milliseconds of foregrounding.
+                // Desktop: lifecycle_rx is None, so this arm blocks via pending().
+                Some(lifecycle_event) = async {
+                    match self.lifecycle_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match lifecycle_event {
+                        LifecycleEvent::Foregrounded => {
+                            tracing::info!(
+                                event = "lifecycle_foregrounded",
+                                "App foregrounded — immediate PowerState recalculation"
+                            );
+                            self.system_governor.update_vitals();
+                        }
+                        LifecycleEvent::Backgrounded => {
+                            tracing::info!(
+                                event = "lifecycle_backgrounded",
+                                "App backgrounded — PowerState will transition to Dormant"
+                            );
+                            self.system_governor.update_vitals();
+                        }
+                    }
+                    false // Never shutdown from lifecycle events
                 }
             };
 
