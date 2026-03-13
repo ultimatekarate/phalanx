@@ -21,8 +21,30 @@ pub struct TransportConfig {
     pub bootstrap_peers: Vec<String>,
 }
 
-/// Constructs the foundational transport stack for the node.
-pub fn build_base_transport(
+/// Constructs the QUIC transport — the primary transport for the swarm.
+///
+/// QUIC provides native TLS 1.3 encryption and stream multiplexing, replacing
+/// the TCP + Noise + Yamux stack. Connection migration across network transitions
+/// (WiFi → cellular) is handled transparently by the protocol.
+pub fn build_quic_transport(
+    local_key: &Keypair,
+) -> Result<
+    libp2p::core::transport::Boxed<(PeerId, libp2p::core::muxing::StreamMuxerBox)>,
+    Box<dyn Error>,
+> {
+    let quic_config = libp2p::quic::Config::new(local_key);
+    let transport = libp2p::quic::tokio::Transport::new(quic_config);
+
+    Ok(transport
+        .map(|(peer_id, muxer), _| (peer_id, libp2p::core::muxing::StreamMuxerBox::new(muxer)))
+        .boxed())
+}
+
+/// Constructs the TCP fallback transport for environments where UDP is blocked.
+///
+/// Uses the classic TCP + Noise + Yamux stack with optional PSK for private networks.
+/// This is the secondary transport — QUIC is preferred when available.
+pub fn build_tcp_fallback(
     local_key: &Keypair,
     psk: Option<pnet::PreSharedKey>,
 ) -> Result<
