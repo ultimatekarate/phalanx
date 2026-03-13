@@ -103,6 +103,13 @@ pub struct StorageConfig {
     /// Fixed TTL for stored evidence, independent of dynamic temporal tolerance.
     #[serde(default = "default_evidence_ttl")]
     pub evidence_ttl_secs: u64,
+    /// Path to the PEM certificate for C2PA manifest signing.
+    /// When `None`, ArtifactSink writes unsigned raw bytes.
+    #[serde(default)]
+    pub c2pa_cert_path: Option<String>,
+    /// Path to the PEM private key for C2PA manifest signing.
+    #[serde(default)]
+    pub c2pa_key_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -182,6 +189,8 @@ impl Default for StorageConfig {
             max_storage_bytes: default_max_storage(),
             max_foreign_storage_bytes: default_max_foreign(),
             evidence_ttl_secs: default_evidence_ttl(),
+            c2pa_cert_path: None,
+            c2pa_key_path: None,
         }
     }
 }

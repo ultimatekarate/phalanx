@@ -4359,6 +4359,7 @@ dependencies = [
  "bip39",
  "blake3",
  "bs58",
+ "c2pa",
  "clap",
  "config 0.15.21",
  "ctrlc",
