@@ -1,15 +1,20 @@
+use crate::persistence::outbound::OutboundQueue;
+use crate::vitals::{Homeostasis, SystemGovernor};
 use phalanx_forensics::crucible::EnvelopeHashExt;
 use phalanx_forensics::gate::WitnessGate;
 use phalanx_forensics::reassembler::FountainChunkifier;
 use phalanx_proto::evidence::{AudioShard, ChunkType, Evidence, SignatureHash, VideoShard};
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId};
 use phalanx_proto::prelude::*;
+use phalanx_proto::time::PhalanxTimestamp;
 use phalanx_transport::EgressPort;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Configuration bundle for MediaEgressActor construction.
-/// Groups topic routing, encoding, and channel parameters to keep `new()` ergonomic.
+/// Groups topic routing, encoding, channel, and resilience parameters to keep `new()` ergonomic.
 pub struct MediaEgressConfig {
     pub video_rx: mpsc::Receiver<VideoShard>,
     pub audio_rx: mpsc::Receiver<AudioShard>,
@@ -17,6 +22,14 @@ pub struct MediaEgressConfig {
     pub audio_topic: MeshTopic,
     pub symbol_size: SymbolSize,
     pub repair_ratio: RepairRatio,
+    /// WAL directory for outbound queue persistence. Failed publishes are persisted
+    /// here and retried with exponential backoff until network conditions improve.
+    pub wal_dir: PathBuf,
+    /// Integral feedback: outbound queue pressure feeds into `w_integral` via
+    /// `record_storage_pressure()`, driving FPS self-regulation.
+    pub system_governor: Arc<SystemGovernor>,
+    /// Denominator for storage pressure ratio (typically `config.storage.max_storage_bytes`).
+    pub max_storage_bytes: u64,
 }
 
 pub struct MediaEgressActor<E: EgressPort> {
@@ -34,16 +47,24 @@ pub struct MediaEgressActor<E: EgressPort> {
     /// Monotonic shard ID counter. Each sealed envelope gets a unique ShardId
     /// so the receiver's Crucible can track reassembly contexts independently.
     next_shard_id: u64,
+    /// WAL-backed persistent queue for failed publishes. Crash-safe, FIFO, exponential
+    /// backoff (5s base, 5min cap), abandonment after 10 attempts with forensic audit log.
+    outbound_queue: OutboundQueue,
+    /// Integral feedback: outbound queue bytes drive `w_integral` → composite stress → FPS.
+    system_governor: Arc<SystemGovernor>,
+    /// Denominator for the storage pressure ratio reported to the governor.
+    max_storage_bytes: u64,
 }
 
 impl<E: EgressPort> MediaEgressActor<E> {
-    pub fn new(
+    pub async fn new(
         egress: E,
         identity: Arc<PhalanxIdentity>,
         local_id: NetworkId,
         config: MediaEgressConfig,
-    ) -> Self {
-        Self {
+    ) -> std::io::Result<Self> {
+        let outbound_queue = OutboundQueue::new(config.wal_dir).await?;
+        Ok(Self {
             egress,
             video_rx: config.video_rx,
             audio_rx: config.audio_rx,
@@ -56,19 +77,39 @@ impl<E: EgressPort> MediaEgressActor<E> {
             symbol_size: config.symbol_size,
             repair_ratio: config.repair_ratio,
             next_shard_id: 0,
-        }
+            outbound_queue,
+            system_governor: config.system_governor,
+            max_storage_bytes: config.max_storage_bytes,
+        })
     }
 
     pub async fn run(mut self) {
+        let mut retry_tick = tokio::time::interval(Duration::from_secs(5));
+        let mut video_open = true;
+        let mut audio_open = true;
+
         loop {
             tokio::select! {
-                Some(shard) = self.video_rx.recv() => {
-                    self.process_media_egress(Evidence::Video(shard), true).await;
+                result = self.video_rx.recv(), if video_open => {
+                    match result {
+                        Some(shard) => self.process_media_egress(Evidence::Video(shard), true).await,
+                        None => video_open = false,
+                    }
                 }
-                Some(shard) = self.audio_rx.recv() => {
-                    self.process_media_egress(Evidence::Audio(shard), false).await;
+                result = self.audio_rx.recv(), if audio_open => {
+                    match result {
+                        Some(shard) => self.process_media_egress(Evidence::Audio(shard), false).await,
+                        None => audio_open = false,
+                    }
                 }
-                else => break,
+                _ = retry_tick.tick() => {
+                    self.process_retry_queue().await;
+                }
+            }
+
+            // Exit only when both capture channels closed AND retry queue drained
+            if !video_open && !audio_open && self.outbound_queue.is_empty() {
+                break;
             }
         }
     }
@@ -142,15 +183,26 @@ impl<E: EgressPort> MediaEgressActor<E> {
         for chunk in chunks {
             match postcard::to_allocvec(&chunk) {
                 Ok(data) => {
-                    if let Err(e) = self.egress.publish(topic, data).await {
+                    // Clone before publish: publish() takes Vec<u8> by value.
+                    // On failure we need the original bytes for WAL enqueue.
+                    if let Err(e) = self.egress.publish(topic, data.clone()).await {
                         tracing::error!(
                             event = "symbol_publish_failed",
                             shard_id = shard_id.0,
                             symbol = published,
                             error = %e,
-                            "Failed to publish fountain symbol"
+                            "Failed to publish fountain symbol — enqueueing for retry"
                         );
-                        // TODO: enqueue to OutboundQueue for retry
+                        if let Err(wal_err) = self
+                            .outbound_queue
+                            .enqueue(topic.clone(), data, PhalanxTimestamp::now())
+                            .await
+                        {
+                            tracing::error!(
+                                error = %wal_err,
+                                "Failed to persist to OutboundQueue WAL"
+                            );
+                        }
                     } else {
                         published += 1;
                     }
@@ -166,5 +218,52 @@ impl<E: EgressPort> MediaEgressActor<E> {
             symbols_total = symbol_count,
             is_video = is_video,
         );
+    }
+
+    /// Drain pending entries from the outbound queue, respecting exponential backoff,
+    /// and report queue pressure to the Volterra integral for FPS self-regulation.
+    async fn process_retry_queue(&mut self) {
+        if self.outbound_queue.is_empty() {
+            return;
+        }
+
+        let now = PhalanxTimestamp::now();
+        let batch = self.outbound_queue.drain_batch(10);
+
+        for entry in batch {
+            // Check if backoff period has elapsed
+            let ready = match entry.last_attempt {
+                None => true,
+                Some(last) => {
+                    let delay = OutboundQueue::backoff_delay(entry.attempts);
+                    now.0 >= last.0 + delay.as_millis() as u64
+                }
+            };
+
+            if !ready {
+                self.outbound_queue.requeue_unchanged(entry);
+                continue;
+            }
+
+            if self
+                .egress
+                .publish(&entry.topic, entry.envelope_bytes.clone())
+                .await
+                .is_ok()
+            {
+                if let Err(e) = self.outbound_queue.acknowledge(entry.id).await {
+                    tracing::error!(error = %e, "Failed to acknowledge outbound entry");
+                }
+                tracing::debug!(event = "outbound_retry_success", entry_id = entry.id.0);
+            } else if let Err(e) = self.outbound_queue.requeue_failed(entry, now).await {
+                tracing::error!(error = %e, "Failed to requeue outbound entry");
+            }
+        }
+
+        // Feed outbound queue pressure into the Volterra integral.
+        // As the queue grows → w_integral rises → composite stress rises → FPS drops
+        // → fewer shards captured → queue growth self-regulates.
+        self.system_governor
+            .record_storage_pressure(self.outbound_queue.total_bytes().0, self.max_storage_bytes);
     }
 }
