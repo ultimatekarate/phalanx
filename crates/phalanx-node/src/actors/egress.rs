@@ -1,5 +1,6 @@
-use phalanx_proto::identity::RecordingId;
+use phalanx_proto::identity::{NetworkId, RecordingId};
 use phalanx_proto::prelude::*;
+use phalanx_proto::retrieval::RecordingRequest;
 use phalanx_transport::EgressPort;
 use std::collections::VecDeque;
 use tokio::sync::{mpsc, oneshot};
@@ -15,6 +16,11 @@ pub enum EgressCommand {
     },
     AnnounceRecording(RecordingId),
     FindProviders(RecordingId),
+    /// Send a shard retrieval request to a specific peer.
+    RequestShards {
+        target: NetworkId,
+        request: RecordingRequest,
+    },
 }
 
 pub struct EgressActor<E: EgressPort> {
@@ -64,6 +70,15 @@ impl<E: EgressPort> EgressActor<E> {
                                     recording = %recording_id,
                                     error = %e,
                                     "DHT: Failed to query providers"
+                                );
+                            }
+                        }
+                        EgressCommand::RequestShards { target, request } => {
+                            if let Err(e) = self.port.send_request(&target, request).await {
+                                tracing::warn!(
+                                    peer = %target,
+                                    error = %e,
+                                    "DHT: Failed to send shard request"
                                 );
                             }
                         }
