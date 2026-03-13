@@ -69,7 +69,7 @@ impl DhtPayloadAuthority for DhtPayload {
 
     fn encode(&self) -> Result<Vec<u8>, ShardError> {
         self.validate()?;
-        postcard::to_allocvec(self).map_err(|e| ShardError::SerializationError(e.to_string()))
+        Ok(postcard::to_allocvec(self)?)
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, ShardError> {

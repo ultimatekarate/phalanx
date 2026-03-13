@@ -29,8 +29,7 @@ impl HandoverJudge for HandoverProof {
             &self.anchor_hash,
         );
 
-        let manifest_bytes = postcard::to_allocvec(&transfer_manifest)
-            .map_err(|e| ShardError::SerializationError(e.to_string()))?;
+        let manifest_bytes = postcard::to_allocvec(&transfer_manifest)?;
 
         let mut hasher = blake3::Hasher::new();
         hasher.update(&manifest_bytes);

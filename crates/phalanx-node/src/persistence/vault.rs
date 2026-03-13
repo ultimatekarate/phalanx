@@ -731,51 +731,31 @@ impl TransientJournal for FileJournal {
         }
 
         // Serialize → encrypt
-        let plaintext = postcard::to_allocvec(chunk)
-            .map_err(|e| ShardError::SerializationError(e.to_string()))?;
+        let plaintext = postcard::to_allocvec(chunk)?;
 
-        let (nonce, ciphertext) = encrypt_bytes(&self.vault_key, &plaintext)
-            .map_err(|e| ShardError::Encryption(e.to_string()))?;
+        let (nonce, ciphertext) = encrypt_bytes(&self.vault_key, &plaintext)?;
 
         // Frame: [4-byte LE len][24-byte nonce][ciphertext]
         let frame_len = (nonce.len() + ciphertext.len()) as u32;
-        self.handle
-            .write_all(&frame_len.to_le_bytes())
-            .await
-            .map_err(|e| ShardError::Io(e.to_string()))?;
-        self.handle
-            .write_all(&nonce)
-            .await
-            .map_err(|e| ShardError::Io(e.to_string()))?;
-        self.handle
-            .write_all(&ciphertext)
-            .await
-            .map_err(|e| ShardError::Io(e.to_string()))?;
+        self.handle.write_all(&frame_len.to_le_bytes()).await?;
+        self.handle.write_all(&nonce).await?;
+        self.handle.write_all(&ciphertext).await?;
 
         // Flush data to disk
-        self.handle
-            .sync_data()
-            .await
-            .map_err(|e| ShardError::Io(e.to_string()))?;
+        self.handle.sync_data().await?;
 
         Ok(())
     }
 
     async fn sync(&mut self) -> Result<(), ShardError> {
-        self.handle
-            .sync_all()
-            .await
-            .map_err(|e| ShardError::Io(e.to_string()))
+        Ok(self.handle.sync_all().await?)
     }
 
     async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
         let mut chunks = Vec::new();
 
         // Rewind the file pointer to the beginning for boot-time recovery
-        self.handle
-            .seek(SeekFrom::Start(0))
-            .await
-            .map_err(|e| ShardError::Io(e.to_string()))?;
+        self.handle.seek(SeekFrom::Start(0)).await?;
 
         // Stream chunks sequentially using the 4-byte length prefix
         loop {
@@ -783,7 +763,7 @@ impl TransientJournal for FileJournal {
             match self.handle.read_exact(&mut len_buf).await {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(ShardError::Io(e.to_string())),
+                Err(e) => return Err(e.into()),
             }
 
             let frame_len = u32::from_le_bytes(len_buf);
@@ -819,7 +799,7 @@ impl TransientJournal for FileJournal {
                     tracing::warn!("WAL corruption: incomplete frame, truncating");
                     break;
                 }
-                Err(e) => return Err(ShardError::Io(e.to_string())),
+                Err(e) => return Err(e.into()),
             }
 
             // Split frame into [nonce][ciphertext]
@@ -843,10 +823,7 @@ impl TransientJournal for FileJournal {
         }
 
         // Reset the file pointer to the end to resume appending
-        self.handle
-            .seek(SeekFrom::End(0))
-            .await
-            .map_err(|e| ShardError::Io(e.to_string()))?;
+        self.handle.seek(SeekFrom::End(0)).await?;
 
         Ok(chunks)
     }
@@ -856,8 +833,7 @@ impl TransientJournal for FileJournal {
             .write(true)
             .truncate(true)
             .open(&self.file_path)
-            .await
-            .map_err(|e| ShardError::Io(e.to_string()))?;
+            .await?;
         Ok(())
     }
 
@@ -868,8 +844,7 @@ impl TransientJournal for FileJournal {
             ShardError::SerializationError(format!("Salvage serialization failed: {}", e))
         })?;
 
-        let (nonce, ciphertext) = encrypt_bytes(&self.vault_key, &plaintext)
-            .map_err(|e| ShardError::Encryption(e.to_string()))?;
+        let (nonce, ciphertext) = encrypt_bytes(&self.vault_key, &plaintext)?;
 
         let mut sealed = Vec::with_capacity(nonce.len() + ciphertext.len());
         sealed.extend_from_slice(&nonce);
@@ -877,12 +852,8 @@ impl TransientJournal for FileJournal {
 
         // Atomic write: tmp → rename
         let tmp_path = salvage_path.with_extension("tmp");
-        tokio::fs::write(&tmp_path, &sealed)
-            .await
-            .map_err(|e| ShardError::Io(e.to_string()))?;
-        tokio::fs::rename(&tmp_path, &salvage_path)
-            .await
-            .map_err(|e| ShardError::Io(e.to_string()))?;
+        tokio::fs::write(&tmp_path, &sealed).await?;
+        tokio::fs::rename(&tmp_path, &salvage_path).await?;
 
         info!(path = ?salvage_path, "Egress Salvage: State persisted to journal");
         Ok(())
@@ -894,9 +865,7 @@ impl TransientJournal for FileJournal {
             return Ok(vec![]);
         }
 
-        let sealed = tokio::fs::read(&salvage_path)
-            .await
-            .map_err(|e| ShardError::Io(e.to_string()))?;
+        let sealed = tokio::fs::read(&salvage_path).await?;
 
         // Bounds check
         if sealed.len() as u64 > MAX_EGRESS_SALVAGE_BYTES {
@@ -912,11 +881,9 @@ impl TransientJournal for FileJournal {
         }
 
         let (nonce, ciphertext) = sealed.split_at(AEAD_NONCE_LEN);
-        let plaintext = decrypt_bytes(&self.vault_key, nonce, ciphertext)
-            .map_err(|e| ShardError::Encryption(e.to_string()))?;
+        let plaintext = decrypt_bytes(&self.vault_key, nonce, ciphertext)?;
 
-        let pending: Vec<PendingEgress> = postcard::from_bytes(&plaintext)
-            .map_err(|e| ShardError::SerializationError(e.to_string()))?;
+        let pending: Vec<PendingEgress> = postcard::from_bytes(&plaintext)?;
 
         // Cleanup after successful recovery
         let _ = tokio::fs::remove_file(salvage_path).await;

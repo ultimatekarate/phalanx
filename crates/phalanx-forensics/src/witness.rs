@@ -32,8 +32,7 @@ impl WitnessAuthority for WitnessEnvelope {
         peer_id: NetworkId,
         prev_hash: Option<SignatureHash>,
     ) -> Result<Self, ShardError> {
-        let data_to_sign = postcard::to_allocvec(&evidence)
-            .map_err(|e| ShardError::SerializationError(e.to_string()))?;
+        let data_to_sign = postcard::to_allocvec(&evidence)?;
 
         // Compute the fast hash
         let mut hasher = sha2::Sha256::new();
@@ -88,8 +87,7 @@ impl WitnessAuthority for WitnessEnvelope {
         let owner_did = self.did.clone();
 
         // Serialize the entire signed envelope
-        let full_data = postcard::to_allocvec(&self)
-            .map_err(|e| ShardError::SerializationError(e.to_string()))?;
+        let full_data = postcard::to_allocvec(&self)?;
         let timestamp = PhalanxTimestamp::now();
 
         // Slice into physical MTU-sized chunks

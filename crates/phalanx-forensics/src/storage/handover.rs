@@ -36,8 +36,7 @@ impl HandoverAuthority for HandoverProof {
         );
 
         // Serialize Manifest (Using 2026 stable postcard idiom)
-        let manifest_bytes = postcard::to_allocvec(&transfer_manifest)
-            .map_err(|e| ShardError::SerializationError(e.to_string()))?;
+        let manifest_bytes = postcard::to_allocvec(&transfer_manifest)?;
 
         // Hash with BLAKE3
         let shared_hash = blake3::hash(&manifest_bytes);
@@ -70,8 +69,7 @@ impl HandoverAuthority for HandoverProof {
         );
 
         // Deterministic Serialization
-        let manifest_bytes = postcard::to_allocvec(&transfer_manifest)
-            .map_err(|e| ShardError::SerializationError(e.to_string()))?;
+        let manifest_bytes = postcard::to_allocvec(&transfer_manifest)?;
 
         // Re-hash
         let shared_hash = blake3::hash(&manifest_bytes);

@@ -30,7 +30,7 @@ pub mod prelude {
 
     pub use crate::constants::{RECORDING_SIZE_THRESHOLD, RECORDING_TIME_THRESHOLD};
     // Contextual Nouns
-    pub use crate::time::{PhalanxTimestamp, TrustedClock};
+    pub use crate::time::{PhalanxTimestamp, TimeError, TrustedClock};
     pub use crate::topic::MeshTopic;
     pub use crate::types::PhalanxPhysics;
 
