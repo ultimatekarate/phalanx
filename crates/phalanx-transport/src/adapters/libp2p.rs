@@ -9,6 +9,7 @@ use libp2p::swarm::SwarmEvent;
 use libp2p::PeerId;
 use phalanx_proto::identity::NetworkId;
 use phalanx_proto::network::NetworkEvent;
+use phalanx_proto::telemetry::DiscoverySource;
 use phalanx_proto::topic::MeshTopic;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -55,6 +56,13 @@ pub fn translate_swarm_event(event: SwarmEvent<PhalanxEvent>) -> Option<NetworkE
             request,
             channel_id: request_id.to_string(),
         }),
+        // mDNS discovery → PeerDiscovered (vitals tracking)
+        SwarmEvent::Behaviour(PhalanxEvent::Mdns(libp2p::mdns::Event::Discovered(peers))) => peers
+            .first()
+            .map(|(peer_id, _)| NetworkEvent::PeerDiscovered {
+                peer: PeerMapper::to_network_id(peer_id),
+                source: DiscoverySource::Mdns,
+            }),
         _ => None, // Safely ignore background noise like DHT pings
     }
 }
@@ -179,6 +187,15 @@ impl Libp2pAdapter {
                     },
 
                     swarm_event = swarm.select_next_some() => {
+                        // Internal swarm wiring: discovered mDNS peers → Kademlia routing table
+                        if let SwarmEvent::Behaviour(PhalanxEvent::Mdns(
+                            libp2p::mdns::Event::Discovered(ref peers)
+                        )) = swarm_event {
+                            for (peer_id, addr) in peers {
+                                swarm.behaviour_mut().kademlia.add_address(peer_id, addr.clone());
+                            }
+                        }
+
                         // H3 FIX: Extract source peer for rate limiting
                         let source_peer = match &swarm_event {
                             SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(

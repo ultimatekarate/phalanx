@@ -50,6 +50,10 @@ pub struct NetworkConfig {
     /// RaptorQ symbol payload size in bytes. Must fit within a single UDP datagram.
     #[serde(default)]
     pub symbol_size: SymbolSize,
+    /// Multiaddr strings the swarm will listen on.
+    /// Default: `["/ip4/0.0.0.0/tcp/0"]` (OS-assigned port).
+    #[serde(default = "default_listen_addresses")]
+    pub listen_addresses: Vec<String>,
 }
 
 impl NodeConfig {
@@ -142,6 +146,9 @@ fn default_evidence_ttl() -> u64 {
 fn default_max_connections() -> usize {
     192
 }
+fn default_listen_addresses() -> Vec<String> {
+    vec!["/ip4/0.0.0.0/tcp/0".to_string()]
+}
 
 impl Default for NetworkConfig {
     fn default() -> Self {
@@ -158,6 +165,7 @@ impl Default for NetworkConfig {
             require_psk: false,
             repair_ratio: RepairRatio::default(),
             symbol_size: SymbolSize::default(),
+            listen_addresses: default_listen_addresses(),
         }
     }
 }
