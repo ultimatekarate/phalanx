@@ -172,6 +172,21 @@ impl CameraDriver {
     }
 }
 
+/// Configuration bundle for `PhalanxCameraThread::spawn()`.
+///
+/// Groups the capture pipeline parameters to keep the spawn signature ergonomic.
+/// - `lens` — ForensicLens implementation for sensor fingerprinting. Default: `ScalarLens`.
+/// - `governor` — Optional SystemGovernor for Phase 4 adaptive FPS duty cycling.
+///   When provided, the camera processor reads `current_power_state()` each batch
+///   cycle and adjusts frame batching accordingly. When `None`, full FPS is used.
+pub struct CameraSpawnConfig {
+    pub hw_config: HardwareConfig,
+    pub volley_id: String,
+    pub secret_key: Option<[u8; 32]>,
+    pub lens: Arc<dyn ForensicLens>,
+    pub governor: Option<Arc<SystemGovernor>>,
+}
+
 /// The main handle for the Camera Subsystem.
 pub struct PhalanxCameraThread {
     fps: u32,
@@ -254,25 +269,20 @@ impl PhalanxCameraThread {
     /// COMPATIBILITY BRIDGE
     /// Matches the signature expected by main.rs.
     /// Spawns the Watchdog AND the Processor to feed the main channel.
-    ///
-    /// `lens` — The ForensicLens implementation for computing sensor fingerprints.
-    /// Each raw RGB frame is analyzed (Y-plane extraction → center crop → Laplacian +
-    /// PRNU) before JPEG compression destroys the raw sensor signal.
-    /// Default: `ScalarLens` (pure-Rust fallback for x86_64 dev/test).
-    ///
-    /// `governor` — Optional SystemGovernor for Phase 4 adaptive FPS duty cycling.
-    /// When provided, the camera processor reads `current_power_state()` each batch
-    /// cycle and adjusts frame batching accordingly. When `None`, full FPS is used.
     pub fn spawn(
         self,
         index: Option<usize>,
         tx: mpsc::Sender<VideoShard>,
-        hw_config: HardwareConfig,
-        volley_id: String,
-        secret_key: Option<[u8; 32]>,
-        lens: Arc<dyn ForensicLens>,
-        governor: Option<Arc<SystemGovernor>>,
+        config: CameraSpawnConfig,
     ) {
+        let CameraSpawnConfig {
+            hw_config,
+            volley_id,
+            secret_key,
+            lens,
+            governor,
+        } = config;
+
         // 1. Ignite the Hardware Watchdog
         let device_idx = index.unwrap_or(0);
         self.start_watchdog(device_idx);
@@ -432,11 +442,13 @@ mod tests {
         cam.spawn(
             Some(0),
             tx,
-            config,
-            "test_volley".to_string(),
-            None,
-            Arc::new(ScalarLens),
-            None, // No governor — full FPS
+            CameraSpawnConfig {
+                hw_config: config,
+                volley_id: "test_volley".to_string(),
+                secret_key: None,
+                lens: Arc::new(ScalarLens),
+                governor: None, // No governor — full FPS
+            },
         );
 
         // Wait for 1 shard (which requires 10 frames at 10fps = ~1 sec)

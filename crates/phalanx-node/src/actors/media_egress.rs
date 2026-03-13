@@ -8,6 +8,17 @@ use phalanx_transport::EgressPort;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+/// Configuration bundle for MediaEgressActor construction.
+/// Groups topic routing, encoding, and channel parameters to keep `new()` ergonomic.
+pub struct MediaEgressConfig {
+    pub video_rx: mpsc::Receiver<VideoShard>,
+    pub audio_rx: mpsc::Receiver<AudioShard>,
+    pub video_topic: MeshTopic,
+    pub audio_topic: MeshTopic,
+    pub symbol_size: SymbolSize,
+    pub repair_ratio: RepairRatio,
+}
+
 pub struct MediaEgressActor<E: EgressPort> {
     egress: E,
     video_rx: mpsc::Receiver<VideoShard>,
@@ -29,26 +40,21 @@ impl<E: EgressPort> MediaEgressActor<E> {
     pub fn new(
         egress: E,
         identity: Arc<PhalanxIdentity>,
-        video_rx: mpsc::Receiver<VideoShard>,
-        audio_rx: mpsc::Receiver<AudioShard>,
-        video_topic: MeshTopic,
-        audio_topic: MeshTopic,
         local_id: NetworkId,
-        symbol_size: SymbolSize,
-        repair_ratio: RepairRatio,
+        config: MediaEgressConfig,
     ) -> Self {
         Self {
             egress,
-            video_rx,
-            audio_rx,
-            video_topic,
-            audio_topic,
+            video_rx: config.video_rx,
+            audio_rx: config.audio_rx,
+            video_topic: config.video_topic,
+            audio_topic: config.audio_topic,
             identity,
             local_id,
             video_prev_hash: None,
             audio_prev_hash: None,
-            symbol_size,
-            repair_ratio,
+            symbol_size: config.symbol_size,
+            repair_ratio: config.repair_ratio,
             next_shard_id: 0,
         }
     }
