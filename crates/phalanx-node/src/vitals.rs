@@ -133,6 +133,18 @@ pub struct IntegralState {
     pub conserving_trigger_count: u8, // Consecutive ticks above Conserving threshold (0.50)
     pub leaf_trigger_count: u8, // Consecutive vitals ticks above composite threshold (0.85)
     pub normal_trigger_count: u8, // Consecutive vitals ticks below recovery threshold (0.30)
+    // Phase 3: Internet connectivity detection
+    /// Whether the node believes it has internet connectivity.
+    /// Determined by tracking peer discovery sources: if ALL connected peers
+    /// are mDNS-local for >30s, internet is considered unavailable.
+    pub internet_available: bool,
+    /// Number of peers discovered via mDNS (local network).
+    pub local_peer_count: usize,
+    /// Number of peers discovered via non-local means (Kademlia, Bootstrap, Relay).
+    pub internet_peer_count: usize,
+    /// When the last non-mDNS peer was seen. Used for the 30s grace period
+    /// before declaring internet unavailable.
+    pub last_internet_peer_seen: Instant,
 }
 
 pub trait Homeostasis {
@@ -217,6 +229,10 @@ impl SystemGovernor {
                 conserving_trigger_count: 0,
                 leaf_trigger_count: 0,
                 normal_trigger_count: 0,
+                internet_available: true,
+                local_peer_count: 0,
+                internet_peer_count: 0,
+                last_internet_peer_seen: Instant::now(),
             }),
             recommended_state: RwLock::new(PowerState::Normal),
         }
@@ -247,6 +263,9 @@ impl SystemGovernor {
         let t_stress = self.read_thermal();
         let b_stress = self.read_battery();
         let new_stress = std::cmp::max(t_stress, b_stress);
+
+        // Phase 3: Periodic connectivity check (30s grace period)
+        self.check_connectivity();
 
         let heat_penalty = match new_stress {
             SystemStress::Nominal => 0.0,
@@ -380,6 +399,84 @@ impl SystemGovernor {
             .recommended_state
             .read()
             .unwrap_or_else(|e| e.into_inner())
+    }
+
+    // --- Phase 3: Internet Connectivity Detection ---
+
+    /// Duration after the last internet peer was seen before declaring offline.
+    const INTERNET_GRACE_PERIOD: Duration = Duration::from_secs(30);
+
+    /// Update connectivity state based on a newly discovered peer and its discovery source.
+    ///
+    /// Detection strategy (from architectural plan):
+    /// - If the node has connected non-mDNS peers (relay, Kademlia bootstrap), internet is available.
+    /// - If ALL connected peers are mDNS-local for >30s, mark internet as unavailable.
+    pub fn record_peer_discovery(&self, source: phalanx_proto::telemetry::DiscoverySource) {
+        use phalanx_proto::telemetry::DiscoverySource;
+
+        self.with_state_mut(|s| {
+            match source {
+                DiscoverySource::Mdns => {
+                    s.local_peer_count = s.local_peer_count.saturating_add(1);
+                }
+                DiscoverySource::Bootstrap
+                | DiscoverySource::Kademlia
+                | DiscoverySource::Identify => {
+                    s.internet_peer_count = s.internet_peer_count.saturating_add(1);
+                    s.last_internet_peer_seen = Instant::now();
+                    // Immediately mark internet as available
+                    if !s.internet_available {
+                        tracing::info!(
+                            event = "internet_restored",
+                            "Internet connectivity detected via {:?} peer",
+                            source
+                        );
+                    }
+                    s.internet_available = true;
+                }
+            }
+        });
+    }
+
+    /// Record a peer departure (disconnect). Adjusts local/internet counts.
+    pub fn record_peer_departure(&self, was_local: bool) {
+        self.with_state_mut(|s| {
+            if was_local {
+                s.local_peer_count = s.local_peer_count.saturating_sub(1);
+            } else {
+                s.internet_peer_count = s.internet_peer_count.saturating_sub(1);
+            }
+        });
+    }
+
+    /// Periodic connectivity check — called by the vitals polling tick.
+    /// If no internet peers have been seen for the grace period, marks internet as unavailable.
+    pub fn check_connectivity(&self) {
+        self.with_state_mut(|s| {
+            if s.internet_peer_count == 0
+                && s.last_internet_peer_seen.elapsed() > Self::INTERNET_GRACE_PERIOD
+            {
+                if s.internet_available {
+                    tracing::warn!(
+                        event = "internet_lost",
+                        local_peers = s.local_peer_count,
+                        grace_elapsed_secs = s.last_internet_peer_seen.elapsed().as_secs(),
+                        "No internet peers for >30s — marking offline"
+                    );
+                }
+                s.internet_available = false;
+            }
+        });
+    }
+
+    /// Returns whether the node believes it has internet connectivity.
+    pub fn internet_available(&self) -> bool {
+        self.with_state(|s| s.internet_available)
+    }
+
+    /// Returns the count of locally-discovered (mDNS) peers.
+    pub fn local_peer_count(&self) -> usize {
+        self.with_state(|s| s.local_peer_count)
     }
 
     // --- Hardware Discovery & Probes ---
@@ -765,6 +862,10 @@ mod tests {
                 conserving_trigger_count: 0,
                 leaf_trigger_count: 0,
                 normal_trigger_count: 0,
+                internet_available: true,
+                local_peer_count: 0,
+                internet_peer_count: 0,
+                last_internet_peer_seen: Instant::now(),
             }),
             recommended_state: RwLock::new(PowerState::Normal),
         };
@@ -916,5 +1017,110 @@ mod tests {
             !gov.is_peer_bandwidth_ok(peer),
             "Peer should be throttled after exceeding ceiling"
         );
+    }
+
+    // --- Phase 3: Internet Connectivity Detection Tests ---
+
+    #[test]
+    fn test_connectivity_default_is_online() {
+        let gov = SystemGovernor::new();
+        assert!(
+            gov.internet_available(),
+            "Fresh governor should default to internet available"
+        );
+        assert_eq!(gov.local_peer_count(), 0);
+    }
+
+    #[test]
+    fn test_internet_peer_keeps_online() {
+        use phalanx_proto::telemetry::DiscoverySource;
+        let gov = SystemGovernor::new();
+
+        // Discover a Kademlia peer — internet should stay available
+        gov.record_peer_discovery(DiscoverySource::Kademlia);
+        assert!(gov.internet_available());
+
+        gov.with_state(|s| {
+            assert_eq!(s.internet_peer_count, 1);
+            assert_eq!(s.local_peer_count, 0);
+        });
+    }
+
+    #[test]
+    fn test_mdns_peer_increments_local_count() {
+        use phalanx_proto::telemetry::DiscoverySource;
+        let gov = SystemGovernor::new();
+
+        gov.record_peer_discovery(DiscoverySource::Mdns);
+        gov.record_peer_discovery(DiscoverySource::Mdns);
+        assert_eq!(gov.local_peer_count(), 2);
+
+        gov.with_state(|s| {
+            assert_eq!(s.internet_peer_count, 0);
+        });
+    }
+
+    #[test]
+    fn test_connectivity_transitions_to_offline() {
+        use phalanx_proto::telemetry::DiscoverySource;
+        let gov = SystemGovernor::new();
+
+        // Start with only mDNS peers, no internet peers ever seen
+        gov.record_peer_discovery(DiscoverySource::Mdns);
+
+        // Force last_internet_peer_seen to be >30s ago
+        gov.with_state_mut(|s| {
+            s.internet_peer_count = 0;
+            s.last_internet_peer_seen = Instant::now() - Duration::from_secs(35);
+        });
+
+        // Connectivity check should detect offline
+        gov.check_connectivity();
+        assert!(
+            !gov.internet_available(),
+            "Should be offline after 30s grace with no internet peers"
+        );
+    }
+
+    #[test]
+    fn test_connectivity_restores_on_internet_peer() {
+        use phalanx_proto::telemetry::DiscoverySource;
+        let gov = SystemGovernor::new();
+
+        // Force offline state
+        gov.with_state_mut(|s| {
+            s.internet_available = false;
+            s.internet_peer_count = 0;
+            s.last_internet_peer_seen = Instant::now() - Duration::from_secs(60);
+        });
+        assert!(!gov.internet_available());
+
+        // A Bootstrap peer arrives — should immediately restore
+        gov.record_peer_discovery(DiscoverySource::Bootstrap);
+        assert!(
+            gov.internet_available(),
+            "Internet should restore immediately on non-local peer discovery"
+        );
+    }
+
+    #[test]
+    fn test_peer_departure_adjusts_counts() {
+        use phalanx_proto::telemetry::DiscoverySource;
+        let gov = SystemGovernor::new();
+
+        gov.record_peer_discovery(DiscoverySource::Mdns);
+        gov.record_peer_discovery(DiscoverySource::Mdns);
+        gov.record_peer_discovery(DiscoverySource::Kademlia);
+
+        assert_eq!(gov.local_peer_count(), 2);
+        gov.with_state(|s| assert_eq!(s.internet_peer_count, 1));
+
+        // Depart one local peer
+        gov.record_peer_departure(true);
+        assert_eq!(gov.local_peer_count(), 1);
+
+        // Depart the internet peer
+        gov.record_peer_departure(false);
+        gov.with_state(|s| assert_eq!(s.internet_peer_count, 0));
     }
 }

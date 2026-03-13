@@ -18,7 +18,7 @@ use phalanx_forensics::policy::{IngressGovernor, TrafficGovernor};
 use phalanx_forensics::prelude::*;
 use phalanx_proto::prelude::*;
 use phalanx_transport::identity_ext::Libp2pExt;
-use phalanx_transport::{EgressPort, IngressPort};
+use phalanx_transport::{EgressPort, IngressPort, LocalMeshPort};
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -38,6 +38,10 @@ pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJourn
     pub trust_registry: TrustRegistry,
     pub system_governor: Arc<SystemGovernor>,
     pub vault_key: SymmetricKey,
+    /// Phase 3: Optional local mesh transport (BLE, WiFi Direct).
+    /// Default: `None` (desktop/non-BLE platforms).
+    /// When `Some`, MeshSentinel polls for local mesh events alongside network ingress.
+    pub local_mesh: Option<Box<dyn LocalMeshPort>>,
 }
 
 pub struct MeshSentinel<I: IngressPort> {
@@ -64,6 +68,10 @@ pub struct MeshSentinel<I: IngressPort> {
 
     // Keep a reference to the storage task to ensure it's not dropped.
     pub storage_task: JoinHandle<()>,
+
+    // Phase 3: Optional local mesh transport (BLE, WiFi Direct).
+    // When available, the select! loop polls for local mesh events.
+    local_mesh: Option<Box<dyn LocalMeshPort>>,
 }
 
 impl<I: IngressPort> MeshSentinel<I> {
@@ -199,6 +207,14 @@ impl<I: IngressPort> MeshSentinel<I> {
 
         let config_arc = Arc::new(deps.config);
 
+        if let Some(ref mesh) = deps.local_mesh {
+            if mesh.is_available() {
+                tracing::info!("Phase 3: Local mesh transport is AVAILABLE");
+            } else {
+                tracing::debug!("Phase 3: Local mesh transport provided but not available");
+            }
+        }
+
         Ok(Self {
             config: config_arc,
             identity: arc_identity,
@@ -212,82 +228,150 @@ impl<I: IngressPort> MeshSentinel<I> {
             retrieval_tx,
             egress_tx,
             discovery_tx,
+            local_mesh: deps.local_mesh,
         })
     }
 
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
         loop {
-            tokio::select! {
+            let should_shutdown = tokio::select! {
                 Some(event) = self.ingress.next_event() => {
-                    match event {
-                        NetworkEvent::DataReceived { origin, topic, data } => {
-                            // P5 FIX: Reject oversized messages before any processing.
-                            // This prevents memory amplification from messages that exceed
-                            // the configured chunk size, protecting the ingestion pipeline.
-                            if data.len() > self.config.network.max_chunk_size_bytes * 2 {
-                                tracing::warn!(
-                                    size = data.len(),
-                                    limit = self.config.network.max_chunk_size_bytes * 2,
-                                    peer = %origin,
-                                    "P5: Oversized message rejected pre-queue"
-                                );
-                                continue;
-                            }
-
-                            // Record bandwidth pressure for every received message
-                            self.system_governor.record_bandwidth_pressure(data.len());
-
-                            if topic.as_str() == self.config.network.control_topic.as_str() {
-                                if let Ok(msg) = phalanx_forensics::gate::unmarshal::<ControlMessage>(&data, "control_message") {
-                                    self.health_tracker.register_activity(msg);
-                                }
-                            } else {
-                                // Bandwidth gate: reject at the edge when saturated
-                                if self.system_governor.bandwidth_scaler().0 < 0.05 {
-                                    tracing::warn!(
-                                        size = data.len(),
-                                        peer = %origin,
-                                        "Bandwidth saturated, dropping chunk"
-                                    );
-                                } else if self.ingestion_tx.try_send(IngestionCommand::ProcessChunk {
-                                    peer_id: origin,
-                                    data,
-                                    topic,
-                                }).is_err() {
-                                    // Channel full — record memory pressure from the backlog
-                                    self.system_governor.record_memory_pressure(
-                                        self.config.network.max_chunk_size_bytes * 200
-                                    );
-                                    tracing::warn!("Ingestion channel full, dropping chunk.");
-                                }
-                            }
-                        }
-                        NetworkEvent::VolleyRequested { origin, request, channel_id } => {
-                            let _ = self.retrieval_tx.send(
-                                RetrievalCommand::SecureRetrieval {
-                                    origin,
-                                    request,
-                                    channel_id,
-                                }
-                            ).await;
-                        }
-                        NetworkEvent::Shutdown => {
-                            tracing::info!("Engine: Initiating emergency salvage");
-                            let (tx, rx) = tokio::sync::oneshot::channel();
-                            if self.egress_tx.send(EgressCommand::DrainForSalvage { reply_to: tx }).await.is_ok() {
-                                if let Ok(payload) = timeout(Duration::from_millis(500), rx).await {
-                                    let _ = self.storage_tx.send(StorageCommand::EmergencySalvage(payload.unwrap_or_default())).await;
-                                }
-                            }
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            break;
-                        }
-                        _ => {}
-                    }
+                    self.handle_network_event(event).await
                 }
+
+                // Phase 3: Poll local mesh transport for events (BLE, WiFi Direct).
+                // When the local mesh is available, events are routed through the
+                // same ingestion pipeline as network events.
+                Some(local_event) = async {
+                    match self.local_mesh.as_mut() {
+                        Some(mesh) if mesh.is_available() => mesh.next_local_event().await,
+                        _ => std::future::pending().await,
+                    }
+                } => {
+                    tracing::debug!(event = "local_mesh_event", "Received event from local transport");
+                    self.handle_network_event(local_event).await
+                }
+            };
+
+            if should_shutdown {
+                break;
             }
         }
         Ok(())
+    }
+
+    /// Unified event handler for both network ingress and local mesh events.
+    /// Returns `true` if the engine should shut down.
+    async fn handle_network_event(&mut self, event: NetworkEvent) -> bool {
+        match event {
+            NetworkEvent::DataReceived {
+                origin,
+                topic,
+                data,
+            } => {
+                // P5 FIX: Reject oversized messages before any processing.
+                // This prevents memory amplification from messages that exceed
+                // the configured chunk size, protecting the ingestion pipeline.
+                if data.len() > self.config.network.max_chunk_size_bytes * 2 {
+                    tracing::warn!(
+                        size = data.len(),
+                        limit = self.config.network.max_chunk_size_bytes * 2,
+                        peer = %origin,
+                        "P5: Oversized message rejected pre-queue"
+                    );
+                    return false;
+                }
+
+                // Record bandwidth pressure for every received message
+                self.system_governor.record_bandwidth_pressure(data.len());
+
+                if topic.as_str() == self.config.network.control_topic.as_str() {
+                    if let Ok(msg) = phalanx_forensics::gate::unmarshal::<ControlMessage>(
+                        &data,
+                        "control_message",
+                    ) {
+                        self.health_tracker.register_activity(msg);
+                    }
+                } else {
+                    // Bandwidth gate: reject at the edge when saturated
+                    if self.system_governor.bandwidth_scaler().0 < 0.05 {
+                        tracing::warn!(
+                            size = data.len(),
+                            peer = %origin,
+                            "Bandwidth saturated, dropping chunk"
+                        );
+                    } else if self
+                        .ingestion_tx
+                        .try_send(IngestionCommand::ProcessChunk {
+                            peer_id: origin,
+                            data,
+                            topic,
+                        })
+                        .is_err()
+                    {
+                        // Channel full — record memory pressure from the backlog
+                        self.system_governor
+                            .record_memory_pressure(self.config.network.max_chunk_size_bytes * 200);
+                        tracing::warn!("Ingestion channel full, dropping chunk.");
+                    }
+                }
+                false
+            }
+
+            // Phase 3: Record peer discovery source for connectivity detection.
+            // Internet peers (Kademlia, Bootstrap) immediately mark internet as available.
+            // mDNS peers increment local count. The 30s grace period in SystemGovernor
+            // handles the transition to offline when only local peers remain.
+            NetworkEvent::PeerDiscovered { peer, source } => {
+                tracing::debug!(
+                    event = "peer_discovered",
+                    peer = %peer,
+                    source = ?source,
+                    "Peer discovered via {:?}",
+                    source
+                );
+                self.system_governor.record_peer_discovery(source);
+                false
+            }
+
+            NetworkEvent::VolleyRequested {
+                origin,
+                request,
+                channel_id,
+            } => {
+                let _ = self
+                    .retrieval_tx
+                    .send(RetrievalCommand::SecureRetrieval {
+                        origin,
+                        request,
+                        channel_id,
+                    })
+                    .await;
+                false
+            }
+
+            NetworkEvent::Shutdown => {
+                tracing::info!("Engine: Initiating emergency salvage");
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                if self
+                    .egress_tx
+                    .send(EgressCommand::DrainForSalvage { reply_to: tx })
+                    .await
+                    .is_ok()
+                {
+                    if let Ok(payload) = timeout(Duration::from_millis(500), rx).await {
+                        let _ = self
+                            .storage_tx
+                            .send(StorageCommand::EmergencySalvage(
+                                payload.unwrap_or_default(),
+                            ))
+                            .await;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                true // Signal shutdown to the run loop
+            }
+        }
     }
 
     pub fn spawn_playback<S: PlaybackSink + 'static>(

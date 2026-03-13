@@ -10,6 +10,7 @@ use tokio::sync::mpsc; // FIX: Corrected from 'use crate::mpsc'
 
 // 2. MODULE REGISTRY
 pub mod adapters {
+    pub mod ble;
     pub mod kademlia;
     pub mod libp2p;
     pub mod mock;
@@ -87,6 +88,27 @@ pub trait EgressPort: Send + Sync + Clone {
         -> Result<(), String>;
 }
 
+// 3c. THE LOCAL MESH PORT (Phase 3 — Ad-Hoc Mesh Forward Infrastructure)
+//
+// For truly disconnected scenarios (no WiFi network at all — outdoors, disaster zone, protest),
+// this trait abstracts local peer-to-peer transports (BLE, WiFi Direct).
+// Each platform injects its own implementation via FFI during mobile integration.
+// Desktop and non-BLE platforms use NoOpLocalMesh (always unavailable).
+#[async_trait]
+pub trait LocalMeshPort: Send {
+    /// Discover peers reachable via this local transport (BLE, WiFi Direct).
+    async fn discover_peers(&mut self) -> Vec<NetworkId>;
+
+    /// Send data directly to a specific peer via the local transport.
+    async fn send_local(&self, target: &NetworkId, data: Vec<u8>) -> Result<(), TransportError>;
+
+    /// Poll for the next inbound event from the local transport.
+    async fn next_local_event(&mut self) -> Option<NetworkEvent>;
+
+    /// Whether this local transport is available on the current platform.
+    fn is_available(&self) -> bool;
+}
+
 // 4. THE PEER MAPPER (THE TRANSLATOR)
 pub struct PeerMapper;
 
@@ -123,6 +145,7 @@ pub mod prelude {
     pub use crate::adapters::libp2p::Libp2pAdapter;
     pub use crate::EgressPort;
     pub use crate::IngressPort;
+    pub use crate::LocalMeshPort;
     pub use crate::NetworkTransport;
     pub use crate::PeerMapper;
     pub use crate::TransportAdapter;
