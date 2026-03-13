@@ -19,7 +19,7 @@ pub mod vitals; // The Health Nouns
 pub mod prelude {
     // Identity Nouns
     pub use crate::identity::{
-        Did, NetworkId, PhalanxIdentity, ShardId, VolleyId, IDENTITY_VERSION,
+        Did, NetworkId, PhalanxIdentity, RecordingId, ShardId, IDENTITY_VERSION,
     };
 
     // Evidence Nouns
@@ -28,7 +28,7 @@ pub mod prelude {
         VideoFrame,
     };
 
-    pub use crate::constants::{VOLLEY_SIZE_THRESHOLD, VOLLEY_TIME_THRESHOLD};
+    pub use crate::constants::{RECORDING_SIZE_THRESHOLD, RECORDING_TIME_THRESHOLD};
     // Contextual Nouns
     pub use crate::time::{PhalanxTimestamp, TrustedClock};
     pub use crate::topic::MeshTopic;
@@ -41,7 +41,7 @@ pub mod prelude {
 
     // Error Nouns
     pub use crate::error::*;
-    pub use crate::retrieval::VolleyResponse;
+    pub use crate::retrieval::RecordingResponse;
     pub use crate::storage::{GuardianError, PendingEgress};
 
     // Trust & Networking Nouns
@@ -55,6 +55,6 @@ pub mod prelude {
 }
 
 // Re-export the canonical Retrieval Nouns from their home modules.
-pub use retrieval::{VolleyRequest, VolleyResponse};
+pub use retrieval::{RecordingRequest, RecordingResponse};
 
 pub const MAX_PAYLOAD_SIZE: usize = 10_000_000;

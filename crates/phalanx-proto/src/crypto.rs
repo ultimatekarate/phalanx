@@ -1,5 +1,5 @@
 use crate::identity::Did;
-use crate::identity::VolleyId;
+use crate::identity::RecordingId;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -43,12 +43,12 @@ impl std::fmt::Debug for SymmetricKey {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SealedLocator {
     /// The content we are pointing to.
-    pub target: VolleyId,
+    pub target: RecordingId,
     /// The DID of the intended recipient (Who can open this?).
     pub recipient: Did,
     /// The DID of the sender (Who signed/sealed this?).
     pub sender: Did,
-    /// The Encrypted VolleyKey (ChaCha20-Poly1305 key).
+    /// The Encrypted RecordingKey (ChaCha20-Poly1305 key).
     /// Encrypted via X25519(SenderPriv, RecipientPub).
     #[serde(with = "base64_serde")]
     pub sealed_key: Vec<u8>,

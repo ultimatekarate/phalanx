@@ -18,7 +18,7 @@ fn create_mock_fountain_chunks(identity: &PhalanxIdentity, shard_id: ShardId) ->
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
-        volley_id: VolleyId::new("test_volley"),
+        recording_id: RecordingId::new("test_recording"),
         payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         lens_metrics: ForensicMetrics::default(),
     });

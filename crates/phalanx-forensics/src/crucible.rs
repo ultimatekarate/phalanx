@@ -1,7 +1,7 @@
 use phalanx_proto::evidence::Evidence;
 use phalanx_proto::evidence::ForensicGap;
+use phalanx_proto::evidence::Recording;
 use phalanx_proto::evidence::StorageSequence;
-use phalanx_proto::evidence::Volley;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::Ownership;
 use phalanx_proto::prelude::*;
@@ -15,8 +15,8 @@ use std::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
 
 // Placeholder constants for threshold limits
-const VOLLEY_SIZE_THRESHOLD: usize = 100;
-const VOLLEY_TIME_THRESHOLD: Duration = Duration::from_secs(60);
+const RECORDING_SIZE_THRESHOLD: usize = 100;
+const RECORDING_TIME_THRESHOLD: Duration = Duration::from_secs(60);
 
 fn default_cleanup_interval() -> Duration {
     Duration::from_secs(1)
@@ -43,17 +43,17 @@ impl EnvelopeHashExt for WitnessEnvelope {
 }
 
 pub trait EvidenceExt {
-    fn volley_id(&self) -> &VolleyId;
+    fn recording_id(&self) -> &RecordingId;
     fn sequence_id(&self) -> StorageSequence;
     fn timestamp(&self) -> PhalanxTimestamp;
 }
 
 impl EvidenceExt for Evidence {
-    fn volley_id(&self) -> &VolleyId {
+    fn recording_id(&self) -> &RecordingId {
         match self {
-            Evidence::Video(s) => &s.volley_id,
-            Evidence::Audio(s) => &s.volley_id,
-            Evidence::Handover(h) => &h.volley_id,
+            Evidence::Video(s) => &s.recording_id,
+            Evidence::Audio(s) => &s.recording_id,
+            Evidence::Handover(h) => &h.recording_id,
             _ => unimplemented!("Add other variants here"),
         }
     }
@@ -302,7 +302,7 @@ impl<S: Mold> Crucible<S> {
     }
 
     pub fn thaw(bytes: &[u8]) -> Result<Self, ShardError> {
-        crate::gate::unmarshal(bytes, "VolleyAmalgam::thaw")
+        crate::gate::unmarshal(bytes, "RecordingAmalgam::thaw")
     }
 
     /// Deserialize and restore `#[serde(skip)]` fields that reset to defaults on thaw.
@@ -311,7 +311,8 @@ impl<S: Mold> Crucible<S> {
         cleanup_interval: Duration,
         max_capacity: usize,
     ) -> Result<Self, ShardError> {
-        let mut crucible: Self = crate::gate::unmarshal(bytes, "VolleyAmalgam::thaw_with_config")?;
+        let mut crucible: Self =
+            crate::gate::unmarshal(bytes, "RecordingAmalgam::thaw_with_config")?;
         crucible.cleanup_interval = cleanup_interval;
         crucible.max_capacity = max_capacity;
         crucible.last_cleanup = Instant::now();
@@ -332,21 +333,21 @@ impl<S: Mold + Default> Default for Crucible<S> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VolleyBuffer {
+pub struct RecordingBuffer {
     pub artifacts: BTreeMap<StorageSequence, WitnessEnvelope>,
-    pub volley_id: VolleyId,
+    pub recording_id: RecordingId,
     pub ownership: Ownership,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct VolleyAmalgam;
+pub struct RecordingAmalgam;
 
-// Define a concrete error type for VolleyAmalgam rejections
+// Define a concrete error type for RecordingAmalgam rejections
 #[derive(Debug, thiserror::Error)]
 pub enum AmalgamError {
     #[error("Unauthorized Handover: Origin DID mismatch")]
     UnauthorizedHandover,
-    #[error("Identity Mismatch: Frame DID does not match Volley owner")]
+    #[error("Identity Mismatch: Frame DID does not match Recording owner")]
     IdentityMismatch,
     #[error("Ambiguous Ownership: We require additional evidence to determine ownership")]
     AmbiguousOwnership,
@@ -354,15 +355,15 @@ pub enum AmalgamError {
     SequenceConflict(StorageSequence),
 }
 
-impl Mold for VolleyAmalgam {
+impl Mold for RecordingAmalgam {
     type Input = ForensicUnit<WitnessEnvelope, Verified>;
-    type Output = Volley;
-    type Key = VolleyId;
-    type Accumulator = VolleyBuffer;
+    type Output = Recording;
+    type Key = RecordingId;
+    type Accumulator = RecordingBuffer;
     type Error = AmalgamError;
 
     fn get_key(item: &Self::Input) -> Self::Key {
-        item.data.evidence.volley_id().clone()
+        item.data.evidence.recording_id().clone()
     }
 
     fn is_authoritative(acc: &Self::Accumulator) -> bool {
@@ -387,9 +388,9 @@ impl Mold for VolleyAmalgam {
             Ownership::Tentative(item.data.did.clone())
         };
 
-        VolleyBuffer {
+        RecordingBuffer {
             artifacts,
-            volley_id: item.data.evidence.volley_id().clone(),
+            recording_id: item.data.evidence.recording_id().clone(),
             ownership,
         }
     }
@@ -408,7 +409,7 @@ impl Mold for VolleyAmalgam {
                 // Different evidence at same sequence — conflict
                 warn!(
                     seq = seq.0,
-                    volley = %acc.volley_id,
+                    recording = %acc.recording_id,
                     "M4: Sequence collision detected — rejecting conflicting evidence"
                 );
                 return Err(AmalgamError::SequenceConflict(seq));
@@ -447,7 +448,7 @@ impl Mold for VolleyAmalgam {
                 if provides_authority {
                     // UPGRADE OR DISPLACE:
                     // A Genesis/Handover arrives. It doesn't matter who the tentative owner was;
-                    // the one with the proof wins and cements the volley.
+                    // the one with the proof wins and cements the recording.
                     let new_authority = handover_target.unwrap_or_else(|| incoming_did.clone());
                     acc.ownership = Ownership::Authoritative(new_authority);
                     acc.artifacts.insert(seq, item.data);
@@ -464,10 +465,10 @@ impl Mold for VolleyAmalgam {
     }
 
     fn is_ready(acc: &Self::Accumulator, elapsed: Duration) -> bool {
-        acc.artifacts.len() >= VOLLEY_SIZE_THRESHOLD || elapsed > VOLLEY_TIME_THRESHOLD
+        acc.artifacts.len() >= RECORDING_SIZE_THRESHOLD || elapsed > RECORDING_TIME_THRESHOLD
     }
 
-    fn assemble(&self, key: VolleyId, acc: Self::Accumulator) -> Option<Self::Output> {
+    fn assemble(&self, key: RecordingId, acc: Self::Accumulator) -> Option<Self::Output> {
         if acc.artifacts.is_empty() {
             return None;
         }
@@ -485,7 +486,7 @@ impl Mold for VolleyAmalgam {
             if let Some(expected) = expected_seq {
                 if current_seq > expected {
                     gaps.push(ForensicGap {
-                        volley_id: key.clone(),
+                        recording_id: key.clone(),
                         start_seq: expected,
                         end_seq: current_seq - 1,
                         detected_at: now,
@@ -497,9 +498,9 @@ impl Mold for VolleyAmalgam {
             if let (Some(expected_hash), Some(actual_link)) = (last_signature_hash, env.prev_hash) {
                 if expected_hash != actual_link {
                     error!(
-                        volley_id = %key,
+                        recording_id = %key,
                         seq = %current_seq.0,
-                        "VolleyAmalgam: CAUSALITY BREACH - Hash link mismatch detected"
+                        "RecordingAmalgam: CAUSALITY BREACH - Hash link mismatch detected"
                     );
                     return None;
                 }
@@ -511,10 +512,10 @@ impl Mold for VolleyAmalgam {
         }
 
         info!(
-            volley_id = %key,
+            recording_id = %key,
             artifacts = %sorted_envelopes.len(),
             gaps = %gaps.len(),
-            "VolleyAmalgam: Finalized chain with verified causality"
+            "RecordingAmalgam: Finalized chain with verified causality"
         );
 
         let gaps_2 = gaps.clone();
@@ -523,7 +524,7 @@ impl Mold for VolleyAmalgam {
             Ownership::Tentative(did) | Ownership::Authoritative(did) => did,
         };
 
-        Some(Volley {
+        Some(Recording {
             id: key.clone(),
             owner_did: final_owner_did,
             artifacts: sorted_envelopes,

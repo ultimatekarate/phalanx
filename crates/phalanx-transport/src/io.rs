@@ -1,5 +1,5 @@
 // crates/phalanx-transport/src/io.rs
-use phalanx_proto::prelude::VOLLEY_SIZE_THRESHOLD;
+use phalanx_proto::prelude::RECORDING_SIZE_THRESHOLD;
 use tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Reads a u32 length prefix, validates against MAX_PAYLOAD_SIZE,
@@ -12,12 +12,12 @@ where
     io.read_exact(&mut length_buffer).await?;
     let payload_length = u32::from_le_bytes(length_buffer) as usize;
 
-    if payload_length > VOLLEY_SIZE_THRESHOLD {
+    if payload_length > RECORDING_SIZE_THRESHOLD {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
                 "Payload length {} exceeds protocol limit of {}",
-                payload_length, VOLLEY_SIZE_THRESHOLD
+                payload_length, RECORDING_SIZE_THRESHOLD
             ),
         ));
     }

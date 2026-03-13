@@ -10,7 +10,7 @@ use phalanx_proto::evidence::{
     ChunkType, DataPayload, EnvelopeState, Evidence, ForensicMetrics, StorageSequence, VideoShard,
     WitnessEnvelope,
 };
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
+use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId, ShardId};
 use phalanx_proto::prelude::{EncodingSymbolId, ShardChunk};
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
 use phalanx_proto::types::Fps;
@@ -19,12 +19,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 
-fn create_test_shard(seq: u32, volley_id: VolleyId) -> VideoShard {
+fn create_test_shard(seq: u32, recording_id: RecordingId) -> VideoShard {
     VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(seq),
         fps: Fps::new(30),
-        volley_id,
+        recording_id,
         payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         lens_metrics: ForensicMetrics::default(),
     }
@@ -35,7 +35,7 @@ async fn test_out_of_sequence_salvage_on_node_death() {
     let (identity, _) = PhalanxIdentity::generate().unwrap();
     let vault_key = derive_vault_key(&identity, &[0u8; 32]);
     let config = NodeConfig::default();
-    let volley_id = VolleyId::new("v_salvage");
+    let recording_id = RecordingId::new("v_salvage");
 
     let temp_dir = tempdir().expect("Failed to create temp dir");
     let vault_path = temp_dir.path().to_string_lossy().to_string();
@@ -49,7 +49,7 @@ async fn test_out_of_sequence_salvage_on_node_death() {
     );
 
     // 1. CREATE VALID CHAIN: Seq 1 -> Seq 2
-    let shard_1 = create_test_shard(1, volley_id.clone());
+    let shard_1 = create_test_shard(1, recording_id.clone());
     let env_1 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_1),
         &identity,
@@ -59,7 +59,7 @@ async fn test_out_of_sequence_salvage_on_node_death() {
     .unwrap();
     let hash_1 = env_1.signature_hash();
 
-    let shard_2 = create_test_shard(2, volley_id.clone());
+    let shard_2 = create_test_shard(2, recording_id.clone());
     // CRITICAL: Point Seq 2 at the hash of Seq 1
     let env_2 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_2),
@@ -96,7 +96,7 @@ async fn test_stronghold_crash_recovery() {
     let vault_key = derive_vault_key(&identity, &[0u8; 32]);
     let peer_id = NetworkId::random();
     let seq = StorageSequence(101);
-    let vid = VolleyId::new("crash_volley");
+    let vid = RecordingId::new("crash_recording");
 
     let mut storage = Guardian::new(
         &vault_path,
@@ -145,10 +145,10 @@ async fn test_stronghold_crash_recovery() {
         .await
         .expect("WAL replay failed");
 
-    // Verify the volley session was recovered
+    // Verify the recording session was recovered
     let recovered_session = recovered_storage
-        .get_active_volley_shards(&vid)
-        .expect("Guardian failed to recover Volley session");
+        .get_active_recording_shards(&vid)
+        .expect("Guardian failed to recover Recording session");
 
     assert!(recovered_session.contains_key(&seq));
 }
@@ -166,7 +166,7 @@ async fn test_leaf_mode_isolation() {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
-        volley_id: VolleyId::new("v_leaf"),
+        recording_id: RecordingId::new("v_leaf"),
         payload: DataPayload::Clear(vec![0x00; 4]),
         lens_metrics: ForensicMetrics::default(),
     });

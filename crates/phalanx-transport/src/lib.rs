@@ -3,8 +3,9 @@
 // EXTERNAL DEPENDENCIES
 use async_trait::async_trait; // THE MISSING PIECE
 use libp2p::PeerId;
+use phalanx_proto::identity::RecordingId;
 use phalanx_proto::network::NetworkEvent;
-use phalanx_proto::prelude::*; // Pulls in MeshTopic, VolleyResponse, NetworkEvent
+use phalanx_proto::prelude::*; // Pulls in MeshTopic, RecordingResponse, NetworkEvent
 use std::str::FromStr;
 use tokio::sync::mpsc; // FIX: Corrected from 'use crate::mpsc'
 
@@ -69,7 +70,7 @@ pub trait NetworkTransport: Send {
     async fn send_response(
         &mut self,
         channel_id: &str,
-        response: VolleyResponse,
+        response: RecordingResponse,
     ) -> Result<(), String>;
 }
 
@@ -84,8 +85,15 @@ pub trait IngressPort: Send {
 pub trait EgressPort: Send + Sync + Clone {
     async fn publish(&self, topic: &MeshTopic, data: Vec<u8>) -> Result<(), String>;
     async fn ban_peer(&self, peer: &NetworkId);
-    async fn send_response(&self, channel_id: &str, response: VolleyResponse)
-        -> Result<(), String>;
+    async fn send_response(
+        &self,
+        channel_id: &str,
+        response: RecordingResponse,
+    ) -> Result<(), String>;
+    /// Announce this node as a provider for a specific recording on the DHT.
+    async fn announce_recording(&self, recording_id: &RecordingId) -> Result<(), String>;
+    /// Initiate a DHT query to find providers for a specific recording.
+    async fn find_providers(&self, recording_id: &RecordingId) -> Result<(), String>;
 }
 
 // THE LOCAL MESH PORT (Ad-Hoc Mesh Forward Infrastructure)

@@ -11,7 +11,7 @@
 use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
 use phalanx_core::primitives::identity::{NetworkId, PhalanxIdentity};
 use phalanx_core::primitives::shards::{
-    self, create_video_shard, ChunkType, Evidence, ShardId, StorageSequence, VolleyId,
+    self, create_video_shard, ChunkType, Evidence, RecordingId, ShardId, StorageSequence,
     WitnessEnvelope,
 };
 use phalanx_core::security::telemetry::{init_observability, NodeRole, SimEvent};
@@ -33,7 +33,7 @@ async fn test_vampire_attack_defense() -> Result<(), Box<dyn std::error::Error>>
 
     let (attacker_identity, _) = PhalanxIdentity::generate()?;
     let attacker_net_id = attacker_identity.to_network_id();
-    let vid = VolleyId::new("vampire_stream");
+    let vid = RecordingId::new("vampire_stream");
 
     for i in 0..5 {
         let shard = create_video_shard(vec![vec![1]], StorageSequence(i), 30, vid.clone())?;

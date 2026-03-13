@@ -130,7 +130,7 @@ impl IngestionActor {
                     .egress_tx
                     .send(EgressCommand::Dispatch {
                         channel_id: "ban".to_string(),
-                        response: VolleyResponse::Unauthorized,
+                        response: RecordingResponse::Unauthorized,
                     })
                     .await;
                 // The EgressActor does not need a way to ban peers. Banning on egress is purely

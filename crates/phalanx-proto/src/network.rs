@@ -1,5 +1,7 @@
+use crate::evidence::WitnessEnvelope;
+use crate::identity::RecordingId;
 use crate::prelude::{MeshTopic, NetworkId};
-use crate::retrieval::VolleyRequest;
+use crate::retrieval::RecordingRequest;
 use crate::telemetry::DiscoverySource;
 
 pub const RETRIEVAL_PROTOCOL_ID: &str = "/phalanx/retrieval/1.0.0";
@@ -19,10 +21,20 @@ pub enum NetworkEvent {
         peer: NetworkId,
         source: DiscoverySource,
     },
-    VolleyRequested {
+    RecordingRequested {
         origin: NetworkId,
-        request: VolleyRequest,
+        request: RecordingRequest,
         channel_id: String,
+    },
+    /// DHT providers discovered for a recording.
+    ProvidersDiscovered {
+        recording_id: RecordingId,
+        providers: Vec<NetworkId>,
+    },
+    /// Shards received from a peer in response to a recording request.
+    ShardResponseReceived {
+        origin: NetworkId,
+        envelopes: Vec<WitnessEnvelope>,
     },
     Shutdown,
 }

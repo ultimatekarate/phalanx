@@ -10,7 +10,7 @@ This document establishes the "Linguistic Model" of Phalanx. All code must be pa
 **Constraint:** Inert. No IO. No tokio. No libp2p.
 
 * **identity.rs:** Who is talking? (Did, NetworkId, PhalanxIdentity)
-* **evidence.rs:** What are they saying? (WitnessEnvelope, ShardChunk, VolleyId)
+* **evidence.rs:** What are they saying? (WitnessEnvelope, ShardChunk, RecordingId)
 * **topic.rs:** Where are they saying it? (MeshTopic)
 * **error.rs:** What went wrong? (ShardError, TimeError)
 * **storage.rs:** The Vault Nouns (GuardianError)
@@ -22,7 +22,7 @@ This document establishes the "Linguistic Model" of Phalanx. All code must be pa
 
 * **crucible.rs:** The Verb "To Stage." A generic engine for data aggregation.
 * **reassembler.rs:** The Verb "To Assemble." Logic for turning Chunks into Envelopes.
-* **judge.rs:** The Verb "To Verify." Logic for Shard and Volley Amalgams (Causality).
+* **judge.rs:** The Verb "To Verify." Logic for Shard and Recording Amalgams (Causality).
 * **policy.rs:** The Verb "To Govern." Traffic governors and power state logic.
 
 ## III. THE HANDS (phalanx-node & phalanx-transport)

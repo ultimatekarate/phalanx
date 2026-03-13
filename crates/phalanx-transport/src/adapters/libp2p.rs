@@ -20,6 +20,8 @@ pub enum TransportCommand {
     Publish(MeshTopic, Vec<u8>),
     SendDirect(NetworkId, Vec<u8>),
     Ban(NetworkId),
+    AnnounceRecording(phalanx_proto::identity::RecordingId),
+    FindRecordingProviders(phalanx_proto::identity::RecordingId),
 }
 
 #[derive(Clone)]
@@ -51,7 +53,7 @@ pub fn translate_swarm_event(event: SwarmEvent<PhalanxEvent>) -> Option<NetworkE
                     },
                 ..
             },
-        )) => Some(NetworkEvent::VolleyRequested {
+        )) => Some(NetworkEvent::RecordingRequested {
             origin: PeerMapper::to_network_id(&peer),
             request,
             channel_id: request_id.to_string(),
@@ -137,14 +139,14 @@ impl Libp2pAdapter {
                                                 target.0,
                                             );
                                         } else {
-                                            match postcard::from_bytes::<phalanx_proto::retrieval::VolleyRequest>(&data) {
+                                            match postcard::from_bytes::<phalanx_proto::retrieval::RecordingRequest>(&data) {
                                                 Ok(request) => {
                                                     swarm.behaviour_mut().retrieval.send_request(&peer_id, request);
                                                 }
                                                 Err(decode_error) => {
                                                     tracing::error!(
                                                         target: "phalanx::transport",
-                                                        "Failed to decode VolleyRequest for {}: {:?}",
+                                                        "Failed to decode RecordingRequest for {}: {:?}",
                                                         target.0,
                                                         decode_error
                                                     );
@@ -181,6 +183,12 @@ impl Libp2pAdapter {
                                         );
                                     }
                                 }
+                            }
+                            Some(TransportCommand::AnnounceRecording(recording_id)) => {
+                                swarm.behaviour_mut().announce_recording(&recording_id);
+                            }
+                            Some(TransportCommand::FindRecordingProviders(recording_id)) => {
+                                swarm.behaviour_mut().find_recording_providers(&recording_id);
                             }
                             None => break, // Channel dropped; initiate actor shutdown
                         }
@@ -289,6 +297,30 @@ impl TransportAdapter for Libp2pAdapter {
     async fn ban_peer(&self, peer: &NetworkId) -> Result<(), TransportError> {
         self.command_tx
             .send(TransportCommand::Ban(peer.clone()))
+            .await
+            .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
+    }
+}
+
+impl Libp2pAdapter {
+    pub async fn announce_recording(
+        &self,
+        recording_id: &phalanx_proto::identity::RecordingId,
+    ) -> Result<(), TransportError> {
+        self.command_tx
+            .send(TransportCommand::AnnounceRecording(recording_id.clone()))
+            .await
+            .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
+    }
+
+    pub async fn find_providers(
+        &self,
+        recording_id: &phalanx_proto::identity::RecordingId,
+    ) -> Result<(), TransportError> {
+        self.command_tx
+            .send(TransportCommand::FindRecordingProviders(
+                recording_id.clone(),
+            ))
             .await
             .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
     }

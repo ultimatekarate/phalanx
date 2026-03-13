@@ -15,11 +15,11 @@ use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::evidence::{
     ChunkType, DataPayload, Evidence, ForensicMetrics, StorageSequence, VideoShard,
 };
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
+use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId, ShardId};
 use phalanx_proto::prelude::{
     EncodingSymbolId, PendingEgress, RepairRatio, ShardChunk, ShardError, SymbolSize,
 };
-use phalanx_proto::retrieval::VolleyResponse;
+use phalanx_proto::retrieval::RecordingResponse;
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
 use phalanx_proto::types::{ForensicUnit, Fps, Verified};
@@ -46,6 +46,7 @@ fn build_test_actor<J: TransientJournal + Send + 'static>(
         identity: identity.clone(),
         current_tolerance: Duration::from_millis(1000),
         system_governor: Arc::new(SystemGovernor::new()),
+        commit_notify_tx: None,
     };
 
     (actor, storage_rx, storage_tx)
@@ -117,7 +118,7 @@ async fn test_pillar_salvage_under_disk_pressure() {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
-        volley_id: VolleyId::new("v1"),
+        recording_id: RecordingId::new("v1"),
         payload: DataPayload::Clear(vec![0xCA, 0xFE, 0xBA, 0xBE]),
         lens_metrics: ForensicMetrics::default(),
     };
@@ -144,7 +145,7 @@ async fn test_pillar_salvage_under_disk_pressure() {
 
     let salvage_data = vec![PendingEgress {
         channel_id: "ch_broken_pillar".into(),
-        response: VolleyResponse::Success(vec![unit]),
+        response: RecordingResponse::Success(vec![unit]),
         attempt_count: 0,
         next_attempt: PhalanxTimestamp::now(),
     }];
@@ -182,7 +183,7 @@ async fn test_reputation_gate_signature_mismatch() {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
-        volley_id: VolleyId::new("v1"),
+        recording_id: RecordingId::new("v1"),
         payload: DataPayload::Clear(vec![0xBA, 0xAD, 0xF0, 0x0D]),
         lens_metrics: ForensicMetrics::default(),
     };
@@ -307,7 +308,7 @@ async fn test_salvage_on_node_death() {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(999),
         fps: Fps::new(30),
-        volley_id: VolleyId::new("salvage_volley_01"),
+        recording_id: RecordingId::new("salvage_recording_01"),
         payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         lens_metrics: ForensicMetrics::default(),
     };
@@ -420,13 +421,13 @@ async fn test_salvage_on_node_death() {
         let _ = actor_handle2.await;
     }
 
-    // 4. VERIFICATION: Check that the volley was committed to disk
+    // 4. VERIFICATION: Check that the recording was committed to disk
     let evidence_dir = vault_path.join(identity_did.to_safe_name());
     let mut found_file = false;
     if evidence_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&evidence_dir) {
             for entry in entries.flatten() {
-                if entry.file_name().to_string_lossy().ends_with(".volley") {
+                if entry.file_name().to_string_lossy().ends_with(".recording") {
                     found_file = true;
                     break;
                 }
@@ -457,7 +458,7 @@ async fn test_stronghold_ingestion_and_persistence() {
         vec![vec![0xDE, 0xAD, 0xBE, 0xEF]],
         StorageSequence(1),
         Fps::new(30),
-        VolleyId::new("v1"),
+        RecordingId::new("v1"),
         ForensicMetrics::default(),
     )
     .expect("Failed to create video shard");
@@ -509,14 +510,14 @@ async fn test_stronghold_ingestion_and_persistence() {
             .expect("Injection failed");
     }
 
-    // 5. Wait for the Crucible TTL to flush the volley to disk
+    // 5. Wait for the Crucible TTL to flush the recording to disk
     // test_defaults uses cleanup_interval_secs=5, but the crucible has a 1s internal TTL
     tokio::time::sleep(Duration::from_millis(2200)).await;
 
     drop(storage_tx);
     actor_handle.abort();
 
-    // 6. Verify the .volley file was written to disk
+    // 6. Verify the .recording file was written to disk
     fn find_file_recursive(path: &std::path::Path, target: &str) -> bool {
         if path.is_file() {
             return path.file_name().map(|n| n == target).unwrap_or(false);
@@ -532,7 +533,7 @@ async fn test_stronghold_ingestion_and_persistence() {
     }
 
     assert!(
-        find_file_recursive(temp_dir.path(), "v1.volley"),
+        find_file_recursive(temp_dir.path(), "v1.recording"),
         "Stronghold failed to create persistent shard in vault within the flush window"
     );
 }
@@ -611,7 +612,7 @@ async fn test_storage_actor_metric_pipeline() {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
-        volley_id: VolleyId::new("v1"),
+        recording_id: RecordingId::new("v1"),
         payload: DataPayload::Clear(vec![0xBA, 0xAD, 0xF0, 0x0D]),
         lens_metrics: ForensicMetrics::default(),
     };
@@ -674,12 +675,13 @@ async fn test_pure_vault_retrieval_contract() {
     });
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    let volley_id = VolleyId::new("v_test_123");
+    let recording_id = RecordingId::new("v_test_123");
 
     // 1. Send the pure command
     cmd_tx
         .send(StorageCommand::Retrieval {
-            volley_id,
+            recording_id,
+            owner_did: None,
             reply_to: reply_tx,
         })
         .await
@@ -710,7 +712,7 @@ async fn test_pure_vault_ingest_contract() {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
-        volley_id: VolleyId::new("v_pure_ingest"),
+        recording_id: RecordingId::new("v_pure_ingest"),
         payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         lens_metrics: ForensicMetrics::default(),
     };
@@ -760,7 +762,7 @@ mod ingress_boundary_tests {
     use phalanx_proto::evidence::{
         DataPayload, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
     };
-    use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
+    use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId, ShardId};
     use phalanx_proto::prelude::ShardChunk;
     use phalanx_proto::time::PhalanxTimestamp;
     use phalanx_proto::types::{ForensicUnit, Unverified, Verified};
@@ -780,7 +782,7 @@ mod ingress_boundary_tests {
             timestamp: PhalanxTimestamp::now(),
             sequence_id: StorageSequence(1),
             fps: Fps::new(30),
-            volley_id: VolleyId::new("v_secure_ingress"),
+            recording_id: RecordingId::new("v_secure_ingress"),
             payload: DataPayload::Clear(vec![0xAA, 0xBB, 0xCC]),
             lens_metrics: ForensicMetrics::default(),
         };

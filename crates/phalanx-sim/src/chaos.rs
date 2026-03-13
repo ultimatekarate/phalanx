@@ -1,5 +1,5 @@
 use phalanx_proto::network::NetworkEvent;
-use phalanx_proto::prelude::{MeshTopic, NetworkId, VolleyResponse};
+use phalanx_proto::prelude::{MeshTopic, NetworkId, RecordingResponse};
 use phalanx_transport::NetworkTransport;
 
 pub struct FailingTransport;
@@ -18,7 +18,7 @@ impl FailingTransport {
 
 #[async_trait::async_trait]
 impl NetworkTransport for FailingTransport {
-    async fn send_response(&mut self, _: &str, _: VolleyResponse) -> Result<(), String> {
+    async fn send_response(&mut self, _: &str, _: RecordingResponse) -> Result<(), String> {
         // Pillar 3: Force failure to verify re-queueing
         Err("Simulated Network Failure".to_string())
     }

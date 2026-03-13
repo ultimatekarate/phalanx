@@ -15,9 +15,9 @@ use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{
     ChunkType, DataPayload, Evidence, ForensicMetrics, StorageSequence, VideoShard, WitnessEnvelope,
 };
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
+use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId, ShardId};
 use phalanx_proto::network::NetworkEvent;
-use phalanx_proto::prelude::{EncodingSymbolId, ShardChunk, VolleyResponse};
+use phalanx_proto::prelude::{EncodingSymbolId, RecordingResponse, ShardChunk};
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
 use phalanx_proto::topic::MeshTopic;
@@ -53,8 +53,14 @@ impl EgressPort for TestEgress {
     async fn send_response(
         &self,
         _channel_id: &str,
-        _response: VolleyResponse,
+        _response: RecordingResponse,
     ) -> Result<(), String> {
+        Ok(())
+    }
+    async fn announce_recording(&self, _recording_id: &RecordingId) -> Result<(), String> {
+        Ok(())
+    }
+    async fn find_providers(&self, _recording_id: &RecordingId) -> Result<(), String> {
         Ok(())
     }
 }
@@ -114,6 +120,7 @@ fn build_test_actor<J: TransientJournal + Send + 'static>(
         identity: identity.clone(),
         current_tolerance: Duration::from_millis(1000),
         system_governor: Arc::new(SystemGovernor::new()),
+        commit_notify_tx: None,
     };
 
     (actor, storage_rx, storage_tx)
@@ -150,7 +157,7 @@ fn mock_valid_envelope() -> WitnessEnvelope {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
-        volley_id: VolleyId::new("mock"),
+        recording_id: RecordingId::new("mock"),
         payload: DataPayload::Clear(vec![]),
         lens_metrics: ForensicMetrics::default(),
     });
@@ -186,7 +193,7 @@ async fn test_ingress_valid_chunk_forwarded_to_storage() {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
-        volley_id: VolleyId::new("v_ingress"),
+        recording_id: RecordingId::new("v_ingress"),
         payload: DataPayload::Clear(vec![0xAB; 4]),
         lens_metrics: ForensicMetrics::default(),
     });
@@ -230,7 +237,7 @@ async fn test_ingress_rejected_in_leaf_mode() {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
-        volley_id: VolleyId::new("v_leaf"),
+        recording_id: RecordingId::new("v_leaf"),
         payload: DataPayload::Clear(vec![0x00; 4]),
         lens_metrics: ForensicMetrics::default(),
     });
@@ -275,12 +282,13 @@ async fn test_pure_vault_retrieval_contract() {
     });
 
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let volley_id = VolleyId::new("v_pure_vault");
+    let recording_id = RecordingId::new("v_pure_vault");
 
     // 1. Send pure command
     cmd_tx
         .send(StorageCommand::Retrieval {
-            volley_id,
+            recording_id,
+            owner_did: None,
             reply_to: reply_tx,
         })
         .await
@@ -328,9 +336,9 @@ async fn test_sentinel_egress_promotion_logic() {
     assert!(promotion_result.is_ok());
     let sealed_unit = promotion_result.unwrap();
 
-    let response = VolleyResponse::Success(vec![sealed_unit]);
+    let response = RecordingResponse::Success(vec![sealed_unit]);
 
-    if let VolleyResponse::Success(units) = response {
+    if let RecordingResponse::Success(units) = response {
         assert_eq!(units.len(), 1);
     } else {
         panic!("Response should have been Success");

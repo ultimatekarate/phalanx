@@ -181,7 +181,7 @@ impl CameraDriver {
 ///   cycle and adjusts frame batching accordingly. When `None`, full FPS is used.
 pub struct CameraSpawnConfig {
     pub hw_config: HardwareConfig,
-    pub volley_id: String,
+    pub recording_id: String,
     pub secret_key: Option<[u8; 32]>,
     pub lens: Arc<dyn ForensicLens>,
     pub governor: Option<Arc<SystemGovernor>>,
@@ -277,7 +277,7 @@ impl PhalanxCameraThread {
     ) {
         let CameraSpawnConfig {
             hw_config,
-            volley_id,
+            recording_id,
             secret_key,
             lens,
             governor,
@@ -347,13 +347,13 @@ impl PhalanxCameraThread {
                 // Batching — uses effective FPS from power state
                 if frame_buffer.len() >= effective_fps.get() as usize {
                     let chunk = frame_buffer.split_off(0); // Take all
-                    let volley_id = VolleyId::new(volley_id.clone());
+                    let recording_id = RecordingId::new(recording_id.clone());
 
                     let shard_result = create_video_shard(
                         chunk,
                         sequence_id,
                         effective_fps,
-                        volley_id,
+                        recording_id,
                         latest_metrics,
                     );
 
@@ -445,7 +445,7 @@ mod tests {
             tx,
             CameraSpawnConfig {
                 hw_config: config,
-                volley_id: "test_volley".to_string(),
+                recording_id: "test_recording".to_string(),
                 secret_key: None,
                 lens: Arc::new(ScalarLens),
                 governor: None, // No governor — full FPS

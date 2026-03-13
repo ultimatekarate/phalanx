@@ -1,5 +1,5 @@
 use crate::identity::NetworkId;
-use crate::identity::VolleyId;
+use crate::identity::RecordingId;
 use crate::prelude::ShardChunk;
 use crate::types::{ByteCapacity, UnitInterval, VitalityRate};
 use serde::{Deserialize, Serialize};
@@ -47,7 +47,7 @@ pub enum SimEvent {
         byte_size: ByteCapacity,
     },
     CrucibleFinalized {
-        volley_id: VolleyId,
+        recording_id: RecordingId,
     },
     AttackAttemptBlocked {
         attacker: NetworkId,
