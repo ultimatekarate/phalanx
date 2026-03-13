@@ -15,8 +15,7 @@ use crate::persistence::kademlia::RedbStore;
 use phalanx_proto::prelude::NetworkId;
 use phalanx_proto::prelude::PhalanxPhysics;
 use phalanx_transport::behaviour::PhalanxBehaviour;
-use phalanx_transport::builder::build_base_transport;
-use phalanx_transport::builder::build_behaviour;
+use phalanx_transport::builder::{build_behaviour, build_quic_transport, build_tcp_fallback};
 
 pub fn setup_phalanx_swarm(
     local_key: Keypair,
@@ -60,8 +59,9 @@ pub fn setup_phalanx_swarm(
     // Relay Initialization
     let (relay_transport, relay_client) = relay::client::new(local_peer_id);
 
-    // Transport and Behaviour Composition via phalanx-transport
-    let base_transport = build_base_transport(&local_key, psk)?;
+    // Transport Composition — QUIC primary, TCP fallback
+    let quic_transport = build_quic_transport(&local_key)?;
+    let tcp_fallback = build_tcp_fallback(&local_key, psk)?;
     let composite_behaviour = build_behaviour(
         &local_key,
         config.network.max_chunk_size_bytes,
@@ -71,10 +71,11 @@ pub fn setup_phalanx_swarm(
         kademlia_behaviour,
     )?;
 
-    // Swarm Assembly
+    // Swarm Assembly — QUIC primary, TCP fallback
     let mut swarm = SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
-        .with_other_transport(|_key| base_transport)?
+        .with_other_transport(|_key| quic_transport)?
+        .with_other_transport(|_key| tcp_fallback)?
         .with_other_transport(|key| {
             let noise_config = noise::Config::new(key)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;

@@ -51,7 +51,7 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub symbol_size: SymbolSize,
     /// Multiaddr strings the swarm will listen on.
-    /// Default: `["/ip4/0.0.0.0/tcp/0"]` (OS-assigned port).
+    /// Default: `["/ip4/0.0.0.0/udp/0/quic-v1", "/ip4/0.0.0.0/tcp/0"]`.
     #[serde(default = "default_listen_addresses")]
     pub listen_addresses: Vec<String>,
 }
@@ -154,7 +154,10 @@ fn default_max_connections() -> usize {
     192
 }
 fn default_listen_addresses() -> Vec<String> {
-    vec!["/ip4/0.0.0.0/tcp/0".to_string()]
+    vec![
+        "/ip4/0.0.0.0/udp/0/quic-v1".to_string(),
+        "/ip4/0.0.0.0/tcp/0".to_string(),
+    ]
 }
 
 impl Default for NetworkConfig {
