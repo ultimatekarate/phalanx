@@ -1,103 +1,280 @@
-// TODO: Re-enable when SimulationHarness is implemented (all methods are currently todo!() stubs).
-// The 6 non-harness tests have been extracted to phalanx-node/tests/:
-//   - test_salvage_on_node_death          -> storage_actor_tests.rs
-//   - test_out_of_sequence_salvage        -> guardian_tests.rs
-//   - test_stronghold_crash_recovery      -> guardian_tests.rs
-//   - test_leaf_mode_isolation            -> guardian_tests.rs
-//   - test_pillar_salvage_under_disk_pressure -> storage_actor_tests.rs
-//   - test_reputation_gate_signature_mismatch -> storage_actor_tests.rs
-#![cfg(feature = "__disabled_legacy_tests")]
+// crates/phalanx-sim/tests/simulation_tests.rs
+//
+// Integration tests for the SimulationHarness, SimulationWorld,
+// TelemetryCollector, and chaos injection.
 
-use phalanx_core::base::config::{PhalanxConfig, PhalanxPhysics};
-use phalanx_core::primitives::identity::{NetworkId, PhalanxIdentity};
-use phalanx_core::primitives::shards::{
-    self, create_video_shard, ChunkType, Evidence, RecordingId, ShardId, StorageSequence,
-    WitnessEnvelope,
-};
-use phalanx_core::security::telemetry::{init_observability, NodeRole, SimEvent};
-use phalanx_core::simulation::SimulationHarness;
-use phalanx_core::transport::events::NetworkEvent;
-use tokio::time::Duration;
+use phalanx_node::config::NodeConfig;
+use phalanx_proto::identity::NodeRole;
+use phalanx_proto::network::NetworkEvent;
+use phalanx_proto::telemetry::{ChaosMode, SimEvent};
+use phalanx_sim::physics::PhalanxPhysics;
+use phalanx_sim::SimulationHarness;
+
+use std::time::Duration;
+
+// ============================================================================
+// Smoke Tests
+// ============================================================================
 
 #[tokio::test]
-async fn test_vampire_attack_defense() -> Result<(), Box<dyn std::error::Error>> {
-    init_observability();
-    let config = PhalanxConfig::test_defaults();
+async fn test_spawn_and_shutdown() {
+    let config = NodeConfig::test_defaults();
     let physics = PhalanxPhysics::test_profile();
 
-    let (mut harness, mut telemetry_rx) = SimulationHarness::init_mesh(config.clone(), physics);
-    let victim_did = harness
-        .spawn_node("Victim", NodeRole::Guardian)
+    let (mut harness, collector) = SimulationHarness::init_mesh(config, physics);
+
+    // Spawn two nodes
+    let node_a = harness
+        .spawn_node("Guardian-A", NodeRole::Guardian)
         .await
-        .expect("Spawn failed");
+        .expect("Failed to spawn Guardian-A");
 
-    let (attacker_identity, _) = PhalanxIdentity::generate()?;
-    let attacker_net_id = attacker_identity.to_network_id();
-    let vid = RecordingId::new("vampire_stream");
+    let node_b = harness
+        .spawn_node("Stronghold-B", NodeRole::Stronghold)
+        .await
+        .expect("Failed to spawn Stronghold-B");
 
-    for i in 0..5 {
-        let shard = create_video_shard(vec![vec![1]], StorageSequence(i), 30, vid.clone())?;
+    // Allow background tasks to process
+    tokio::task::yield_now().await;
 
-        let mut envelope = WitnessEnvelope::new(
-            Evidence::Video(shard),
-            &attacker_identity,
-            attacker_net_id.clone(),
-            None,
-        )?;
-
-        // POISON: Tamper with evidence to break signature
-        if let Evidence::Video(ref mut v) = envelope.evidence {
-            v.fps = 145;
-        }
-
-        let serialized = postcard::to_stdvec(&envelope)?;
-        let chunks = shards::chunkify(
-            ShardId(i as u32),
-            serialized,
-            4096,
-            attacker_identity.did.clone(),
-            ChunkType::Witnessed,
-        )?;
-
-        if let Some(first_chunk) = chunks.first() {
-            harness
-                .inject_event(
-                    &victim_did,
-                    NetworkEvent::DataReceived {
-                        origin: attacker_net_id.clone(),
-                        topic: config.network.video_topic.clone(),
-                        data: postcard::to_stdvec(first_chunk)?,
-                    },
-                )
-                .await?;
-        }
-    }
-
-    // Monitor for defense event
-    let mut defense_triggered = false;
-    let sleep = tokio::time::sleep(Duration::from_secs(2));
-    tokio::pin!(sleep);
-
-    loop {
-        tokio::select! {
-            Some(event) = telemetry_rx.recv() => {
-                if let SimEvent::AttackAttemptBlocked { attacker, .. } = event {
-                    if attacker == attacker_net_id {
-                        defense_triggered = true;
-                        break;
-                    }
-                }
-            }
-            _ = &mut sleep => {
-                tracing::warn!("Vampire monitoring timed out");
-                break;
-            }
-        }
-    }
-
-    assert!(
-        defense_triggered,
-        "Vampire defense failed to block malformed payload"
+    // Verify PeerDiscovered telemetry events were emitted
+    let events = collector.events().await;
+    let peer_events: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, SimEvent::PeerDiscovered { .. }))
+        .collect();
+    assert_eq!(
+        peer_events.len(),
+        2,
+        "Expected 2 PeerDiscovered events, got {}",
+        peer_events.len()
     );
-    Ok(())
+
+    // Shut down both nodes via their ingress channels
+    harness
+        .inject_event(&node_a, NetworkEvent::Shutdown)
+        .await
+        .expect("Failed to send shutdown to node A");
+    harness
+        .inject_event(&node_b, NetworkEvent::Shutdown)
+        .await
+        .expect("Failed to send shutdown to node B");
+
+    // Allow shutdown processing
+    harness.advance_time(Duration::from_millis(200)).await;
+}
+
+#[tokio::test]
+async fn test_resolve_did() {
+    let config = NodeConfig::test_defaults();
+    let physics = PhalanxPhysics::test_profile();
+
+    let (mut harness, _collector) = SimulationHarness::init_mesh(config, physics);
+
+    let node_did = harness
+        .spawn_node("Resolver", NodeRole::Guardian)
+        .await
+        .expect("Failed to spawn node");
+
+    // Resolve should succeed
+    let network_id = harness
+        .resolve_did(&node_did)
+        .await
+        .expect("Failed to resolve DID");
+
+    // NetworkId should be non-empty
+    assert!(!network_id.0.is_empty(), "NetworkId should not be empty");
+
+    // Resolve unknown DID should fail
+    let unknown = phalanx_proto::prelude::Did::from("did:key:unknown");
+    assert!(
+        harness.resolve_did(&unknown).await.is_err(),
+        "Should fail for unknown DID"
+    );
+
+    // Clean up
+    harness
+        .inject_event(&node_did, NetworkEvent::Shutdown)
+        .await
+        .unwrap();
+    harness.advance_time(Duration::from_millis(200)).await;
+}
+
+// ============================================================================
+// Chaos Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_inject_chaos_emits_telemetry() {
+    let config = NodeConfig::test_defaults();
+    let physics = PhalanxPhysics::test_profile();
+
+    let (mut harness, collector) = SimulationHarness::init_mesh(config, physics);
+
+    let node_did = harness
+        .spawn_node("Chaos-Target", NodeRole::Guardian)
+        .await
+        .expect("Failed to spawn node");
+
+    // Inject chaos
+    harness
+        .inject_chaos(&node_did, ChaosMode::PacketLoss(0.5))
+        .await;
+
+    // Allow telemetry to propagate
+    tokio::task::yield_now().await;
+
+    // Verify ChaosUpdate event
+    let events = collector.events().await;
+    let chaos_events: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, SimEvent::ChaosUpdate { .. }))
+        .collect();
+    assert_eq!(
+        chaos_events.len(),
+        1,
+        "Expected 1 ChaosUpdate event, got {}",
+        chaos_events.len()
+    );
+
+    // Clean up
+    harness
+        .inject_event(&node_did, NetworkEvent::Shutdown)
+        .await
+        .unwrap();
+    harness.advance_time(Duration::from_millis(200)).await;
+}
+
+#[tokio::test]
+async fn test_inject_transport_failure() {
+    let config = NodeConfig::test_defaults();
+    let physics = PhalanxPhysics::test_profile();
+
+    let (mut harness, collector) = SimulationHarness::init_mesh(config, physics);
+
+    let node_did = harness
+        .spawn_node("Byzantine-Node", NodeRole::Guardian)
+        .await
+        .expect("Failed to spawn node");
+
+    // inject_transport_failure should set Byzantine chaos mode
+    harness.inject_transport_failure(&node_did).await;
+
+    tokio::task::yield_now().await;
+
+    let events = collector.events().await;
+    let chaos_event = events.iter().find(|e| {
+        matches!(
+            e,
+            SimEvent::ChaosUpdate {
+                mode: ChaosMode::Byzantine,
+                ..
+            }
+        )
+    });
+    assert!(
+        chaos_event.is_some(),
+        "Expected ChaosUpdate with Byzantine mode"
+    );
+
+    // Clean up
+    harness
+        .inject_event(&node_did, NetworkEvent::Shutdown)
+        .await
+        .unwrap();
+    harness.advance_time(Duration::from_millis(200)).await;
+}
+
+// ============================================================================
+// Telemetry Collector Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_telemetry_summary() {
+    let config = NodeConfig::test_defaults();
+    let physics = PhalanxPhysics::test_profile();
+
+    let (mut harness, collector) = SimulationHarness::init_mesh(config, physics);
+
+    // Spawn 3 nodes to generate PeerDiscovered events
+    let node_a = harness
+        .spawn_node("Node-A", NodeRole::Guardian)
+        .await
+        .expect("Failed to spawn Node-A");
+    let node_b = harness
+        .spawn_node("Node-B", NodeRole::Guardian)
+        .await
+        .expect("Failed to spawn Node-B");
+    let node_c = harness
+        .spawn_node("Node-C", NodeRole::Stronghold)
+        .await
+        .expect("Failed to spawn Node-C");
+
+    // Inject chaos on one node
+    harness
+        .inject_chaos(&node_a, ChaosMode::HighLatency(100))
+        .await;
+
+    tokio::task::yield_now().await;
+
+    // Generate summary
+    let summary = collector.summary().await;
+
+    // Verify summary contains expected information
+    assert!(
+        summary.contains("Simulation Telemetry Summary"),
+        "Summary should have header"
+    );
+    assert!(
+        summary.contains("PeerDiscovered: 3"),
+        "Should have 3 PeerDiscovered events, got:\n{}",
+        summary
+    );
+    assert!(
+        summary.contains("ChaosUpdate: 1"),
+        "Should have 1 ChaosUpdate event, got:\n{}",
+        summary
+    );
+
+    // Clean up all nodes
+    for did in [&node_a, &node_b, &node_c] {
+        harness
+            .inject_event(did, NetworkEvent::Shutdown)
+            .await
+            .unwrap();
+    }
+    harness.advance_time(Duration::from_millis(200)).await;
+}
+
+#[tokio::test]
+async fn test_telemetry_wait_for() {
+    let config = NodeConfig::test_defaults();
+    let physics = PhalanxPhysics::test_profile();
+
+    let (mut harness, collector) = SimulationHarness::init_mesh(config, physics);
+
+    let _node = harness
+        .spawn_node("WaitFor-Node", NodeRole::Guardian)
+        .await
+        .expect("Failed to spawn node");
+
+    // wait_for should find a PeerDiscovered event
+    let found = collector
+        .wait_for(
+            |e| matches!(e, SimEvent::PeerDiscovered { .. }),
+            Duration::from_secs(1),
+        )
+        .await;
+
+    assert!(found.is_some(), "Should find PeerDiscovered event");
+
+    // wait_for should timeout for a non-existent event
+    let not_found = collector
+        .wait_for(
+            |e| matches!(e, SimEvent::Shutdown),
+            Duration::from_millis(50),
+        )
+        .await;
+
+    assert!(not_found.is_none(), "Should not find Shutdown event");
 }

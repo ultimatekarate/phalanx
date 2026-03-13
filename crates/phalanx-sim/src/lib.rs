@@ -5,7 +5,10 @@ pub mod physics; // The Physical Laws of the Simulation
 pub mod world; // The "Ether": Shared state where nodes meet // The "Adverbs": Logic for dropping/delaying packets
 
 pub use clock::VirtualClock;
-pub use harness::{SimConfig, SimulationHarness};
+pub use harness::{
+    NodeMetrics, RecoveryJournal, SimConfig, SimEgress, SimIngress, SimulationHarness,
+    TelemetryCollector,
+};
 pub use world::SimulationWorld;
 
 /// High-level errors that occur during the "Authoring" of a simulation.
