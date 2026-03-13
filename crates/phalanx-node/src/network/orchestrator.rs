@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use libp2p::{
     core::upgrade::Version, identity::Keypair, kad, noise, pnet::PreSharedKey, relay, yamux,
-    StreamProtocol, Swarm, SwarmBuilder, Transport,
+    Multiaddr, StreamProtocol, Swarm, SwarmBuilder, Transport,
 };
 
 use phalanx_forensics::PeerEvaluator;
@@ -72,7 +72,7 @@ pub fn setup_phalanx_swarm(
     )?;
 
     // Swarm Assembly
-    let swarm = SwarmBuilder::with_existing_identity(local_key)
+    let mut swarm = SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
         .with_other_transport(|_key| base_transport)?
         .with_other_transport(|key| {
@@ -92,6 +92,38 @@ pub fn setup_phalanx_swarm(
                 .with_max_negotiating_inbound_streams(128)
         })
         .build();
+
+    // --- Swarm Activation ---
+    // All calls below register intent only. Actual socket/connection
+    // work begins when the swarm is polled inside the adapter's tokio task.
+
+    // Open listening sockets on configured addresses
+    for addr in &config.network.listen_addresses {
+        let multiaddr: Multiaddr = addr.parse()?;
+        swarm.listen_on(multiaddr)?;
+        tracing::info!(target: "phalanx_node::orchestrator", address = %addr, "Listening on address");
+    }
+
+    // Subscribe to gossipsub topics
+    let topics = [
+        &config.network.video_topic,
+        &config.network.audio_topic,
+        &config.network.control_topic,
+    ];
+    for topic in topics {
+        let ident = libp2p::gossipsub::IdentTopic::new(topic.to_string());
+        swarm.behaviour_mut().gossipsub.subscribe(&ident)?;
+        tracing::info!(target: "phalanx_node::orchestrator", topic = %topic, "Subscribed to topic");
+    }
+
+    // Dial bootstrap peers
+    for peer_addr in &config.network.bootstrap_peers {
+        if let Ok(multiaddr) = peer_addr.parse::<Multiaddr>() {
+            if let Err(e) = swarm.dial(multiaddr) {
+                tracing::warn!(target: "phalanx_node::orchestrator", error = %e, addr = %peer_addr, "Failed to dial bootstrap peer");
+            }
+        }
+    }
 
     Ok(swarm)
 }
