@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::request_response;
 use libp2p::swarm::StreamProtocol;
-use phalanx_proto::{VolleyRequest, VolleyResponse, MAX_PAYLOAD_SIZE};
+use phalanx_proto::{RecordingRequest, RecordingResponse, MAX_PAYLOAD_SIZE};
 use std::io;
 
 #[derive(Clone, Default)]
@@ -11,8 +11,8 @@ pub struct PhalanxRetrievalProtocol;
 #[async_trait]
 impl request_response::Codec for PhalanxRetrievalProtocol {
     type Protocol = StreamProtocol;
-    type Request = VolleyRequest;
-    type Response = VolleyResponse;
+    type Request = RecordingRequest;
+    type Response = RecordingResponse;
 
     async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Request>
     where

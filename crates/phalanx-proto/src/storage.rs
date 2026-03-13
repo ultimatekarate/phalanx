@@ -1,7 +1,7 @@
-use crate::VolleyResponse;
+use crate::RecordingResponse;
 // crates/phalanx-proto/src/storage.rs
 use crate::evidence::{SignatureHash, StorageSequence};
-use crate::identity::{Did, VolleyId};
+use crate::identity::{Did, RecordingId};
 use crate::prelude::NetworkId;
 use crate::prelude::PhalanxTimestamp;
 use crate::prelude::ShardError;
@@ -54,7 +54,7 @@ pub enum GuardianError {
     #[error("Identity Mismatch")]
     IdentityMismatch,
 
-    #[error("Ambiguous ownership: Multiple unproven identities claiming Volley")]
+    #[error("Ambiguous ownership: Multiple unproven identities claiming Recording")]
     AmbiguousOwnership,
 
     #[error("Crucible capacity exhausted: {0} active contexts at limit")]
@@ -66,7 +66,7 @@ pub enum GuardianError {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HandoverProof {
-    pub volley_id: VolleyId,
+    pub recording_id: RecordingId,
     pub sequence_id: StorageSequence,
     pub old_did: Did,
     pub new_did: Did,
@@ -78,13 +78,13 @@ pub struct HandoverProof {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingEgress {
     pub channel_id: String,
-    pub response: VolleyResponse,
+    pub response: RecordingResponse,
     pub attempt_count: u32,
     pub next_attempt: PhalanxTimestamp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StorageAck {
-    Success(VolleyId, NetworkId),
+    Success(RecordingId, NetworkId),
     Failure(ShardError, NetworkId),
 }

@@ -3,7 +3,7 @@
 use crate::actors::storage::StorageCommand;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{DataPayload, Evidence, StorageSequence};
-use phalanx_proto::identity::VolleyId;
+use phalanx_proto::identity::RecordingId;
 use phalanx_proto::playback::PlaybackSink;
 
 use anyhow::{Context, Result};
@@ -14,7 +14,7 @@ pub struct PlaybackCoordinator<S: PlaybackSink> {
     storage_tx: mpsc::Sender<StorageCommand>,
     decryption_key: Option<SymmetricKey>,
     sink: S,
-    discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
+    discovery_tx: mpsc::Sender<(RecordingId, StorageSequence)>,
     current_sequence: StorageSequence,
 }
 
@@ -23,7 +23,7 @@ impl<S: PlaybackSink> PlaybackCoordinator<S> {
         storage_tx: mpsc::Sender<StorageCommand>,
         decryption_key: Option<SymmetricKey>,
         sink: S,
-        discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
+        discovery_tx: mpsc::Sender<(RecordingId, StorageSequence)>,
     ) -> Self {
         Self {
             storage_tx,
@@ -34,14 +34,14 @@ impl<S: PlaybackSink> PlaybackCoordinator<S> {
         }
     }
 
-    pub async fn run(&mut self, volley_id: VolleyId) -> Result<()> {
+    pub async fn run(&mut self, recording_id: RecordingId) -> Result<()> {
         loop {
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
 
             // Ask the StorageActor for the frame
             self.storage_tx
                 .send(StorageCommand::GetShard {
-                    volley_id: volley_id.clone(),
+                    recording_id: recording_id.clone(),
                     sequence_id: self.current_sequence,
                     reply_to: reply_tx,
                 })
@@ -93,7 +93,7 @@ impl<S: PlaybackSink> PlaybackCoordinator<S> {
                     // Gap detected, trigger Samson Reflex
                     let _ = self
                         .discovery_tx
-                        .try_send((volley_id.clone(), self.current_sequence));
+                        .try_send((recording_id.clone(), self.current_sequence));
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }

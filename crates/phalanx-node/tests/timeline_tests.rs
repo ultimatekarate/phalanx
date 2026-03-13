@@ -7,7 +7,7 @@ use phalanx_proto::evidence::{
     DataPayload, EnvelopeState, Evidence, ForensicMetrics, StorageSequence, VideoShard,
     WitnessEnvelope,
 };
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
+use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId};
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
 use phalanx_proto::types::Fps;
@@ -32,14 +32,14 @@ async fn test_reliability_timeline_integrity() {
         Arc::new(SystemClock),
         vault_key,
     );
-    let volley_id = VolleyId::new("v_timeline");
+    let recording_id = RecordingId::new("v_timeline");
 
     // 1. ANCHOR: Establish the legitimate start of the timeline
     let anchor_shard = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
-        volley_id: volley_id.clone(),
+        recording_id: recording_id.clone(),
         payload: DataPayload::Clear(b"Anchor Frame".to_vec()),
         lens_metrics: ForensicMetrics::default(),
     };
@@ -64,7 +64,7 @@ async fn test_reliability_timeline_integrity() {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(2),
         fps: Fps::new(30),
-        volley_id: volley_id.clone(),
+        recording_id: recording_id.clone(),
         payload: DataPayload::Clear(b"Valid Frame".to_vec()),
         lens_metrics: ForensicMetrics::default(),
     };
@@ -89,7 +89,7 @@ async fn test_reliability_timeline_integrity() {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(3),
         fps: Fps::new(30),
-        volley_id: volley_id.clone(),
+        recording_id: recording_id.clone(),
         payload: DataPayload::Clear(b"Hijacked Frame".to_vec()),
         lens_metrics: ForensicMetrics::default(),
     };

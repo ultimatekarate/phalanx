@@ -7,9 +7,11 @@ use libp2p::{
     autonat, connection_limits, dcutr, gossipsub, identify, kad, mdns, relay, request_response,
 };
 use phalanx_proto::constants::DiscoveryError;
+use phalanx_proto::identity::RecordingId;
 use phalanx_proto::prelude::*;
 // Also, define STRONGHOLD_NAMESPACE if it was lost in the proto move:
 pub const STRONGHOLD_NAMESPACE: &[u8] = b"phalanx/stronghold";
+pub const RECORDING_NAMESPACE_PREFIX: &str = "phalanx/recording/";
 
 pub type PhalanxKadStore = kad::store::MemoryStore;
 
@@ -69,6 +71,41 @@ where
         tracing::info!(
             target: "phalanx::transport",
             "Initiating discovery for Stronghold providers"
+        );
+
+        self.kademlia.get_providers(record_key)
+    }
+
+    /// Builds a DHT key for a specific recording.
+    fn recording_key(recording_id: &RecordingId) -> RecordKey {
+        let key = format!("{}{}", RECORDING_NAMESPACE_PREFIX, recording_id.as_str());
+        RecordKey::new(&key.as_bytes())
+    }
+
+    /// Announces this node as a provider for a specific recording on the DHT.
+    pub fn announce_recording(&mut self, recording_id: &RecordingId) -> Option<kad::QueryId> {
+        let record_key = Self::recording_key(recording_id);
+
+        tracing::debug!(
+            target: "phalanx::transport",
+            recording = %recording_id,
+            "DHT: Announcing as recording provider"
+        );
+
+        self.kademlia
+            .start_providing(record_key)
+            .map_err(|_| DiscoveryError::StorageError)
+            .ok()
+    }
+
+    /// Initiates a DHT query to find providers for a specific recording.
+    pub fn find_recording_providers(&mut self, recording_id: &RecordingId) -> kad::QueryId {
+        let record_key = Self::recording_key(recording_id);
+
+        tracing::debug!(
+            target: "phalanx::transport",
+            recording = %recording_id,
+            "DHT: Querying for recording providers"
         );
 
         self.kademlia.get_providers(record_key)

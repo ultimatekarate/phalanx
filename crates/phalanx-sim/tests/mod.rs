@@ -11,7 +11,7 @@ struct TestSetup<'a, J: TransientJournal> {
 
 use phalanx_core::primitives::identity::PhalanxIdentity;
 use phalanx_core::primitives::shards::{
-    Evidence, HandoverProof, StorageSequence, VolleyId, WitnessEnvelope,
+    Evidence, HandoverProof, RecordingId, StorageSequence, WitnessEnvelope,
 };
 use phalanx_core::primitives::shards::{ShardChunk, ShardId};
 #[ignore = "Not done."]
@@ -45,7 +45,7 @@ fn create_signed_envelope(
 ) -> WitnessEnvelope {
     // We create HandoverProof as a standard form of Evidence for simulation
     let evidence = Evidence::Handover(HandoverProof {
-        volley_id: VolleyId::new("sim_volley"),
+        recording_id: RecordingId::new("sim_recording"),
         sequence_id: StorageSequence(sequence),
         old_did: identity.did.clone(),
         new_did: identity.did.clone(),

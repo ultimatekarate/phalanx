@@ -12,7 +12,7 @@ impl ForensicPromotion for AmalgamError {
                 "Unauthorized Handover: Origin DID mismatch".to_string(),
             ),
             AmalgamError::IdentityMismatch => GuardianError::PolicyViolation(
-                "Identity Mismatch: Frame DID does not match Volley owner".to_string(),
+                "Identity Mismatch: Frame DID does not match Recording owner".to_string(),
             ),
             AmalgamError::AmbiguousOwnership => GuardianError::PolicyViolation(
                 "Ambiguous Ownership: We require additional evidence to determine ownership. Dropping packet.".to_string(),

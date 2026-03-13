@@ -15,7 +15,7 @@ use phalanx_proto::prelude::Did;
 use phalanx_proto::prelude::IdentityError;
 use phalanx_proto::prelude::NetworkId;
 use phalanx_proto::prelude::PhalanxIdentity;
-use phalanx_proto::VolleyRequest;
+use phalanx_proto::RecordingRequest;
 use rand::Rng;
 use std::fs;
 use std::path::Path;
@@ -57,7 +57,7 @@ pub trait PhalanxNodeIdentityExt: Sized {
     fn restore(phrase: &str) -> Result<Self, IdentityError>;
     fn save_to_disk<P: AsRef<Path>>(&self, path: P, passphrase: &str) -> Result<(), IdentityError>;
     fn load_from_disk<P: AsRef<Path>>(path: P, passphrase: &str) -> Result<Self, IdentityError>;
-    fn verify_retrieval_auth(&self, request: &VolleyRequest) -> Result<(), IdentityError>;
+    fn verify_retrieval_auth(&self, request: &RecordingRequest) -> Result<(), IdentityError>;
     fn init<P: AsRef<Path>>(path: P, passphrase: &str) -> Result<Self, IdentityError>;
 }
 
@@ -224,7 +224,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         Ok(disk_format.into_identity())
     }
 
-    fn verify_retrieval_auth(&self, request: &VolleyRequest) -> Result<(), IdentityError> {
+    fn verify_retrieval_auth(&self, request: &RecordingRequest) -> Result<(), IdentityError> {
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
         // Resolve the public key of the claimed recipient (the requester)
@@ -236,7 +236,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
             .map_err(|e| IdentityError::CryptoError(format!("Invalid Public Key: {}", e)))?;
 
         // Reconstruct the signed message payload
-        let signed_data = (&request.target_did, &request.volley_id, &request.locator);
+        let signed_data = (&request.target_did, &request.recording_id, &request.locator);
         let msg = postcard::to_allocvec(&signed_data)
             .map_err(|e| IdentityError::SerializationError(e.to_string()))?;
 

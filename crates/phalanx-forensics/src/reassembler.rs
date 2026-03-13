@@ -9,8 +9,8 @@ use phalanx_proto::evidence::{
 };
 use phalanx_proto::identity::{Did, ShardId};
 use phalanx_proto::prelude::{
-    DataPayload, EncodingSymbolId, PhalanxTimestamp, RepairRatio, ShardChunk, ShardError,
-    SymbolSize, VolleyId,
+    DataPayload, EncodingSymbolId, PhalanxTimestamp, RecordingId, RepairRatio, ShardChunk,
+    ShardError, SymbolSize,
 };
 use phalanx_proto::types::{ChannelCount, Fps, PowerState, SampleRate};
 use raptorq::{Decoder, Encoder, EncodingPacket, ObjectTransmissionInformation, PayloadId};
@@ -45,7 +45,7 @@ pub fn create_video_shard(
     frames: Vec<Vec<u8>>,
     sequence: StorageSequence,
     fps: Fps,
-    volley: VolleyId,
+    recording: RecordingId,
     lens_metrics: ForensicMetrics,
 ) -> Result<VideoShard, ShardError> {
     let raw_bytes = postcard::to_allocvec(&frames)
@@ -57,7 +57,7 @@ pub fn create_video_shard(
         // Automatically applies the new LZ4 block compression
         payload: DataPayload::Compressed(compress_payload(&raw_bytes)),
         fps,
-        volley_id: volley,
+        recording_id: recording,
         lens_metrics,
     })
 }
@@ -68,14 +68,14 @@ pub fn create_audio_shard(
     sequence: StorageSequence,
     rate: SampleRate,
     channels: ChannelCount,
-    volley: VolleyId,
+    recording: RecordingId,
 ) -> Result<AudioShard, ShardError> {
     Ok(AudioShard {
         payload: DataPayload::Compressed(compress_payload(&data)),
         sequence_id: sequence,
         sample_rate: rate,
         channels,
-        volley_id: volley,
+        recording_id: recording,
         timestamp: PhalanxTimestamp::now(),
     })
 }
@@ -355,7 +355,7 @@ pub trait AudioWeaver {
         sequence: StorageSequence,
         rate: SampleRate,
         channels: ChannelCount,
-        volley: VolleyId,
+        recording: RecordingId,
     ) -> AudioShard;
 }
 
@@ -365,14 +365,14 @@ impl AudioWeaver for Vec<u8> {
         sequence: StorageSequence,
         rate: SampleRate,
         channels: ChannelCount,
-        volley: VolleyId,
+        recording: RecordingId,
     ) -> AudioShard {
         AudioShard {
             payload: DataPayload::Compressed(compress_payload(self)),
             sequence_id: sequence,
             sample_rate: rate,
             channels,
-            volley_id: volley,
+            recording_id: recording,
             timestamp: PhalanxTimestamp::now(),
         }
     }
@@ -384,7 +384,7 @@ pub trait VideoWeaver {
         frames: Vec<Vec<u8>>,
         sequence: StorageSequence,
         fps: Fps,
-        volley: VolleyId,
+        recording: RecordingId,
     ) -> VideoShard;
 }
 
@@ -394,7 +394,7 @@ impl VideoWeaver for Vec<u8> {
         frames: Vec<Vec<u8>>,
         sequence: StorageSequence,
         fps: Fps,
-        volley: VolleyId,
+        recording: RecordingId,
     ) -> VideoShard {
         let raw_bytes = postcard::to_allocvec(&frames).unwrap_or_default();
         VideoShard {
@@ -402,7 +402,7 @@ impl VideoWeaver for Vec<u8> {
             sequence_id: sequence,
             payload: DataPayload::Compressed(compress_payload(&raw_bytes)),
             fps,
-            volley_id: volley,
+            recording_id: recording,
             lens_metrics: ForensicMetrics::default(),
         }
     }
@@ -560,7 +560,7 @@ mod tests {
             frames.clone(),
             seq,
             Fps::new(30),
-            "volley_1".into(),
+            "recording_1".into(),
             ForensicMetrics::default(),
         )?;
 
@@ -602,7 +602,7 @@ mod tests {
             seq,
             SampleRate::new(44100),
             ChannelCount::new(2),
-            "volley_2".into(),
+            "recording_2".into(),
         )?;
 
         let key = get_test_key();
@@ -675,7 +675,7 @@ mod tests {
 
         assert_eq!(recovered_frames[0], vec![255, 0, 255]);
         assert_eq!(received_shard.sequence_id.0, 50);
-        assert_eq!(received_shard.volley_id, "v_net".into());
+        assert_eq!(received_shard.recording_id, "v_net".into());
 
         Ok(())
     }
@@ -690,7 +690,7 @@ mod tests {
             timestamp: PhalanxTimestamp::now(),
             sequence_id: StorageSequence(1),
             fps: Fps::new(30),
-            volley_id: VolleyId::new("fountain_test"),
+            recording_id: RecordingId::new("fountain_test"),
             payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             lens_metrics: ForensicMetrics::default(),
         });
@@ -739,7 +739,7 @@ mod tests {
             timestamp: PhalanxTimestamp::now(),
             sequence_id: StorageSequence(1),
             fps: Fps::new(30),
-            volley_id: VolleyId::new("loss_test"),
+            recording_id: RecordingId::new("loss_test"),
             payload: DataPayload::Clear(vec![0xCA; 2048]), // Large enough to produce multiple symbols
             lens_metrics: ForensicMetrics::default(),
         });
@@ -803,7 +803,7 @@ mod tests {
             timestamp: PhalanxTimestamp::now(),
             sequence_id: StorageSequence(1),
             fps: Fps::new(30),
-            volley_id: VolleyId::new("reassembler_test"),
+            recording_id: RecordingId::new("reassembler_test"),
             payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             lens_metrics: ForensicMetrics::default(),
         });
@@ -908,7 +908,7 @@ mod tests {
         use ed25519_dalek::Signer;
         let envelope = WitnessEnvelope::sign_envelope(
             Evidence::Handover(HandoverProof {
-                volley_id: VolleyId::new("test"),
+                recording_id: RecordingId::new("test"),
                 sequence_id: StorageSequence(0),
                 old_did: identity.did.clone(),
                 new_did: identity.did.clone(),

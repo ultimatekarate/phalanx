@@ -8,6 +8,7 @@
 //! and forwarding commands through the channel-based interface.
 
 use async_trait::async_trait;
+use phalanx_proto::identity::RecordingId;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::*;
 use phalanx_transport::prelude::Libp2pAdapter;
@@ -59,7 +60,7 @@ impl NetworkTransport for Libp2pBridge {
     async fn send_response(
         &mut self,
         _channel_id: &str,
-        _response: VolleyResponse,
+        _response: RecordingResponse,
     ) -> Result<(), String> {
         // In the production Libp2p stack, retrieval responses are handled
         // directly by the swarm actor via request_response protocol.
@@ -105,9 +106,23 @@ impl EgressPort for BridgeEgress {
     async fn send_response(
         &self,
         _channel_id: &str,
-        _response: VolleyResponse,
+        _response: RecordingResponse,
     ) -> Result<(), String> {
         Ok(())
+    }
+
+    async fn announce_recording(&self, recording_id: &RecordingId) -> Result<(), String> {
+        self.adapter
+            .announce_recording(recording_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn find_providers(&self, recording_id: &RecordingId) -> Result<(), String> {
+        self.adapter
+            .find_providers(recording_id)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 

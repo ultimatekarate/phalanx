@@ -12,10 +12,10 @@ use rand_core::RngCore;
 /// The Verb "To Authorize": Defines the forensic capability to secure and recover
 /// symmetric keys using asymmetric identities.
 pub trait GrantAuthority {
-    /// Seals a symmetric VolleyKey into a locator targeted at a specific recipient.
+    /// Seals a symmetric RecordingKey into a locator targeted at a specific recipient.
     /// Implements ECDH over X25519 with XChaCha20-Poly1305 authenticated encryption.
     fn seal(
-        target: VolleyId,
+        target: RecordingId,
         key: &[u8; 32],
         sender: &PhalanxIdentity,
         recipient_did: Did,
@@ -27,7 +27,7 @@ pub trait GrantAuthority {
 
 impl GrantAuthority for SealedLocator {
     fn seal(
-        target: VolleyId,
+        target: RecordingId,
         key: &[u8; 32],
         sender: &PhalanxIdentity,
         recipient_did: Did,
@@ -124,13 +124,13 @@ mod tests {
     fn test_grant_lifecycle_success() {
         let sender = generate_identity();
         let recipient = generate_identity();
-        let volley_key = [0x42u8; 32];
-        let volley_id = VolleyId::new("volley-test-001");
+        let recording_key = [0x42u8; 32];
+        let recording_id = RecordingId::new("recording-test-001");
 
         // Use the Seal Verb
         let locator = SealedLocator::seal(
-            volley_id.clone(),
-            &volley_key,
+            recording_id.clone(),
+            &recording_key,
             &sender,
             recipient.did.clone(),
         )
@@ -144,7 +144,7 @@ mod tests {
             .unlock(&recipient)
             .expect("Recipient failed to decrypt grant");
 
-        assert_eq!(decrypted_key, volley_key);
+        assert_eq!(decrypted_key, recording_key);
     }
 
     #[test]
@@ -154,7 +154,7 @@ mod tests {
         let attacker = generate_identity();
 
         let locator = SealedLocator::seal(
-            VolleyId::new("v2"),
+            RecordingId::new("v2"),
             &[0xAA; 32],
             &sender,
             recipient.did.clone(),
@@ -172,7 +172,7 @@ mod tests {
         let recipient = generate_identity();
 
         let mut locator = SealedLocator::seal(
-            VolleyId::new("v1"),
+            RecordingId::new("v1"),
             &[0xBB; 32],
             &sender,
             recipient.did.clone(),
@@ -196,7 +196,7 @@ mod tests {
         let recipient = generate_identity();
 
         let locator = SealedLocator::seal(
-            VolleyId::new("test-id"),
+            RecordingId::new("test-id"),
             &[0u8; 32],
             &sender,
             recipient.did.clone(),

@@ -13,7 +13,7 @@ use phalanx_proto::evidence::{
     DataPayload, EnvelopeState, Evidence, ForensicMetrics, StorageSequence, VideoShard,
     WitnessEnvelope,
 };
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
+use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId};
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
 use phalanx_proto::types::Fps;
 use std::sync::Arc;
@@ -44,11 +44,11 @@ async fn test_exodus_resurrection_logic() {
         while let Some(cmd) = storage_rx.recv().await {
             match cmd {
                 StorageCommand::GetShard {
-                    volley_id,
+                    recording_id,
                     sequence_id,
                     reply_to,
                 } => {
-                    let _ = reply_to.send(guardian.get_shard(&volley_id, sequence_id));
+                    let _ = reply_to.send(guardian.get_shard(&recording_id, sequence_id));
                 }
                 StorageCommand::IngestEnvelope {
                     state,
@@ -69,14 +69,14 @@ async fn test_exodus_resurrection_logic() {
     });
 
     let sink = VideoPlayerSink::new(ui_tx);
-    let volley_id = VolleyId::new("v_exodus_test");
+    let recording_id = RecordingId::new("v_exodus_test");
     let mut coordinator = PlaybackCoordinator::new(storage_tx.clone(), None, sink, disc_tx);
 
     let shard_1 = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
-        volley_id: volley_id.clone(),
+        recording_id: recording_id.clone(),
         payload: DataPayload::Clear(b"Frame 1".to_vec()),
         lens_metrics: ForensicMetrics::default(),
     };
@@ -100,7 +100,7 @@ async fn test_exodus_resurrection_logic() {
         .unwrap();
     rx.await.unwrap().unwrap();
 
-    let v_id_clone = volley_id.clone();
+    let v_id_clone = recording_id.clone();
     let _handle = tokio::spawn(async move {
         coordinator.run(v_id_clone).await.unwrap();
     });
@@ -108,7 +108,7 @@ async fn test_exodus_resurrection_logic() {
     let frame = ui_rx.recv().await.expect("Should receive Frame 1");
     assert_eq!(frame, b"Frame 1");
 
-    let (volley_id, missing_id) = disc_rx
+    let (recording_id, missing_id) = disc_rx
         .recv()
         .await
         .expect("Should signal discovery for Shard 2");
@@ -118,7 +118,7 @@ async fn test_exodus_resurrection_logic() {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(2),
         fps: Fps::new(30),
-        volley_id: volley_id.clone(),
+        recording_id: recording_id.clone(),
         payload: DataPayload::Clear(b"Frame 2".to_vec()),
         lens_metrics: ForensicMetrics::default(),
     };
@@ -153,7 +153,7 @@ async fn test_playback_resurrection_with_mesh_gap() {
     let config = NodeConfig::default();
 
     let (storage_tx, mut storage_rx) = mpsc::channel::<StorageCommand>(100);
-    let (disc_tx, mut disc_rx) = mpsc::channel::<(VolleyId, StorageSequence)>(100);
+    let (disc_tx, mut disc_rx) = mpsc::channel::<(RecordingId, StorageSequence)>(100);
     let (ui_tx, mut ui_rx) = mpsc::channel(10);
 
     let vault_key = derive_vault_key(&identity, &[0u8; 32]);
@@ -169,11 +169,11 @@ async fn test_playback_resurrection_with_mesh_gap() {
         while let Some(cmd) = storage_rx.recv().await {
             match cmd {
                 StorageCommand::GetShard {
-                    volley_id,
+                    recording_id,
                     sequence_id,
                     reply_to,
                 } => {
-                    let _ = reply_to.send(guardian.get_shard(&volley_id, sequence_id));
+                    let _ = reply_to.send(guardian.get_shard(&recording_id, sequence_id));
                 }
                 StorageCommand::IngestEnvelope {
                     state,
@@ -192,14 +192,14 @@ async fn test_playback_resurrection_with_mesh_gap() {
     });
 
     let sink = VideoPlayerSink::new(ui_tx);
-    let volley_id = VolleyId::new("v_resurrection");
+    let recording_id = RecordingId::new("v_resurrection");
     let mut coordinator = PlaybackCoordinator::new(storage_tx.clone(), None, sink, disc_tx);
 
     let shard_1 = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
-        volley_id: volley_id.clone(),
+        recording_id: recording_id.clone(),
         payload: DataPayload::Clear(b"Frame 1 Data".to_vec()),
         lens_metrics: ForensicMetrics::default(),
     };
@@ -223,7 +223,7 @@ async fn test_playback_resurrection_with_mesh_gap() {
         .unwrap();
     rx.await.unwrap().unwrap();
 
-    let v_id_clone = volley_id.clone();
+    let v_id_clone = recording_id.clone();
     tokio::spawn(async move {
         let _ = coordinator.run(v_id_clone).await;
     });
@@ -241,7 +241,7 @@ async fn test_playback_resurrection_with_mesh_gap() {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(2),
         fps: Fps::new(30),
-        volley_id: _v_id,
+        recording_id: _v_id,
         payload: DataPayload::Clear(b"Frame 2 Data".to_vec()),
         lens_metrics: ForensicMetrics::default(),
     };
@@ -278,7 +278,7 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
     let config = NodeConfig::default();
 
     let (storage_tx, mut storage_rx) = mpsc::channel::<StorageCommand>(100);
-    let (disc_tx, mut disc_rx) = mpsc::channel::<(VolleyId, StorageSequence)>(100);
+    let (disc_tx, mut disc_rx) = mpsc::channel::<(RecordingId, StorageSequence)>(100);
     let (ui_tx, mut ui_rx) = mpsc::channel(100);
 
     let vault_key = derive_vault_key(&identity, &[0u8; 32]);
@@ -293,11 +293,11 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
         while let Some(cmd) = storage_rx.recv().await {
             match cmd {
                 StorageCommand::GetShard {
-                    volley_id,
+                    recording_id,
                     sequence_id,
                     reply_to,
                 } => {
-                    let _ = reply_to.send(guardian.get_shard(&volley_id, sequence_id));
+                    let _ = reply_to.send(guardian.get_shard(&recording_id, sequence_id));
                 }
                 StorageCommand::IngestEnvelope {
                     state,
@@ -313,7 +313,7 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
     });
 
     let (identity_main, _) = PhalanxIdentity::generate().unwrap();
-    let volley_id = VolleyId::new("v_chaos_monkey");
+    let recording_id = RecordingId::new("v_chaos_monkey");
 
     let mut chain = std::collections::HashMap::new();
     let mut last_hash = None;
@@ -323,7 +323,7 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
             timestamp: PhalanxTimestamp::now(),
             sequence_id: StorageSequence(i),
             fps: Fps::new(30),
-            volley_id: volley_id.clone(),
+            recording_id: recording_id.clone(),
             payload: DataPayload::Clear(format!("Frame {}", i).into_bytes()),
             lens_metrics: ForensicMetrics::default(),
         };
@@ -383,7 +383,7 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
         VideoPlayerSink::new(ui_tx),
         disc_tx,
     );
-    let v_id_clone = volley_id.clone();
+    let v_id_clone = recording_id.clone();
     tokio::spawn(async move {
         let _ = coordinator.run(v_id_clone).await;
     });

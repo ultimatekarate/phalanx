@@ -2,15 +2,16 @@ use crate::FileJournal;
 use crate::NodeConfig;
 use async_trait::async_trait;
 use phalanx_forensics::crucible::Crucible;
-use phalanx_forensics::crucible::VolleyAmalgam;
+use phalanx_forensics::crucible::RecordingAmalgam;
 use phalanx_forensics::crucible::{EnvelopeHashExt, EvidenceExt};
 use phalanx_forensics::cryptography::{decrypt_bytes, encrypt_bytes};
 use phalanx_forensics::gate::PromotionGate;
 use phalanx_forensics::prelude::TransientJournal;
 use phalanx_proto::crypto::SymmetricKey;
+use phalanx_proto::evidence::Recording;
 use phalanx_proto::evidence::StorageSequence;
-use phalanx_proto::evidence::Volley;
 use phalanx_proto::evidence::WitnessEnvelope;
+use phalanx_proto::identity::RecordingId;
 use phalanx_proto::prelude::*;
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::TrustedClock;
@@ -18,7 +19,7 @@ use phalanx_proto::types::ByteCapacity;
 use phalanx_proto::types::ForensicUnit;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
@@ -32,6 +33,20 @@ const MAX_EGRESS_SALVAGE_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
 /// Prevents unbounded WAL growth that could exhaust disk space.
 const MAX_WAL_AGGREGATE_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
 const AEAD_NONCE_LEN: usize = 24;
+/// Frame header size for recording log entries: 4-byte sequence_id + 4-byte payload_len.
+const RECORDING_FRAME_HEADER_LEN: usize = 8;
+
+/// Append-only recording log. One file per recording, mirroring the WAL pattern.
+/// Stores post-reassembly WitnessEnvelopes with O(1) random access via in-memory index.
+#[allow(dead_code)]
+struct RecordingLog {
+    file: tokio::fs::File,
+    /// Maps sequence_id → byte offset in the recording log file for O(1) seeks.
+    index: BTreeMap<StorageSequence, u64>,
+    recording_id: RecordingId,
+    owner_did: Did,
+    path: PathBuf,
+}
 
 /// M7 FIX: Vault key derivation now includes a random 32-byte salt.
 /// This ensures that identity key compromise does not directly yield the vault key.
@@ -131,13 +146,15 @@ impl StorageLedger {
 }
 
 pub struct Guardian {
-    pub crucible: Crucible<VolleyAmalgam>,
+    pub crucible: Crucible<RecordingAmalgam>,
     pub vault_path: String,
     pub local_did: Did,
     pub clock: Arc<dyn TrustedClock>,
     pub vault_key: SymmetricKey,
     /// Per-node storage accounting for fairness and eviction policy.
     pub ledger: StorageLedger,
+    /// Append-only recording logs, one per recording. Keyed by RecordingId.
+    recording_logs: BTreeMap<RecordingId, RecordingLog>,
 }
 
 impl Guardian {
@@ -149,12 +166,13 @@ impl Guardian {
         vault_key: SymmetricKey,
     ) -> Self {
         Self {
-            crucible: Crucible::new(VolleyAmalgam, Duration::from_secs(5), 1000),
+            crucible: Crucible::new(RecordingAmalgam, Duration::from_secs(5), 1000),
             vault_path: vault_path.to_string(),
             local_did,
             clock,
             vault_key,
             ledger: StorageLedger::default(),
+            recording_logs: BTreeMap::new(),
         }
     }
 
@@ -167,22 +185,22 @@ impl Guardian {
         tracing::debug!("Guardian: Received envelope for ingestion. Verifying...");
 
         let EnvelopeState::Intact(envelope) = state;
-        let vid = envelope.evidence.volley_id().clone();
+        let vid = envelope.evidence.recording_id().clone();
         let seq = envelope.evidence.sequence_id();
         let sender_did = envelope.witness_peer_id.clone();
 
         // Log the attempt
-        tracing::info!(volley = %vid, seq = %seq.0, from = %sender_did, "Guardian: Processing frame");
+        tracing::info!(recording = %vid, seq = %seq.0, from = %sender_did, "Guardian: Processing frame");
 
         let seq = envelope.evidence.sequence_id();
-        let volley_id = envelope.evidence.volley_id().clone();
+        let recording_id = envelope.evidence.recording_id().clone();
         let mut anchor = None;
 
         if seq.0 > 1 {
             let prev_seq = StorageSequence(seq.0 - 1);
 
             // Look up the previous anchor in the vault
-            if let Some(prev_envelope) = self.get_shard(&volley_id, prev_seq) {
+            if let Some(prev_envelope) = self.get_shard(&recording_id, prev_seq) {
                 anchor = Some(prev_envelope.signature_hash());
             }
         }
@@ -205,68 +223,71 @@ impl Guardian {
                 _ => GuardianError::VerificationFailed(e.to_string()),
             })?;
 
-        // Volley Aggregation
+        // Recording Aggregation
         // The Crucible now accepts only Verified units
-        let maybe_volley = self.crucible.process(verified_unit)?;
+        let maybe_recording = self.crucible.process(verified_unit)?;
 
-        if let Some(volley) = maybe_volley {
-            self.commit_volley_to_disk(&volley).await?;
+        if let Some(recording) = maybe_recording {
+            self.commit_recording_to_disk(&recording).await?;
         }
 
-        // Trigger TTL checks, stale volley flushing, and workbench cleanup
-        self.check_and_finalize_volley(current_tolerance).await?;
+        // Trigger TTL checks, stale recording flushing, and workbench cleanup
+        self.check_and_finalize_recording(current_tolerance).await?;
 
         Ok(())
     }
 
     /// Evaluates active working contexts for TTL expiration.
-    pub async fn check_and_finalize_volley(
+    pub async fn check_and_finalize_recording(
         &mut self,
         current_tolerance: Duration,
     ) -> Result<(), GuardianError> {
-        let stale_volleys = self.crucible.flush_stale(current_tolerance);
-        for volley in stale_volleys {
-            self.commit_volley_to_disk(&volley).await?;
+        let stale_recordings = self.crucible.flush_stale(current_tolerance);
+        for recording in stale_recordings {
+            self.commit_recording_to_disk(&recording).await?;
         }
         Ok(())
     }
 
     pub fn get_shard(
         &self,
-        volley_id: &VolleyId,
+        recording_id: &RecordingId,
         sequence_id: StorageSequence,
     ) -> Option<WitnessEnvelope> {
         // We leverage the Crucible's active contexts directly
-        self.get_active_volley_shards(volley_id)
+        self.get_active_recording_shards(recording_id)
             .and_then(|shards| shards.get(&sequence_id))
             .cloned()
     }
 
     /// Explicit salvage command for node termination sequences.
-    pub async fn salvage(&mut self) -> Result<Vec<Volley>, GuardianError> {
+    pub async fn salvage(&mut self) -> Result<Vec<Recording>, GuardianError> {
         // Flush the Crucible to extract all pending reassemblies from memory
-        let active_volleys = self.crucible.flush_all();
+        let active_recordings = self.crucible.flush_all();
 
         // Early return if there's nothing to save (returns an empty Vec)
-        if active_volleys.is_empty() {
+        if active_recordings.is_empty() {
             return Ok(vec![]);
         }
 
-        // Commit each volley to the permanent silo (The 'Hands' layer)
+        // Commit each recording to the permanent silo (The 'Hands' layer)
         // We iterate by reference so we can return the collection at the end
-        for volley in &active_volleys {
-            self.commit_volley_to_disk(volley).await?;
+        for recording in &active_recordings {
+            self.commit_recording_to_disk(recording).await?;
         }
 
-        // Return the collection to satisfy the return type Result<Vec<Volley>, ...>
-        Ok(active_volleys)
+        // Return the collection to satisfy the return type Result<Vec<Recording>, ...>
+        Ok(active_recordings)
     }
 
     /// Non-blocking Disk Persistence
-    pub async fn commit_volley_to_disk(&self, volley: &Volley) -> Result<(), GuardianError> {
-        let file_name = format!("{}.volley", volley.id);
+    pub async fn commit_recording_to_disk(
+        &self,
+        recording: &Recording,
+    ) -> Result<(), GuardianError> {
+        let file_name = format!("{}.recording", recording.id);
         let path = std::path::PathBuf::from(&self.vault_path)
-            .join(volley.owner_did.to_safe_name())
+            .join(recording.owner_did.to_safe_name())
             .join(file_name);
 
         // Ensure directory exists
@@ -276,16 +297,16 @@ impl Guardian {
                 .map_err(|e| GuardianError::StorageFailure(e.to_string()))?;
         }
 
-        let data = postcard::to_allocvec(&volley)
+        let data = postcard::to_allocvec(&recording)
             .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
 
         atomic_encrypted_write(&path, &data, &self.vault_key).await?;
 
-        info!(path = ?path, "DISK_WRITE_SUCCESS: Volley committed");
+        info!(path = ?path, "DISK_WRITE_SUCCESS: Recording committed");
         Ok(())
     }
 
-    /// Estimates the total bytes held across all active volley contexts in the crucible.
+    /// Estimates the total bytes held across all active recording contexts in the crucible.
     /// Used by the StorageActor to feed WAL/storage pressure into the integral loop.
     pub fn wal_bytes_estimate(&self) -> u64 {
         // Conservative per-envelope estimate: signature (64) + evidence (~4KB avg) + metadata
@@ -297,14 +318,354 @@ impl Guardian {
             .sum()
     }
 
-    pub fn get_active_volley_shards(
+    pub fn get_active_recording_shards(
         &self,
-        volley_id: &VolleyId,
+        recording_id: &RecordingId,
     ) -> Option<&BTreeMap<StorageSequence, WitnessEnvelope>> {
         self.crucible
             .contexts // FIX: Crucible doesn't have .get(), its BTreeMap is 'contexts'
-            .get(volley_id) // FIX: No more .to_string()!
+            .get(recording_id) // FIX: No more .to_string()!
             .map(|ctx| &ctx.accumulator.artifacts) // FIX: Access through WorkContext wrapper
+    }
+
+    // ── Recording Log: Append-Only Shard Storage ──
+
+    /// Append a single shard to the recording log. Disk-first — called immediately
+    /// after fountain reassembly, before any in-memory verification.
+    pub async fn append_shard(&mut self, envelope: &WitnessEnvelope) -> Result<(), GuardianError> {
+        let recording_id = envelope.evidence.recording_id().clone();
+        let sequence_id = envelope.evidence.sequence_id();
+        let owner_did = envelope.did.clone();
+
+        // Get or create the RecordingLog for this recording
+        if !self.recording_logs.contains_key(&recording_id) {
+            let dir_path = PathBuf::from(&self.vault_path).join(owner_did.to_safe_name());
+            fs::create_dir_all(&dir_path)
+                .await
+                .map_err(|e| GuardianError::StorageFailure(e.to_string()))?;
+
+            let file_path = dir_path.join(format!("{}.recording", recording_id));
+            let file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .append(true)
+                .open(&file_path)
+                .await
+                .map_err(|e| GuardianError::StorageFailure(e.to_string()))?;
+
+            self.recording_logs.insert(
+                recording_id.clone(),
+                RecordingLog {
+                    file,
+                    index: BTreeMap::new(),
+                    recording_id: recording_id.clone(),
+                    owner_did: owner_did.clone(),
+                    path: file_path,
+                },
+            );
+        }
+
+        let log = self.recording_logs.get_mut(&recording_id).unwrap();
+
+        // Record current file position as the index offset
+        let offset = log
+            .file
+            .seek(SeekFrom::End(0))
+            .await
+            .map_err(|e| GuardianError::StorageFailure(e.to_string()))?;
+
+        // Serialize → encrypt
+        let plaintext = postcard::to_allocvec(envelope)
+            .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
+
+        let (nonce, ciphertext) = encrypt_bytes(&self.vault_key, &plaintext)
+            .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
+
+        // Frame: [4-byte seq_id LE][4-byte payload_len LE][24-byte nonce][ciphertext]
+        let payload_len = (nonce.len() + ciphertext.len()) as u32;
+        log.file
+            .write_all(&sequence_id.0.to_le_bytes())
+            .await
+            .map_err(|e| GuardianError::WalWriteFailed(e.to_string()))?;
+        log.file
+            .write_all(&payload_len.to_le_bytes())
+            .await
+            .map_err(|e| GuardianError::WalWriteFailed(e.to_string()))?;
+        log.file
+            .write_all(&nonce)
+            .await
+            .map_err(|e| GuardianError::WalWriteFailed(e.to_string()))?;
+        log.file
+            .write_all(&ciphertext)
+            .await
+            .map_err(|e| GuardianError::WalWriteFailed(e.to_string()))?;
+
+        // Flush to disk
+        log.file
+            .sync_data()
+            .await
+            .map_err(|e| GuardianError::WalWriteFailed(e.to_string()))?;
+
+        // Update in-memory index
+        log.index.insert(sequence_id, offset);
+
+        tracing::debug!(
+            recording = %recording_id,
+            seq = sequence_id.0,
+            offset,
+            "Recording log: shard appended"
+        );
+
+        Ok(())
+    }
+
+    /// Read a single shard from the recording log by sequence_id. O(1) via index lookup.
+    pub async fn read_shard(
+        &mut self,
+        recording_id: &RecordingId,
+        sequence_id: StorageSequence,
+        _owner_did: Option<&Did>,
+    ) -> Result<WitnessEnvelope, GuardianError> {
+        let log = self.recording_logs.get_mut(recording_id).ok_or_else(|| {
+            GuardianError::StorageFailure(format!("No recording log for {}", recording_id))
+        })?;
+
+        let &offset = log.index.get(&sequence_id).ok_or_else(|| {
+            GuardianError::StorageFailure(format!(
+                "Shard {} not found in recording {}",
+                sequence_id.0, recording_id
+            ))
+        })?;
+
+        // Seek to the frame
+        log.file
+            .seek(SeekFrom::Start(offset))
+            .await
+            .map_err(|e| GuardianError::StorageFailure(e.to_string()))?;
+
+        // Read frame header: [4-byte seq_id][4-byte payload_len]
+        let mut header = [0u8; RECORDING_FRAME_HEADER_LEN];
+        log.file
+            .read_exact(&mut header)
+            .await
+            .map_err(|e| GuardianError::StorageFailure(e.to_string()))?;
+
+        let payload_len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+
+        // Read encrypted payload
+        if payload_len < AEAD_NONCE_LEN {
+            return Err(GuardianError::StorageFailure(
+                "Recording frame too small for AEAD".to_string(),
+            ));
+        }
+        let mut payload = vec![0u8; payload_len];
+        log.file
+            .read_exact(&mut payload)
+            .await
+            .map_err(|e| GuardianError::StorageFailure(e.to_string()))?;
+
+        // Decrypt
+        let (nonce, ciphertext) = payload.split_at(AEAD_NONCE_LEN);
+        let plaintext = decrypt_bytes(&self.vault_key, nonce, ciphertext)
+            .map_err(|_| GuardianError::StorageFailure("AEAD authentication failed".to_string()))?;
+
+        // Deserialize
+        postcard::from_bytes::<WitnessEnvelope>(&plaintext)
+            .map_err(|e| GuardianError::SerializationError(e.to_string()))
+    }
+
+    /// Read all shards from a recording log. Linear scan, returns sorted by sequence_id.
+    pub async fn read_all_shards(
+        &mut self,
+        recording_id: &RecordingId,
+        _owner_did: Option<&Did>,
+    ) -> Result<Vec<WitnessEnvelope>, GuardianError> {
+        let log = match self.recording_logs.get_mut(recording_id) {
+            Some(l) => l,
+            None => return Ok(vec![]),
+        };
+
+        log.file
+            .seek(SeekFrom::Start(0))
+            .await
+            .map_err(|e| GuardianError::StorageFailure(e.to_string()))?;
+
+        let mut envelopes = Vec::new();
+        loop {
+            let mut header = [0u8; RECORDING_FRAME_HEADER_LEN];
+            match log.file.read_exact(&mut header).await {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(GuardianError::StorageFailure(e.to_string())),
+            }
+
+            let payload_len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+
+            if payload_len < AEAD_NONCE_LEN || payload_len > MAX_WAL_CHUNK_BYTES as usize {
+                tracing::warn!(payload_len, "Recording log: corrupt frame, skipping");
+                break;
+            }
+
+            let mut payload = vec![0u8; payload_len];
+            match log.file.read_exact(&mut payload).await {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    tracing::warn!("Recording log: truncated frame at tail");
+                    break;
+                }
+                Err(e) => return Err(GuardianError::StorageFailure(e.to_string())),
+            }
+
+            let (nonce, ciphertext) = payload.split_at(AEAD_NONCE_LEN);
+            let plaintext = match decrypt_bytes(&self.vault_key, nonce, ciphertext) {
+                Ok(pt) => pt,
+                Err(_) => {
+                    tracing::warn!("Recording log: AEAD failed, skipping frame");
+                    continue;
+                }
+            };
+
+            match postcard::from_bytes::<WitnessEnvelope>(&plaintext) {
+                Ok(env) => envelopes.push(env),
+                Err(_) => {
+                    tracing::warn!("Recording log: deserialization failed, skipping frame");
+                    continue;
+                }
+            }
+        }
+
+        // Sort by sequence_id (file order may differ from sequence order)
+        envelopes.sort_by_key(|e| e.evidence.sequence_id());
+        Ok(envelopes)
+    }
+
+    /// List all recording IDs that have recording logs.
+    pub fn list_recordings(&self) -> Vec<RecordingId> {
+        self.recording_logs.keys().cloned().collect()
+    }
+
+    /// Rebuild recording log indexes on startup by scanning vault for .recording files.
+    pub async fn hydrate_recording_logs(&mut self) -> Result<(), GuardianError> {
+        let vault_dir = PathBuf::from(&self.vault_path);
+        if !vault_dir.exists() {
+            return Ok(());
+        }
+
+        let mut dir_entries = fs::read_dir(&vault_dir)
+            .await
+            .map_err(|e| GuardianError::StorageFailure(e.to_string()))?;
+
+        while let Some(entry) = dir_entries
+            .next_entry()
+            .await
+            .map_err(|e| GuardianError::StorageFailure(e.to_string()))?
+        {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            // Scan DID subdirectory for .recording files
+            let mut sub_entries = match fs::read_dir(&path).await {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            while let Some(sub_entry) = sub_entries
+                .next_entry()
+                .await
+                .map_err(|e| GuardianError::StorageFailure(e.to_string()))?
+            {
+                let file_path = sub_entry.path();
+                if file_path.extension().and_then(|e| e.to_str()) != Some("recording") {
+                    continue;
+                }
+
+                let recording_id_str = file_path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                let recording_id = RecordingId::new(recording_id_str);
+
+                // Derive owner_did from directory name (best effort)
+                let owner_did = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(Did::new)
+                    .unwrap_or_default();
+
+                let mut file = match tokio::fs::OpenOptions::new()
+                    .read(true)
+                    .append(true)
+                    .open(&file_path)
+                    .await
+                {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::warn!(path = ?file_path, error = %e, "Failed to open recording log");
+                        continue;
+                    }
+                };
+
+                // Rebuild index by scanning frames
+                let index = Self::rebuild_index(&mut file, &self.vault_key).await;
+
+                tracing::info!(
+                    recording = %recording_id,
+                    shards = index.len(),
+                    "Hydrated recording log"
+                );
+
+                self.recording_logs.insert(
+                    recording_id.clone(),
+                    RecordingLog {
+                        file,
+                        index,
+                        recording_id,
+                        owner_did,
+                        path: file_path,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Rebuild the in-memory index from a recording log file. Tolerates corrupt tail frames.
+    async fn rebuild_index(
+        file: &mut tokio::fs::File,
+        _vault_key: &SymmetricKey,
+    ) -> BTreeMap<StorageSequence, u64> {
+        let mut index = BTreeMap::new();
+        let _ = file.seek(SeekFrom::Start(0)).await;
+
+        while let Ok(offset) = file.stream_position().await {
+            let mut header = [0u8; RECORDING_FRAME_HEADER_LEN];
+            if file.read_exact(&mut header).await.is_err() {
+                break;
+            }
+
+            let sequence_id = StorageSequence(u32::from_le_bytes(
+                header[0..4].try_into().unwrap_or([0; 4]),
+            ));
+            let payload_len = u32::from_le_bytes(header[4..8].try_into().unwrap_or([0; 4]));
+
+            if payload_len < AEAD_NONCE_LEN as u32 || payload_len > MAX_WAL_CHUNK_BYTES {
+                break;
+            }
+
+            // Skip payload without full decrypt for speed during index rebuild
+            if file
+                .seek(SeekFrom::Current(payload_len as i64))
+                .await
+                .is_err()
+            {
+                break;
+            }
+
+            index.insert(sequence_id, offset);
+        }
+
+        // Reset to end for future appends
+        let _ = file.seek(SeekFrom::End(0)).await;
+        index
     }
 }
 
@@ -592,14 +953,14 @@ mod tests {
             vault_key,
         );
 
-        // Define a specific VolleyId for this stream
-        let vid = VolleyId::new("v1");
+        // Define a specific RecordingId for this stream
+        let vid = RecordingId::new("v1");
 
         let shard = VideoShard {
             timestamp: PhalanxTimestamp::now(),
             sequence_id: StorageSequence(1),
             fps: Fps::new(30),
-            volley_id: vid.clone(), // Use the VolleyId here
+            recording_id: vid.clone(), // Use the RecordingId here
             payload: DataPayload::Clear(vec![1, 2, 3]),
             lens_metrics: ForensicMetrics::default(),
         };
@@ -618,18 +979,18 @@ mod tests {
             .await;
         assert!(result.is_ok(), "Ingestion failed: {:?}", result.err());
 
-        // FIX: Verify Crucible state mutation using the VolleyId, NOT the Did
-        let active_shards = guardian.get_active_volley_shards(&vid);
+        // FIX: Verify Crucible state mutation using the RecordingId, NOT the Did
+        let active_shards = guardian.get_active_recording_shards(&vid);
 
         assert!(
             active_shards.is_some(),
-            "Crucible should contain an active volley buffer for this VolleyId"
+            "Crucible should contain an active recording buffer for this RecordingId"
         );
 
         let shards_map = active_shards.unwrap();
         assert!(
             shards_map.contains_key(&StorageSequence(1)),
-            "Volley buffer should contain the ingested sequence ID"
+            "Recording buffer should contain the ingested sequence ID"
         );
     }
 
@@ -653,7 +1014,7 @@ mod tests {
             timestamp: PhalanxTimestamp::now(),
             sequence_id: StorageSequence(1),
             fps: Fps::new(30),
-            volley_id: VolleyId::new("v1"),
+            recording_id: RecordingId::new("v1"),
             payload: DataPayload::Clear(vec![1, 2, 3]),
             lens_metrics: ForensicMetrics::default(),
         };

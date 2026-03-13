@@ -11,7 +11,7 @@ pub struct MockTransport {
     egress_tx: Option<mpsc::Sender<(MeshTopic, Vec<u8>)>>,
     telemetry_tx: Option<mpsc::Sender<SimEvent>>,
     local_id: NetworkId,
-    pub captured_responses: Vec<(String, VolleyResponse)>,
+    pub captured_responses: Vec<(String, RecordingResponse)>,
     banned_peers: HashSet<NetworkId>,
 }
 
@@ -80,7 +80,7 @@ impl NetworkTransport for MockTransport {
     async fn send_response(
         &mut self,
         channel_id: &str,
-        response: VolleyResponse,
+        response: RecordingResponse,
     ) -> Result<(), String> {
         self.captured_responses
             .push((channel_id.to_string(), response));

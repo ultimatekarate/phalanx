@@ -1,3 +1,4 @@
+use phalanx_proto::identity::RecordingId;
 use phalanx_proto::prelude::*;
 use phalanx_transport::EgressPort;
 use std::collections::VecDeque;
@@ -7,11 +8,13 @@ use tokio::time::{interval, Duration};
 pub enum EgressCommand {
     Dispatch {
         channel_id: String,
-        response: VolleyResponse,
+        response: RecordingResponse,
     },
     DrainForSalvage {
         reply_to: oneshot::Sender<Vec<PendingEgress>>,
     },
+    AnnounceRecording(RecordingId),
+    FindProviders(RecordingId),
 }
 
 pub struct EgressActor<E: EgressPort> {
@@ -46,13 +49,31 @@ impl<E: EgressPort> EgressActor<E> {
                             let _ = reply_to.send(self.pending.drain(..).collect());
                             break;
                         }
+                        EgressCommand::AnnounceRecording(recording_id) => {
+                            if let Err(e) = self.port.announce_recording(&recording_id).await {
+                                tracing::warn!(
+                                    recording = %recording_id,
+                                    error = %e,
+                                    "DHT: Failed to announce recording"
+                                );
+                            }
+                        }
+                        EgressCommand::FindProviders(recording_id) => {
+                            if let Err(e) = self.port.find_providers(&recording_id).await {
+                                tracing::warn!(
+                                    recording = %recording_id,
+                                    error = %e,
+                                    "DHT: Failed to query providers"
+                                );
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    async fn dispatch(&mut self, channel_id: String, response: VolleyResponse) {
+    async fn dispatch(&mut self, channel_id: String, response: RecordingResponse) {
         if self
             .port
             .send_response(&channel_id, response.clone())

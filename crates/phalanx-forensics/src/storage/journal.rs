@@ -6,7 +6,7 @@ use phalanx_proto::prelude::ShardError;
 use phalanx_proto::prelude::*;
 
 /// The Transient Journal: A high-speed, volatile storage interface.
-/// Acts as the holding cell for fully assembled Volleys before they
+/// Acts as the holding cell for fully assembled Recordings before they
 /// are distributed to the broader Phalanx Mesh.
 #[async_trait]
 pub trait TransientJournal: Send + Sync + 'static {

@@ -10,7 +10,7 @@ pub trait HandoverAuthority {
     fn generate(
         old_identity: &PhalanxIdentity,
         new_identity: &PhalanxIdentity,
-        volley_id: VolleyId,
+        recording_id: RecordingId,
         sequence_id: StorageSequence,
         anchor_hash: SignatureHash,
     ) -> Result<HandoverProof, ShardError>;
@@ -22,13 +22,13 @@ impl HandoverAuthority for HandoverProof {
     fn generate(
         old_identity: &PhalanxIdentity,
         new_identity: &PhalanxIdentity,
-        volley_id: VolleyId,
+        recording_id: RecordingId,
         sequence_id: StorageSequence,
         anchor_hash: SignatureHash,
     ) -> Result<Self, ShardError> {
         // Create deterministic manifest (ordered tuple)
         let transfer_manifest = (
-            &volley_id,
+            &recording_id,
             &sequence_id,
             &old_identity.did,
             &new_identity.did,
@@ -49,7 +49,7 @@ impl HandoverAuthority for HandoverProof {
         let new_signature = new_identity.sign(&hash_bytes);
 
         Ok(Self {
-            volley_id,
+            recording_id,
             sequence_id,
             old_did: old_identity.did.clone(),
             new_did: new_identity.did.clone(),
@@ -62,7 +62,7 @@ impl HandoverAuthority for HandoverProof {
     fn verify(&self) -> Result<(), ShardError> {
         // Re-manifest: Reconstruct the exact tuple used during generation
         let transfer_manifest = (
-            &self.volley_id,
+            &self.recording_id,
             &self.sequence_id,
             &self.old_did,
             &self.new_did,

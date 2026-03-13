@@ -2,13 +2,14 @@
 use crate::config::NodeConfig;
 use crate::persistence::vault::Guardian;
 use crate::vitals::{Homeostasis, SystemGovernor};
+use phalanx_forensics::crucible::EvidenceExt;
 use phalanx_forensics::prelude::TransientJournal;
 use phalanx_forensics::prelude::*;
 use phalanx_proto::evidence::EnvelopeState;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::PhalanxIdentity;
-use phalanx_proto::identity::VolleyId;
+use phalanx_proto::identity::RecordingId;
 use phalanx_proto::prelude::{PendingEgress, ShardChunk, ShardError};
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::types::ForensicUnit;
@@ -27,6 +28,8 @@ pub struct StorageActor<J: TransientJournal> {
     pub identity: PhalanxIdentity,
     pub current_tolerance: Duration,
     pub system_governor: Arc<SystemGovernor>,
+    /// Fires after each successful shard write. MeshSentinel uses this for DHT announcements.
+    pub commit_notify_tx: Option<mpsc::Sender<RecordingId>>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -39,14 +42,21 @@ pub enum StorageCommand {
     },
     /// Pure retrieval. Returns raw envelopes directly from the vault.
     Retrieval {
-        volley_id: VolleyId,
+        recording_id: RecordingId,
+        owner_did: Option<phalanx_proto::identity::Did>,
         reply_to: oneshot::Sender<Vec<WitnessEnvelope>>,
     },
     /// Single shard retrieval for local PlaybackCoordinator UI playback.
     GetShard {
-        volley_id: VolleyId,
+        recording_id: RecordingId,
         sequence_id: StorageSequence,
         reply_to: oneshot::Sender<Option<WitnessEnvelope>>,
+    },
+    /// Direct shard write to recording log (used by MediaEgressActor for local capture
+    /// and MeshSentinel for DHT shard responses). Disk-first, then verify.
+    WriteShard {
+        envelope: WitnessEnvelope,
+        reply_to: oneshot::Sender<Result<(), GuardianError>>,
     },
     /// Direct envelope ingestion bypass (used internally by Guardian operations).
     IngestEnvelope {
@@ -71,7 +81,7 @@ impl<J: TransientJournal> StorageActor<J> {
             Ok(()) => {
                 tracing::info!(
                     target: "phalanx::storage",
-                    active_volleys = self.reassembler.active_shards.len(),
+                    active_recordings = self.reassembler.active_shards.len(),
                     "StorageActor: Bootstrap complete. State hydrated from WAL."
                 );
             }
@@ -93,11 +103,16 @@ impl<J: TransientJournal> StorageActor<J> {
                                 let result = self.handle_ingest(unit).await;
                                 let _ = reply_to.send(result);
                             }
-                            StorageCommand::Retrieval { volley_id, reply_to } => {
-                                self.handle_retrieval(volley_id, reply_to).await;
+                            StorageCommand::Retrieval { recording_id, owner_did, reply_to } => {
+                                self.handle_retrieval(recording_id, owner_did, reply_to).await;
                             }
-                            StorageCommand::GetShard { volley_id, sequence_id, reply_to } => {
-                                let _ = reply_to.send(self.guardian.get_shard(&volley_id, sequence_id));
+                            StorageCommand::GetShard { recording_id, sequence_id, reply_to } => {
+                                let result = self.guardian.read_shard(&recording_id, sequence_id, None).await.ok();
+                                let _ = reply_to.send(result);
+                            }
+                            StorageCommand::WriteShard { envelope, reply_to } => {
+                                let result = self.handle_write_shard(envelope).await;
+                                let _ = reply_to.send(result);
                             }
                             StorageCommand::IngestEnvelope { state, reply_to, ttl } => {
                                 let _ = reply_to.send(self.guardian.ingest_envelope(state, ttl).await);
@@ -114,7 +129,7 @@ impl<J: TransientJournal> StorageActor<J> {
                     }
                 }
                 _ = maintenance_timer.tick() => {
-                    let _ = self.guardian.check_and_finalize_volley(self.current_tolerance).await;
+                    let _ = self.guardian.check_and_finalize_recording(self.current_tolerance).await;
                 }
             }
         }
@@ -205,12 +220,32 @@ impl<J: TransientJournal> StorageActor<J> {
 
         match reassembly_result {
             Ok(Some(envelope_state)) => {
-                self.guardian
+                // 1. Disk first — persist to recording log before verification
+                match &envelope_state {
+                    EnvelopeState::Intact(envelope) => {
+                        self.guardian.append_shard(envelope).await?;
+                        let recording_id = envelope.evidence.recording_id().clone();
+                        if let Some(ref tx) = self.commit_notify_tx {
+                            let _ = tx.try_send(recording_id);
+                        }
+                    }
+                }
+                // 2. Verify in memory (data is already safely on disk)
+                let result = self
+                    .guardian
                     .ingest_envelope(envelope_state, self.current_tolerance)
-                    .await
+                    .await;
+                if let Err(ref e) = result {
+                    tracing::warn!(
+                        target: "phalanx::storage",
+                        error = %e,
+                        "Verification failed for persisted shard"
+                    );
+                }
+                result
             }
             Ok(None) => {
-                // Chunk accepted, but volley is still incomplete
+                // Chunk accepted, but recording is still incomplete
                 Ok(())
             }
             Err(e) => {
@@ -220,20 +255,43 @@ impl<J: TransientJournal> StorageActor<J> {
         }
     }
 
-    /// Fetches all active shards for a specific volley without wrapping in network responses.
+    /// Reads all shards for a recording from the recording log on disk.
     async fn handle_retrieval(
-        &self,
-        volley_id: VolleyId,
+        &mut self,
+        recording_id: RecordingId,
+        owner_did: Option<phalanx_proto::identity::Did>,
         reply_to: oneshot::Sender<Vec<WitnessEnvelope>>,
     ) {
-        // CORRECTED: Uses Guardian::get_active_volley_shards which returns an Option<&BTreeMap>
         let envelopes = self
             .guardian
-            .get_active_volley_shards(&volley_id)
-            .map(|map| map.values().cloned().collect())
+            .read_all_shards(&recording_id, owner_did.as_ref())
+            .await
             .unwrap_or_default();
 
         let _ = reply_to.send(envelopes);
+    }
+
+    /// Writes a single shard to the recording log, notifies DHT, and verifies in-memory.
+    async fn handle_write_shard(&mut self, envelope: WitnessEnvelope) -> Result<(), GuardianError> {
+        // 1. Disk first
+        self.guardian.append_shard(&envelope).await?;
+        let recording_id = envelope.evidence.recording_id().clone();
+        if let Some(ref tx) = self.commit_notify_tx {
+            let _ = tx.try_send(recording_id);
+        }
+        // 2. Verify in memory (data is already safely on disk)
+        let result = self
+            .guardian
+            .ingest_envelope(EnvelopeState::Intact(envelope), self.current_tolerance)
+            .await;
+        if let Err(ref e) = result {
+            tracing::warn!(
+                target: "phalanx::storage",
+                error = %e,
+                "WriteShard: Verification failed for persisted shard"
+            );
+        }
+        result
     }
 
     /// Persists network state to the WAL and salvages Guardian data.

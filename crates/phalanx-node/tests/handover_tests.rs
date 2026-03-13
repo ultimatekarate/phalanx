@@ -3,9 +3,9 @@ use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::vault::{derive_vault_key, read_encrypted_file, Guardian};
 use phalanx_node::vitals::init_observability;
 use phalanx_proto::evidence::{
-    EnvelopeState, Evidence, ForensicMetrics, StorageSequence, Volley, WitnessEnvelope,
+    EnvelopeState, Evidence, ForensicMetrics, Recording, StorageSequence, WitnessEnvelope,
 };
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, VolleyId};
+use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId};
 use phalanx_proto::prelude::GuardianError;
 use phalanx_proto::storage::HandoverProof;
 use phalanx_proto::time::SystemClock;
@@ -31,7 +31,7 @@ async fn test_legal_identity_handover() {
     let (identity_b, _) = PhalanxIdentity::generate().expect("Failed to generate New DID");
 
     let peer_id = NetworkId::random();
-    let vid = VolleyId::new("handover_stream_01");
+    let vid = RecordingId::new("handover_stream_01");
 
     // Initialize Guardian (Vault) under Identity A's ownership
     let vault_key = derive_vault_key(&identity_a, &[0u8; 32]);
@@ -116,26 +116,26 @@ async fn test_legal_identity_handover() {
     let expected_path = temp_dir
         .path()
         .join(identity_b.did.to_safe_name())
-        .join("handover_stream_01.volley");
+        .join("handover_stream_01.recording");
 
     assert!(
         expected_path.exists(),
-        "Volley was not saved under the new Identity's storage silo"
+        "Recording was not saved under the new Identity's storage silo"
     );
 
     let saved_bytes = read_encrypted_file(&expected_path, &vault_key)
         .await
         .unwrap();
-    let saved_volley: Volley = postcard::from_bytes(&saved_bytes).unwrap();
+    let saved_recording: Recording = postcard::from_bytes(&saved_bytes).unwrap();
 
     assert_eq!(
-        saved_volley.artifacts.len(),
+        saved_recording.artifacts.len(),
         3,
-        "Volley should contain all 3 envelopes"
+        "Recording should contain all 3 envelopes"
     );
     assert_eq!(
-        saved_volley.owner_did, identity_b.did,
-        "Volley ownership did not transfer to Identity B"
+        saved_recording.owner_did, identity_b.did,
+        "Recording ownership did not transfer to Identity B"
     );
 }
 
@@ -146,7 +146,7 @@ async fn test_illegal_identity_swap_rejected() {
     let identity_a = PhalanxIdentity::new_ephemeral();
     let identity_b = PhalanxIdentity::new_ephemeral();
     let peer_id = NetworkId::random();
-    let vid = VolleyId::new("illegal_stream");
+    let vid = RecordingId::new("illegal_stream");
 
     let config = NodeConfig::test_defaults();
     let vault_key = derive_vault_key(&identity_a, &[0u8; 32]);
@@ -221,7 +221,7 @@ async fn test_illegal_identity_swap_rejected() {
     }
 
     // 3. Verify the state wasn't poisoned
-    let active_session = guardian.get_active_volley_shards(&vid).unwrap();
+    let active_session = guardian.get_active_recording_shards(&vid).unwrap();
     assert_eq!(
         active_session.len(),
         1,

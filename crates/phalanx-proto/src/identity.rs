@@ -12,9 +12,9 @@ pub const IDENTITY_VERSION: u32 = 1;
 pub struct ShardId(pub u64);
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
-pub struct VolleyId(pub String);
+pub struct RecordingId(pub String);
 
-impl VolleyId {
+impl RecordingId {
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
@@ -25,25 +25,25 @@ impl VolleyId {
     }
 }
 
-impl std::str::FromStr for VolleyId {
+impl std::str::FromStr for RecordingId {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.trim().is_empty() {
-            Err("VolleyId cannot be empty".to_string())
+            Err("RecordingId cannot be empty".to_string())
         } else {
             Ok(Self(s.to_string()))
         }
     }
 }
 
-impl From<String> for VolleyId {
+impl From<String> for RecordingId {
     fn from(s: String) -> Self {
         Self(s)
     }
 }
 
-impl From<&str> for VolleyId {
+impl From<&str> for RecordingId {
     fn from(s: &str) -> Self {
         Self(s.to_string())
     }
@@ -299,7 +299,7 @@ pub enum LocatorError {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PhalanxLocator {
-    pub id: VolleyId,
+    pub id: RecordingId,
     pub secret: String,
     pub author: crate::identity::Did,
     pub recipient_did: crate::identity::Did,
@@ -343,7 +343,7 @@ impl FromStr for PhalanxLocator {
             .trim();
 
         Ok(PhalanxLocator {
-            id: VolleyId::from_str(id_str).map_err(|_| LocatorError::ParseError)?,
+            id: RecordingId::from_str(id_str).map_err(|_| LocatorError::ParseError)?,
             secret: secret_str.to_string(),
             author: crate::identity::Did(author_str.to_string()),
             recipient_did: crate::identity::Did(recipient_str.to_string()),

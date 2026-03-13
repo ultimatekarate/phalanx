@@ -103,7 +103,7 @@ impl PhalanxAudioThread {
         self,
         tx: mpsc::Sender<AudioShard>,
         hw_config: HardwareConfig,
-        volley_id: String,
+        recording_id: String,
         secret_key: Option<[u8; 32]>,
     ) {
         // Ignite Hardware
@@ -132,13 +132,13 @@ impl PhalanxAudioThread {
                 if byte_buffer.len() >= bytes_per_sec {
                     let chunk = byte_buffer.split_off(0);
 
-                    let volley_id = VolleyId::new(volley_id.clone());
+                    let recording_id = RecordingId::new(recording_id.clone());
                     let shard_result = create_audio_shard(
                         chunk,
                         sequence_id,
                         hw_config.audio_sample_rate,
                         hw_config.audio_channels,
-                        volley_id,
+                        recording_id,
                     );
 
                     match shard_result {

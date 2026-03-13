@@ -22,7 +22,7 @@ pub trait HandoverJudge {
 impl HandoverJudge for HandoverProof {
     fn verify_signatures(&self) -> Result<SignatureHash, ShardError> {
         let transfer_manifest = (
-            &self.volley_id,
+            &self.recording_id,
             &self.sequence_id,
             &self.old_did,
             &self.new_did,
@@ -193,7 +193,7 @@ mod tests {
     use phalanx_proto::evidence::{
         DataPayload, Evidence, ForensicMetrics, StorageSequence, VideoShard, WitnessEnvelope,
     };
-    use phalanx_proto::identity::{PhalanxIdentity, VolleyId};
+    use phalanx_proto::identity::{PhalanxIdentity, RecordingId};
     use phalanx_proto::time::SystemClock;
     use phalanx_proto::trust::TrustLevel;
     use phalanx_proto::types::{ForensicUnit, Fps, SystemStress, Verified};
@@ -205,7 +205,7 @@ mod tests {
         // Setup Identities & Baseline Environment
         let witness_identity = PhalanxIdentity::new_ephemeral();
         let witness_peer_id = witness_identity.clone().network_id;
-        let vid = VolleyId::new("test_stream_01");
+        let vid = RecordingId::new("test_stream_01");
         let clock = SystemClock;
         let now = PhalanxTimestamp::now();
 
@@ -214,7 +214,7 @@ mod tests {
             timestamp: now,
             sequence_id: StorageSequence(100),
             fps: Fps::new(30),
-            volley_id: vid,
+            recording_id: vid,
             payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             lens_metrics: ForensicMetrics::default(),
         };
@@ -287,9 +287,9 @@ mod tests {
             }
         }
 
-        // FINAL PROOF: VolleyResponse requires Sealed units
+        // FINAL PROOF: RecordingResponse requires Sealed units
         // Because the tamper_result was an Err, we can't even construct a
-        // VolleyResponse::Success(vec![...]) with this data.
+        // RecordingResponse::Success(vec![...]) with this data.
 
         info!("Forensic Boundary: Successfully verified that Gate 3 and Gate 4 block tampered evidence.");
     }

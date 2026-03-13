@@ -56,7 +56,7 @@ pub struct MeshSentinel<I: IngressPort> {
     // For the playback factory method
     pub storage_tx: mpsc::Sender<StorageCommand>,
     pub network_key: Arc<SymmetricKey>,
-    pub discovery_tx: mpsc::Sender<(VolleyId, StorageSequence)>,
+    pub discovery_tx: mpsc::Sender<(RecordingId, StorageSequence)>,
 
     // Homeostasis feedback
     pub system_governor: Arc<SystemGovernor>,
@@ -68,6 +68,14 @@ pub struct MeshSentinel<I: IngressPort> {
 
     // Keep a reference to the storage task to ensure it's not dropped.
     pub storage_task: JoinHandle<()>,
+
+    // DHT: Receives notifications when StorageActor persists a shard.
+    // Triggers `EgressCommand::AnnounceRecording` to announce the recording on the DHT.
+    commit_notify_rx: mpsc::Receiver<RecordingId>,
+
+    // DHT: Receives (recording_id, sequence_id) from PlaybackCoordinator when it
+    // discovers missing shards. Triggers `EgressCommand::FindProviders`.
+    discovery_rx: mpsc::Receiver<(RecordingId, StorageSequence)>,
 
     // Optional local mesh transport (BLE, WiFi Direct).
     // When available, the select! loop polls for local mesh events.
@@ -108,7 +116,8 @@ impl<I: IngressPort> MeshSentinel<I> {
         let (egress_tx, egress_rx) = mpsc::channel(100);
         let (retrieval_tx, retrieval_rx) = mpsc::channel(100);
         let (trust_tx, trust_rx) = mpsc::channel(100);
-        let (discovery_tx, _discovery_rx) = mpsc::channel(100);
+        let (discovery_tx, discovery_rx) = mpsc::channel(100);
+        let (commit_notify_tx, commit_notify_rx) = mpsc::channel(100);
 
         // Stateless Recovery: Pull salvaged egress from the journal
         let salvaged_queue = deps
@@ -133,6 +142,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             identity: deps.identity.clone(),
             current_tolerance: Duration::from_millis(1000),
             system_governor: deps.system_governor.clone(),
+            commit_notify_tx: Some(commit_notify_tx),
         };
 
         let storage_task = tokio::spawn(async move {
@@ -242,6 +252,8 @@ impl<I: IngressPort> MeshSentinel<I> {
             retrieval_tx,
             egress_tx,
             discovery_tx,
+            commit_notify_rx,
+            discovery_rx,
             local_mesh: deps.local_mesh,
             lifecycle_rx,
         })
@@ -265,6 +277,22 @@ impl<I: IngressPort> MeshSentinel<I> {
                 } => {
                     tracing::debug!(event = "local_mesh_event", "Received event from local transport");
                     self.handle_network_event(local_event).await
+                }
+
+                // DHT: StorageActor persisted a shard — announce as provider.
+                Some(recording_id) = self.commit_notify_rx.recv() => {
+                    let _ = self.egress_tx
+                        .send(EgressCommand::AnnounceRecording(recording_id))
+                        .await;
+                    false
+                }
+
+                // DHT: PlaybackCoordinator needs a missing shard — find providers.
+                Some((recording_id, _sequence_id)) = self.discovery_rx.recv() => {
+                    let _ = self.egress_tx
+                        .send(EgressCommand::FindProviders(recording_id))
+                        .await;
+                    false
                 }
 
                 // Lifecycle events from mobile OS (foreground/background).
@@ -379,7 +407,7 @@ impl<I: IngressPort> MeshSentinel<I> {
                 false
             }
 
-            NetworkEvent::VolleyRequested {
+            NetworkEvent::RecordingRequested {
                 origin,
                 request,
                 channel_id,
@@ -392,6 +420,41 @@ impl<I: IngressPort> MeshSentinel<I> {
                         channel_id,
                     })
                     .await;
+                false
+            }
+
+            // DHT: Providers discovered for a recording.
+            // Full retrieval requests (with SealedLocator + signature) are initiated
+            // by PlaybackCoordinator when it has the auth context to construct them.
+            NetworkEvent::ProvidersDiscovered {
+                recording_id,
+                providers,
+            } => {
+                tracing::info!(
+                    recording = %recording_id,
+                    count = providers.len(),
+                    "DHT: Providers discovered for recording"
+                );
+                false
+            }
+
+            // DHT: Shards received from a peer — write each to the recording log.
+            NetworkEvent::ShardResponseReceived { origin, envelopes } => {
+                tracing::info!(
+                    peer = %origin,
+                    count = envelopes.len(),
+                    "DHT: Shard response received"
+                );
+                for envelope in envelopes {
+                    let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+                    let _ = self
+                        .storage_tx
+                        .send(StorageCommand::WriteShard {
+                            envelope,
+                            reply_to: reply_tx,
+                        })
+                        .await;
+                }
                 false
             }
 
@@ -421,7 +484,7 @@ impl<I: IngressPort> MeshSentinel<I> {
 
     pub fn spawn_playback<S: PlaybackSink + 'static>(
         &self,
-        volley_id: VolleyId,
+        recording_id: RecordingId,
         sink: S,
     ) -> tokio::task::JoinHandle<()> {
         let mut coordinator = PlaybackCoordinator::new(
@@ -432,7 +495,7 @@ impl<I: IngressPort> MeshSentinel<I> {
         );
 
         tokio::spawn(async move {
-            if let Err(e) = coordinator.run(volley_id).await {
+            if let Err(e) = coordinator.run(recording_id).await {
                 tracing::error!("Playback Coordinator terminated with error: {:?}", e);
             }
         })

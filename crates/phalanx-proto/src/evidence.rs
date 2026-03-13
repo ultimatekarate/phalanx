@@ -1,5 +1,5 @@
 // crates/phalanx-proto/src/evidence.rs
-use crate::identity::{Did, NetworkId, ShardId, VolleyId};
+use crate::identity::{Did, NetworkId, RecordingId, ShardId};
 use crate::storage::HandoverProof;
 use crate::time::PhalanxTimestamp;
 use crate::types::{ChannelCount, EncodingSymbolId, Fps, SampleRate};
@@ -110,7 +110,7 @@ pub struct VideoShard {
     pub timestamp: PhalanxTimestamp,
     pub sequence_id: StorageSequence,
     pub fps: Fps,
-    pub volley_id: VolleyId,
+    pub recording_id: RecordingId,
     pub payload: DataPayload,
     /// Mandatory sensor fingerprint from the ForensicLens pipeline.
     pub lens_metrics: ForensicMetrics,
@@ -122,13 +122,13 @@ pub struct AudioShard {
     pub sequence_id: StorageSequence,
     pub sample_rate: SampleRate,
     pub channels: ChannelCount,
-    pub volley_id: VolleyId,
+    pub recording_id: RecordingId,
     pub payload: DataPayload,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForensicGap {
-    pub volley_id: VolleyId,
+    pub recording_id: RecordingId,
     pub start_seq: StorageSequence,
     pub end_seq: StorageSequence,
     pub detected_at: PhalanxTimestamp,
@@ -217,7 +217,7 @@ impl fmt::Display for ShardId {
     }
 }
 
-impl fmt::Display for VolleyId {
+impl fmt::Display for RecordingId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -233,8 +233,8 @@ pub struct HandoverShard {
 
 /// The stateful reassembly container for a complete forensic session.
 #[derive(Serialize, Deserialize)]
-pub struct Volley {
-    pub id: VolleyId,
+pub struct Recording {
+    pub id: RecordingId,
     pub owner_did: Did,
     pub artifacts: Vec<WitnessEnvelope>,
     pub gaps: Vec<ForensicGap>,

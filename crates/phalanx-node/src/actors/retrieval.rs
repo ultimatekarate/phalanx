@@ -14,7 +14,7 @@ use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*;
 use phalanx_proto::trust::Offense;
 use phalanx_proto::types::{ForensicUnit, TaskCost, Verified};
-use phalanx_proto::VolleyRequest;
+use phalanx_proto::RecordingRequest;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, oneshot};
 pub enum RetrievalCommand {
     SecureRetrieval {
         origin: NetworkId,
-        request: VolleyRequest,
+        request: RecordingRequest,
         channel_id: String,
     },
 }
@@ -83,7 +83,7 @@ impl RetrievalActor {
     async fn execute_secure_retrieval(
         &mut self,
         origin: NetworkId,
-        request: VolleyRequest,
+        request: RecordingRequest,
         channel_id: String,
     ) {
         let local_id = &self.identity.network_id;
@@ -96,13 +96,13 @@ impl RetrievalActor {
 
         if !self.system_governor.check_permission(TaskCost::Heavy) {
             tracing::warn!(target: "phalanx::egress", "Retrieval rejected: System thermal/battery limits exceeded");
-            self.dispatch_resilient_response(channel_id, VolleyResponse::Unauthorized)
+            self.dispatch_resilient_response(channel_id, RecordingResponse::Unauthorized)
                 .await;
             return;
         }
 
         if PhalanxNodeIdentityExt::verify_retrieval_auth(&*self.identity, &request).is_err() {
-            tracing::warn!(peer = %origin, volley = %request.volley_id, "Privacy Gate: Unauthorized retrieval attempt blocked");
+            tracing::warn!(peer = %origin, recording = %request.recording_id, "Privacy Gate: Unauthorized retrieval attempt blocked");
             let _ = self
                 .trust_tx
                 .send(TrustCommand::RecordOffense {
@@ -110,7 +110,7 @@ impl RetrievalActor {
                     offense: Offense::InvalidSignature,
                 })
                 .await;
-            self.dispatch_resilient_response(channel_id, VolleyResponse::Unauthorized)
+            self.dispatch_resilient_response(channel_id, RecordingResponse::Unauthorized)
                 .await;
             return;
         }
@@ -119,13 +119,14 @@ impl RetrievalActor {
         if self
             .storage_tx
             .send(StorageCommand::Retrieval {
-                volley_id: request.volley_id.clone(),
+                recording_id: request.recording_id.clone(),
+                owner_did: Some(request.target_did.clone()),
                 reply_to: reply_tx,
             })
             .await
             .is_err()
         {
-            self.dispatch_resilient_response(channel_id, VolleyResponse::NotFound)
+            self.dispatch_resilient_response(channel_id, RecordingResponse::NotFound)
                 .await;
             return;
         }
@@ -163,14 +164,18 @@ impl RetrievalActor {
         }
 
         let response = if sealed_units.is_empty() {
-            VolleyResponse::NotFound
+            RecordingResponse::NotFound
         } else {
-            VolleyResponse::Success(sealed_units)
+            RecordingResponse::Success(sealed_units)
         };
         self.dispatch_resilient_response(channel_id, response).await;
     }
 
-    async fn dispatch_resilient_response(&mut self, channel_id: String, response: VolleyResponse) {
+    async fn dispatch_resilient_response(
+        &mut self,
+        channel_id: String,
+        response: RecordingResponse,
+    ) {
         let _ = self
             .egress_tx
             .send(EgressCommand::Dispatch {
