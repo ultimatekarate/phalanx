@@ -357,8 +357,7 @@ pub trait CoastingGate {
 impl CoastingGate for WitnessEnvelope {
     fn verify_fast_hash(self, peer_id: &NetworkId) -> Result<Self, ShardError> {
         // Serialize evidence to compute actual hash
-        let actual_bytes = postcard::to_allocvec(&self.evidence)
-            .map_err(|e| ShardError::SerializationError(e.to_string()))?;
+        let actual_bytes = postcard::to_allocvec(&self.evidence)?;
 
         let mut hasher = Sha256::new();
         sha2::Digest::update(&mut hasher, &actual_bytes);

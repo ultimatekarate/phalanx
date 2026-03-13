@@ -58,10 +58,7 @@ impl TransientJournal for FileJournal {
     }
 
     async fn sync(&mut self) -> Result<(), ShardError> {
-        self.handle
-            .sync_all()
-            .await
-            .map_err(|e| ShardError::Io(e.to_string()))
+        Ok(self.handle.sync_all().await?)
     }
 
     async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
@@ -87,8 +84,7 @@ impl TransientJournal for FileJournal {
 
     async fn record_workbench_state(&mut self, state_bytes: &[u8]) -> Result<(), ShardError> {
         // Encrypt the state
-        let (nonce, ciphertext) = encrypt_bytes(&self.vault_key, state_bytes)
-            .map_err(|e| ShardError::Encryption(e.to_string()))?;
+        let (nonce, ciphertext) = encrypt_bytes(&self.vault_key, state_bytes)?;
 
         // Frame: [8-byte BE len][24-byte nonce][ciphertext]
         let frame_len = (nonce.len() + ciphertext.len()) as u64;
@@ -139,7 +135,6 @@ impl TransientJournal for FileJournal {
 
         // Split and decrypt
         let (nonce, ciphertext) = buffer.split_at(AEAD_NONCE_LEN);
-        decrypt_bytes(&self.vault_key, nonce, ciphertext)
-            .map_err(|e| ShardError::Encryption(e.to_string()))
+        Ok(decrypt_bytes(&self.vault_key, nonce, ciphertext)?)
     }
 }

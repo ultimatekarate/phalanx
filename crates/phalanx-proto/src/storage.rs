@@ -5,7 +5,6 @@ use crate::identity::{Did, RecordingId};
 use crate::prelude::NetworkId;
 use crate::prelude::PhalanxTimestamp;
 use crate::prelude::ShardError;
-use crate::time::TimeError;
 use crate::types::ByteCapacity;
 use ed25519_dalek::Signature;
 use serde::{Deserialize, Serialize};
@@ -27,17 +26,8 @@ pub enum GuardianError {
     #[error("Serialization error: {0}")]
     SerializationError(String),
 
-    #[error("Time synchronization failure: {0}")]
-    TimeSource(#[from] TimeError),
-
-    #[error("Attack attempt blocked: Peer {0} is blacklisted")]
-    BlacklistedPeer(String),
-
     #[error("Cryptographic verification failed: {0}")]
     VerificationFailed(String),
-
-    #[error("Crucible commit failed: {0}")]
-    CrucibleError(String),
 
     #[error("Storage error: {0}")]
     StorageFailure(String),
@@ -45,14 +35,8 @@ pub enum GuardianError {
     #[error("Chain Integrity Violation: {0}")]
     ChainIntegrityViolation(String),
 
-    #[error("Reassembly failure: {0}")]
-    ReassemblyError(String),
-
     #[error("Policy Violation: {0}")]
     PolicyViolation(String),
-
-    #[error("Identity Mismatch")]
-    IdentityMismatch,
 
     #[error("Ambiguous ownership: Multiple unproven identities claiming Recording")]
     AmbiguousOwnership,

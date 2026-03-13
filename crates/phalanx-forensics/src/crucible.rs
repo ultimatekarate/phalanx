@@ -1,3 +1,4 @@
+use crate::errors::ForensicPromotion;
 use phalanx_proto::evidence::Evidence;
 use phalanx_proto::evidence::ForensicGap;
 use phalanx_proto::evidence::Recording;
@@ -151,7 +152,10 @@ impl<S: Mold> Crucible<S> {
     }
 
     #[instrument(skip(self, item), level = "info")]
-    pub fn process(&mut self, item: S::Input) -> Result<Option<S::Output>, GuardianError> {
+    pub fn process(&mut self, item: S::Input) -> Result<Option<S::Output>, GuardianError>
+    where
+        S::Error: ForensicPromotion,
+    {
         self.perform_cleanup();
         let key = S::get_key(&item);
         let active_contexts = self.contexts.len();
@@ -162,13 +166,8 @@ impl<S: Mold> Crucible<S> {
                 let ctx = entry.get_mut();
 
                 // Ingest & Map Errors
-                S::ingest(&mut ctx.accumulator, item).map_err(|e| {
-                    if S::is_authoritative(&ctx.accumulator) {
-                        GuardianError::PolicyViolation(format!("{}", e))
-                    } else {
-                        GuardianError::AmbiguousOwnership
-                    }
-                })?;
+                S::ingest(&mut ctx.accumulator, item)
+                    .map_err(|e| e.promote(S::is_authoritative(&ctx.accumulator)))?;
 
                 let elapsed = ctx.created_at.elapsed();
 
@@ -201,7 +200,7 @@ impl<S: Mold> Crucible<S> {
                 let mut acc = S::init_accumulator(&item);
 
                 // First shard is inherently Ambiguous until Seq 0 or Handover arrives
-                S::ingest(&mut acc, item).map_err(|_| GuardianError::AmbiguousOwnership)?;
+                S::ingest(&mut acc, item).map_err(|e| e.promote(false))?;
 
                 // Optimization: If the first item makes it ready (e.g. 1-chunk shard),
                 // assemble it without ever touching the contexts map.
@@ -298,7 +297,7 @@ impl<S: Mold> Crucible<S> {
     }
 
     pub fn freeze(&self) -> Result<Vec<u8>, ShardError> {
-        postcard::to_allocvec(self).map_err(|e| ShardError::SerializationError(e.to_string()))
+        Ok(postcard::to_allocvec(self)?)
     }
 
     pub fn thaw(bytes: &[u8]) -> Result<Self, ShardError> {
@@ -546,6 +545,12 @@ mod tests {
     #[derive(Debug, thiserror::Error)]
     #[error("SumMoldError")]
     struct SumError;
+
+    impl crate::errors::ForensicPromotion for SumError {
+        fn promote(self, _is_authoritative: bool) -> GuardianError {
+            GuardianError::AmbiguousOwnership
+        }
+    }
 
     impl Mold for SumMold {
         type Input = i32;

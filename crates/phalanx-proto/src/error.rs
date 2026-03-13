@@ -1,7 +1,6 @@
-// crates/phalanx-proto/src/storage.rs
+// crates/phalanx-proto/src/error.rs
 
-use crate::prelude::GuardianError;
-pub use crate::time::TimeError;
+use crate::crypto::CryptoError;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
@@ -12,28 +11,34 @@ pub enum ShardError {
     InvalidConfiguration(String),
     #[error("Serialization failed: {0}")]
     SerializationError(String),
-    #[error("Time source error: {0}")]
-    TimeSource(#[from] TimeError),
     #[error("Cryptographic signing failed: {0}")]
     SigningError(String),
     #[error("Encryption error: {0}")]
     Encryption(String),
     #[error("Disk I/O failed: {0}")]
     Io(String),
-    #[error("Decompression Error: {0}")]
-    DecompressionFailure(String),
-    #[error("Invalid Signature: {0}")]
-    InvalidSignature(String),
-    #[error("Salvage operation failed: {0}")]
-    SalvageError(String),
     #[error("Not enough reputation")]
     Unauthorized(String),
     #[error("Size cannot be 0")]
     InvalidSize(String),
-    #[error("Shard verification failed")]
-    VerificationFailed,
-    #[error("Forensic Violation: {0}")]
-    Forensic(#[from] GuardianError),
+}
+
+impl From<std::io::Error> for ShardError {
+    fn from(e: std::io::Error) -> Self {
+        ShardError::Io(e.to_string())
+    }
+}
+
+impl From<postcard::Error> for ShardError {
+    fn from(e: postcard::Error) -> Self {
+        ShardError::SerializationError(e.to_string())
+    }
+}
+
+impl From<CryptoError> for ShardError {
+    fn from(e: CryptoError) -> Self {
+        ShardError::Encryption(e.to_string())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -48,26 +53,4 @@ pub enum IdentityError {
     SerializationError(String),
     #[error("Identity data corruption: {0}")]
     Corruption(String),
-}
-
-#[derive(Debug, thiserror::Error, Serialize, Deserialize)]
-pub enum LocatorError {
-    #[error("Locator input is malformed or incorrectly delimited")]
-    MalformedInput,
-    #[error("Locator is missing the required author/signer field")]
-    MissingAuthor,
-    #[error("Locator scheme is unsupported or invalid: {0}")]
-    InvalidScheme(String),
-    #[error("Locator payload exceeds maximum forensic length: {0}")]
-    PayloadTooLarge(usize),
-    #[error("Cryptographic signature in locator failed verification")]
-    SignatureMismatch,
-    #[error("Internal encoding error: {0}")]
-    Encoding(String),
-    #[error("Missing fragment (Decryption Key)")]
-    MissingKey,
-    #[error("Malformatted component")]
-    ParseError,
-    #[error("Locator is missing a recipient.")]
-    MissingRecipient,
 }
