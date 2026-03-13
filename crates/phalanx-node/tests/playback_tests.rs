@@ -8,12 +8,13 @@ use phalanx_node::actors::storage::StorageCommand;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
-use phalanx_node::playback::sink::VideoPlayerSink;
+use phalanx_node::playback::sink::{ArtifactSink, VideoPlayerSink};
 use phalanx_proto::evidence::{
     DataPayload, EnvelopeState, Evidence, ForensicMetrics, StorageSequence, VideoShard,
     WitnessEnvelope,
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId};
+use phalanx_proto::playback::PlaybackSink;
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
 use phalanx_proto::types::Fps;
 use std::sync::Arc;
@@ -400,4 +401,54 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
         result.is_ok(),
         "Chaos test timed out - chain probably broke"
     );
+}
+
+#[tokio::test]
+async fn test_artifact_sink_unsigned_export() {
+    let temp_dir = tempdir().expect("Failed to create temporary directory");
+    let output_path = temp_dir.path().join("export.mp4");
+
+    let mut sink = ArtifactSink::new(
+        output_path.clone(),
+        "test-node-001".to_string(),
+        ForensicMetrics::default(),
+        None,
+        None,
+    );
+
+    // Feed three chunks
+    sink.handle_chunk(StorageSequence(1), b"chunk-one-".to_vec())
+        .await
+        .unwrap();
+    sink.handle_chunk(StorageSequence(2), b"chunk-two-".to_vec())
+        .await
+        .unwrap();
+    sink.handle_chunk(StorageSequence(3), b"chunk-three".to_vec())
+        .await
+        .unwrap();
+
+    sink.finalize().await.unwrap();
+
+    let contents = tokio::fs::read(&output_path).await.unwrap();
+    assert_eq!(contents, b"chunk-one-chunk-two-chunk-three");
+}
+
+#[tokio::test]
+async fn test_artifact_sink_empty_finalize() {
+    let temp_dir = tempdir().expect("Failed to create temporary directory");
+    let output_path = temp_dir.path().join("empty.mp4");
+
+    let mut sink = ArtifactSink::new(
+        output_path.clone(),
+        "test-node-empty".to_string(),
+        ForensicMetrics::default(),
+        None,
+        None,
+    );
+
+    // Finalize with no chunks — should produce an empty file
+    sink.finalize().await.unwrap();
+
+    let contents = tokio::fs::read(&output_path).await.unwrap();
+    assert!(contents.is_empty());
 }

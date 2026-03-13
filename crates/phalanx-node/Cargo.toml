@@ -58,3 +58,4 @@ ctrlc = "3.5.2"
 lru = "0.16.3"
 blake3 = "1.8"
 zeroize = "1.8.2"
+c2pa = { version = "0.78.0", default-features = false, features = ["rust_native_crypto", "file_io"] }
