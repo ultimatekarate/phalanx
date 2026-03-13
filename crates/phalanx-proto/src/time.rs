@@ -76,7 +76,7 @@ impl CausalitySession {
     pub fn verify_next(&mut self, envelope: &WitnessEnvelope) -> Result<(), TimeError> {
         let incoming_prev = envelope.prev_hash;
 
-        // 1. Link Validation
+        // Link Validation
         match (self.last_hash, incoming_prev) {
             // Sequential case: Ensure incoming prev matches our current head
             (Some(expected), Some(found)) if expected == found => Ok(()),
@@ -88,7 +88,7 @@ impl CausalitySession {
             (expected, found) => Err(TimeError::CausalityBreak { expected, found }),
         }?;
 
-        // 2. State Advancement: Promote the new hash as the chain head
+        // State Advancement: Promote the new hash as the chain head
         self.last_hash = Some(SignatureHash(envelope.evidence_hash));
 
         Ok(())

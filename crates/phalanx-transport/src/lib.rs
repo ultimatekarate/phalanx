@@ -1,6 +1,6 @@
 // crates/phalanx-transport/src/lib.rs
 
-// 1. EXTERNAL DEPENDENCIES
+// EXTERNAL DEPENDENCIES
 use async_trait::async_trait; // THE MISSING PIECE
 use libp2p::PeerId;
 use phalanx_proto::network::NetworkEvent;
@@ -8,7 +8,7 @@ use phalanx_proto::prelude::*; // Pulls in MeshTopic, VolleyResponse, NetworkEve
 use std::str::FromStr;
 use tokio::sync::mpsc; // FIX: Corrected from 'use crate::mpsc'
 
-// 2. MODULE REGISTRY
+// MODULE REGISTRY
 pub mod adapters {
     pub mod ble;
     pub mod kademlia;
@@ -34,7 +34,7 @@ pub mod signaling;
 #[cfg(test)]
 pub mod mock;
 
-// 3. THE TRANSPORT ADAPTER (THE PRIMARY INTERFACE)
+// THE TRANSPORT ADAPTER (THE PRIMARY INTERFACE)
 // This is what the MeshSentinel/Node uses to interact with the mesh.
 #[async_trait]
 pub trait TransportAdapter: Send + Sync {
@@ -88,7 +88,7 @@ pub trait EgressPort: Send + Sync + Clone {
         -> Result<(), String>;
 }
 
-// 3c. THE LOCAL MESH PORT (Phase 3 — Ad-Hoc Mesh Forward Infrastructure)
+// THE LOCAL MESH PORT (Ad-Hoc Mesh Forward Infrastructure)
 //
 // For truly disconnected scenarios (no WiFi network at all — outdoors, disaster zone, protest),
 // this trait abstracts local peer-to-peer transports (BLE, WiFi Direct).
@@ -109,7 +109,7 @@ pub trait LocalMeshPort: Send {
     fn is_available(&self) -> bool;
 }
 
-// 4. THE PEER MAPPER (THE TRANSLATOR)
+// THE PEER MAPPER (THE TRANSLATOR)
 pub struct PeerMapper;
 
 impl PeerMapper {
@@ -124,7 +124,7 @@ impl PeerMapper {
     }
 }
 
-// 5. ERROR TYPES
+// ERROR TYPES
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
     #[error("Network failure: {0}")]
@@ -140,7 +140,7 @@ pub enum TransportError {
     Internal(String),
 }
 
-// 6. THE PRELUDE (GATEWAY FOR OTHER CRATES)
+// THE PRELUDE (GATEWAY FOR OTHER CRATES)
 pub mod prelude {
     pub use crate::adapters::libp2p::Libp2pAdapter;
     pub use crate::EgressPort;

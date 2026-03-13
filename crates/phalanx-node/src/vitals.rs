@@ -312,11 +312,11 @@ pub struct IntegralState {
     pub conserving_trigger_count: u8, // Consecutive ticks above Conserving threshold (0.50)
     pub leaf_trigger_count: u8, // Consecutive vitals ticks above composite threshold (0.85)
     pub normal_trigger_count: u8, // Consecutive vitals ticks below recovery threshold (0.30)
-    /// Phase 4f: Tracks the stress-driven power state independently of battery gate.
+    /// Tracks the stress-driven power state independently of battery gate.
     /// Used as hysteresis fallback by `stress_recommendation()` so it doesn't
     /// inherit battery-gate-driven Dormant/Leaf states.
     pub stress_power_state: PowerState,
-    // Phase 3: Internet connectivity detection
+    // Internet connectivity detection
     /// Whether the node believes it has internet connectivity.
     /// Determined by tracking peer discovery sources: if ALL connected peers
     /// are mDNS-local for >30s, internet is considered unavailable.
@@ -475,7 +475,7 @@ impl SystemGovernor {
         let b_stress = self.read_battery();
         let new_stress = std::cmp::max(t_stress, b_stress);
 
-        // Phase 3: Periodic connectivity check (30s grace period)
+        // Periodic connectivity check (30s grace period)
         self.check_connectivity();
 
         let heat_penalty = match new_stress {
@@ -564,7 +564,7 @@ impl SystemGovernor {
         })
     }
 
-    /// Phase 4f: Two-stage power state evaluation. Final state = max restriction wins.
+    /// Two-stage power state evaluation. Final state = max restriction wins.
     ///
     /// Stage 1: Battery gate (hard physical constraint, NO hysteresis — physical state is authoritative)
     /// Stage 2: Composite stress (software signal, existing hysteresis: 0.85/0.50/0.30 thresholds)
@@ -636,7 +636,7 @@ impl SystemGovernor {
             .unwrap_or_else(|e| e.into_inner())
     }
 
-    // --- Phase 3: Internet Connectivity Detection ---
+    // --- Internet Connectivity Detection ---
 
     /// Duration after the last internet peer was seen before declaring offline.
     const INTERNET_GRACE_PERIOD: Duration = Duration::from_secs(30);
@@ -735,7 +735,7 @@ impl SystemGovernor {
         }
     }
 
-    // --- Phase 4e: Battery gate (hard physical constraint, NOT composite_stress) ---
+    // --- Battery gate (hard physical constraint, NOT composite_stress) ---
 
     /// Hard physical battery gate. A dead phone produces zero evidence.
     /// Battery is NOT a composite_stress weight — it short-circuits directly to PowerState.
@@ -757,7 +757,7 @@ impl SystemGovernor {
         &*self.probe
     }
 
-    // --- Phase 4c: Adaptive Vitals Polling Interval ---
+    // --- Adaptive Vitals Polling Interval ---
 
     /// Returns the vitals polling interval based on the current power state.
     /// Less restrictive states poll more frequently for faster adaptation.
@@ -950,8 +950,8 @@ impl HealthTracker {
         let load_delta = (current_load - self.last_sent_load).abs();
         let time_since = self.last_sent_at.elapsed();
 
-        // 1. SIGNIFICANCE: Did my stress change by more than 10%?
-        // 2. STALENESS: Has it been 30 seconds since I checked in?
+        // SIGNIFICANCE: Did my stress change by more than 10%?
+        // STALENESS: Has it been 30 seconds since I checked in?
         if load_delta > 0.10 || time_since > Duration::from_secs(30) {
             self.last_sent_load = current_load;
             self.last_sent_storage = current_storage;
@@ -996,7 +996,7 @@ impl Default for HealthTracker {
 }
 
 // =====================================================================
-// 6. TESTS
+// TESTS
 // =====================================================================
 
 #[cfg(test)]

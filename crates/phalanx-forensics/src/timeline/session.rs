@@ -14,7 +14,7 @@ pub trait ChronosAuthority {
 
 impl ChronosAuthority for CausalitySession {
     fn seal_evidence(&mut self, evidence: Evidence) -> Result<WitnessEnvelope, ShardError> {
-        // 1. Perform the Seal using the WitnessAuthority Verb
+        // Perform the Seal using the WitnessAuthority Verb
         let envelope = WitnessEnvelope::sign_envelope(
             evidence,
             &self.identity,
@@ -22,7 +22,7 @@ impl ChronosAuthority for CausalitySession {
             self.last_hash, // Inject current causality anchor
         )?;
 
-        // 2. Advance the Causality Chain
+        // Advance the Causality Chain
         // We use the signature hash of the just-sealed envelope as the anchor for the next
         self.last_hash = Some(envelope.calculate_anchor());
 

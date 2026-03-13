@@ -28,7 +28,7 @@ pub fn setup_phalanx_swarm(
     let local_peer_id = local_key.public().to_peer_id();
     tracing::info!(target: "phalanx_node::orchestrator", peer_id = %local_peer_id, "Initializing Network Stack");
 
-    // N3 FIX: Enforce PSK requirement when configured.
+    // Enforce PSK requirement when configured.
     // Prevents silent fallback to unencrypted transport when the swarm key
     // is missing or corrupt, which would expose all traffic.
     if config.network.require_psk && psk.is_none() {
@@ -39,12 +39,12 @@ pub fn setup_phalanx_swarm(
         );
     }
 
-    // 1. Persistent Kademlia Store Construction
+    // Persistent Kademlia Store Construction
     let dht_db_path = Path::new(&config.storage.vault_path).join("dht_store.redb");
     let local_network_id = NetworkId::from(local_peer_id.to_string());
     let persistent_store = RedbStore::new(&dht_db_path, local_network_id, evaluator)?;
 
-    // 2. Kademlia Protocol Validation
+    // Kademlia Protocol Validation
     // E3 FIX: Harden Kademlia configuration against routing table poisoning.
     let protocol_str = format!("/phalanx/kad/{}", config.network.protocol_version);
     let kad_protocol = StreamProtocol::try_from_owned(protocol_str)?;
@@ -57,10 +57,10 @@ pub fn setup_phalanx_swarm(
     let kademlia_behaviour =
         kad::Behaviour::with_config(local_peer_id, persistent_store, kad_config);
 
-    // 3. Relay Initialization
+    // Relay Initialization
     let (relay_transport, relay_client) = relay::client::new(local_peer_id);
 
-    // 4. Transport and Behaviour Composition via phalanx-transport
+    // Transport and Behaviour Composition via phalanx-transport
     let base_transport = build_base_transport(&local_key, psk)?;
     let composite_behaviour = build_behaviour(
         &local_key,
@@ -71,7 +71,7 @@ pub fn setup_phalanx_swarm(
         kademlia_behaviour,
     )?;
 
-    // 5. Swarm Assembly
+    // Swarm Assembly
     let swarm = SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
         .with_other_transport(|_key| base_transport)?

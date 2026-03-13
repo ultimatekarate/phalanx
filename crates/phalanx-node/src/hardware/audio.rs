@@ -61,12 +61,12 @@ impl PhalanxAudioThread {
             info!(rate, channels, "Audio Watchdog: STARTED");
 
             while running_flag.load(Ordering::Relaxed) {
-                // 1. Connection Attempt
+                // Connection Attempt
                 match AudioDriver::connect(rate, channels) {
                     Ok(mut driver) => {
                         info!("Audio Hardware: CONNECTED");
 
-                        // 2. Hot Loop (Capture)
+                        // Hot Loop (Capture)
                         while running_flag.load(Ordering::Relaxed) {
                             match driver.capture_chunk() {
                                 Ok(frame) => {
@@ -101,7 +101,7 @@ impl PhalanxAudioThread {
         volley_id: String,
         secret_key: Option<[u8; 32]>,
     ) {
-        // 1. Ignite Hardware
+        // Ignite Hardware
         self.start_watchdog();
 
         let mut rx = self.subscribe();
@@ -111,7 +111,7 @@ impl PhalanxAudioThread {
         let bytes_per_sec =
             (hw_config.audio_sample_rate * hw_config.audio_channels as u32 * 2) as usize;
 
-        // 2. Spawn Processor (Thread B)
+        // Spawn Processor (Thread B)
         tokio::spawn(async move {
             info!("Audio Processor: STARTED");
 
@@ -119,10 +119,10 @@ impl PhalanxAudioThread {
             let mut sequence_id = StorageSequence(0);
 
             while let Ok(frame) = rx.recv().await {
-                // A. Buffer Data
+                // Buffer Data
                 byte_buffer.extend_from_slice(&frame.data);
 
-                // B. Batching
+                // Batching
                 if byte_buffer.len() >= bytes_per_sec {
                     let chunk = byte_buffer.split_off(0);
 
@@ -138,7 +138,7 @@ impl PhalanxAudioThread {
 
                     match shard_result {
                         Ok(mut actual_shard) => {
-                            // C. Encryption
+                            // Encryption
                             if let Some(key) = secret_key {
                                 if let Err(e) =
                                     actual_shard.payload.apply_encryption(&SymmetricKey(key))
@@ -151,7 +151,7 @@ impl PhalanxAudioThread {
                                 }
                             }
 
-                            // D. Transmission
+                            // Transmission
                             if tx.send(actual_shard).await.is_err() {
                                 error!("Main channel closed (MeshSentinel dropped). Stopping Audio Processor.");
                                 self.stop();

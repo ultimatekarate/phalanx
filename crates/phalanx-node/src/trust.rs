@@ -629,7 +629,7 @@ mod tests {
         let clock = SystemClock; // Using SystemClock for the trait impl
         let did = Did::from("did:phx:offender");
 
-        // 1. Record a minor offense (Implicitly registers the peer)
+        // Record a minor offense (Implicitly registers the peer)
         registry
             .record_offense(&did, Offense::QuotaExceeded, &clock)
             .await;
@@ -641,7 +641,7 @@ mod tests {
         assert_eq!(record.reputation.score, 75);
         assert!(!record.reputation.is_blacklisted);
 
-        // 2. Record a fatal offense
+        // Record a fatal offense
         registry
             .record_offense(&did, Offense::InvalidSignature, &clock)
             .await;

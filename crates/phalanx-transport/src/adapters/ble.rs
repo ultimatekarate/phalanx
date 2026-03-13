@@ -1,6 +1,6 @@
 // crates/phalanx-transport/src/adapters/ble.rs
 //
-// Phase 3c: Local mesh transport adapters for truly disconnected scenarios.
+// Local mesh transport adapters for truly disconnected scenarios.
 //
 // BleAdapter — Structural stub for AArch64/mobile platforms. Real BLE/WiFi Direct
 // implementation requires Android/iOS SDKs via FFI during mobile integration.

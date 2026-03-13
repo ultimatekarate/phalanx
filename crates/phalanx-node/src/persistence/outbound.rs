@@ -329,7 +329,7 @@ mod tests {
         let now = PhalanxTimestamp::now();
         let topic = MeshTopic::new("test/audio");
 
-        // Phase 1: Enqueue entries, then drop the queue (simulating crash)
+        // Enqueue entries, then drop the queue (simulating crash)
         {
             let mut queue = OutboundQueue::new(dir.path().to_path_buf()).await.unwrap();
             queue
@@ -348,7 +348,7 @@ mod tests {
             // Queue dropped here — simulating crash
         }
 
-        // Phase 2: Recover from disk
+        // Recover from disk
         let mut recovered = OutboundQueue::new(dir.path().to_path_buf()).await.unwrap();
         assert_eq!(recovered.len(), 3);
         assert_eq!(recovered.total_bytes().0, 64 + 128 + 32);

@@ -35,7 +35,6 @@ impl TrustArbiter {
             let intervals = elapsed / interval_secs;
 
             if intervals > 0 {
-                // E7 FIX: Diminishing recovery — peers with lower scores recover slower.
                 // Linear recovery allows penalized peers to regain full trust too quickly.
                 // Scale recovery by the ratio of current score to MAX, with a minimum of 10%.
                 // A peer at score 50 recovers at 50% rate; at score 10, at 10% rate.
@@ -186,7 +185,7 @@ impl EgressGovernor {
     ) -> Result<ForensicUnit<WitnessEnvelope, Sealed>, GuardianError> {
         use crate::gate::PrivacyGate;
 
-        // 1. Physical Constraint: Hardware Preservation
+        // Physical Constraint: Hardware Preservation
         // Prevent heavy network egress if the device battery is dying or thermal throttling.
         if matches!(stress, SystemStress::Critical | SystemStress::Serious) {
             return Err(GuardianError::VerificationFailed(
@@ -194,7 +193,7 @@ impl EgressGovernor {
             ));
         }
 
-        // 2. Social Constraint: Zero-Trust Reputation
+        // Social Constraint: Zero-Trust Reputation
         // Prevent data exfiltration by untrusted, ignored, or actively malicious peers.
         if matches!(trust, TrustLevel::Blocked | TrustLevel::Ignored) {
             return Err(GuardianError::VerificationFailed(
@@ -202,14 +201,14 @@ impl EgressGovernor {
             ));
         }
 
-        // 3. Privacy Gate: Encrypt evidence payload before egress
+        // Privacy Gate: Encrypt evidence payload before egress
         unit.data.evidence = unit
             .data
             .evidence
             .safeguard(encryption_key)
             .map_err(|e| GuardianError::VerificationFailed(e.to_string()))?;
 
-        // 4. Typestate Promotion (The core architectural lock)
+        // Typestate Promotion (The core architectural lock)
         // This is the ONLY place in the entire codebase where .seal() is called,
         // physically proving to the compiler that the data passed the policy gates.
         Ok(unit.seal())
@@ -258,7 +257,7 @@ mod tests {
         let peer_did = Did("test_peer".to_string());
         let mut clock = MockClock::new(1000); // Start at T=1000
 
-        // 1. Setup a penalized peer (not yet banned)
+        // Setup a penalized peer (not yet banned)
         peers.insert(
             peer_did.clone(),
             PeerRecord {
@@ -272,7 +271,7 @@ mod tests {
             },
         );
 
-        // 2. Advance time by half an interval (No recovery expected)
+        // Advance time by half an interval (No recovery expected)
         clock.tick(30);
         TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 60, 10);
         assert_eq!(
@@ -280,7 +279,7 @@ mod tests {
             "Should not recover before interval"
         );
 
-        // 3. Advance time past the full interval
+        // Advance time past the full interval
         // E7 FIX: Diminishing recovery — at score 50, factor = 0.5, step = 5
         // Recovery: 50 -> 55
         clock.tick(31); // Total 61s elapsed
@@ -290,7 +289,7 @@ mod tests {
             "Reputation should have increased by scaled recovery_step (diminishing returns)"
         );
 
-        // 4. Advance time by multiple intervals
+        // Advance time by multiple intervals
         // E7 FIX: At score 55, factor = 0.55, step = 5 (truncated), 2 intervals = +10
         // Recovery: 55 -> 65
         clock.tick(120); // 2 more intervals
@@ -300,7 +299,7 @@ mod tests {
             "Reputation should follow diminishing multi-cycle recovery"
         );
 
-        // 5. Ensure it caps at the baseline (100)
+        // Ensure it caps at the baseline (100)
         clock.tick(600);
         TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 60, 10);
         assert_eq!(
@@ -351,18 +350,18 @@ mod tests {
         let mut gov = IngressGovernor::new(10);
         let stress = SystemStress::Nominal;
 
-        // 1. Fill 10 slots with low-trust peers
+        // Fill 10 slots with low-trust peers
         for i in 0..10 {
             let res = gov.try_allocate(mock_peer(), TrustLevel::Ignored, stress);
             assert!(res.is_ok(), "Failed to fill slot {}", i);
         }
 
-        // 2. Verify the 11th low-trust peer is REJECTED (Backpressure)
+        // Verify the 11th low-trust peer is REJECTED (Backpressure)
         let rejected_peer = mock_peer();
         let res = gov.try_allocate(rejected_peer, TrustLevel::Ignored, stress);
         assert!(res.is_err(), "11th Ignored peer should have been rejected");
 
-        // 3. Verify a high-trust ALLY peer PREEMPTS a low-trust peer
+        // Verify a high-trust ALLY peer PREEMPTS a low-trust peer
         let ally_peer = mock_peer();
         match gov.try_allocate(ally_peer.clone(), TrustLevel::Ally, stress) {
             Ok(Some(evicted)) => {
@@ -382,21 +381,21 @@ mod tests {
         // Switch to Serious Stress (Capacity drops to 1)
         let stress = SystemStress::Serious;
 
-        // 1. Verify Ignored peers are blocked regardless of capacity
+        // Verify Ignored peers are blocked regardless of capacity
         let res = gov.try_allocate(mock_peer(), TrustLevel::Ignored, stress);
         assert!(
             res.is_err(),
             "Ignored peer should be blocked during Serious stress"
         );
 
-        // 2. Verify Ally peer can still take the single remaining slot
+        // Verify Ally peer can still take the single remaining slot
         let res = gov.try_allocate(mock_peer(), TrustLevel::Ally, stress);
         assert!(
             res.is_ok(),
             "Ally should be allowed 1 slot during Serious stress"
         );
 
-        // 3. Verify second Ally is blocked (Capacity = 1)
+        // Verify second Ally is blocked (Capacity = 1)
         let res = gov.try_allocate(mock_peer(), TrustLevel::Ally, stress);
         assert!(
             res.is_err(),

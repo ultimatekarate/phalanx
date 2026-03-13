@@ -27,15 +27,14 @@ impl PlaybackSink for VideoPlayerSink {
         _sequence_id: StorageSequence,
         mut data: Vec<u8>,
     ) -> Result<()> {
-        // 1. Hand off to the UI layer.
+        // Hand off to the UI layer.
         // We send a clone to the channel so the UI can process/render it.
         if let Err(e) = self.ui_tx.send(data.clone()).await {
             // If the UI is no longer listening, we drop the data.
             return Err(anyhow::anyhow!("UI playback channel closed: {}", e));
         }
 
-        // 2. THE MASTERPIECE MOVE: Ephemerality.
-        // Once the clone is sent, we securely wipe the local 'data' buffer.
+        // Ephemerality: wipe the local buffer once the clone is sent.
         // This ensures the cleartext exists in RAM for the shortest time possible.
         data.zeroize();
 

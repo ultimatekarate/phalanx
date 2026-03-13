@@ -112,7 +112,7 @@ impl IntegrityGate for WitnessEnvelope {
         tolerance: std::time::Duration,
         anchor: Option<SignatureHash>,
     ) -> Result<Self, ShardError> {
-        // 1. UNCONDITIONAL CRYPTOGRAPHIC VERIFICATION
+        // UNCONDITIONAL CRYPTOGRAPHIC VERIFICATION
         // Forensic Zero-Trust: Never operate on data without signature verification.
         if !self.verify_envelope() {
             error!(
@@ -126,14 +126,14 @@ impl IntegrityGate for WitnessEnvelope {
             ));
         }
 
-        // 2. STICKY TRUST OPTIMIZATION (POST-VERIFICATION)
+        // STICKY TRUST OPTIMIZATION (POST-VERIFICATION)
         // If anchored, we trust the chain continuity and can skip secondary checks.
         let is_anchored = anchor.is_some() && anchor == self.prev_hash;
         if is_anchored {
             return Ok(self);
         }
 
-        // 3. TEMPORAL GATE (Only for non-anchored or genesis units)
+        // TEMPORAL GATE (Only for non-anchored or genesis units)
         let now = clock.now();
         match self.evidence.timestamp().verify_freshness(now, tolerance) {
             Ok(_) => Ok(self),
@@ -424,17 +424,17 @@ impl PromotionGate for ForensicUnit<WitnessEnvelope, Unverified> {
         tolerance: std::time::Duration,
         anchor: Option<SignatureHash>,
     ) -> Result<ForensicUnit<WitnessEnvelope, Verified>, ShardError> {
-        // 1. Integrity Gate (Signature + Time + Sticky Trust)
+        // Integrity Gate (Signature + Time + Sticky Trust)
         let mut envelope = self
             .data
             .check_integrity(node_id, clock, tolerance, anchor)?;
 
-        // 2. Coasting Gate (Fast hash on anchored path)
+        // Coasting Gate (Fast hash on anchored path)
         if anchor.is_some() && anchor == envelope.prev_hash {
             envelope = envelope.verify_fast_hash(node_id)?;
         }
 
-        // 3. Continuity Gate (Chain Enforcement)
+        // Continuity Gate (Chain Enforcement)
         if let Some(ref a) = anchor {
             envelope = envelope.verify_link(a)?;
         }

@@ -80,7 +80,7 @@ impl fmt::Display for UnitInterval {
     }
 }
 
-// 2. Strict Equality (Eq)
+// Strict Equality (Eq)
 // Valid because we filter NaNs in new().
 impl PartialEq for UnitInterval {
     fn eq(&self, other: &Self) -> bool {
@@ -90,7 +90,7 @@ impl PartialEq for UnitInterval {
 
 impl Eq for UnitInterval {}
 
-// 3. Strict Ordering (Ord)
+// Strict Ordering (Ord)
 // Essential for sorting vectors of loads or using in BTreeMaps.
 impl Ord for UnitInterval {
     fn cmp(&self, other: &Self) -> Ordering {
@@ -318,7 +318,7 @@ impl<T, S: ValidationState> ForensicUnit<T, S> {
     }
 }
 
-// ─── Four Pillars Newtypes (Phase 0-pre) ───────────────────────────────────
+// ─── Four Pillars Newtypes ───────────────────────────────────
 // Every new domain concept gets a newtype. Primitive obsession is forbidden.
 
 /// RaptorQ encoding symbol identifier (ESI). Not an index — it's a symbol address.

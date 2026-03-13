@@ -27,7 +27,7 @@ use phalanx_proto::prelude::*;
 const DEFAULT_BLACK_LEVEL: f32 = 16.0;
 
 // =====================================================================
-// PHASE 4b: ADAPTIVE FPS DUTY CYCLING
+// ADAPTIVE FPS DUTY CYCLING
 // =====================================================================
 
 /// Compute target FPS based on the current power state.
@@ -123,8 +123,8 @@ impl CameraDriver {
         // [STUB] Real implementation would use `nokhwa` here.
         // For robustness testing, we use a reliable Mock Driver.
         // To enable Real Hardware:
-        // 1. Add `nokhwa` to imports.
-        // 2. Initialize Camera::new(Index(index), ...) inside here.
+        // Add `nokhwa` to imports.
+        // Initialize Camera::new(Index(index), ...) inside here.
 
         Ok(Self {
             fps_interval: Duration::from_millis(1000 / fps as u64),
@@ -138,10 +138,10 @@ impl CameraDriver {
     }
 
     fn capture_frame(&mut self) -> Result<VideoFrame, String> {
-        // 1. Simulate Hardware Wait (Blocking I/O)
+        // Simulate Hardware Wait (Blocking I/O)
         thread::sleep(self.fps_interval);
 
-        // 2. Time Drift Correction
+        // Time Drift Correction
         // Calculate current time based on Monotonic elapsed + System Anchor
         let elapsed = self.start_monotonic.elapsed();
         let frame_time = self.start_system_time + elapsed;
@@ -151,7 +151,7 @@ impl CameraDriver {
             .unwrap_or(Duration::from_secs(0))
             .as_millis() as u64;
 
-        // 3. Generate Data (Visual Noise Pattern)
+        // Generate Data (Visual Noise Pattern)
         // 640x480 * 3 bytes (RGB)
         let mut fake_data = vec![0u8; (self.width * self.height * 3) as usize];
         // Simple moving pattern so we can "see" the video changing
@@ -159,7 +159,7 @@ impl CameraDriver {
 
         self.frame_counter += 1;
 
-        // 4. Simulate Random Crash (Optional - Uncomment to test Watchdog)
+        // Simulate Random Crash (Optional - Uncomment to test Watchdog)
         // if self.frame_counter % 100 == 0 { return Err("USB Disconnect".into()); }
 
         Ok(VideoFrame {
@@ -176,7 +176,7 @@ impl CameraDriver {
 ///
 /// Groups the capture pipeline parameters to keep the spawn signature ergonomic.
 /// - `lens` — ForensicLens implementation for sensor fingerprinting. Default: `ScalarLens`.
-/// - `governor` — Optional SystemGovernor for Phase 4 adaptive FPS duty cycling.
+/// - `governor` — Optional SystemGovernor for adaptive FPS duty cycling.
 ///   When provided, the camera processor reads `current_power_state()` each batch
 ///   cycle and adjusts frame batching accordingly. When `None`, full FPS is used.
 pub struct CameraSpawnConfig {
@@ -233,12 +233,12 @@ impl PhalanxCameraThread {
             );
 
             while running_flag.load(Ordering::Relaxed) {
-                // 1. Connection Attempt
+                // Connection Attempt
                 match CameraDriver::connect(device_index, target_fps) {
                     Ok(mut driver) => {
                         info!("Camera Hardware: CONNECTED");
 
-                        // 2. Hot Loop (Capture)
+                        // Hot Loop (Capture)
                         while running_flag.load(Ordering::Relaxed) {
                             match driver.capture_frame() {
                                 Ok(frame) => {
@@ -283,18 +283,18 @@ impl PhalanxCameraThread {
             governor,
         } = config;
 
-        // 1. Ignite the Hardware Watchdog
+        // Ignite the Hardware Watchdog
         let device_idx = index.unwrap_or(0);
         self.start_watchdog(device_idx);
 
         let mut rx = self.subscribe();
         let base_fps = Fps::new(hw_config.camera_fps);
 
-        // 2. Spawn the Processor (Thread B)
+        // Spawn the Processor (Thread B)
         // Consumes raw frames, analyzes sensor fingerprint, compresses,
         // shards, encrypts -> Main Channel
         //
-        // Phase 4b: Each batch cycle, the processor reads the current PowerState
+        // Each batch cycle, the processor reads the current PowerState
         // and adjusts frame batching accordingly. Asymmetric ramp:
         // - UP (more capture): instant — every frame we don't capture is lost evidence
         // - DOWN (less capture): smooth over 1s — prevents burst flooding egress
@@ -310,7 +310,7 @@ impl PhalanxCameraThread {
 
             // "While the camera is producing frames..."
             while let Ok(frame) = rx.recv().await {
-                // Phase 4b: Read current power state to determine effective FPS
+                // Read current power state to determine effective FPS
                 let effective_fps = match &governor {
                     Some(gov) => {
                         let power = gov.current_power_state();
@@ -325,7 +325,7 @@ impl PhalanxCameraThread {
                     None => base_fps,
                 };
 
-                // A. Forensic Lens Analysis (BEFORE compression)
+                // Forensic Lens Analysis (BEFORE compression)
                 // Extract Y (luma) plane from raw RGB data — the ForensicLens
                 // operates on luminance to compute Moiré energy + PRNU variance.
                 // Must happen before JPEG compression destroys the raw sensor signal.
@@ -338,13 +338,13 @@ impl PhalanxCameraThread {
                     BlackLevel(DEFAULT_BLACK_LEVEL),
                 );
 
-                // B. Compression (Simulated or Real JPEG)
+                // Compression (Simulated or Real JPEG)
                 // Using the dimensions provided by the frame itself
                 if let Ok(jpeg) = compress_frame(frame.data, frame.width, frame.height) {
                     frame_buffer.push(jpeg);
                 }
 
-                // C. Batching — uses effective FPS from power state
+                // Batching — uses effective FPS from power state
                 if frame_buffer.len() >= effective_fps.get() as usize {
                     let chunk = frame_buffer.split_off(0); // Take all
                     let volley_id = VolleyId::new(volley_id.clone());
@@ -359,7 +359,7 @@ impl PhalanxCameraThread {
 
                     match shard_result {
                         Ok(mut actual_shard) => {
-                            // D. Encryption
+                            // Encryption
                             if let Some(key) = secret_key {
                                 if let Err(e) =
                                     actual_shard.payload.apply_encryption(&SymmetricKey(key))
@@ -369,7 +369,7 @@ impl PhalanxCameraThread {
                                 }
                             }
 
-                            // E. Transmission
+                            // Transmission
                             if tx.send(actual_shard).await.is_err() {
                                 error!("Main channel closed. Stopping Camera Processor.");
                                 self.stop(); // Kill the watchdog too
@@ -459,7 +459,7 @@ mod tests {
         assert!(shard.unwrap().is_some(), "Received empty shard");
     }
 
-    // --- Phase 4b: Adaptive FPS Tests ---
+    // --- Adaptive FPS Tests ---
 
     #[test]
     fn test_target_fps_normal_returns_base() {

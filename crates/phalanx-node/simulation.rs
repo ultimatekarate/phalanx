@@ -60,7 +60,7 @@ impl SimulationHarness {
 
     /// Spawns an actual PhalanxEngine backed by the MockTransport adapter.
     pub async fn spawn_node(&mut self, name: &str, _role: NodeRole) -> Option<Did> {
-        // 1. Establish Domain Identity
+        // Establish Domain Identity
         let identity_result = PhalanxIdentity::generate();
         let (identity, _) = match identity_result {
             Ok(res) => res,
@@ -80,7 +80,7 @@ impl SimulationHarness {
 
         info!(node = %name, %network_id, "Initializing Production Engine on Mock Adapter");
 
-        // 2. Establish Mock Transport Port (The Adapter)
+        // Establish Mock Transport Port (The Adapter)
         let (ingress_tx, ingress_rx) = mpsc::channel::<NetworkEvent>(4096);
         let (egress_tx, mut egress_rx) = mpsc::channel::<(MeshTopic, Vec<u8>)>(4096);
         let transport = MockTransport::new(ingress_rx, Some(egress_tx))
@@ -91,7 +91,7 @@ impl SimulationHarness {
             .await
             .insert(node_did.clone(), ingress_tx);
 
-        // 3. Initialize the Actual Production Engine
+        // Initialize the Actual Production Engine
         let registry_config = self.config.clone();
 
         let trust_registry = TrustRegistry::build(&registry_config).await;
@@ -118,14 +118,14 @@ impl SimulationHarness {
             }
         };
 
-        // 4. Detach Engine Execution
+        // Detach Engine Execution
         tokio::spawn(async move {
             if let Err(e) = engine.run().await {
                 error!(error = %e, "Simulation node engine terminated unexpectedly.");
             }
         });
 
-        // 5. Wire Mesh Routing (Egress -> Ingress)
+        // Wire Mesh Routing (Egress -> Ingress)
         let routing_table = Arc::clone(&self.ingress_routes);
         let source_did = node_did.clone();
         let source_network_id = network_id;

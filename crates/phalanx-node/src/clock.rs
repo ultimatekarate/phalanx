@@ -140,7 +140,7 @@ impl TrustedClock {
     /// This method is async because sntpc 0.8 returns a future from `get_time`.
     /// If called from a synchronous context, wrap in a runtime block.
     pub async fn synchronize(&self) -> TimeResult<()> {
-        // 1. Resolve the hostname to a concrete SocketAddr
+        // Resolve the hostname to a concrete SocketAddr
         // NTP always uses port 123
         let addr = "pool.ntp.org:123"
             .to_socket_addrs()
@@ -148,7 +148,7 @@ impl TrustedClock {
             .next()
             .ok_or_else(|| TimeError::NtpError("No address found for NTP pool".into()))?;
 
-        // 2. Setup the async socket via the Tokio adapter
+        // Setup the async socket via the Tokio adapter
         let socket = TokioNtpSocket(
             tokio::net::UdpSocket::bind("0.0.0.0:0")
                 .await
@@ -157,7 +157,7 @@ impl TrustedClock {
 
         let context = NtpContext::new(PhalanxNtpGenerator);
 
-        // 3. Pass the resolved 'addr' (SocketAddr) instead of the string
+        // Pass the resolved 'addr' (SocketAddr) instead of the string
         match sntpc::get_time(addr, &socket, context).await {
             Ok(time) => {
                 let ntp_sec = time.sec();

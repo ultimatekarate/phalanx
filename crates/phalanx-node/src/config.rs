@@ -184,8 +184,8 @@ impl NodeConfig {
     /// REFACTOR: Removed .expect() to satisfy Forensic Integrity standards.
     #[allow(clippy::missing_errors_doc)]
     pub fn load_default() -> Result<Self, ConfigError> {
-        // 1. Attempt to load the file
-        // 2. Return the Result directly instead of unwrapping/expecting
+        // Attempt to load the file
+        // Return the Result directly instead of unwrapping/expecting
         Self::load("phalanx.toml")
             .map_err(|e| ConfigError::NotFound(format!("Critical: Missing phalanx.toml - {e}")))
     }

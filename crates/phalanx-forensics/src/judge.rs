@@ -47,13 +47,13 @@ impl Decryptor for DataPayload {
     fn reveal(&self, key: &SymmetricKey) -> Result<Vec<u8>, CryptoError> {
         match self {
             DataPayload::Encrypted { nonce, ciphertext } => {
-                // 1. Initialize the cryptographic engine using the provided 32-byte key
+                // Initialize the cryptographic engine using the provided 32-byte key
                 let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
 
-                // 2. Load the 24-byte extended nonce
+                // Load the 24-byte extended nonce
                 let x_nonce = XNonce::from_slice(nonce);
 
-                // 3. Perform Authenticated Decryption
+                // Perform Authenticated Decryption
                 // If the ciphertext was tampered with, this will safely fail.
                 let decrypted_bytes = cipher
                     .decrypt(x_nonce, ciphertext.as_ref())
@@ -124,30 +124,19 @@ impl PayloadCipher for DataPayload {
 }
 
 pub trait JudgeExt {
-    fn verify(pubkey: &[u8], msg: &[u8], sig: &[u8]) -> bool;
+    fn verify(pubkey: &[u8; 32], msg: &[u8], sig: &[u8]) -> bool;
     fn sign(&self, msg: &[u8]) -> Signature;
 }
 
 impl JudgeExt for PhalanxIdentity {
-    fn verify(pubkey: &[u8], msg: &[u8], sig: &[u8]) -> bool {
-        let key_bytes_opt: Option<&[u8]> = if pubkey.len() == 32 {
-            Some(pubkey)
-        } else if pubkey.len() == 38 && pubkey.starts_with(&[0x00, 0x24, 0x08, 0x01, 0x12, 0x20]) {
-            pubkey.get(6..)
-        } else {
-            None
+    fn verify(pubkey: &[u8; 32], msg: &[u8], sig: &[u8]) -> bool {
+        let Ok(vk) = VerifyingKey::from_bytes(pubkey) else {
+            return false;
         };
-
-        if let Some(bytes) = key_bytes_opt {
-            if let Ok(key_array) = bytes.try_into() {
-                if let Ok(vk) = VerifyingKey::from_bytes(key_array) {
-                    if let Ok(signature) = Signature::from_slice(sig) {
-                        return vk.verify_strict(msg, &signature).is_ok();
-                    }
-                }
-            }
-        }
-        false
+        let Ok(sig) = Signature::from_slice(sig) else {
+            return false;
+        };
+        vk.verify_strict(msg, &sig).is_ok()
     }
 
     fn sign(&self, msg: &[u8]) -> Signature {
@@ -155,7 +144,6 @@ impl JudgeExt for PhalanxIdentity {
     }
 }
 
-/// T4 FIX: TimeJudge now accepts Duration instead of raw u64.
 /// This eliminates unit confusion (seconds vs milliseconds) that previously
 /// allowed attackers to exploit misconfigured tolerance values.
 pub trait TimeJudge {
@@ -174,7 +162,7 @@ impl TimeJudge for PhalanxTimestamp {
     ) -> Result<(), TimeError> {
         let claimed = self.as_u64();
         let current = now.as_u64();
-        // T4 FIX: Convert Duration to milliseconds explicitly.
+
         // PhalanxTimestamp values are in milliseconds, so tolerance must match.
         let tolerance_ms = tolerance.as_millis() as u64;
 
@@ -214,14 +202,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_forensic_boundary_tamper_detection_v4() {
-        // 1. Setup Identities & Baseline Environment
+        // Setup Identities & Baseline Environment
         let witness_identity = PhalanxIdentity::new_ephemeral();
         let witness_peer_id = witness_identity.clone().network_id;
         let vid = VolleyId::new("test_stream_01");
         let clock = SystemClock;
         let now = PhalanxTimestamp::now();
 
-        // 2. Properly initialize a valid VideoShard
+        // Properly initialize a valid VideoShard
         let original_shard = VideoShard {
             timestamp: now,
             sequence_id: StorageSequence(100),
@@ -240,7 +228,7 @@ mod tests {
         )
         .expect("Failed to initialize valid WitnessEnvelope");
 
-        // 3. BASELINE: Verify check_integrity passes on clean data (Gate 3)
+        // BASELINE: Verify check_integrity passes on clean data (Gate 3)
         let integrity_result = envelope.clone().check_integrity(
             &witness_peer_id,
             &clock,
@@ -252,7 +240,7 @@ mod tests {
             "Integrity Gate failed on clean data"
         );
 
-        // 4. TAMPER: Modify the evidence bytes (Simulation of disk-rot or database injection)
+        // TAMPER: Modify the evidence bytes (Simulation of disk-rot or database injection)
         match &mut envelope.evidence {
             Evidence::Video(shard) => {
                 if let DataPayload::Clear(ref mut bytes) = shard.payload {
@@ -262,7 +250,7 @@ mod tests {
             _ => panic!("Expected Video evidence"),
         }
 
-        // 5. THE TEST: Gate 3 (Integrity) must catch the modification
+        // THE TEST: Gate 3 (Integrity) must catch the modification
         // Re-serializing and comparing against the stored signature must fail.
         let tamper_result = envelope.check_integrity(
             &witness_peer_id,
@@ -276,7 +264,7 @@ mod tests {
             "INTEGRITY BREACH: Gate 3 (check_integrity) accepted modified evidence!"
         );
 
-        // 6. THE ARCHITECTURAL LOCK: Gate 4 (Policy Promotion)
+        // THE ARCHITECTURAL LOCK: Gate 4 (Policy Promotion)
         // We prove that without a successful Gate 3, we cannot obtain a 'Verified' unit,
         // which means the EgressGovernor cannot produce a 'Sealed' unit for the wire.
         match tamper_result {
@@ -299,7 +287,7 @@ mod tests {
             }
         }
 
-        // 7. FINAL PROOF: VolleyResponse requires Sealed units
+        // FINAL PROOF: VolleyResponse requires Sealed units
         // Because the tamper_result was an Err, we can't even construct a
         // VolleyResponse::Success(vec![...]) with this data.
 

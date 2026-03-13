@@ -113,7 +113,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
             }
         };
 
-        // Phase 1e: Fountain-encode into ShardChunks.
+        // Fountain-encode into ShardChunks.
         // Each symbol is self-describing (12-byte OTI prefix) so the receiver
         // can initialize the decoder from ANY received symbol.
         let shard_id = ShardId(self.next_shard_id);
@@ -150,7 +150,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
                             error = %e,
                             "Failed to publish fountain symbol"
                         );
-                        // TODO: Phase 0e — enqueue to OutboundQueue for retry
+                        // TODO: enqueue to OutboundQueue for retry
                     } else {
                         published += 1;
                     }

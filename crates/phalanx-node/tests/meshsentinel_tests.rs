@@ -81,7 +81,7 @@ async fn build_test_sentinel(
         trust_registry,
         system_governor: Arc::new(SystemGovernor::new()),
         vault_key,
-        local_mesh: None, // Phase 3: No local transport in tests
+        local_mesh: None, // No local transport in tests
     };
 
     (
