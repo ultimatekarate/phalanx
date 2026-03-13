@@ -63,6 +63,13 @@ impl EgressPort for TestEgress {
     async fn find_providers(&self, _recording_id: &RecordingId) -> Result<(), String> {
         Ok(())
     }
+    async fn send_request(
+        &self,
+        _target: &NetworkId,
+        _request: phalanx_proto::retrieval::RecordingRequest,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 // --- Test Sentinel Factory ---

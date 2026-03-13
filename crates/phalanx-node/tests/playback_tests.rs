@@ -3,6 +3,7 @@ use tokio::sync::mpsc;
 
 use phalanx_forensics::crucible::EnvelopeHashExt;
 use phalanx_forensics::witness::WitnessAuthority;
+use phalanx_node::actors::egress::EgressCommand;
 use phalanx_node::actors::playback::PlaybackCoordinator;
 use phalanx_node::actors::storage::StorageCommand;
 use phalanx_node::config::NodeConfig;
@@ -71,7 +72,17 @@ async fn test_exodus_resurrection_logic() {
 
     let sink = VideoPlayerSink::new(ui_tx);
     let recording_id = RecordingId::new("v_exodus_test");
-    let mut coordinator = PlaybackCoordinator::new(storage_tx.clone(), None, sink, disc_tx);
+    let (egress_tx, _egress_rx) = mpsc::channel::<EgressCommand>(10);
+    let (_providers_tx, providers_rx) = mpsc::channel(1);
+    let mut coordinator = PlaybackCoordinator::new(
+        storage_tx.clone(),
+        egress_tx,
+        None,
+        sink,
+        disc_tx,
+        providers_rx,
+        Arc::new(identity.clone()),
+    );
 
     let shard_1 = VideoShard {
         timestamp: PhalanxTimestamp::now(),
@@ -194,7 +205,17 @@ async fn test_playback_resurrection_with_mesh_gap() {
 
     let sink = VideoPlayerSink::new(ui_tx);
     let recording_id = RecordingId::new("v_resurrection");
-    let mut coordinator = PlaybackCoordinator::new(storage_tx.clone(), None, sink, disc_tx);
+    let (egress_tx, _egress_rx) = mpsc::channel::<EgressCommand>(10);
+    let (_providers_tx, providers_rx) = mpsc::channel(1);
+    let mut coordinator = PlaybackCoordinator::new(
+        storage_tx.clone(),
+        egress_tx,
+        None,
+        sink,
+        disc_tx,
+        providers_rx,
+        Arc::new(identity.clone()),
+    );
 
     let shard_1 = VideoShard {
         timestamp: PhalanxTimestamp::now(),
@@ -378,11 +399,16 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
         }
     });
 
+    let (egress_tx, _egress_rx) = mpsc::channel::<EgressCommand>(10);
+    let (_providers_tx, providers_rx) = mpsc::channel(1);
     let mut coordinator = PlaybackCoordinator::new(
         storage_tx.clone(),
+        egress_tx,
         None,
         VideoPlayerSink::new(ui_tx),
         disc_tx,
+        providers_rx,
+        Arc::new(identity_main.clone()),
     );
     let v_id_clone = recording_id.clone();
     tokio::spawn(async move {

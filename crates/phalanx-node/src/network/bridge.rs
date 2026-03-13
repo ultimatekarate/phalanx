@@ -124,6 +124,18 @@ impl EgressPort for BridgeEgress {
             .await
             .map_err(|e| e.to_string())
     }
+
+    async fn send_request(
+        &self,
+        target: &NetworkId,
+        request: phalanx_proto::retrieval::RecordingRequest,
+    ) -> Result<(), String> {
+        let data = postcard::to_allocvec(&request).map_err(|e| e.to_string())?;
+        self.adapter
+            .send_direct(target, data)
+            .await
+            .map_err(|e| e.to_string())
+    }
 }
 
 impl Libp2pBridge {

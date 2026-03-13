@@ -6,6 +6,7 @@ use libp2p::PeerId;
 use phalanx_proto::identity::RecordingId;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::*; // Pulls in MeshTopic, RecordingResponse, NetworkEvent
+use phalanx_proto::retrieval::RecordingRequest;
 use std::str::FromStr;
 use tokio::sync::mpsc; // FIX: Corrected from 'use crate::mpsc'
 
@@ -94,6 +95,12 @@ pub trait EgressPort: Send + Sync + Clone {
     async fn announce_recording(&self, recording_id: &RecordingId) -> Result<(), String>;
     /// Initiate a DHT query to find providers for a specific recording.
     async fn find_providers(&self, recording_id: &RecordingId) -> Result<(), String>;
+    /// Send a shard retrieval request to a specific peer.
+    async fn send_request(
+        &self,
+        target: &NetworkId,
+        request: RecordingRequest,
+    ) -> Result<(), String>;
 }
 
 // THE LOCAL MESH PORT (Ad-Hoc Mesh Forward Infrastructure)

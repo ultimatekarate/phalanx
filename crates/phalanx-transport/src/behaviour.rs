@@ -15,6 +15,15 @@ pub const RECORDING_NAMESPACE_PREFIX: &str = "phalanx/recording/";
 
 pub type PhalanxKadStore = kad::store::MemoryStore;
 
+/// Parse a RecordingId from a Kademlia RecordKey.
+/// Inverse of `PhalanxBehaviour::recording_key()`.
+pub fn recording_id_from_key(key: &RecordKey) -> Option<RecordingId> {
+    let key_str = std::str::from_utf8(key.as_ref()).ok()?;
+    key_str
+        .strip_prefix(RECORDING_NAMESPACE_PREFIX)
+        .map(RecordingId::new)
+}
+
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "PhalanxEvent")]
 pub struct PhalanxBehaviour<S: RecordStore + Send + Sync + 'static> {

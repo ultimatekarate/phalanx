@@ -85,6 +85,10 @@ pub struct MeshSentinel<I: IngressPort> {
     // When a `Foregrounded` event arrives, immediately recalculate PowerState.
     // Desktop: always `None` (no foreground/background concept).
     lifecycle_rx: Option<tokio::sync::mpsc::Receiver<LifecycleEvent>>,
+
+    // DHT: Provider discovery forwarding to the active PlaybackCoordinator.
+    // Replaced with a fresh channel on each spawn_playback() call.
+    providers_tx: mpsc::Sender<(RecordingId, Vec<NetworkId>)>,
 }
 
 impl<I: IngressPort> MeshSentinel<I> {
@@ -239,6 +243,9 @@ impl<I: IngressPort> MeshSentinel<I> {
         // Desktop (SysfsProbe) returns None.
         let lifecycle_rx = deps.system_governor.probe().lifecycle_events();
 
+        // Placeholder providers_tx — replaced with a fresh channel on each spawn_playback() call.
+        let (providers_tx, _) = mpsc::channel(1);
+
         Ok(Self {
             config: config_arc,
             identity: arc_identity,
@@ -256,6 +263,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             discovery_rx,
             local_mesh: deps.local_mesh,
             lifecycle_rx,
+            providers_tx,
         })
     }
 
@@ -424,17 +432,23 @@ impl<I: IngressPort> MeshSentinel<I> {
             }
 
             // DHT: Providers discovered for a recording.
-            // Full retrieval requests (with SealedLocator + signature) are initiated
-            // by PlaybackCoordinator when it has the auth context to construct them.
+            // Filter out self (don't request shards from yourself), then forward to
+            // PlaybackCoordinator which owns the auth context to construct retrieval requests.
             NetworkEvent::ProvidersDiscovered {
                 recording_id,
                 providers,
             } => {
-                tracing::info!(
-                    recording = %recording_id,
-                    count = providers.len(),
-                    "DHT: Providers discovered for recording"
-                );
+                let local_id = self.identity.to_network_id();
+                let remote_providers: Vec<_> =
+                    providers.into_iter().filter(|p| *p != local_id).collect();
+                if !remote_providers.is_empty() {
+                    tracing::info!(
+                        recording = %recording_id,
+                        count = remote_providers.len(),
+                        "DHT: Providers discovered for recording"
+                    );
+                    let _ = self.providers_tx.try_send((recording_id, remote_providers));
+                }
                 false
             }
 
@@ -483,15 +497,24 @@ impl<I: IngressPort> MeshSentinel<I> {
     }
 
     pub fn spawn_playback<S: PlaybackSink + 'static>(
-        &self,
+        &mut self,
         recording_id: RecordingId,
         sink: S,
     ) -> tokio::task::JoinHandle<()> {
+        // Fresh channel per playback session — only one active at a time.
+        // Replacing providers_tx drops the old sender, signaling the previous
+        // PlaybackCoordinator's providers_rx that no more data will arrive.
+        let (providers_tx, providers_rx) = mpsc::channel(100);
+        self.providers_tx = providers_tx;
+
         let mut coordinator = PlaybackCoordinator::new(
             self.storage_tx.clone(),
+            self.egress_tx.clone(),
             Some((*self.network_key).clone()),
             sink,
             self.discovery_tx.clone(),
+            providers_rx,
+            self.identity.clone(),
         );
 
         tokio::spawn(async move {

@@ -1,14 +1,16 @@
-use crate::behaviour::PhalanxBehaviour;
+use crate::behaviour::{recording_id_from_key, PhalanxBehaviour};
 use crate::events::PhalanxEvent;
 use crate::{PeerMapper, TransportAdapter, TransportError};
 use async_trait::async_trait;
 use futures::StreamExt; // Required to bring StreamExt::select_next_some into scope
+use libp2p::kad;
 use libp2p::kad::store::RecordStore;
 use libp2p::swarm::Swarm;
 use libp2p::swarm::SwarmEvent;
 use libp2p::PeerId;
 use phalanx_proto::identity::NetworkId;
 use phalanx_proto::network::NetworkEvent;
+use phalanx_proto::retrieval::RecordingResponse;
 use phalanx_proto::telemetry::DiscoverySource;
 use phalanx_proto::topic::MeshTopic;
 use std::collections::HashMap;
@@ -65,6 +67,52 @@ pub fn translate_swarm_event(event: SwarmEvent<PhalanxEvent>) -> Option<NetworkE
                 peer: PeerMapper::to_network_id(peer_id),
                 source: DiscoverySource::Mdns,
             }),
+        // DHT: Kademlia provider discovery results → ProvidersDiscovered
+        SwarmEvent::Behaviour(PhalanxEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+            result:
+                kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders {
+                    key,
+                    providers,
+                })),
+            ..
+        })) => {
+            let Some(recording_id) = recording_id_from_key(&key) else {
+                tracing::warn!(
+                    target: "phalanx::transport",
+                    "DHT: Could not parse recording_id from provider key"
+                );
+                return None;
+            };
+            let providers: Vec<_> = providers.iter().map(PeerMapper::to_network_id).collect();
+            Some(NetworkEvent::ProvidersDiscovered {
+                recording_id,
+                providers,
+            })
+        }
+        // DHT: Request-response shard retrieval responses → ShardResponseReceived
+        SwarmEvent::Behaviour(PhalanxEvent::Retrieval(
+            libp2p::request_response::Event::Message {
+                peer,
+                message: libp2p::request_response::Message::Response { response, .. },
+                ..
+            },
+        )) => match response {
+            RecordingResponse::Success(sealed_units) => {
+                let envelopes = sealed_units.into_iter().map(|u| u.unpack()).collect();
+                Some(NetworkEvent::ShardResponseReceived {
+                    origin: PeerMapper::to_network_id(&peer),
+                    envelopes,
+                })
+            }
+            other => {
+                tracing::debug!(
+                    target: "phalanx::transport",
+                    response = ?other,
+                    "DHT: Non-success retrieval response"
+                );
+                None
+            }
+        },
         _ => None, // Safely ignore background noise like DHT pings
     }
 }
