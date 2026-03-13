@@ -13,6 +13,13 @@ use phalanx_proto::types::BlackLevel;
 pub struct ScalarLens;
 
 impl ForensicLens for ScalarLens {
+    // SAFETY: All arithmetic in this kernel is bounded by the early-return guard
+    // (width ≥ crop, height ≥ crop, y_plane.len() ≥ width×height). Loop indices
+    // stay within [1, crop-2] so ±1 offsets never underflow/overflow. Counters
+    // (lap_count, prnu_count) max at crop² = 65,536, well within u32.
+    // The f64→f32 casts are intentional: we accumulate in f64 for numerical
+    // stability and truncate to f32 for the output metrics (matching NEON kernel).
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     fn analyze(
         &self,
         y_plane: &[u8],
