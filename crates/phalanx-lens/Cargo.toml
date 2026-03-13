@@ -1,0 +1,16 @@
+[package]
+name = "phalanx-lens"
+version = "0.1.0"
+edition = "2021"
+description = "The Forensic Eye: SIMD-accelerated sensor fingerprinting for evidence provenance."
+
+[dependencies]
+phalanx-proto = { path = "../phalanx-proto" }
+
+[features]
+default = ["scalar"]
+scalar = []
+neon = []
+
+[lints]
+workspace = true
