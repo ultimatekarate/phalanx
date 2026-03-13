@@ -2,7 +2,7 @@
 use crate::identity::{Did, NetworkId, ShardId, VolleyId};
 use crate::storage::HandoverProof;
 use crate::time::PhalanxTimestamp;
-use crate::types::EncodingSymbolId;
+use crate::types::{ChannelCount, EncodingSymbolId, Fps, SampleRate};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::{Add, AddAssign, Deref, Sub};
@@ -109,7 +109,7 @@ pub struct ForensicMetrics {
 pub struct VideoShard {
     pub timestamp: PhalanxTimestamp,
     pub sequence_id: StorageSequence,
-    pub fps: u8,
+    pub fps: Fps,
     pub volley_id: VolleyId,
     pub payload: DataPayload,
     /// Mandatory sensor fingerprint from the ForensicLens pipeline.
@@ -120,8 +120,8 @@ pub struct VideoShard {
 pub struct AudioShard {
     pub timestamp: PhalanxTimestamp,
     pub sequence_id: StorageSequence,
-    pub sample_rate: u32,
-    pub channels: u8,
+    pub sample_rate: SampleRate,
+    pub channels: ChannelCount,
     pub volley_id: VolleyId,
     pub payload: DataPayload,
 }

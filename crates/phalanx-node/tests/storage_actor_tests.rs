@@ -22,7 +22,7 @@ use phalanx_proto::prelude::{
 use phalanx_proto::retrieval::VolleyResponse;
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
-use phalanx_proto::types::{ForensicUnit, Verified};
+use phalanx_proto::types::{ForensicUnit, Fps, Verified};
 use phalanx_transport::identity_ext::Libp2pExt;
 use tokio::sync::{mpsc, oneshot};
 
@@ -116,7 +116,7 @@ async fn test_pillar_salvage_under_disk_pressure() {
     let video_shard = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id: VolleyId::new("v1"),
         payload: DataPayload::Clear(vec![0xCA, 0xFE, 0xBA, 0xBE]),
         lens_metrics: ForensicMetrics::default(),
@@ -181,7 +181,7 @@ async fn test_reputation_gate_signature_mismatch() {
     let video_shard = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id: VolleyId::new("v1"),
         payload: DataPayload::Clear(vec![0xBA, 0xAD, 0xF0, 0x0D]),
         lens_metrics: ForensicMetrics::default(),
@@ -306,7 +306,7 @@ async fn test_salvage_on_node_death() {
     let real_shard = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(999),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id: VolleyId::new("salvage_volley_01"),
         payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         lens_metrics: ForensicMetrics::default(),
@@ -456,7 +456,7 @@ async fn test_stronghold_ingestion_and_persistence() {
     let video_shard = phalanx_forensics::reassembler::create_video_shard(
         vec![vec![0xDE, 0xAD, 0xBE, 0xEF]],
         StorageSequence(1),
-        30,
+        Fps::new(30),
         VolleyId::new("v1"),
         ForensicMetrics::default(),
     )
@@ -610,7 +610,7 @@ async fn test_storage_actor_metric_pipeline() {
     let video_shard = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id: VolleyId::new("v1"),
         payload: DataPayload::Clear(vec![0xBA, 0xAD, 0xF0, 0x0D]),
         lens_metrics: ForensicMetrics::default(),
@@ -709,7 +709,7 @@ async fn test_pure_vault_ingest_contract() {
     let video_shard = VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id: VolleyId::new("v_pure_ingest"),
         payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         lens_metrics: ForensicMetrics::default(),
@@ -779,7 +779,7 @@ mod ingress_boundary_tests {
         let video_shard = VideoShard {
             timestamp: PhalanxTimestamp::now(),
             sequence_id: StorageSequence(1),
-            fps: 30,
+            fps: Fps::new(30),
             volley_id: VolleyId::new("v_secure_ingress"),
             payload: DataPayload::Clear(vec![0xAA, 0xBB, 0xCC]),
             lens_metrics: ForensicMetrics::default(),

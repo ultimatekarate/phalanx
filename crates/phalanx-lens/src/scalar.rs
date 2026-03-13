@@ -179,6 +179,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::indexing_slicing, clippy::cast_possible_truncation)]
     fn test_horizontal_gradient() {
         // Horizontal gradient: pixel value = x * 255 / (width-1), never wrapping.
         // A true linear gradient has zero second derivative → Laplacian ≈ 0.
@@ -216,6 +217,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::indexing_slicing)]
     fn test_noise_pattern() {
         // Noise pattern: alternating 0 and 255 in a checkerboard.
         // Maximum Laplacian energy (high-frequency content).

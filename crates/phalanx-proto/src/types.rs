@@ -335,6 +335,7 @@ impl fmt::Display for EncodingSymbolId {
 /// Frames per second. Floor of 1 enforced on construction via `new()`.
 /// `zero()` is explicitly opt-in for Dormant (no capture) only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Fps(u32);
 
 impl Fps {
@@ -437,6 +438,78 @@ impl Default for BlackLevel {
     }
 }
 
+/// Audio sample rate in Hz. Clamped to [1, 192_000] on construction.
+/// Prevents zero-rate bugs that cause infinite shard emission (bytes_per_sec = 0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SampleRate(u32);
+
+impl SampleRate {
+    const MIN: u32 = 1;
+    const MAX: u32 = 192_000;
+
+    /// Construct with clamping to [1, 192_000].
+    #[must_use]
+    pub fn new(rate: u32) -> Self {
+        Self(rate.clamp(Self::MIN, Self::MAX))
+    }
+
+    #[must_use]
+    pub fn get(&self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for SampleRate {
+    fn default() -> Self {
+        Self(16_000)
+    }
+}
+
+impl fmt::Display for SampleRate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} Hz", self.0)
+    }
+}
+
+/// Audio channel count. Clamped to [1, 8] on construction.
+/// Type-distinct from SampleRate — swapping arguments is now a compile error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ChannelCount(u8);
+
+impl ChannelCount {
+    const MIN: u8 = 1;
+    const MAX: u8 = 8;
+
+    /// Construct with clamping to [1, 8].
+    #[must_use]
+    pub fn new(ch: u8) -> Self {
+        Self(ch.clamp(Self::MIN, Self::MAX))
+    }
+
+    #[must_use]
+    pub fn get(&self) -> u8 {
+        self.0
+    }
+}
+
+impl Default for ChannelCount {
+    fn default() -> Self {
+        Self(1)
+    }
+}
+
+impl fmt::Display for ChannelCount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            1 => write!(f, "mono"),
+            2 => write!(f, "stereo"),
+            n => write!(f, "{}ch", n),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,6 +586,36 @@ mod tests {
     fn test_black_level_default() {
         let bl = BlackLevel::default();
         assert_eq!(bl.0, 16.0);
+    }
+
+    #[test]
+    fn test_sample_rate_validation() {
+        // Zero clamps to 1
+        assert_eq!(SampleRate::new(0).get(), 1);
+        // Normal value passes through
+        assert_eq!(SampleRate::new(16_000).get(), 16_000);
+        assert_eq!(SampleRate::new(48_000).get(), 48_000);
+        // Over-max clamps to 192_000
+        assert_eq!(SampleRate::new(500_000).get(), 192_000);
+        // Default is 16kHz (telephony)
+        assert_eq!(SampleRate::default().get(), 16_000);
+    }
+
+    #[test]
+    fn test_channel_count_validation() {
+        // Zero clamps to 1
+        assert_eq!(ChannelCount::new(0).get(), 1);
+        // Normal values pass through
+        assert_eq!(ChannelCount::new(1).get(), 1);
+        assert_eq!(ChannelCount::new(2).get(), 2);
+        // Over-max clamps to 8
+        assert_eq!(ChannelCount::new(16).get(), 8);
+        // Default is mono
+        assert_eq!(ChannelCount::default().get(), 1);
+        // Display
+        assert_eq!(format!("{}", ChannelCount::new(1)), "mono");
+        assert_eq!(format!("{}", ChannelCount::new(2)), "stereo");
+        assert_eq!(format!("{}", ChannelCount::new(6)), "6ch");
     }
 
     #[test]

@@ -196,7 +196,7 @@ mod tests {
     use phalanx_proto::identity::{PhalanxIdentity, VolleyId};
     use phalanx_proto::time::SystemClock;
     use phalanx_proto::trust::TrustLevel;
-    use phalanx_proto::types::{ForensicUnit, SystemStress, Verified};
+    use phalanx_proto::types::{ForensicUnit, Fps, SystemStress, Verified};
 
     use tracing::info;
 
@@ -213,7 +213,7 @@ mod tests {
         let original_shard = VideoShard {
             timestamp: now,
             sequence_id: StorageSequence(100),
-            fps: 30,
+            fps: Fps::new(30),
             volley_id: vid,
             payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             lens_metrics: ForensicMetrics::default(),

@@ -22,7 +22,7 @@ use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
 use phalanx_proto::topic::MeshTopic;
 use phalanx_proto::trust::TrustLevel;
-use phalanx_proto::types::{ForensicUnit, SystemStress, Verified};
+use phalanx_proto::types::{ForensicUnit, Fps, SystemStress, Verified};
 use phalanx_transport::{EgressPort, IngressPort};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -149,7 +149,7 @@ fn mock_valid_envelope() -> WitnessEnvelope {
     let evidence = Evidence::Video(VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id: VolleyId::new("mock"),
         payload: DataPayload::Clear(vec![]),
         lens_metrics: ForensicMetrics::default(),
@@ -185,7 +185,7 @@ async fn test_ingress_valid_chunk_forwarded_to_storage() {
     let evidence = Evidence::Video(VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id: VolleyId::new("v_ingress"),
         payload: DataPayload::Clear(vec![0xAB; 4]),
         lens_metrics: ForensicMetrics::default(),
@@ -229,7 +229,7 @@ async fn test_ingress_rejected_in_leaf_mode() {
     let evidence = Evidence::Video(VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id: VolleyId::new("v_leaf"),
         payload: DataPayload::Clear(vec![0x00; 4]),
         lens_metrics: ForensicMetrics::default(),

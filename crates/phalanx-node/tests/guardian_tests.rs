@@ -13,6 +13,7 @@ use phalanx_proto::evidence::{
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId, VolleyId};
 use phalanx_proto::prelude::{EncodingSymbolId, ShardChunk};
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
+use phalanx_proto::types::Fps;
 use phalanx_transport::identity_ext::Libp2pExt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,7 +23,7 @@ fn create_test_shard(seq: u32, volley_id: VolleyId) -> VideoShard {
     VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(seq),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id,
         payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         lens_metrics: ForensicMetrics::default(),
@@ -108,7 +109,7 @@ async fn test_stronghold_crash_recovery() {
     let shard = create_video_shard(
         vec![vec![0xAA]],
         seq,
-        30,
+        Fps::new(30),
         vid.clone(),
         ForensicMetrics::default(),
     )
@@ -164,7 +165,7 @@ async fn test_leaf_mode_isolation() {
     let evidence = Evidence::Video(VideoShard {
         timestamp: PhalanxTimestamp::now(),
         sequence_id: StorageSequence(1),
-        fps: 30,
+        fps: Fps::new(30),
         volley_id: VolleyId::new("v_leaf"),
         payload: DataPayload::Clear(vec![0x00; 4]),
         lens_metrics: ForensicMetrics::default(),

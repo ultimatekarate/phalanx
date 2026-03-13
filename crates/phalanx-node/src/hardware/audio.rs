@@ -7,6 +7,7 @@ use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::AudioShard;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::prelude::*;
+use phalanx_proto::types::{ChannelCount, SampleRate};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -20,8 +21,8 @@ use std::thread;
 use tokio::sync::{broadcast, mpsc}; // Bring in AudioWeaver
 
 pub struct PhalanxAudioThread {
-    sample_rate: u32,
-    channels: u8,
+    sample_rate: SampleRate,
+    channels: ChannelCount,
     running: Arc<AtomicBool>,
     frame_tx: broadcast::Sender<AudioFrame>,
 }
@@ -58,11 +59,15 @@ impl PhalanxAudioThread {
 
         // THREAD A: The Watchdog
         thread::spawn(move || {
-            info!(rate, channels, "Audio Watchdog: STARTED");
+            info!(
+                rate = rate.get(),
+                channels = channels.get(),
+                "Audio Watchdog: STARTED"
+            );
 
             while running_flag.load(Ordering::Relaxed) {
-                // Connection Attempt
-                match AudioDriver::connect(rate, channels) {
+                // Connection Attempt — driver stays raw (hardware boundary)
+                match AudioDriver::connect(rate.get(), channels.get()) {
                     Ok(mut driver) => {
                         info!("Audio Hardware: CONNECTED");
 
@@ -108,8 +113,9 @@ impl PhalanxAudioThread {
 
         // Calculate bytes needed for 1 second of audio
         // e.g. 44100 * 2 (16-bit) * 2 (stereo) = 176,400 bytes
-        let bytes_per_sec =
-            (hw_config.audio_sample_rate * hw_config.audio_channels as u32 * 2) as usize;
+        let bytes_per_sec = (hw_config.audio_sample_rate.get()
+            * hw_config.audio_channels.get() as u32
+            * 2) as usize;
 
         // Spawn Processor (Thread B)
         tokio::spawn(async move {
@@ -127,7 +133,6 @@ impl PhalanxAudioThread {
                     let chunk = byte_buffer.split_off(0);
 
                     let volley_id = VolleyId::new(volley_id.clone());
-                    // FIX: Added missing arguments (sample_rate, channels)
                     let shard_result = create_audio_shard(
                         chunk,
                         sequence_id,
@@ -234,13 +239,14 @@ impl AudioDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phalanx_proto::types::Fps;
 
     #[tokio::test]
     async fn test_audio_drift_compensation() {
         let config = HardwareConfig {
-            camera_fps: 30,
-            audio_sample_rate: 44100,
-            audio_channels: 2,
+            camera_fps: Fps::new(30),
+            audio_sample_rate: SampleRate::new(44100),
+            audio_channels: ChannelCount::new(2),
         };
         let audio = PhalanxAudioThread::new(&config);
         let mut rx = audio.subscribe();
@@ -264,9 +270,9 @@ mod tests {
     #[tokio::test]
     async fn test_audio_data_generation() {
         let config = HardwareConfig {
-            camera_fps: 30,
-            audio_sample_rate: 44100,
-            audio_channels: 1,
+            camera_fps: Fps::new(30),
+            audio_sample_rate: SampleRate::new(44100),
+            audio_channels: ChannelCount::new(1),
         };
         let audio = PhalanxAudioThread::new(&config);
         let mut rx = audio.subscribe();

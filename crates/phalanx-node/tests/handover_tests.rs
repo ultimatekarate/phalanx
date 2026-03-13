@@ -17,6 +17,7 @@ use phalanx_forensics::crucible::EnvelopeHashExt;
 use phalanx_forensics::reassembler::create_video_shard;
 use phalanx_forensics::storage::handover::HandoverAuthority;
 use phalanx_forensics::witness::WitnessAuthority;
+use phalanx_proto::types::Fps;
 
 #[tokio::test]
 async fn test_legal_identity_handover() {
@@ -46,7 +47,7 @@ async fn test_legal_identity_handover() {
     let shard_1 = create_video_shard(
         vec![vec![0x01]],
         StorageSequence(1),
-        30,
+        Fps::new(30),
         vid.clone(),
         ForensicMetrics::default(),
     )
@@ -83,7 +84,7 @@ async fn test_legal_identity_handover() {
     let shard_3 = create_video_shard(
         vec![vec![0x03]],
         StorageSequence(3),
-        30,
+        Fps::new(30),
         vid.clone(),
         ForensicMetrics::default(),
     )
@@ -161,7 +162,7 @@ async fn test_illegal_identity_swap_rejected() {
     let shard_1 = create_video_shard(
         vec![vec![0x01]],
         StorageSequence(0),
-        30,
+        Fps::new(30),
         vid.clone(),
         ForensicMetrics::default(),
     )
@@ -179,7 +180,7 @@ async fn test_illegal_identity_swap_rejected() {
     let shard_2 = create_video_shard(
         vec![vec![0x02]],
         StorageSequence(2),
-        30,
+        Fps::new(30),
         vid.clone(),
         ForensicMetrics::default(),
     )

@@ -572,6 +572,7 @@ mod tests {
     use phalanx_proto::evidence::ForensicMetrics;
     use phalanx_proto::evidence::VideoShard;
     use phalanx_proto::time::SystemClock;
+    use phalanx_proto::types::Fps;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -597,7 +598,7 @@ mod tests {
         let shard = VideoShard {
             timestamp: PhalanxTimestamp::now(),
             sequence_id: StorageSequence(1),
-            fps: 30,
+            fps: Fps::new(30),
             volley_id: vid.clone(), // Use the VolleyId here
             payload: DataPayload::Clear(vec![1, 2, 3]),
             lens_metrics: ForensicMetrics::default(),
@@ -651,7 +652,7 @@ mod tests {
         let shard = VideoShard {
             timestamp: PhalanxTimestamp::now(),
             sequence_id: StorageSequence(1),
-            fps: 30,
+            fps: Fps::new(30),
             volley_id: VolleyId::new("v1"),
             payload: DataPayload::Clear(vec![1, 2, 3]),
             lens_metrics: ForensicMetrics::default(),

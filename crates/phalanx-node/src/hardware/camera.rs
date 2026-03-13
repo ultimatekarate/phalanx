@@ -189,7 +189,7 @@ pub struct CameraSpawnConfig {
 
 /// The main handle for the Camera Subsystem.
 pub struct PhalanxCameraThread {
-    fps: u32,
+    fps: Fps,
     running: Arc<AtomicBool>,
     frame_tx: broadcast::Sender<VideoFrame>,
 }
@@ -198,7 +198,7 @@ impl PhalanxCameraThread {
     /// Creates the handle. Does NOT start the thread yet.
     pub fn new(config: &HardwareConfig) -> Self {
         // Buffer ~2 seconds of frames to absorb system lag
-        let (tx, _) = broadcast::channel(config.camera_fps as usize * 2);
+        let (tx, _) = broadcast::channel(config.camera_fps.get() as usize * 2);
 
         Self {
             fps: config.camera_fps,
@@ -228,13 +228,13 @@ impl PhalanxCameraThread {
         thread::spawn(move || {
             info!(
                 index = device_index,
-                fps = target_fps,
+                fps = target_fps.get(),
                 "Camera Watchdog: STARTED"
             );
 
             while running_flag.load(Ordering::Relaxed) {
-                // Connection Attempt
-                match CameraDriver::connect(device_index, target_fps) {
+                // Connection Attempt — driver stays raw (hardware boundary)
+                match CameraDriver::connect(device_index, target_fps.get()) {
                     Ok(mut driver) => {
                         info!("Camera Hardware: CONNECTED");
 
@@ -288,7 +288,7 @@ impl PhalanxCameraThread {
         self.start_watchdog(device_idx);
 
         let mut rx = self.subscribe();
-        let base_fps = Fps::new(hw_config.camera_fps);
+        let base_fps = hw_config.camera_fps;
 
         // Spawn the Processor (Thread B)
         // Consumes raw frames, analyzes sensor fingerprint, compresses,
@@ -352,7 +352,7 @@ impl PhalanxCameraThread {
                     let shard_result = create_video_shard(
                         chunk,
                         sequence_id,
-                        effective_fps.get() as u8,
+                        effective_fps,
                         volley_id,
                         latest_metrics,
                     );
@@ -393,14 +393,15 @@ mod tests {
     use super::*;
     use crate::config::HardwareConfig;
     use phalanx_lens::scalar::ScalarLens;
+    use phalanx_proto::types::{ChannelCount, SampleRate};
     use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_time_drift_compensation() {
         let config = HardwareConfig {
-            camera_fps: 50,
-            audio_sample_rate: 44100,
-            audio_channels: 2,
+            camera_fps: Fps::new(50),
+            audio_sample_rate: SampleRate::new(44100),
+            audio_channels: ChannelCount::new(2),
         };
         let cam = PhalanxCameraThread::new(&config);
         let mut rx = cam.subscribe();
@@ -432,9 +433,9 @@ mod tests {
         // Verifies the spawn() method correctly pumps VideoShards to the channel
         let (tx, mut rx) = mpsc::channel(10);
         let config = HardwareConfig {
-            camera_fps: 10, // Fast enough for test
-            audio_sample_rate: 44100,
-            audio_channels: 2,
+            camera_fps: Fps::new(10),
+            audio_sample_rate: SampleRate::new(44100),
+            audio_channels: ChannelCount::new(2),
         };
 
         let cam = PhalanxCameraThread::new(&config);
