@@ -15,10 +15,10 @@ impl KademliaGovernor {
         reputation: f32,
         current_time: u64,
     ) -> bool {
-        // 1. Temporal Decay: Clear expired records
+        // Temporal Decay: Clear expired records
         set.providers.retain(|p| p.expiration > current_time);
 
-        // 2. Deduplication
+        // Deduplication
         if let Some(existing) = set
             .providers
             .iter_mut()
@@ -35,13 +35,13 @@ impl KademliaGovernor {
             reputation_score: reputation,
         };
 
-        // 3. Simple Admission
+        // Simple Admission
         if set.providers.len() < DhtProviderSet::MAX_PROVIDERS {
             set.providers.push(new_entry);
             return true;
         }
 
-        // 4. Reputation-Weighted Eviction
+        // Reputation-Weighted Eviction
         // We find the peer with the lowest reputation to determine eligibility
         if let Some((idx, min_score)) = set
             .providers

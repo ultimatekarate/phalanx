@@ -84,7 +84,7 @@ impl IngestionActor {
     }
 
     async fn handle_network_ingress(&mut self, peer_id: NetworkId, data: &[u8], topic: MeshTopic) {
-        // 1. TOPIC ROUTING (Edge Filtering)
+        // TOPIC ROUTING (Edge Filtering)
         let topic_str = topic.as_str();
         if topic_str != self.config.network.video_topic.as_str()
             && topic_str != self.config.network.audio_topic.as_str()

@@ -35,12 +35,12 @@ impl WitnessAuthority for WitnessEnvelope {
         let data_to_sign = postcard::to_allocvec(&evidence)
             .map_err(|e| ShardError::SerializationError(e.to_string()))?;
 
-        // 1. Compute the fast hash
+        // Compute the fast hash
         let mut hasher = sha2::Sha256::new();
         sha2::Digest::update(&mut hasher, &data_to_sign);
         let evidence_hash: [u8; 32] = hasher.finalize().into();
 
-        // 2. Sign the hash (or data_to_sign)
+        // Sign the hash (or data_to_sign)
         let signature = identity.keypair.sign(&data_to_sign);
 
         Ok(Self {
@@ -54,18 +54,18 @@ impl WitnessAuthority for WitnessEnvelope {
     }
 
     fn verify_envelope(&self) -> bool {
-        // 1. Resolve Public Key from DID Noun
+        // Resolve Public Key from DID Noun
         // (Assuming bridge::resolve_did_pk handles the multibase decoding)
         let Ok(verifying_key) = crate::cryptography::bridge::resolve_did_pk(&self.did) else {
             return false;
         };
 
-        // 2. Reconstruct serialized evidence for verification
+        // Reconstruct serialized evidence for verification
         let Ok(data_bytes) = postcard::to_allocvec(&self.evidence) else {
             return false;
         };
 
-        // 3. Verify Signature
+        // Verify Signature
         let Ok(sig_bytes) = self.witness_signature.as_slice().try_into() else {
             return false;
         };

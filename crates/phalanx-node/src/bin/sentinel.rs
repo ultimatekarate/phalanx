@@ -22,11 +22,11 @@ use phalanx_transport::prelude::Libp2pAdapter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // 1. Telemetry & Initialization
+    // Telemetry & Initialization
     init_observability();
     setup_shutdown_handler();
 
-    // 2. Configuration Loading
+    // Configuration Loading
     let config = NodeConfig::load_from_env();
     let physics = PhalanxPhysics::default_wan();
 
@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let identity_passphrase = std::env::var("PHALANX_IDENTITY_PASSPHRASE")
         .map_err(|_| "Security Violation: PHALANX_IDENTITY_PASSPHRASE not set")?;
 
-    // 3. Identity & Security Setup
+    // Identity & Security Setup
     let my_identity = PhalanxIdentity::init("identity.bin", &identity_passphrase)?;
     let psk_path = Path::new("swarm.key");
     let psk = load_swarm_key(psk_path);
@@ -56,7 +56,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let trust_registry = TrustRegistry::build(&config).await;
     let reputation_projection = trust_registry.projection_handle();
 
-    // 4. Production Network Adapter Setup (Hexagonal Port Injection)
+    // Production Network Adapter Setup (Hexagonal Port Injection)
     let network_keypair = my_identity.to_libp2p_keypair();
     let swarm = setup_phalanx_swarm(
         network_keypair,
@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let bridge = Libp2pBridge::new(adapter);
     let (ingress, egress) = bridge.split();
 
-    // 5. Engine Initialization via Parameter Object
+    // Engine Initialization via Parameter Object
     let deps = SentinelDependencies {
         config,
         identity: my_identity,
@@ -80,14 +80,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         trust_registry,
         system_governor: Arc::new(phalanx_node::vitals::SystemGovernor::new()),
         vault_key,
-        local_mesh: None, // Phase 3: NoOp — BLE/WiFi Direct injected during mobile integration
+        local_mesh: None, // NoOp — BLE/WiFi Direct injected during mobile integration
     };
 
     let mut engine = MeshSentinel::new(deps).await?;
 
     println!("--- PHALANX SENSOR: ONLINE (WAN + LAN) ---");
 
-    // 6. Execution
+    // Execution
     engine.run().await?;
 
     Ok(())

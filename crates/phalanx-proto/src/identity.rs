@@ -233,14 +233,14 @@ impl PhalanxIdentity {
         let signing_key = SigningKey::generate(&mut csprng);
         let verifying_key = signing_key.verifying_key();
 
-        // 1. Derive Forensic NetworkId
+        // Derive Forensic NetworkId
         // We use the Base58 encoding of the public key. In the Phalanx mesh,
         // this string is used by the Hands layer to reconstruct a libp2p PeerId.
         let public_key_bytes = verifying_key.to_bytes();
         let network_id_string = bs58::encode(public_key_bytes).into_string();
         let network_id = NetworkId(network_id_string);
 
-        // 2. Derive Decentralized Identifier (DID)
+        // Derive Decentralized Identifier (DID)
         let did = Did::derive_did_key(&public_key_bytes);
 
         Self {

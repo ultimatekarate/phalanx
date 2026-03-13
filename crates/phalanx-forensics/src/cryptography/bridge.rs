@@ -7,7 +7,6 @@ use sha2::{Digest, Sha512};
 
 /// THE BRIDGE VERB: Ed25519 PK -> X25519 PK
 pub fn ed_to_x25519_pk(ed_key: &VerifyingKey) -> Result<[u8; 32], CryptoError> {
-    // FIX: Extract bytes using the dalek API
     let bytes = ed_key.to_bytes();
 
     let ed_point =

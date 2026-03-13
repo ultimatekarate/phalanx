@@ -123,12 +123,12 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         let plaintext = postcard::to_allocvec(&disk_format)
             .map_err(|e| IdentityError::SerializationError(e.to_string()))?;
 
-        // 2. Generate a random 16-byte salt for Argon2.
+        // Generate a random 16-byte salt for Argon2.
         // A new salt is generated for each save to prevent rainbow table attacks.
         let mut salt = [0u8; 16];
         OsRng.fill_bytes(&mut salt);
 
-        // 3. Derive a 32-byte encryption key from the passphrase and salt using Argon2.
+        // Derive a 32-byte encryption key from the passphrase and salt using Argon2.
         let argon2 = Argon2::default();
         let mut key_bytes = [0u8; 32];
         argon2
@@ -138,23 +138,23 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
             })?;
         let key = SymmetricKey(key_bytes);
 
-        // 4. Generate a random 24-byte nonce for the AEAD cipher.
+        // Generate a random 24-byte nonce for the AEAD cipher.
         let mut nonce = [0u8; 24];
         OsRng.fill_bytes(&mut nonce);
 
-        // 5. Encrypt the serialized data using the derived key and nonce.
+        // Encrypt the serialized data using the derived key and nonce.
         // This assumes `encrypt_bytes` is an AEAD function like XChaCha20-Poly1305.
         let ciphertext_wrapper = encrypt_bytes(&key, &plaintext)
             .map_err(|e| IdentityError::CryptoError(format!("Encryption failed: {}", e)))?;
 
-        // 6. Assemble the final file content: [salt][nonce][ciphertext]
+        // Assemble the final file content: [salt][nonce][ciphertext]
         let mut file_bytes =
             Vec::with_capacity(salt.len() + nonce.len() + ciphertext_wrapper.0.len());
         file_bytes.extend_from_slice(&salt);
         file_bytes.extend_from_slice(&nonce);
         file_bytes.extend_from_slice(&ciphertext_wrapper.0);
 
-        // 7. Write the encrypted bundle to disk.
+        // Write the encrypted bundle to disk.
         fs::write(path.as_ref(), file_bytes).map_err(|e| {
             IdentityError::Corruption(format!(
                 "Failed to write encrypted identity to {:?}: {}",
@@ -163,7 +163,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
             ))
         })?;
 
-        // 8. Securely erase the derived key from memory.
+        // Securely erase the derived key from memory.
         key_bytes.zeroize();
 
         Ok(())
@@ -171,7 +171,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
 
     /// Loads an identity from an encrypted file on disk using a passphrase.
     fn load_from_disk<P: AsRef<Path>>(path: P, passphrase: &str) -> Result<Self, IdentityError> {
-        // 1. Read the entire encrypted file.
+        // Read the entire encrypted file.
         let file_bytes = fs::read(path.as_ref()).map_err(|e| {
             IdentityError::Corruption(format!(
                 "Failed to read encrypted identity from {:?}: {}",
@@ -180,7 +180,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
             ))
         })?;
 
-        // 2. Deconstruct the file content: [salt][nonce][ciphertext]
+        // Deconstruct the file content: [salt][nonce][ciphertext]
         if file_bytes.len() < (16 + 24) {
             return Err(IdentityError::Corruption(
                 "Invalid or corrupt identity file: too short".to_string(),
@@ -192,7 +192,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         let salt: [u8; 16] = salt_slice.try_into().unwrap(); // Should not fail
         let nonce: [u8; 24] = nonce_slice.try_into().unwrap(); // Should not fail
 
-        // 3. Re-derive the same encryption key using the passphrase and the extracted salt.
+        // Re-derive the same encryption key using the passphrase and the extracted salt.
         let argon2 = Argon2::default();
         let mut key_bytes = [0u8; 32];
         argon2
@@ -202,7 +202,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
             })?;
         let key = SymmetricKey(key_bytes);
 
-        // 4. Decrypt the ciphertext. If the passphrase is wrong or the file is corrupt,
+        // Decrypt the ciphertext. If the passphrase is wrong or the file is corrupt,
         // the AEAD authentication tag will not match, and this will fail.
         let plaintext = decrypt_bytes(&key, &nonce, ciphertext).map_err(|_| {
             IdentityError::CryptoError(
@@ -218,7 +218,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
             ))
         })?;
 
-        // 6. Securely erase the derived key from memory.
+        // Securely erase the derived key from memory.
         key_bytes.zeroize();
 
         Ok(disk_format.into_identity())
@@ -227,7 +227,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
     fn verify_retrieval_auth(&self, request: &VolleyRequest) -> Result<(), IdentityError> {
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
-        // 1. Resolve the public key of the claimed recipient (the requester)
+        // Resolve the public key of the claimed recipient (the requester)
         let pk_bytes =
             phalanx_forensics::identity::resolve_did_public_key(&request.locator.recipient)
                 .map_err(|_| IdentityError::CryptoError("DID Resolution Failed".into()))?;
@@ -235,12 +235,12 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         let verifying_key = VerifyingKey::from_bytes(&pk_bytes)
             .map_err(|e| IdentityError::CryptoError(format!("Invalid Public Key: {}", e)))?;
 
-        // 2. Reconstruct the signed message payload
+        // Reconstruct the signed message payload
         let signed_data = (&request.target_did, &request.volley_id, &request.locator);
         let msg = postcard::to_allocvec(&signed_data)
             .map_err(|e| IdentityError::SerializationError(e.to_string()))?;
 
-        // 3. Verify the signature
+        // Verify the signature
         let signature = Signature::from_slice(&request.signature)
             .map_err(|e| IdentityError::CryptoError(format!("Invalid Signature: {}", e)))?;
 

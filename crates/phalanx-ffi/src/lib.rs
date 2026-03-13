@@ -33,7 +33,7 @@ pub unsafe extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut
         return ptr::null_mut();
     };
 
-    // 1. Establish Configuration
+    // Establish Configuration
     let mut config = PhalanxConfig::default();
     config.storage.vault_path = path_str.to_string();
     let physics = PhalanxPhysics::default_wan();
@@ -46,7 +46,7 @@ pub unsafe extern "C" fn phalanx_engine_new(storage_path: *const c_char) -> *mut
     .unwrap_or_default();
     let reputation_cache = Arc::new(SyncReputationCache::default());
 
-    // 2. Unitary Async Initialization
+    // Unitary Async Initialization
     // We build a single runtime to drive the entire initialization sequence.
     let engine_result = std::thread::spawn({
         let config = config.clone();

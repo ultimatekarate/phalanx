@@ -205,7 +205,7 @@ impl Guardian {
                 _ => GuardianError::VerificationFailed(e.to_string()),
             })?;
 
-        // 2. Volley Aggregation
+        // Volley Aggregation
         // The Crucible now accepts only Verified units
         let maybe_volley = self.crucible.process(verified_unit)?;
 
@@ -258,7 +258,7 @@ impl Guardian {
             self.commit_volley_to_disk(volley).await?;
         }
 
-        // 4. Return the collection to satisfy the return type Result<Vec<Volley>, ...>
+        // Return the collection to satisfy the return type Result<Vec<Volley>, ...>
         Ok(active_volleys)
     }
 
@@ -302,9 +302,9 @@ impl Guardian {
         volley_id: &VolleyId,
     ) -> Option<&BTreeMap<StorageSequence, WitnessEnvelope>> {
         self.crucible
-            .contexts // 2. FIX: Crucible doesn't have .get(), its BTreeMap is 'contexts'
-            .get(volley_id) // 3. FIX: No more .to_string()!
-            .map(|ctx| &ctx.accumulator.artifacts) // 4. FIX: Access through WorkContext wrapper
+            .contexts // FIX: Crucible doesn't have .get(), its BTreeMap is 'contexts'
+            .get(volley_id) // FIX: No more .to_string()!
+            .map(|ctx| &ctx.accumulator.artifacts) // FIX: Access through WorkContext wrapper
     }
 }
 
@@ -369,14 +369,14 @@ impl TransientJournal for FileJournal {
             ));
         }
 
-        // 1. Serialize → encrypt
+        // Serialize → encrypt
         let plaintext = postcard::to_allocvec(chunk)
             .map_err(|e| ShardError::SerializationError(e.to_string()))?;
 
         let (nonce, ciphertext) = encrypt_bytes(&self.vault_key, &plaintext)
             .map_err(|e| ShardError::Encryption(e.to_string()))?;
 
-        // 2. Frame: [4-byte LE len][24-byte nonce][ciphertext]
+        // Frame: [4-byte LE len][24-byte nonce][ciphertext]
         let frame_len = (nonce.len() + ciphertext.len()) as u32;
         self.handle
             .write_all(&frame_len.to_le_bytes())
@@ -391,7 +391,7 @@ impl TransientJournal for FileJournal {
             .await
             .map_err(|e| ShardError::Io(e.to_string()))?;
 
-        // 3. Flush data to disk
+        // Flush data to disk
         self.handle
             .sync_data()
             .await
@@ -410,13 +410,13 @@ impl TransientJournal for FileJournal {
     async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
         let mut chunks = Vec::new();
 
-        // 1. Rewind the file pointer to the beginning for boot-time recovery
+        // Rewind the file pointer to the beginning for boot-time recovery
         self.handle
             .seek(SeekFrom::Start(0))
             .await
             .map_err(|e| ShardError::Io(e.to_string()))?;
 
-        // 2. Stream chunks sequentially using the 4-byte length prefix
+        // Stream chunks sequentially using the 4-byte length prefix
         loop {
             let mut len_buf = [0u8; 4];
             match self.handle.read_exact(&mut len_buf).await {
@@ -481,7 +481,7 @@ impl TransientJournal for FileJournal {
             }
         }
 
-        // 3. Reset the file pointer to the end to resume appending
+        // Reset the file pointer to the end to resume appending
         self.handle
             .seek(SeekFrom::End(0))
             .await
@@ -603,7 +603,7 @@ mod tests {
             lens_metrics: ForensicMetrics::default(),
         };
 
-        // 2. Seal the unit (The 4th argument is None for the start of the chain)
+        // Seal the unit (The 4th argument is None for the start of the chain)
         let envelope = WitnessEnvelope::sign_envelope(
             Evidence::Video(shard),
             &identity,
@@ -617,7 +617,7 @@ mod tests {
             .await;
         assert!(result.is_ok(), "Ingestion failed: {:?}", result.err());
 
-        // 3. FIX: Verify Crucible state mutation using the VolleyId, NOT the Did
+        // FIX: Verify Crucible state mutation using the VolleyId, NOT the Did
         let active_shards = guardian.get_active_volley_shards(&vid);
 
         assert!(

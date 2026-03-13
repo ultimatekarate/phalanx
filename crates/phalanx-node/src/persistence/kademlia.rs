@@ -64,7 +64,7 @@ impl RedbStore {
             return false;
         }
 
-        // 1. Extract the expected Owner DID from the RecordKey
+        // Extract the expected Owner DID from the RecordKey
         // Phalanx Shard Keys follow the format: did_hash:shard_id
         let key_str = String::from_utf8_lossy(record.key.as_ref());
         let expected_owner_prefix = match key_str.split(':').next() {
@@ -72,13 +72,13 @@ impl RedbStore {
             None => return false,
         };
 
-        // 2. Decode Payload to access the embedded signature
+        // Decode Payload to access the embedded signature
         let payload: DhtPayload = match postcard::from_bytes(&record.value) {
             Ok(p) => p,
             Err(_) => return false,
         };
 
-        // 3. Cryptographic Verification
+        // Cryptographic Verification
         // Implementation utilizes the identity module to verify the specific payload hash
         // against the embedded signature and the claimed DID.
         payload.verify_ownership(expected_owner_prefix)

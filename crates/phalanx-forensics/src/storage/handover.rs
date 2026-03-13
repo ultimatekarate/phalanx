@@ -26,7 +26,7 @@ impl HandoverAuthority for HandoverProof {
         sequence_id: StorageSequence,
         anchor_hash: SignatureHash,
     ) -> Result<Self, ShardError> {
-        // 1. Create deterministic manifest (ordered tuple)
+        // Create deterministic manifest (ordered tuple)
         let transfer_manifest = (
             &volley_id,
             &sequence_id,
@@ -35,15 +35,15 @@ impl HandoverAuthority for HandoverProof {
             &anchor_hash,
         );
 
-        // 2. Serialize Manifest (Using 2026 stable postcard idiom)
+        // Serialize Manifest (Using 2026 stable postcard idiom)
         let manifest_bytes = postcard::to_allocvec(&transfer_manifest)
             .map_err(|e| ShardError::SerializationError(e.to_string()))?;
 
-        // 3. Hash with BLAKE3
+        // Hash with BLAKE3
         let shared_hash = blake3::hash(&manifest_bytes);
         let hash_bytes: [u8; 32] = shared_hash.into();
 
-        // 4. Co-signing: Both identities anchor the transfer
+        // Co-signing: Both identities anchor the transfer
         // Note: We use the signature logic provided by the Laboratory's bridge
         let old_signature = old_identity.sign(&hash_bytes);
         let new_signature = new_identity.sign(&hash_bytes);
@@ -60,7 +60,7 @@ impl HandoverAuthority for HandoverProof {
     }
 
     fn verify(&self) -> Result<(), ShardError> {
-        // 1. Re-manifest: Reconstruct the exact tuple used during generation
+        // Re-manifest: Reconstruct the exact tuple used during generation
         let transfer_manifest = (
             &self.volley_id,
             &self.sequence_id,
@@ -69,15 +69,15 @@ impl HandoverAuthority for HandoverProof {
             &self.anchor_hash,
         );
 
-        // 2. Deterministic Serialization
+        // Deterministic Serialization
         let manifest_bytes = postcard::to_allocvec(&transfer_manifest)
             .map_err(|e| ShardError::SerializationError(e.to_string()))?;
 
-        // 3. Re-hash
+        // Re-hash
         let shared_hash = blake3::hash(&manifest_bytes);
         let hash_bytes: [u8; 32] = shared_hash.into();
 
-        // 4. Resolve Public Keys from DIDs
+        // Resolve Public Keys from DIDs
         // Assuming your bridge provides a way to extract the Ed25519 public key from a did:key string
         let old_pk = crate::cryptography::bridge::resolve_did_pk(&self.old_did).map_err(|_| {
             ShardError::InvalidConfiguration("Could not resolve old_did".to_string())
@@ -86,7 +86,7 @@ impl HandoverAuthority for HandoverProof {
             ShardError::InvalidConfiguration("Could not resolve new_did".to_string())
         })?;
 
-        // 5. Verify Signatures
+        // Verify Signatures
         old_pk
             .verify_strict(&hash_bytes, &self.old_signature)
             .map_err(|_| {

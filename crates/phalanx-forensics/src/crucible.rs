@@ -161,7 +161,7 @@ impl<S: Mold> Crucible<S> {
             MapEntry::Occupied(mut entry) => {
                 let ctx = entry.get_mut();
 
-                // 1. Ingest & Map Errors
+                // Ingest & Map Errors
                 S::ingest(&mut ctx.accumulator, item).map_err(|e| {
                     if S::is_authoritative(&ctx.accumulator) {
                         GuardianError::PolicyViolation(format!("{}", e))
@@ -172,7 +172,7 @@ impl<S: Mold> Crucible<S> {
 
                 let elapsed = ctx.created_at.elapsed();
 
-                // 2. Internalized Sealing: If ready, assemble and return NOW.
+                // Internalized Sealing: If ready, assemble and return NOW.
                 if S::is_ready(&ctx.accumulator, elapsed) {
                     info!(?key, ?elapsed, "Crucible: Item READY. Sealing...");
                     let ctx = entry.remove();
@@ -203,7 +203,7 @@ impl<S: Mold> Crucible<S> {
                 // First shard is inherently Ambiguous until Seq 0 or Handover arrives
                 S::ingest(&mut acc, item).map_err(|_| GuardianError::AmbiguousOwnership)?;
 
-                // 3. Optimization: If the first item makes it ready (e.g. 1-chunk shard),
+                // Optimization: If the first item makes it ready (e.g. 1-chunk shard),
                 // assemble it without ever touching the contexts map.
                 if S::is_ready(&acc, Duration::ZERO) {
                     info!(?key, "Crucible: Item READY on initial shard. Sealing...");
@@ -415,7 +415,7 @@ impl Mold for VolleyAmalgam {
             }
         }
 
-        // 1. Determine if the incoming shard is an "Authority Signal"
+        // Determine if the incoming shard is an "Authority Signal"
         let provides_authority = match &item.data.evidence {
             Evidence::Handover(_) => true,
             Evidence::Video(s) if s.sequence_id.0 == 0 => true,
@@ -429,7 +429,7 @@ impl Mold for VolleyAmalgam {
             None
         };
 
-        // 2. Resolve Ownership State
+        // Resolve Ownership State
         match &acc.ownership {
             Ownership::Authoritative(pinned_did) => {
                 if incoming_did == pinned_did {

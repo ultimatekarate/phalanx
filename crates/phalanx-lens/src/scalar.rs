@@ -48,7 +48,7 @@ impl ForensicLens for ScalarLens {
             y_plane.get(idx).copied().unwrap_or(0) as f32
         };
 
-        // 1. Laplacian energy (horizontal + vertical) on interior pixels.
+        // Laplacian energy (horizontal + vertical) on interior pixels.
         // Interior: skip 1-pixel border of the crop to avoid reaching outside.
         let mut h_sum: f64 = 0.0;
         let mut v_sum: f64 = 0.0;
@@ -80,7 +80,7 @@ impl ForensicLens for ScalarLens {
             0.0
         };
 
-        // 2. PRNU variance: Var(pixel − black_level) over the full crop.
+        // PRNU variance: Var(pixel − black_level) over the full crop.
         // Raw (non-normalized) — the LensGate scales thresholds by mean luminance.
         // Also compute mean luminance for auto-exposure threshold scaling.
         let mut sum: f64 = 0.0;

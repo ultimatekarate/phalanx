@@ -139,10 +139,10 @@ impl ProviderAuthority for DhtProviderSet {
         expiration: u64,
         reputation: f32,
     ) -> bool {
-        // 1. Lazy Cleanup
+        // Lazy Cleanup
         self.providers.retain(|p| !is_expired(Some(p.expiration)));
 
-        // 2. Deduplication
+        // Deduplication
         if let Some(existing) = self.providers.iter_mut().find(|p| p.network_id == new_peer) {
             existing.expiration = expiration;
             existing.reputation_score = reputation;
@@ -155,13 +155,13 @@ impl ProviderAuthority for DhtProviderSet {
             reputation_score: reputation,
         };
 
-        // 3. Simple Capacity Check
+        // Simple Capacity Check
         if self.providers.len() < Self::MAX_PROVIDERS {
             self.providers.push(new_entry);
             return true;
         }
 
-        // 4. Weighted Eviction: Find the weak link
+        // Weighted Eviction: Find the weak link
         let min_idx = self
             .providers
             .iter()
@@ -221,7 +221,7 @@ mod tests {
         // Fill the set with providers of increasing reputation
         for i in 0..DhtProviderSet::MAX_PROVIDERS {
             let pid = NetworkId::from(format!("peer_{}", i));
-            // Reputation 0.0 to 0.19
+
             set.try_insert_weighted(pid, future, i as f32 / 100.0);
         }
 

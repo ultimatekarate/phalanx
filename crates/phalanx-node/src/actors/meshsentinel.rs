@@ -38,7 +38,7 @@ pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJourn
     pub trust_registry: TrustRegistry,
     pub system_governor: Arc<SystemGovernor>,
     pub vault_key: SymmetricKey,
-    /// Phase 3: Optional local mesh transport (BLE, WiFi Direct).
+    /// Optional local mesh transport (BLE, WiFi Direct).
     /// Default: `None` (desktop/non-BLE platforms).
     /// When `Some`, MeshSentinel polls for local mesh events alongside network ingress.
     pub local_mesh: Option<Box<dyn LocalMeshPort>>,
@@ -69,11 +69,11 @@ pub struct MeshSentinel<I: IngressPort> {
     // Keep a reference to the storage task to ensure it's not dropped.
     pub storage_task: JoinHandle<()>,
 
-    // Phase 3: Optional local mesh transport (BLE, WiFi Direct).
+    // Optional local mesh transport (BLE, WiFi Direct).
     // When available, the select! loop polls for local mesh events.
     local_mesh: Option<Box<dyn LocalMeshPort>>,
 
-    // Phase 4c: Lifecycle event receiver for mobile foreground/background transitions.
+    // Lifecycle event receiver for mobile foreground/background transitions.
     // When a `Foregrounded` event arrives, immediately recalculate PowerState.
     // Desktop: always `None` (no foreground/background concept).
     lifecycle_rx: Option<tokio::sync::mpsc::Receiver<LifecycleEvent>>,
@@ -202,7 +202,7 @@ impl<I: IngressPort> MeshSentinel<I> {
 
         tokio::spawn(media_actor.run());
 
-        // Phase 4c: Adaptive vitals polling — interval scales with PowerState.
+        // Adaptive vitals polling — interval scales with PowerState.
         // Normal: 5s, Conserving: 15s, Leaf: 30s, Dormant: 60s.
         // Uses dynamic sleep instead of fixed interval to adapt each cycle.
         let vitals_governor = deps.system_governor.clone();
@@ -218,13 +218,13 @@ impl<I: IngressPort> MeshSentinel<I> {
 
         if let Some(ref mesh) = deps.local_mesh {
             if mesh.is_available() {
-                tracing::info!("Phase 3: Local mesh transport is AVAILABLE");
+                tracing::info!("Local mesh transport is AVAILABLE");
             } else {
-                tracing::debug!("Phase 3: Local mesh transport provided but not available");
+                tracing::debug!("Local mesh transport provided but not available");
             }
         }
 
-        // Phase 4c: Extract lifecycle event receiver from hardware probe.
+        // Extract lifecycle event receiver from hardware probe.
         // Mobile implementations push OS lifecycle callbacks into this channel.
         // Desktop (SysfsProbe) returns None.
         let lifecycle_rx = deps.system_governor.probe().lifecycle_events();
@@ -254,7 +254,7 @@ impl<I: IngressPort> MeshSentinel<I> {
                     self.handle_network_event(event).await
                 }
 
-                // Phase 3: Poll local mesh transport for events (BLE, WiFi Direct).
+                // Poll local mesh transport for events (BLE, WiFi Direct).
                 // When the local mesh is available, events are routed through the
                 // same ingestion pipeline as network events.
                 Some(local_event) = async {
@@ -267,7 +267,7 @@ impl<I: IngressPort> MeshSentinel<I> {
                     self.handle_network_event(local_event).await
                 }
 
-                // Phase 4c: Lifecycle events from mobile OS (foreground/background).
+                // Lifecycle events from mobile OS (foreground/background).
                 // When the app transitions to foreground, immediately recalculate
                 // PowerState and update vitals — don't wait for the polling tick.
                 // This ensures capture resumes within milliseconds of foregrounding.
@@ -363,7 +363,7 @@ impl<I: IngressPort> MeshSentinel<I> {
                 false
             }
 
-            // Phase 3: Record peer discovery source for connectivity detection.
+            // Record peer discovery source for connectivity detection.
             // Internet peers (Kademlia, Bootstrap) immediately mark internet as available.
             // mDNS peers increment local count. The 30s grace period in SystemGovernor
             // handles the transition to offline when only local peers remain.
