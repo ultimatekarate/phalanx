@@ -260,6 +260,7 @@ pub struct HomeostaticConfig {
     pub b_crit: f64,                      // Bandwidth critical threshold (MiB)
     pub lambda_conn: f64,                 // Connection pressure decay rate
     pub c_crit: f64,                      // Connection critical ratio (0.0-1.0)
+    pub lambda_lat: f64,                  // Latency pressure decay rate (independent of lambda_sys)
     pub max_temporal_tolerance: Duration, // Hard clamp on temporal_tolerance (T2 fix)
 }
 
@@ -292,26 +293,55 @@ impl Default for HomeostaticConfig {
             b_crit: 50.0,
             lambda_conn: 0.2,
             c_crit: 0.9,
+            lambda_lat: 1.0,
             max_temporal_tolerance: Duration::from_secs(10),
         }
     }
 }
 
+/// A single Volterra second-kind integral with its own time cursor.
+/// Each integral decays independently: I(t+dt) = impulse + I(t) · exp(-λ·dt)
+/// where dt is measured from THIS integral's last update, not a shared clock.
+///
+/// Before this fix, all integrals shared a single `last_sys_tick`. High-frequency
+/// updates to one integral (e.g., bandwidth) would suppress decay in all others,
+/// causing phantom cross-coupling and ~10x pressure inflation under load.
+#[derive(Debug)]
+pub struct DecayingIntegral {
+    pub value: f64,
+    last_update: Instant,
+}
+
+impl DecayingIntegral {
+    fn new() -> Self {
+        Self {
+            value: 0.0,
+            last_update: Instant::now(),
+        }
+    }
+
+    /// Record an impulse, applying exponential decay since this integral's last update.
+    fn record(&mut self, impulse: f64, lambda: f64) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_update).as_secs_f64();
+        self.last_update = now;
+        self.value = impulse + self.value * (-lambda * dt).exp();
+    }
+}
+
 pub struct IntegralState {
-    pub s_integral: f64,
-    pub d_integral: f64,
-    pub e_integral: f64,
-    pub l_integral: f64, // Latency (Network/Scheduling Age)
-    pub r_integrals: HashMap<String, f64>,
-    pub last_sys_tick: Instant,
-    // Volterra second-kind extensions for resource pressure feedback
-    pub m_integral: f64, // Memory/buffer pressure (MiB held in reassembler + channels)
-    pub w_integral: f64, // WAL/storage pressure (ratio of max capacity)
-    pub b_integral: f64, // Bandwidth pressure (MiB ingress per event)
-    pub c_integral: f64, // Connection pressure (ratio of max connections)
+    pub s: DecayingIntegral, // System/metabolic pressure
+    pub d: DecayingIntegral, // I/O digestion pressure
+    pub e: DecayingIntegral, // Entry/Sybil pressure
+    pub l: DecayingIntegral, // Latency (Network/Scheduling Age)
+    pub m: DecayingIntegral, // Memory/buffer pressure
+    pub w: DecayingIntegral, // WAL/storage pressure
+    pub b: DecayingIntegral, // Bandwidth pressure
+    pub c: DecayingIntegral, // Connection pressure
+    pub r_integrals: HashMap<String, DecayingIntegral>,
     pub conserving_trigger_count: u8, // Consecutive ticks above Conserving threshold (0.50)
-    pub leaf_trigger_count: u8, // Consecutive vitals ticks above composite threshold (0.85)
-    pub normal_trigger_count: u8, // Consecutive vitals ticks below recovery threshold (0.30)
+    pub leaf_trigger_count: u8,       // Consecutive vitals ticks above composite threshold (0.85)
+    pub normal_trigger_count: u8,     // Consecutive vitals ticks below recovery threshold (0.30)
     /// Tracks the stress-driven power state independently of battery gate.
     /// Used as hysteresis fallback by `stress_recommendation()` so it doesn't
     /// inherit battery-gate-driven Dormant/Leaf states.
@@ -328,6 +358,30 @@ pub struct IntegralState {
     /// When the last non-mDNS peer was seen. Used for the 30s grace period
     /// before declaring internet unavailable.
     pub last_internet_peer_seen: Instant,
+}
+
+impl IntegralState {
+    fn new() -> Self {
+        Self {
+            s: DecayingIntegral::new(),
+            d: DecayingIntegral::new(),
+            e: DecayingIntegral::new(),
+            l: DecayingIntegral::new(),
+            m: DecayingIntegral::new(),
+            w: DecayingIntegral::new(),
+            b: DecayingIntegral::new(),
+            c: DecayingIntegral::new(),
+            r_integrals: HashMap::new(),
+            conserving_trigger_count: 0,
+            leaf_trigger_count: 0,
+            normal_trigger_count: 0,
+            stress_power_state: PowerState::Normal,
+            internet_available: true,
+            local_peer_count: 0,
+            internet_peer_count: 0,
+            last_internet_peer_seen: Instant::now(),
+        }
+    }
 }
 
 pub trait Homeostasis {
@@ -379,26 +433,7 @@ impl SystemGovernor {
             current_state: RwLock::new(SystemStress::Nominal),
             probe,
             config,
-            integrals: RwLock::new(IntegralState {
-                s_integral: 0.0,
-                d_integral: 0.0,
-                e_integral: 0.0,
-                l_integral: 0.0,
-                r_integrals: HashMap::new(),
-                last_sys_tick: Instant::now(),
-                m_integral: 0.0,
-                w_integral: 0.0,
-                b_integral: 0.0,
-                c_integral: 0.0,
-                conserving_trigger_count: 0,
-                leaf_trigger_count: 0,
-                normal_trigger_count: 0,
-                stress_power_state: PowerState::Normal,
-                internet_available: true,
-                local_peer_count: 0,
-                internet_peer_count: 0,
-                last_internet_peer_seen: Instant::now(),
-            }),
+            integrals: RwLock::new(IntegralState::new()),
             recommended_state: RwLock::new(PowerState::Normal),
         }
     }
@@ -425,26 +460,7 @@ impl SystemGovernor {
             current_state: RwLock::new(SystemStress::Nominal),
             probe: Arc::new(SysfsProbe::new()),
             config,
-            integrals: RwLock::new(IntegralState {
-                s_integral: 0.0,
-                d_integral: 0.0,
-                e_integral: 0.0,
-                l_integral: 0.0,
-                r_integrals: HashMap::new(),
-                last_sys_tick: Instant::now(),
-                m_integral: 0.0,
-                w_integral: 0.0,
-                b_integral: 0.0,
-                c_integral: 0.0,
-                conserving_trigger_count: 0,
-                leaf_trigger_count: 0,
-                normal_trigger_count: 0,
-                stress_power_state: PowerState::Normal,
-                internet_available: true,
-                local_peer_count: 0,
-                internet_peer_count: 0,
-                last_internet_peer_seen: Instant::now(),
-            }),
+            integrals: RwLock::new(IntegralState::new()),
             recommended_state: RwLock::new(PowerState::Normal),
         }
     }
@@ -486,9 +502,7 @@ impl SystemGovernor {
         };
 
         if heat_penalty > 0.0 {
-            let mut state = self.integrals.write().unwrap_or_else(|e| e.into_inner());
-            let decay = Self::calculate_dt_and_decay(&mut state, self.config.lambda_sys);
-            state.s_integral = heat_penalty + (state.s_integral * decay);
+            self.with_state_mut(|s| s.s.record(heat_penalty, self.config.lambda_sys));
         }
 
         let mut state = self
@@ -506,26 +520,20 @@ impl SystemGovernor {
         *power = new_power;
     }
 
-    fn calculate_dt_and_decay(state: &mut IntegralState, lambda: f64) -> f64 {
-        let now = Instant::now();
-        let dt = now.duration_since(state.last_sys_tick).as_secs_f64();
-        state.last_sys_tick = now;
-        (-lambda * dt).exp()
-    }
-
     // --- Immune Integral (Reputation) ---
 
     pub fn record_peer_evidence(&self, peer_id: &str, is_valid: bool) {
         self.with_state_mut(|s| {
-            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_rep);
-            let current_r = s.r_integrals.get(peer_id).unwrap_or(&0.0) * decay;
             let delta = if is_valid { 1.0 } else { -self.config.omega };
-            s.r_integrals.insert(peer_id.to_string(), current_r + delta);
+            s.r_integrals
+                .entry(peer_id.to_string())
+                .or_insert_with(DecayingIntegral::new)
+                .record(delta, self.config.lambda_rep);
         });
     }
 
     pub fn is_peer_coupled(&self, peer_id: &str) -> bool {
-        self.with_state(|s| *s.r_integrals.get(peer_id).unwrap_or(&0.0) >= 0.0)
+        self.with_state(|s| s.r_integrals.get(peer_id).is_none_or(|r| r.value >= 0.0))
     }
 
     /// Per-peer bandwidth check via the r_integrals namespace.
@@ -534,8 +542,9 @@ impl SystemGovernor {
     pub fn is_peer_bandwidth_ok(&self, peer_id: &str) -> bool {
         let key = format!("bw:{}", peer_id);
         self.with_state(|s| {
-            let pressure = s.r_integrals.get(&key).unwrap_or(&0.0);
-            *pressure < self.config.psi_max
+            s.r_integrals
+                .get(&key)
+                .is_none_or(|r| r.value < self.config.psi_max)
         })
     }
 
@@ -543,9 +552,10 @@ impl SystemGovernor {
     pub fn record_peer_bandwidth(&self, peer_id: &str) {
         let key = format!("bw:{}", peer_id);
         self.with_state_mut(|s| {
-            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_rep);
-            let current = s.r_integrals.get(&key).unwrap_or(&0.0) * decay;
-            s.r_integrals.insert(key, current + 1.0);
+            s.r_integrals
+                .entry(key)
+                .or_insert_with(DecayingIntegral::new)
+                .record(1.0, self.config.lambda_rep);
         });
     }
 
@@ -554,11 +564,11 @@ impl SystemGovernor {
     pub fn composite_stress(&self) -> f64 {
         self.with_state(|s| {
             let terms = [
-                (0.25, s.s_integral / self.config.s_crit),
-                (0.20, s.d_integral / self.config.d_crit),
-                (0.20, s.m_integral / self.config.m_crit),
-                (0.15, s.w_integral / self.config.w_crit),
-                (0.20, s.b_integral / self.config.b_crit),
+                (0.25, s.s.value / self.config.s_crit),
+                (0.20, s.d.value / self.config.d_crit),
+                (0.20, s.m.value / self.config.m_crit),
+                (0.15, s.w.value / self.config.w_crit),
+                (0.20, s.b.value / self.config.b_crit),
             ];
             terms.iter().map(|(w, n)| w * n.min(1.0)).sum()
         })
@@ -794,53 +804,41 @@ impl SystemGovernor {
 
 impl Homeostasis for SystemGovernor {
     fn record_metabolic_pressure(&self, duration: Duration) {
-        self.with_state_mut(|s| {
-            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_sys);
-            s.s_integral = duration.as_secs_f64() + (s.s_integral * decay);
-        });
+        self.with_state_mut(|s| s.s.record(duration.as_secs_f64(), self.config.lambda_sys));
     }
 
     fn record_latency_pressure(&self, duration: Duration) {
-        self.with_state_mut(|s| {
-            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_sys);
-            s.l_integral = duration.as_secs_f64() + (s.l_integral * decay);
-        });
+        self.with_state_mut(|s| s.l.record(duration.as_secs_f64(), self.config.lambda_lat));
     }
 
     fn record_io_pressure(&self, duration: Duration) {
-        self.with_state_mut(|s| {
-            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_io);
-            s.d_integral = duration.as_secs_f64() + (s.d_integral * decay);
-        });
+        self.with_state_mut(|s| s.d.record(duration.as_secs_f64(), self.config.lambda_io));
     }
 
     fn record_entry_pressure(&self) {
-        self.with_state_mut(|s| {
-            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_entry);
-            s.e_integral = 1.0 + (s.e_integral * decay);
-        });
+        self.with_state_mut(|s| s.e.record(1.0, self.config.lambda_entry));
     }
 
     fn temporal_tolerance(&self) -> Duration {
         self.with_state(|s| {
             let base = self.config.base_temporal_drift;
-            let expansion = Duration::from_secs_f64(s.l_integral);
+            let expansion = Duration::from_secs_f64(s.l.value);
             let total = base + expansion;
             total.min(self.config.max_temporal_tolerance) // T2: Hard clamp
         })
     }
 
     fn ingestion_scaler(&self) -> IngestionScale {
-        self.with_state(|s| IngestionScale((1.0 - (s.s_integral / self.config.s_crit)).max(0.0)))
+        self.with_state(|s| IngestionScale((1.0 - (s.s.value / self.config.s_crit)).max(0.0)))
     }
 
     fn finalization_scaler(&self) -> FinalizationScale {
-        self.with_state(|s| FinalizationScale((1.0 - (s.d_integral / self.config.d_crit)).max(0.0)))
+        self.with_state(|s| FinalizationScale((1.0 - (s.d.value / self.config.d_crit)).max(0.0)))
     }
 
     fn sybil_endowment(&self) -> SybilEndowment {
         self.with_state(|s| {
-            SybilEndowment(self.config.psi_max / (1.0 + self.config.k_sybil * s.e_integral))
+            SybilEndowment(self.config.psi_max / (1.0 + self.config.k_sybil * s.e.value))
         })
     }
 
@@ -848,60 +846,56 @@ impl Homeostasis for SystemGovernor {
 
     fn record_memory_pressure(&self, bytes_held: usize) {
         self.with_state_mut(|s| {
-            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_mem);
             let mib = bytes_held as f64 / 1_048_576.0;
-            s.m_integral = mib + (s.m_integral * decay);
+            s.m.record(mib, self.config.lambda_mem);
         });
     }
 
     fn record_storage_pressure(&self, used_bytes: u64, max_bytes: u64) {
         self.with_state_mut(|s| {
-            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_wal);
             let ratio = if max_bytes > 0 {
                 used_bytes as f64 / max_bytes as f64
             } else {
                 1.0
             };
-            s.w_integral = ratio + (s.w_integral * decay);
+            s.w.record(ratio, self.config.lambda_wal);
         });
     }
 
     fn record_bandwidth_pressure(&self, bytes: usize) {
         self.with_state_mut(|s| {
-            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_bw);
             let mib = bytes as f64 / 1_048_576.0;
-            s.b_integral = mib + (s.b_integral * decay);
+            s.b.record(mib, self.config.lambda_bw);
         });
     }
 
     fn record_connection_pressure(&self, active: usize, max: usize) {
         self.with_state_mut(|s| {
-            let decay = Self::calculate_dt_and_decay(s, self.config.lambda_conn);
             let ratio = if max > 0 {
                 active as f64 / max as f64
             } else {
                 1.0
             };
-            s.c_integral = ratio + (s.c_integral * decay);
+            s.c.record(ratio, self.config.lambda_conn);
         });
     }
 
     // --- Resource Scalers (1.0 = nominal, 0.0 = saturated) ---
 
     fn memory_scaler(&self) -> MemoryScale {
-        self.with_state(|s| MemoryScale((1.0 - (s.m_integral / self.config.m_crit)).max(0.0)))
+        self.with_state(|s| MemoryScale((1.0 - (s.m.value / self.config.m_crit)).max(0.0)))
     }
 
     fn storage_scaler(&self) -> StorageScale {
-        self.with_state(|s| StorageScale((1.0 - (s.w_integral / self.config.w_crit)).max(0.0)))
+        self.with_state(|s| StorageScale((1.0 - (s.w.value / self.config.w_crit)).max(0.0)))
     }
 
     fn bandwidth_scaler(&self) -> BandwidthScale {
-        self.with_state(|s| BandwidthScale((1.0 - (s.b_integral / self.config.b_crit)).max(0.0)))
+        self.with_state(|s| BandwidthScale((1.0 - (s.b.value / self.config.b_crit)).max(0.0)))
     }
 
     fn connection_scaler(&self) -> ConnectionScale {
-        self.with_state(|s| ConnectionScale((1.0 - (s.c_integral / self.config.c_crit)).max(0.0)))
+        self.with_state(|s| ConnectionScale((1.0 - (s.c.value / self.config.c_crit)).max(0.0)))
     }
 }
 
@@ -1713,6 +1707,34 @@ mod tests {
             gov.current_power_state(),
             PowerState::Normal,
             "Should transition to Normal immediately after foregrounding"
+        );
+    }
+
+    // --- Volterra Decoupling Regression Test ---
+
+    #[test]
+    fn test_integrals_are_decoupled() {
+        let gov = SystemGovernor::new();
+
+        // Record bandwidth pressure rapidly (simulates high-traffic burst).
+        // Before the fix, this would reset the shared last_sys_tick on every call,
+        // suppressing decay in all other integrals.
+        for _ in 0..100 {
+            gov.record_bandwidth_pressure(64 * 1024);
+        }
+
+        // Record a single small memory impulse (1 MiB out of 512 MiB crit)
+        gov.record_memory_pressure(1_048_576);
+
+        // Memory scaler should reflect only 1 MiB / 512 MiB ≈ 0.002 pressure.
+        // Before decoupling, bandwidth's rapid clock resets would suppress memory
+        // decay, inflating the integral ~10x.
+        let mem = gov.memory_scaler();
+        assert!(
+            mem.0 > 0.99,
+            "Memory scaler should be near 1.0 (1/512 MiB), got {}. \
+             If this fails, integrals may still be coupled via a shared clock.",
+            mem.0
         );
     }
 }
