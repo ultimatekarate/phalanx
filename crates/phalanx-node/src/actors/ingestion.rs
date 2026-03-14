@@ -164,7 +164,17 @@ impl IngestionActor {
                 Ok(Some(_evicted)) => {}
                 Ok(None) => {}
                 Err(_) => {
-                    tracing::error!(target: "siege_debug", "INGRESS GOVERNOR FULL! Dropping {}", peer_id);
+                    // P7 FIX: Feed rejection events into memory pressure integral
+                    // so the system self-regulates faster when ingestion is saturated.
+                    // Without this, the system drops silently with no feedback loop.
+                    tracing::warn!(
+                        target: "siege_debug",
+                        peer = %peer_id,
+                        stress = ?stress,
+                        event = "ingress_governor_full",
+                        "INGRESS GOVERNOR FULL! Dropping chunk from {}", peer_id
+                    );
+                    self.system_governor.record_memory_pressure(1024 * 1024); // 1 MiB phantom pressure per rejection
                     return;
                 }
             }

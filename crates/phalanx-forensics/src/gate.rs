@@ -110,9 +110,9 @@ impl IntegrityGate for WitnessEnvelope {
         node_id: &NetworkId,
         clock: &dyn TrustedClock,
         tolerance: std::time::Duration,
-        anchor: Option<SignatureHash>,
+        _anchor: Option<SignatureHash>,
     ) -> Result<Self, ShardError> {
-        // UNCONDITIONAL CRYPTOGRAPHIC VERIFICATION
+        // 1. UNCONDITIONAL CRYPTOGRAPHIC VERIFICATION
         // Forensic Zero-Trust: Never operate on data without signature verification.
         if !self.verify_envelope() {
             error!(
@@ -126,27 +126,26 @@ impl IntegrityGate for WitnessEnvelope {
             ));
         }
 
-        // STICKY TRUST OPTIMIZATION (POST-VERIFICATION)
-        // If anchored, we trust the chain continuity and can skip secondary checks.
-        let is_anchored = anchor.is_some() && anchor == self.prev_hash;
-        if is_anchored {
-            return Ok(self);
+        // 2. UNCONDITIONAL TEMPORAL GATE
+        // T3 FIX: Temporal validation ALWAYS runs, even for anchored units.
+        // Without this, an attacker who knows a valid prev_hash can inject
+        // evidence with timestamps years in the future, corrupting timelines.
+        let now = clock.now();
+        if let Err(e) = self.evidence.timestamp().verify_freshness(now, tolerance) {
+            error!(
+                event = "temporal_failure",
+                node = %node_id,
+                peer = %self.did,
+                "TIME_INVALID"
+            );
+            return Err(ShardError::InvalidConfiguration(e.to_string()));
         }
 
-        // TEMPORAL GATE (Only for non-anchored or genesis units)
-        let now = clock.now();
-        match self.evidence.timestamp().verify_freshness(now, tolerance) {
-            Ok(_) => Ok(self),
-            Err(e) => {
-                error!(
-                    event = "temporal_failure",
-                    node = %node_id,
-                    peer = %self.did,
-                    "TIME_INVALID"
-                );
-                Err(ShardError::InvalidConfiguration(e.to_string()))
-            }
-        }
+        // 3. STICKY TRUST OPTIMIZATION (POST-VERIFICATION)
+        // Signature and temporal freshness already verified above.
+        // If anchored, skip remaining secondary checks (e.g. continuity).
+        // This is now safe — future-dated evidence is rejected by step 2.
+        Ok(self)
     }
 }
 
