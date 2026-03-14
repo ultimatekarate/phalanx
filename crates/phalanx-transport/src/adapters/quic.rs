@@ -40,7 +40,11 @@ use crate::{EgressPort, IngressPort};
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum QuicWireMessage {
     /// Client identifies itself to the server on the first stream.
-    Identify { network_id: String },
+    /// Includes a timestamp to prevent replay of captured Identify frames.
+    Identify {
+        network_id: String,
+        timestamp_ms: u64,
+    },
     /// Publish data on a topic (broadcast to all connected peers).
     Publish { topic: String, data: Vec<u8> },
     /// Recording retrieval request.
@@ -90,6 +94,9 @@ pub struct QuicServerConfig {
     pub key_pem: Vec<u8>,
     /// Event channel capacity (default: 2048).
     pub event_channel_capacity: usize,
+    /// Maximum concurrent client connections (default: 64). Connections beyond
+    /// this limit are dropped immediately to prevent connection-flood DoS.
+    pub max_connections: usize,
 }
 
 /// Configuration for a QUIC client (Phone mode).
@@ -278,7 +285,12 @@ impl QuicAdapter {
             .local_addr()
             .map_err(|e| QuicError::Transport(e.to_string()))?;
 
-        tokio::spawn(server_actor(server, event_tx, command_rx));
+        tokio::spawn(server_actor(
+            server,
+            event_tx,
+            command_rx,
+            config.max_connections,
+        ));
 
         Ok((
             QuicIngress { event_rx },
@@ -336,6 +348,7 @@ async fn server_actor(
     mut server: s2n_quic::Server,
     event_tx: mpsc::Sender<NetworkEvent>,
     mut command_rx: mpsc::Receiver<QuicCommand>,
+    max_connections: usize,
 ) {
     let connections: ConnectionMap = Arc::new(RwLock::new(HashMap::new()));
 
@@ -344,6 +357,18 @@ async fn server_actor(
             maybe_conn = server.accept() => {
                 match maybe_conn {
                     Some(connection) => {
+                        // P6 FIX: Enforce connection limit to prevent connection-flood DoS.
+                        let current = connections.read().await.len();
+                        if current >= max_connections {
+                            tracing::warn!(
+                                target: "phalanx::quic",
+                                current,
+                                max = max_connections,
+                                "Connection limit reached, dropping new connection"
+                            );
+                            drop(connection);
+                            continue;
+                        }
                         let etx = event_tx.clone();
                         let conns = connections.clone();
                         tokio::spawn(server_connection_handler(connection, etx, conns));
@@ -480,9 +505,29 @@ async fn server_connection_handler(
     connections: ConnectionMap,
 ) {
     // Phase 1: Identity handshake — first stream must carry an Identify message.
+    // P5 FIX: Verify timestamp freshness to prevent replay of captured Identify frames.
     let network_id = match connection.accept_bidirectional_stream().await {
         Ok(Some(mut stream)) => match read_frame(&mut stream).await {
-            Ok(QuicWireMessage::Identify { network_id }) => NetworkId(network_id),
+            Ok(QuicWireMessage::Identify {
+                network_id,
+                timestamp_ms,
+            }) => {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let age_ms = now_ms.saturating_sub(timestamp_ms);
+                if age_ms > 30_000 {
+                    tracing::warn!(
+                        target: "phalanx::quic",
+                        claimed_id = %network_id,
+                        age_ms,
+                        "Identify timestamp too old (>30s), rejecting"
+                    );
+                    return;
+                }
+                NetworkId(network_id)
+            }
             Ok(_other) => {
                 tracing::warn!(
                     target: "phalanx::quic",
@@ -759,6 +804,10 @@ async fn client_actor(
             Ok(mut stream) => {
                 let identify = QuicWireMessage::Identify {
                     network_id: local_network_id.0.clone(),
+                    timestamp_ms: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
                 };
                 match write_frame(&mut stream, &identify).await {
                     Ok(()) => true,
@@ -1089,13 +1138,18 @@ mod tests {
     fn test_wire_message_roundtrip_identify() {
         let msg = QuicWireMessage::Identify {
             network_id: "peer_abc123".to_string(),
+            timestamp_ms: 1700000000000,
         };
         let encoded = postcard::to_allocvec(&msg).expect("Serialize failed");
         let decoded: QuicWireMessage = postcard::from_bytes(&encoded).expect("Deserialize failed");
 
         match decoded {
-            QuicWireMessage::Identify { network_id } => {
+            QuicWireMessage::Identify {
+                network_id,
+                timestamp_ms,
+            } => {
                 assert_eq!(network_id, "peer_abc123");
+                assert_eq!(timestamp_ms, 1700000000000);
             }
             _ => panic!("Wrong variant after roundtrip"),
         }
@@ -1213,6 +1267,7 @@ mod tests {
             cert_pem: cert_pem.clone(),
             key_pem,
             event_channel_capacity: 64,
+            max_connections: 64,
         };
 
         let (mut server_ingress, _server_egress, server_addr) = QuicAdapter::server(server_config)
@@ -1288,6 +1343,7 @@ mod tests {
             cert_pem: cert_pem.clone(),
             key_pem,
             event_channel_capacity: 64,
+            max_connections: 64,
         };
 
         let (mut server_ingress, server_egress, server_addr) = QuicAdapter::server(server_config)
@@ -1361,6 +1417,7 @@ mod tests {
             cert_pem: cert_pem.clone(),
             key_pem,
             event_channel_capacity: 64,
+            max_connections: 64,
         };
 
         let (mut server_ingress, _server_egress, server_addr) = QuicAdapter::server(server_config)
@@ -1533,6 +1590,7 @@ mod tests {
             cert_pem: cert_pem.clone(),
             key_pem,
             event_channel_capacity: 64,
+            max_connections: 64,
         };
 
         let (_server_ingress, _server_egress, server_addr) = QuicAdapter::server(server_config)
