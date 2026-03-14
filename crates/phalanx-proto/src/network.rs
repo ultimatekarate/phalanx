@@ -36,5 +36,10 @@ pub enum NetworkEvent {
         origin: NetworkId,
         envelopes: Vec<WitnessEnvelope>,
     },
+    /// A previously-connected peer has disconnected.
+    /// Emitted by transports that maintain persistent connections (e.g., QuicAdapter client).
+    PeerDisconnected {
+        peer: NetworkId,
+    },
     Shutdown,
 }

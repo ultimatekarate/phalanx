@@ -480,6 +480,17 @@ impl<I: IngressPort> MeshSentinel<I> {
                 false
             }
 
+            NetworkEvent::PeerDisconnected { peer } => {
+                tracing::info!(
+                    event = "peer_disconnected",
+                    peer = %peer,
+                    "Peer disconnected"
+                );
+                // QUIC disconnects are always internet peers (not mDNS-local).
+                self.system_governor.record_peer_departure(false);
+                false
+            }
+
             NetworkEvent::Shutdown => {
                 tracing::info!("Engine: Initiating emergency salvage");
                 let (tx, rx) = tokio::sync::oneshot::channel();
