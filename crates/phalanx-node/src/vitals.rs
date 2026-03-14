@@ -656,7 +656,8 @@ impl SystemGovernor {
                 }
                 DiscoverySource::Bootstrap
                 | DiscoverySource::Kademlia
-                | DiscoverySource::Identify => {
+                | DiscoverySource::Identify
+                | DiscoverySource::Quic => {
                     s.internet_peer_count = s.internet_peer_count.saturating_add(1);
                     s.last_internet_peer_seen = Instant::now();
                     // Immediately mark internet as available

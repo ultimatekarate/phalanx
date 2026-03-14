@@ -19,6 +19,7 @@ pub enum DiscoverySource {
     Kademlia,
     Mdns,
     Identify,
+    Quic,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
