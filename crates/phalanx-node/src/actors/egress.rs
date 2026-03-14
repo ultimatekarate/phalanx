@@ -1,8 +1,10 @@
+use crate::vitals::{Homeostasis, SystemGovernor};
 use phalanx_proto::identity::{NetworkId, RecordingId};
 use phalanx_proto::prelude::*;
 use phalanx_proto::retrieval::RecordingRequest;
 use phalanx_transport::EgressPort;
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{interval, Duration, Instant};
 
@@ -27,6 +29,8 @@ pub struct EgressActor<E: EgressPort> {
     port: E,
     pending: VecDeque<PendingEgress>,
     rx: mpsc::Receiver<EgressCommand>,
+    /// P10 FIX: SystemGovernor reference for feeding egress failures back into vitals.
+    system_governor: Arc<SystemGovernor>,
     /// P7 FIX: Dedup window for DHT announces to prevent post-partition spam.
     /// Recordings announced in the current window are skipped. Window clears every 30s.
     announced: HashSet<RecordingId>,
@@ -36,12 +40,22 @@ pub struct EgressActor<E: EgressPort> {
 /// DHT announce dedup window duration.
 const ANNOUNCE_DEDUP_WINDOW: Duration = Duration::from_secs(30);
 
+/// P11 FIX: Maximum pending retry queue size. When exceeded, oldest items
+/// are shed to prevent unbounded memory growth during sustained transport failure.
+const MAX_PENDING_RETRIES: usize = 64;
+
 impl<E: EgressPort> EgressActor<E> {
-    pub fn new(port: E, rx: mpsc::Receiver<EgressCommand>, salvaged: Vec<PendingEgress>) -> Self {
+    pub fn new(
+        port: E,
+        rx: mpsc::Receiver<EgressCommand>,
+        salvaged: Vec<PendingEgress>,
+        system_governor: Arc<SystemGovernor>,
+    ) -> Self {
         Self {
             port,
             pending: VecDeque::from(salvaged),
             rx,
+            system_governor,
             announced: HashSet::new(),
             last_announce_clear: Instant::now(),
         }
@@ -119,6 +133,21 @@ impl<E: EgressPort> EgressActor<E> {
             .is_err()
         {
             tracing::warn!(channel = %channel_id, "Response dispatch failed, queuing for retry");
+            // P10 FIX: Feed dispatch failure into bandwidth pressure so the system
+            // reduces ingestion when the outbound transport is failing.
+            self.system_governor.record_bandwidth_pressure(64 * 1024); // ~64 KiB phantom pressure per failure
+
+            // P11 FIX: Shed oldest entries when queue exceeds cap.
+            while self.pending.len() >= MAX_PENDING_RETRIES {
+                if let Some(shed) = self.pending.pop_front() {
+                    tracing::warn!(
+                        channel = %shed.channel_id,
+                        attempts = shed.attempt_count,
+                        "Egress queue full, shedding oldest pending response"
+                    );
+                }
+            }
+
             self.pending.push_back(PendingEgress {
                 channel_id,
                 response,
@@ -153,6 +182,14 @@ impl<E: EgressPort> EgressActor<E> {
                     pending.next_attempt =
                         PhalanxTimestamp::from_millis(now.0 + delay.as_millis() as u64);
                     retry_queue.push_back(pending);
+                } else {
+                    // P10 FIX: Abandoned responses signal sustained transport failure.
+                    tracing::error!(
+                        channel = %pending.channel_id,
+                        attempts = pending.attempt_count,
+                        "Egress response abandoned after max retries"
+                    );
+                    self.system_governor.record_bandwidth_pressure(128 * 1024); // Heavier pressure for data loss
                 }
             }
         }

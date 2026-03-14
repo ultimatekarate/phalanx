@@ -154,7 +154,12 @@ impl<I: IngressPort> MeshSentinel<I> {
         });
 
         // Egress Actor instantiation
-        let egress_actor = EgressActor::new(deps.egress.clone(), egress_rx, salvaged_queue);
+        let egress_actor = EgressActor::new(
+            deps.egress.clone(),
+            egress_rx,
+            salvaged_queue,
+            deps.system_governor.clone(),
+        );
 
         tokio::spawn(async move {
             egress_actor.run().await;
@@ -420,6 +425,8 @@ impl<I: IngressPort> MeshSentinel<I> {
                     source
                 );
                 self.system_governor.record_peer_discovery(source);
+                // P12 FIX: Feed connection count into c_integral.
+                self.system_governor.record_connection_gauge();
                 false
             }
 
@@ -488,6 +495,8 @@ impl<I: IngressPort> MeshSentinel<I> {
                 );
                 // QUIC disconnects are always internet peers (not mDNS-local).
                 self.system_governor.record_peer_departure(false);
+                // P12 FIX: Update c_integral on disconnect.
+                self.system_governor.record_connection_gauge();
                 false
             }
 
