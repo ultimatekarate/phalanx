@@ -6,7 +6,7 @@ use crate::actors::playback::PlaybackCoordinator;
 use crate::actors::retrieval::{RetrievalActor, RetrievalCommand};
 
 use crate::actors::storage::StorageCommand;
-use crate::actors::trust_actor::TrustActor;
+use crate::actors::trust_actor::{TrustActor, TrustCommand};
 use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
 
@@ -89,6 +89,9 @@ pub struct MeshSentinel<I: IngressPort> {
     // DHT: Provider discovery forwarding to the active PlaybackCoordinator.
     // Replaced with a fresh channel on each spawn_playback() call.
     providers_tx: mpsc::Sender<(RecordingId, Vec<NetworkId>)>,
+
+    // Shield Wall: Trust channel for dispatching spectral anomaly offenses.
+    trust_tx: mpsc::Sender<TrustCommand>,
 }
 
 impl<I: IngressPort> MeshSentinel<I> {
@@ -188,6 +191,9 @@ impl<I: IngressPort> MeshSentinel<I> {
         );
         tokio::spawn(retrieval_actor.run());
 
+        // Shield Wall: retain a trust_tx handle for spectral anomaly dispatch.
+        let sentinel_trust_tx = trust_tx.clone();
+
         // Ingestion Actor
         let ingestion_actor = IngestionActor::new(
             deps.config.clone(),
@@ -277,6 +283,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             local_mesh: deps.local_mesh,
             lifecycle_rx,
             providers_tx,
+            trust_tx: sentinel_trust_tx,
         })
     }
 
@@ -384,9 +391,35 @@ impl<I: IngressPort> MeshSentinel<I> {
                         &data,
                         "control_message",
                     ) {
+                        let peer_id_for_spectral = msg.sender.clone();
                         self.health_tracker.register_activity(msg);
+
+                        // Shield Wall: evaluate spectral consistency
+                        if let Some(residual) =
+                            self.health_tracker.spectral.evaluate(&peer_id_for_spectral)
+                        {
+                            if residual > self.health_tracker.spectral.anomaly_threshold {
+                                // Drive peer toward decoupling via existing Volterra integral
+                                self.system_governor.record_spectral_anomaly(
+                                    &peer_id_for_spectral.to_string(),
+                                    residual,
+                                );
+
+                                tracing::warn!(
+                                    target: "phalanx::shield_wall",
+                                    peer = %peer_id_for_spectral,
+                                    residual = %residual,
+                                    "SPECTRAL_ANOMALY_DETECTED"
+                                );
+                            }
+                        }
                     }
                 } else {
+                    // Shield Wall: record data volume for spectral observation
+                    self.health_tracker
+                        .spectral
+                        .record_data_received(origin.clone(), data.len());
+
                     // Bandwidth gate: reject at the edge when saturated
                     if self.system_governor.bandwidth_scaler().0 < 0.05 {
                         tracing::warn!(
@@ -493,6 +526,8 @@ impl<I: IngressPort> MeshSentinel<I> {
                     peer = %peer,
                     "Peer disconnected"
                 );
+                // Shield Wall: clean up spectral observation state for departed peer.
+                self.health_tracker.spectral.remove_peer(&peer);
                 // QUIC disconnects are always internet peers (not mDNS-local).
                 self.system_governor.record_peer_departure(false);
                 // P12 FIX: Update c_integral on disconnect.
