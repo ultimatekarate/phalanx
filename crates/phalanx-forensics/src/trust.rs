@@ -6,6 +6,7 @@ pub fn assess_penalty(offense: &Offense) -> i64 {
     match offense {
         Offense::QuotaExceeded => 25,
         Offense::InvalidSignature | Offense::IdentityTheft => 101,
+        Offense::SpectralAnomaly => 15,
         _ => 10,
     }
 }

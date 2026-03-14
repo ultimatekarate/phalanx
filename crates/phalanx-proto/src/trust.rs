@@ -14,6 +14,7 @@ pub enum Offense {
     IdentityTheft,
     ProtocolViolation,
     TemporalSkew,
+    SpectralAnomaly,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
