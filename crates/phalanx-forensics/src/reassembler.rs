@@ -16,6 +16,7 @@ use phalanx_proto::types::{ChannelCount, Fps, PowerState, SampleRate};
 use raptorq::{Decoder, Encoder, EncodingPacket, ObjectTransmissionInformation, PayloadId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 /// OTI (ObjectTransmissionInformation) prefix length in bytes.
 /// Every fountain symbol's data field starts with 12 bytes of OTI,
@@ -115,6 +116,11 @@ pub fn compress_payload(data: &[u8]) -> Vec<u8> {
 /// by opening thousands of unique shard IDs from the same DID.
 const MAX_CONTEXTS_PER_PEER: usize = 50;
 
+/// P7 FIX: Maximum inactivity duration before a shard context is evicted.
+/// Prevents memory pressure deadlock where incomplete shards hold memory
+/// indefinitely, throttling ingestion and preventing new symbols from arriving.
+const SHARD_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub struct Reassembler {
     pub active_shards: Crucible<ShardMold>,
     pub power_state: PowerState,
@@ -143,11 +149,41 @@ impl Reassembler {
             .count()
     }
 
+    /// P7 FIX: Evict shard contexts that have been inactive longer than
+    /// SHARD_INACTIVITY_TIMEOUT. Returns the number of evicted contexts.
+    /// Contexts with `ttl_extended` (active assembly progress) get 2x timeout.
+    pub fn evict_stale_contexts(&mut self) -> usize {
+        let now = Instant::now();
+        let stale_keys: Vec<ShardId> = self
+            .active_shards
+            .contexts
+            .iter()
+            .filter(|(_, ctx)| {
+                let timeout = if ctx.accumulator.ttl_extended {
+                    SHARD_INACTIVITY_TIMEOUT * 2
+                } else {
+                    SHARD_INACTIVITY_TIMEOUT
+                };
+                now.duration_since(ctx.accumulator.last_activity) > timeout
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        let count = stale_keys.len();
+        for key in stale_keys {
+            tracing::warn!(shard_id = %key, "P7: Evicting stale shard context (inactive > 30s)");
+            self.active_shards.contexts.remove(&key);
+        }
+        count
+    }
+
     pub async fn ingest_chunk<J: TransientJournal>(
         &mut self,
         chunk: ShardChunk,
         journal: &mut J,
     ) -> Result<Option<EnvelopeState>, ShardError> {
+        // P7 FIX: Evict stale contexts before processing new chunks.
+        self.evict_stale_contexts();
+
         // P1 FIX: Per-peer quota enforcement.
         // Check if this peer already has too many active reassembly contexts.
         // Only enforce for NEW shard IDs (existing ones are already tracked).
@@ -211,6 +247,15 @@ pub struct ShardBuffer {
     /// accumulated_bytes() resource accounting
     pub parts: BTreeMap<u32, Vec<u8>>,
     pub owner_did: Did,
+    /// P7 FIX: Tracks when the last symbol was received. Contexts inactive
+    /// longer than SHARD_INACTIVITY_TIMEOUT are evicted to prevent memory
+    /// pressure deadlock.
+    #[serde(skip, default = "Instant::now")]
+    pub last_activity: Instant,
+    /// TTL extension flag. Set when assembly is making progress (terminal
+    /// received + significant symbols accumulated). Extended contexts get
+    /// 2x inactivity timeout to allow slow-but-progressing assemblies to complete.
+    pub ttl_extended: bool,
     /// RaptorQ fountain decoder. Not serializable — reconstructed from
     /// stored symbols during WAL recovery (journal replay through Crucible).
     #[serde(skip)]
@@ -249,6 +294,8 @@ impl Mold for ShardMold {
             terminal_received: item.is_terminal,
             parts: BTreeMap::new(),
             owner_did: item.owner_did.clone(),
+            last_activity: Instant::now(),
+            ttl_extended: false,
             fountain_decoder: None,
             decoded_data: None,
         }
@@ -309,6 +356,14 @@ impl Mold for ShardMold {
         // Store raw data (OTI + symbol) for WAL recovery and dedup tracking
         acc.parts.insert(esi, raw_data);
         acc.received_count += 1;
+        acc.last_activity = Instant::now();
+
+        // TTL extension: if terminal has been received and we have significant
+        // progress (>10 symbols), extend the inactivity timeout to give slow
+        // assemblies a chance to complete.
+        if !acc.ttl_extended && acc.terminal_received && acc.received_count > 10 {
+            acc.ttl_extended = true;
+        }
 
         // Feed to fountain decoder (only if not already decoded)
         if acc.decoded_data.is_none() {
