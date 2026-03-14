@@ -59,3 +59,9 @@ lru = "0.16.3"
 blake3 = "1.8"
 zeroize = "1.8.2"
 c2pa = { version = "0.78.0", default-features = false, features = ["rust_native_crypto", "file_io"] }
+
+# Stability analysis (optional)
+nalgebra = { version = "0.33", optional = true }
+
+[features]
+stability-analysis = ["dep:nalgebra"]

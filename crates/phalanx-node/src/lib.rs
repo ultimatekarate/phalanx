@@ -39,6 +39,9 @@ pub mod persistence {
 pub mod trust;
 pub mod vitals;
 
+#[cfg(feature = "stability-analysis")]
+pub mod stability;
+
 #[macro_use]
 extern crate tracing;
 
