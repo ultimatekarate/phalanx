@@ -758,6 +758,17 @@ impl SystemGovernor {
         &*self.probe
     }
 
+    /// P12 FIX: Record connection pressure based on current tracked peer counts.
+    /// Called from MeshSentinel on PeerDiscovered/PeerDisconnected events.
+    /// Uses a default max of 64 connections (matching QUIC server default).
+    const MAX_EXPECTED_CONNECTIONS: usize = 64;
+
+    pub fn record_connection_gauge(&self) {
+        let (local, internet) = self.with_state(|s| (s.local_peer_count, s.internet_peer_count));
+        let total = local.saturating_add(internet);
+        self.record_connection_pressure(total, Self::MAX_EXPECTED_CONNECTIONS);
+    }
+
     // --- Adaptive Vitals Polling Interval ---
 
     /// Returns the vitals polling interval based on the current power state.

@@ -99,6 +99,12 @@ impl IngestionActor {
             tokio::time::sleep(delay).await;
         }
 
+        // P9 FIX: Sync TrafficGovernor with current PowerState on each chunk.
+        // Without this, the traffic governor stays at Normal forever and never
+        // sheds non-local traffic during Leaf/Dormant power states.
+        self.traffic_governor
+            .set_state(self.system_governor.current_power_state());
+
         if !self
             .traffic_governor
             .should_accept(&peer_id, &self.identity.to_network_id())
