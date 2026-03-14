@@ -15,7 +15,7 @@ futures = "0.3"
 
 # Physical Adapters (The "Across")
 # Real-world QUIC transport
-s2n-quic = "1.75.0" 
+s2n-quic = { version = "1.75.0", features = ["provider-tls-rustls"] }
 # For P2P Mesh logic (Gossipsub/DHT)
 # E1 FIX: connection_limits module is unconditionally available in libp2p 0.56
 libp2p = { version = "0.56", features = ["gossipsub", "noise", "yamux", "tcp", "tokio", "macros", "dns", "kad", "request-response", "identify", "autonat", "relay", "dcutr", "mdns", "pnet", "quic"] }
@@ -34,3 +34,4 @@ zeroize = "1.8.2"
 [dev-dependencies]
 # For testing our Prepositional logic
 tokio-test = "0.4"
+rcgen = "0.13"

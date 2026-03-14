@@ -158,6 +158,9 @@ pub enum TransportError {
 // THE PRELUDE (GATEWAY FOR OTHER CRATES)
 pub mod prelude {
     pub use crate::adapters::libp2p::Libp2pAdapter;
+    pub use crate::adapters::quic::{
+        QuicAdapter, QuicClientConfig, QuicEgress, QuicIngress, QuicServerConfig,
+    };
     pub use crate::EgressPort;
     pub use crate::IngressPort;
     pub use crate::LocalMeshPort;
