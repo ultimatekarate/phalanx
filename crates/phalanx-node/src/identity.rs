@@ -2,7 +2,7 @@ use bip39::Mnemonic;
 use ed25519_dalek::SigningKey;
 
 use anyhow::Result;
-use argon2::{self, Argon2};
+use argon2::{self, Algorithm, Argon2, Params, Version};
 use phalanx_forensics::cryptography::{decrypt_bytes, encrypt_bytes};
 use phalanx_proto::crypto::SymmetricKey;
 use rand_core::OsRng;
@@ -20,6 +20,15 @@ use rand::Rng;
 use std::fs;
 use std::path::Path;
 pub const IDENTITY_VERSION: u32 = 1;
+
+/// P14 FIX: Explicit Argon2id parameters pinned to prevent silent changes
+/// on dependency updates. Mobile-appropriate: m=19 MiB, t=2 iterations, p=1.
+fn identity_argon2() -> Argon2<'static> {
+    // SAFETY: These are the argon2 0.5 defaults. Using `expect` here is acceptable
+    // because the parameters are compile-time constants that are always valid.
+    let params = Params::new(19 * 1024, 2, 1, Some(32)).expect("hardcoded Argon2 params are valid");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
 
 /// M6 FIX: Private struct used exclusively for encrypted disk persistence.
 /// This is the only path through which private keypair bytes are serialized,
@@ -129,7 +138,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         OsRng.fill_bytes(&mut salt);
 
         // Derive a 32-byte encryption key from the passphrase and salt using Argon2.
-        let argon2 = Argon2::default();
+        let argon2 = identity_argon2();
         let mut key_bytes = [0u8; 32];
         argon2
             .hash_password_into(passphrase.as_bytes(), &salt, &mut key_bytes)
@@ -193,7 +202,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         let nonce: [u8; 24] = nonce_slice.try_into().unwrap(); // Should not fail
 
         // Re-derive the same encryption key using the passphrase and the extracted salt.
-        let argon2 = Argon2::default();
+        let argon2 = identity_argon2();
         let mut key_bytes = [0u8; 32];
         argon2
             .hash_password_into(passphrase.as_bytes(), &salt, &mut key_bytes)

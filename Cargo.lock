@@ -4390,7 +4390,6 @@ dependencies = [
 name = "phalanx-forensics"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
  "async-trait",
  "base64",
  "blake3",
@@ -4405,7 +4404,6 @@ dependencies = [
  "lz4_flex",
  "phalanx-proto",
  "postcard",
- "rand 0.10.0",
  "rand_core 0.6.4",
  "raptorq",
  "serde",

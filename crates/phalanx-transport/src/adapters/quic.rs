@@ -266,15 +266,16 @@ impl QuicAdapter {
         let (event_tx, event_rx) = mpsc::channel(config.event_channel_capacity);
         let (command_tx, command_rx) = mpsc::channel::<QuicCommand>(128);
 
-        // Write PEM to temp files — s2n-quic's file-path TLS API is the most
-        // robust across all platforms and providers.
-        let cert_file = tempfile::NamedTempFile::new()?;
-        std::fs::write(cert_file.path(), &config.cert_pem)?;
-        let key_file = tempfile::NamedTempFile::new()?;
-        std::fs::write(key_file.path(), &config.key_pem)?;
+        // P13 FIX: Load TLS certs from memory — avoids writing private keys to
+        // temp files on disk where they could be recovered (especially on Windows).
+        // Note: s2n-quic treats &str as PEM and &[u8] as DER, so we must convert.
+        let cert_pem = std::str::from_utf8(&config.cert_pem)
+            .map_err(|e| QuicError::Tls(format!("Invalid PEM encoding: {}", e)))?;
+        let key_pem = std::str::from_utf8(&config.key_pem)
+            .map_err(|e| QuicError::Tls(format!("Invalid PEM encoding: {}", e)))?;
 
         let server = s2n_quic::Server::builder()
-            .with_tls((cert_file.path(), key_file.path()))
+            .with_tls((cert_pem, key_pem))
             .map_err(|e| QuicError::Tls(e.to_string()))?
             .with_io(config.bind_address)
             .map_err(|e| QuicError::Transport(e.to_string()))?
@@ -308,12 +309,12 @@ impl QuicAdapter {
         let (event_tx, event_rx) = mpsc::channel(config.event_channel_capacity);
         let (command_tx, command_rx) = mpsc::channel::<QuicCommand>(128);
 
-        // Write CA cert to temp file for s2n-quic compatibility.
-        let ca_cert_file = tempfile::NamedTempFile::new()?;
-        std::fs::write(ca_cert_file.path(), &config.ca_cert_pem)?;
+        // P13 FIX: Load CA cert from memory — no temp files needed.
+        let ca_cert_pem = std::str::from_utf8(&config.ca_cert_pem)
+            .map_err(|e| QuicError::Tls(format!("Invalid PEM encoding: {}", e)))?;
 
         let client = s2n_quic::Client::builder()
-            .with_tls(ca_cert_file.path())
+            .with_tls(ca_cert_pem)
             .map_err(|e| QuicError::Tls(e.to_string()))?
             .with_io("0.0.0.0:0")
             .map_err(|e| QuicError::Transport(e.to_string()))?
