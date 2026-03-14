@@ -90,7 +90,16 @@ impl RetrievalActor {
         let io_scale: FinalizationScale = self.system_governor.finalization_scaler();
 
         if io_scale.0 < 0.2 {
-            tracing::warn!("I/O Digestion integral saturated. Shedding retrieval request.");
+            tracing::warn!(
+                target: "phalanx::retrieval",
+                io_scale = io_scale.0,
+                peer = %origin,
+                "I/O Digestion integral saturated. Sending Busy response."
+            );
+            // P8 FIX: Send Busy response instead of silent drop so the requesting
+            // peer knows to retry later rather than waiting indefinitely.
+            self.dispatch_resilient_response(channel_id, RecordingResponse::Busy)
+                .await;
             return;
         }
 

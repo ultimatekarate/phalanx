@@ -2,9 +2,9 @@ use phalanx_proto::identity::{NetworkId, RecordingId};
 use phalanx_proto::prelude::*;
 use phalanx_proto::retrieval::RecordingRequest;
 use phalanx_transport::EgressPort;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{interval, Duration};
+use tokio::time::{interval, Duration, Instant};
 
 pub enum EgressCommand {
     Dispatch {
@@ -27,7 +27,14 @@ pub struct EgressActor<E: EgressPort> {
     port: E,
     pending: VecDeque<PendingEgress>,
     rx: mpsc::Receiver<EgressCommand>,
+    /// P7 FIX: Dedup window for DHT announces to prevent post-partition spam.
+    /// Recordings announced in the current window are skipped. Window clears every 30s.
+    announced: HashSet<RecordingId>,
+    last_announce_clear: Instant,
 }
+
+/// DHT announce dedup window duration.
+const ANNOUNCE_DEDUP_WINDOW: Duration = Duration::from_secs(30);
 
 impl<E: EgressPort> EgressActor<E> {
     pub fn new(port: E, rx: mpsc::Receiver<EgressCommand>, salvaged: Vec<PendingEgress>) -> Self {
@@ -35,6 +42,8 @@ impl<E: EgressPort> EgressActor<E> {
             port,
             pending: VecDeque::from(salvaged),
             rx,
+            announced: HashSet::new(),
+            last_announce_clear: Instant::now(),
         }
     }
 
@@ -56,6 +65,20 @@ impl<E: EgressPort> EgressActor<E> {
                             break;
                         }
                         EgressCommand::AnnounceRecording(recording_id) => {
+                            // P7 FIX: Dedup DHT announces within a 30s window.
+                            // Prevents per-shard announce storms and post-partition spam.
+                            let now = Instant::now();
+                            if now.duration_since(self.last_announce_clear) > ANNOUNCE_DEDUP_WINDOW {
+                                self.announced.clear();
+                                self.last_announce_clear = now;
+                            }
+                            if !self.announced.insert(recording_id.clone()) {
+                                tracing::debug!(
+                                    recording = %recording_id,
+                                    "DHT: Skipping duplicate announce (dedup window)"
+                                );
+                                continue;
+                            }
                             if let Err(e) = self.port.announce_recording(&recording_id).await {
                                 tracing::warn!(
                                     recording = %recording_id,
