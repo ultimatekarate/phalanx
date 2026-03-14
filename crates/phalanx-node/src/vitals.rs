@@ -338,10 +338,10 @@ pub struct IntegralState {
     pub w: DecayingIntegral, // WAL/storage pressure
     pub b: DecayingIntegral, // Bandwidth pressure
     pub c: DecayingIntegral, // Connection pressure
-    pub r_integrals: HashMap<String, DecayingIntegral>,
+    pub r_integrals: HashMap<String, DecayingIntegral>, // reputation integrals
     pub conserving_trigger_count: u8, // Consecutive ticks above Conserving threshold (0.50)
-    pub leaf_trigger_count: u8,       // Consecutive vitals ticks above composite threshold (0.85)
-    pub normal_trigger_count: u8,     // Consecutive vitals ticks below recovery threshold (0.30)
+    pub leaf_trigger_count: u8, // Consecutive vitals ticks above composite threshold (0.85)
+    pub normal_trigger_count: u8, // Consecutive vitals ticks below recovery threshold (0.30)
     /// Tracks the stress-driven power state independently of battery gate.
     /// Used as hysteresis fallback by `stress_recommendation()` so it doesn't
     /// inherit battery-gate-driven Dormant/Leaf states.
