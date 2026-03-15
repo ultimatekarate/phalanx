@@ -4,7 +4,6 @@ members = [
     "crates/phalanx-forensics",
     "crates/phalanx-transport",
     "crates/phalanx-node",
-    "crates/phalanx-ui",
     "crates/phalanx-lens",
     "crates/phalanx-ffi",
     "crates/phalanx-sim",
