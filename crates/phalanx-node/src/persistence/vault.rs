@@ -18,7 +18,7 @@ use phalanx_proto::time::TrustedClock;
 use phalanx_proto::types::ByteCapacity;
 use phalanx_proto::types::ForensicUnit;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -100,6 +100,11 @@ pub struct StorageLedger {
     pub foreign_committed_bytes: ByteCapacity,
     /// Foreign shards in the relay buffer (transient, evictable).
     pub foreign_transient_bytes: ByteCapacity,
+    /// Per-owner foreign byte counts (committed + transient combined).
+    /// Used for per-DID quota enforcement to prevent a single owner from
+    /// monopolizing all foreign storage capacity.
+    #[serde(default)]
+    pub foreign_bytes_by_owner: HashMap<Did, u64>,
     /// Cumulative bytes of my evidence pushed to the mesh.
     pub own_bytes_pushed: ByteCapacity,
 }
@@ -121,8 +126,22 @@ impl StorageLedger {
     }
 
     /// Record ingestion of foreign evidence (transient until promoted to committed).
-    pub fn record_foreign_ingestion(&mut self, bytes: u64) {
+    /// Tracks both the global transient total and per-owner accounting.
+    pub fn record_foreign_ingestion(&mut self, bytes: u64, owner_did: &Did) {
         self.foreign_transient_bytes = ByteCapacity(self.foreign_transient_bytes.as_u64() + bytes);
+        let entry = self
+            .foreign_bytes_by_owner
+            .entry(owner_did.clone())
+            .or_insert(0);
+        *entry = entry.saturating_add(bytes);
+    }
+
+    /// Returns the total foreign bytes tracked for a specific owner DID.
+    pub fn foreign_bytes_for_owner(&self, owner_did: &Did) -> u64 {
+        self.foreign_bytes_by_owner
+            .get(owner_did)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Promote transient foreign storage to committed (K-replica confirmed).
@@ -1004,6 +1023,10 @@ mod tests {
 
     // ── StorageLedger Tests ──
 
+    fn test_foreign_did() -> Did {
+        Did::new("did:key:z6MkTestForeign")
+    }
+
     #[test]
     fn test_storage_ledger_defaults_to_zero() {
         let ledger = StorageLedger::default();
@@ -1034,7 +1057,7 @@ mod tests {
     #[test]
     fn test_storage_ledger_foreign_ingestion_is_transient() {
         let mut ledger = StorageLedger::default();
-        ledger.record_foreign_ingestion(2000);
+        ledger.record_foreign_ingestion(2000, &test_foreign_did());
 
         // Foreign ingestion lands in transient first
         assert_eq!(ledger.foreign_transient_bytes.as_u64(), 2000);
@@ -1046,7 +1069,7 @@ mod tests {
     #[test]
     fn test_storage_ledger_promote_transient_to_committed() {
         let mut ledger = StorageLedger::default();
-        ledger.record_foreign_ingestion(3000);
+        ledger.record_foreign_ingestion(3000, &test_foreign_did());
 
         // Promote 1000 bytes to committed (K-replica confirmed)
         ledger.promote_to_committed(1000);
@@ -1076,7 +1099,7 @@ mod tests {
     #[test]
     fn test_storage_ledger_evict_transient() {
         let mut ledger = StorageLedger::default();
-        ledger.record_foreign_ingestion(5000);
+        ledger.record_foreign_ingestion(5000, &test_foreign_did());
 
         ledger.evict_transient(2000);
         assert_eq!(ledger.foreign_transient_bytes.as_u64(), 3000);
@@ -1092,7 +1115,7 @@ mod tests {
 
         // Simulate a node that stores own evidence and hosts foreign replicas
         ledger.record_own_ingestion(10_000);
-        ledger.record_foreign_ingestion(8_000);
+        ledger.record_foreign_ingestion(8_000, &test_foreign_did());
         ledger.promote_to_committed(3_000); // 3K committed, 5K transient
         ledger.record_own_push(6_000);
 
@@ -1107,5 +1130,24 @@ mod tests {
         ledger.evict_transient(5_000);
         assert_eq!(ledger.total_foreign_bytes(), 3_000);
         assert_eq!(ledger.total_local_bytes(), 13_000);
+    }
+
+    #[test]
+    fn test_storage_ledger_per_owner_tracking() {
+        let mut ledger = StorageLedger::default();
+        let owner_a = Did::new("did:key:z6MkOwnerA");
+        let owner_b = Did::new("did:key:z6MkOwnerB");
+
+        ledger.record_foreign_ingestion(1000, &owner_a);
+        ledger.record_foreign_ingestion(2000, &owner_b);
+        ledger.record_foreign_ingestion(500, &owner_a);
+
+        assert_eq!(ledger.foreign_bytes_for_owner(&owner_a), 1500);
+        assert_eq!(ledger.foreign_bytes_for_owner(&owner_b), 2000);
+        assert_eq!(ledger.total_foreign_bytes(), 3500);
+
+        // Unknown owner returns 0
+        let owner_c = Did::new("did:key:z6MkOwnerC");
+        assert_eq!(ledger.foreign_bytes_for_owner(&owner_c), 0);
     }
 }
