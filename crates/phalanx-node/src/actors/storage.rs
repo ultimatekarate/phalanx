@@ -179,10 +179,31 @@ impl<J: TransientJournal> StorageActor<J> {
                     foreign_total, max_foreign
                 )));
             }
+
+            // Per-owner quota: prevent a single foreign DID from monopolizing all foreign storage.
+            let owner_bytes = self
+                .guardian
+                .ledger
+                .foreign_bytes_for_owner(&chunk.owner_did);
+            let max_per_owner = self.config.storage.max_foreign_per_owner_bytes.as_u64();
+            if owner_bytes >= max_per_owner {
+                tracing::warn!(
+                    event = "per_owner_quota_rejected",
+                    owner_did = %chunk.owner_did,
+                    owner_bytes,
+                    max_per_owner,
+                    "Per-owner foreign storage quota exceeded"
+                );
+                return Err(GuardianError::StorageFailure(format!(
+                    "Per-owner foreign quota exceeded for {} ({} >= {} bytes)",
+                    chunk.owner_did, owner_bytes, max_per_owner
+                )));
+            }
         }
 
-        // Track chunk size for ledger accounting before consumption
+        // Track chunk size and owner DID for ledger accounting before consumption
         let chunk_bytes = chunk.data.len() as u64;
+        let chunk_owner_did = chunk.owner_did.clone();
 
         let reassembly_result = self
             .reassembler
@@ -196,7 +217,9 @@ impl<J: TransientJournal> StorageActor<J> {
         // Update storage ledger (own vs foreign accounting)
         if reassembly_result.is_ok() {
             if is_foreign {
-                self.guardian.ledger.record_foreign_ingestion(chunk_bytes);
+                self.guardian
+                    .ledger
+                    .record_foreign_ingestion(chunk_bytes, &chunk_owner_did);
             } else {
                 self.guardian.ledger.record_own_ingestion(chunk_bytes);
             }

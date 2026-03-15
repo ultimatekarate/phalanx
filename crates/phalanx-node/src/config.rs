@@ -100,6 +100,8 @@ pub struct StorageConfig {
     pub max_storage_bytes: ByteCapacity,
     #[serde(default = "default_max_foreign")]
     pub max_foreign_storage_bytes: ByteCapacity,
+    #[serde(default = "default_max_foreign_per_owner")]
+    pub max_foreign_per_owner_bytes: ByteCapacity,
     /// Fixed TTL for stored evidence, independent of dynamic temporal tolerance.
     #[serde(default = "default_evidence_ttl")]
     pub evidence_ttl_secs: u64,
@@ -147,6 +149,9 @@ fn default_max_storage() -> ByteCapacity {
 fn default_max_foreign() -> ByteCapacity {
     ByteCapacity(500_000_000)
 }
+fn default_max_foreign_per_owner() -> ByteCapacity {
+    ByteCapacity(50_000_000) // 50 MB per foreign owner
+}
 fn default_evidence_ttl() -> u64 {
     300
 }
@@ -191,6 +196,7 @@ impl Default for StorageConfig {
             shards_needed_to_archive: 10,
             max_storage_bytes: default_max_storage(),
             max_foreign_storage_bytes: default_max_foreign(),
+            max_foreign_per_owner_bytes: default_max_foreign_per_owner(),
             evidence_ttl_secs: default_evidence_ttl(),
             c2pa_cert_path: None,
             c2pa_key_path: None,
