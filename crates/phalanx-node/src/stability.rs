@@ -2136,7 +2136,7 @@ pub fn format_nonlinear_partition_report(report: &NonlinearPartitionReport) -> S
 //
 //   γ₁  = |Re(λ_dominant)|        — distance from the instability boundary
 //   κ(V) = σ_max(V)/σ_min(V)     — worst-case transient amplification bound
-//   r(J) = min_ω σ_min(iωI − J)  — smallest perturbation that destabilises
+//   r(J) = min_ω σ_min(iωI − J)  — smallest perturbation that destabilizes
 //   δ_H  = √(‖J‖²_F − Σ|λ|²)    — Henrici departure from normality
 //
 // Together with the Lyapunov exponent μ₁ < 0 from the nonlinear analysis,
@@ -2166,7 +2166,7 @@ pub struct SpectralGapReport {
     /// Zero iff J is normal.
     pub henrici_departure: f64,
     /// Stability radius r(J) = min_ω σ_min(iωI − J).
-    /// Smallest operator-norm perturbation that can destabilise.
+    /// Smallest operator-norm perturbation that can destabilize.
     pub stability_radius: f64,
     /// Frequency ω* where the stability radius minimum is attained.
     pub stability_radius_omega: f64,
@@ -2383,7 +2383,7 @@ fn stability_radius(jacobian: &DMatrix<f64>) -> (f64, f64) {
 
 // ----- main analysis entry point -----
 
-/// Analyse spectral gap, eigenvector orthogonality, and stability radius
+/// analyze spectral gap, eigenvector orthogonality, and stability radius
 /// for a single operating scenario.
 pub fn analyze_spectral_gap(
     scenario: &str,
@@ -2573,7 +2573,7 @@ fn build_combined_certificate(
         worst_rad
     ));
     out.push_str(&format!(
-        "       perturbation must exceed r(J) in operator norm to destabilise\n"
+        "       perturbation must exceed r(J) in operator norm to destabilize\n"
     ));
 
     // Layer 4: eigenvector conditioning
@@ -2941,6 +2941,7 @@ mod tests {
         }
     }
 
+    // Shout out to Dr. Varga- I'm still using Gershgorin's theorem all these years later.
     #[test]
     fn test_gershgorin_analysis() {
         // Diagonal dominance is a sufficient (not necessary) condition for

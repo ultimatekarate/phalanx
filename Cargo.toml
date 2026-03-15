@@ -8,6 +8,7 @@ members = [
     "crates/phalanx-dashboard", # Your Ratatui Dashboard
     "crates/phalanx-ui",
     "crates/phalanx-lens",
+    "crates/phalanx-ffi",
 ]
 resolver = "2"
 

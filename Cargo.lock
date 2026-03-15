@@ -4442,6 +4442,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "phalanx-ffi"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "phalanx-forensics",
+ "phalanx-lens",
+ "phalanx-node",
+ "phalanx-proto",
+ "phalanx-transport",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "phalanx-forensics"
 version = "0.1.0"
 dependencies = [

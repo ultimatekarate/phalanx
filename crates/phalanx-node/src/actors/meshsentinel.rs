@@ -24,7 +24,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use phalanx_proto::crypto::SymmetricKey;
-use phalanx_proto::evidence::StorageSequence;
+use phalanx_proto::evidence::{AudioShard, StorageSequence, VideoShard};
 use std::error::Error;
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
@@ -91,7 +91,12 @@ pub struct MeshSentinel<I: IngressPort> {
     providers_tx: mpsc::Sender<(RecordingId, Vec<NetworkId>)>,
 
     // Shield Wall: Trust channel for dispatching spectral anomaly offenses.
-    trust_tx: mpsc::Sender<TrustCommand>,
+    pub trust_tx: mpsc::Sender<TrustCommand>,
+
+    // Media capture channels — exposed for FFI frame injection.
+    // Desktop sentinel ignores these; the FFI handle clones them for phalanx_push_video_frame().
+    pub video_tx: mpsc::Sender<VideoShard>,
+    pub audio_tx: mpsc::Sender<AudioShard>,
 }
 
 impl<I: IngressPort> MeshSentinel<I> {
@@ -114,8 +119,8 @@ impl<I: IngressPort> MeshSentinel<I> {
         );
         let phys_capacity = deps.system_governor.config.pipeline_capacity();
 
-        let (_video_tx_unused, video_rx) = mpsc::channel(deps.config.storage.max_video_buffer);
-        let (_audio_tx_unused, audio_rx) = mpsc::channel(deps.config.storage.max_audio_buffer);
+        let (video_tx, video_rx) = mpsc::channel(deps.config.storage.max_video_buffer);
+        let (audio_tx, audio_rx) = mpsc::channel(deps.config.storage.max_audio_buffer);
 
         let (storage_tx, storage_rx) = mpsc::channel(phys_capacity);
         let (ingestion_tx, ingestion_rx) = mpsc::channel(phys_capacity);
@@ -284,6 +289,8 @@ impl<I: IngressPort> MeshSentinel<I> {
             lifecycle_rx,
             providers_tx,
             trust_tx: sentinel_trust_tx,
+            video_tx,
+            audio_tx,
         })
     }
 
