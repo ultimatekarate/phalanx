@@ -124,3 +124,175 @@ impl HardwareProbe for MobileProbe {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_values_on_cold_start() {
+        let probe = MobileProbe::new(ThermalThresholds::default());
+
+        let battery = probe.battery_level().expect("battery should be Some");
+        assert_eq!(battery.get(), 100);
+        assert!(!probe.is_charging());
+        assert!(!probe.is_background());
+
+        let thermal = probe.thermal_reading().expect("thermal should be Some");
+        assert_eq!(thermal.0, 25);
+    }
+
+    #[test]
+    fn battery_updates_visible_through_trait() {
+        let probe = MobileProbe::new(ThermalThresholds::default());
+
+        probe.set_battery(75, true);
+        let battery = probe.battery_level().expect("battery should be Some");
+        assert_eq!(battery.get(), 75);
+        assert!(probe.is_charging());
+
+        probe.set_battery(42, false);
+        let battery = probe.battery_level().expect("battery should be Some");
+        assert_eq!(battery.get(), 42);
+        assert!(!probe.is_charging());
+    }
+
+    #[test]
+    fn battery_clamps_at_100() {
+        let probe = MobileProbe::new(ThermalThresholds::default());
+
+        probe.set_battery(255, false);
+        let battery = probe.battery_level().expect("battery should be Some");
+        assert_eq!(battery.get(), 100);
+    }
+
+    #[test]
+    fn battery_zero_is_valid() {
+        let probe = MobileProbe::new(ThermalThresholds::default());
+
+        probe.set_battery(0, false);
+        let battery = probe.battery_level().expect("battery should be Some");
+        assert_eq!(battery.get(), 0);
+    }
+
+    #[test]
+    fn thermal_updates_visible_through_trait() {
+        let probe = MobileProbe::new(ThermalThresholds::default());
+
+        probe.set_thermal(40);
+        assert_eq!(probe.thermal_reading().expect("some").0, 40);
+
+        probe.set_thermal(85);
+        assert_eq!(probe.thermal_reading().expect("some").0, 85);
+    }
+
+    #[test]
+    fn thermal_negative_values_are_valid() {
+        let probe = MobileProbe::new(ThermalThresholds::default());
+
+        // Arctic field conditions
+        probe.set_thermal(-20);
+        assert_eq!(probe.thermal_reading().expect("some").0, -20);
+    }
+
+    #[test]
+    fn lifecycle_foreground_background() {
+        let probe = MobileProbe::new(ThermalThresholds::default());
+
+        assert!(!probe.is_background());
+
+        probe.set_lifecycle(false);
+        assert!(probe.is_background());
+
+        probe.set_lifecycle(true);
+        assert!(!probe.is_background());
+    }
+
+    #[test]
+    fn lifecycle_events_take_once() {
+        let probe = MobileProbe::new(ThermalThresholds::default());
+
+        let rx1 = probe.lifecycle_events();
+        assert!(rx1.is_some(), "First call should return Some(receiver)");
+
+        let rx2 = probe.lifecycle_events();
+        assert!(rx2.is_none(), "Second call should return None");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_events_forwarded_to_channel() {
+        let probe = MobileProbe::new(ThermalThresholds::default());
+
+        let mut rx = probe.lifecycle_events().expect("should get receiver");
+
+        probe.set_lifecycle(false);
+        probe.set_lifecycle(true);
+
+        let event1 = rx.try_recv().expect("should have Backgrounded event");
+        assert!(matches!(event1, LifecycleEvent::Backgrounded));
+
+        let event2 = rx.try_recv().expect("should have Foregrounded event");
+        assert!(matches!(event2, LifecycleEvent::Foregrounded));
+    }
+
+    #[test]
+    fn can_capture_in_background_defaults_false() {
+        let probe = MobileProbe::new(ThermalThresholds::default());
+        assert!(!probe.can_capture_in_background());
+    }
+
+    #[test]
+    fn rapid_updates_dont_panic() {
+        let probe = MobileProbe::new(ThermalThresholds::default());
+
+        for i in 0..1000u16 {
+            let level = (i % 101) as u8;
+            let charging = i % 3 == 0;
+            let celsius = (i as i32 % 100) - 20;
+
+            probe.set_battery(level, charging);
+            probe.set_thermal(celsius);
+            probe.set_lifecycle(i % 2 == 0);
+
+            let _ = probe.battery_level();
+            let _ = probe.thermal_reading();
+            let _ = probe.is_charging();
+            let _ = probe.is_background();
+        }
+    }
+
+    #[test]
+    fn concurrent_reads_and_writes_dont_panic() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let probe = Arc::new(MobileProbe::new(ThermalThresholds::default()));
+
+        let writer = {
+            let probe = probe.clone();
+            thread::spawn(move || {
+                for i in 0..500u16 {
+                    probe.set_battery((i % 101) as u8, i % 2 == 0);
+                    probe.set_thermal((i as i32) % 80);
+                    probe.set_lifecycle(i % 3 != 0);
+                }
+            })
+        };
+
+        let reader = {
+            let probe = probe.clone();
+            thread::spawn(move || {
+                for _ in 0..500 {
+                    let _ = probe.battery_level();
+                    let _ = probe.thermal_reading();
+                    let _ = probe.is_charging();
+                    let _ = probe.is_background();
+                }
+            })
+        };
+
+        writer.join().expect("writer thread panicked");
+        reader.join().expect("reader thread panicked");
+    }
+}

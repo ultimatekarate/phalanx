@@ -378,3 +378,63 @@ impl PhalanxHandle {
             .unwrap_or(false)
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+
+    #[test]
+    fn null_handle_start_returns_error() {
+        unsafe {
+            assert_eq!(
+                phalanx_start(std::ptr::null_mut()),
+                PhalanxError::NullPointer.code()
+            );
+        }
+    }
+
+    #[test]
+    fn null_handle_stop_returns_error() {
+        unsafe {
+            assert_eq!(
+                phalanx_stop(std::ptr::null_mut()),
+                PhalanxError::NullPointer.code()
+            );
+        }
+    }
+
+    #[test]
+    fn destroy_null_is_noop() {
+        unsafe {
+            phalanx_destroy(std::ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn create_with_null_storage_returns_null() {
+        unsafe {
+            let passphrase = CString::new("test").expect("valid");
+            let handle = phalanx_create(std::ptr::null(), std::ptr::null(), passphrase.as_ptr());
+            assert!(handle.is_null());
+        }
+    }
+
+    #[test]
+    fn create_with_null_passphrase_returns_null() {
+        unsafe {
+            let storage = CString::new("/tmp/phalanx_test").expect("valid");
+            let handle = phalanx_create(std::ptr::null(), storage.as_ptr(), std::ptr::null());
+            assert!(handle.is_null());
+        }
+    }
+
+    #[test]
+    fn create_with_both_null_returns_null() {
+        unsafe {
+            let handle = phalanx_create(std::ptr::null(), std::ptr::null(), std::ptr::null());
+            assert!(handle.is_null());
+        }
+    }
+}

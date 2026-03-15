@@ -46,3 +46,79 @@ impl PhalanxError {
         self as i32
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_codes_are_stable() {
+        // These values are part of the C-ABI contract.
+        // Changing them breaks all Dart code.
+        assert_eq!(PhalanxError::Ok.code(), 0);
+        assert_eq!(PhalanxError::NullPointer.code(), -1);
+        assert_eq!(PhalanxError::InvalidState.code(), -2);
+        assert_eq!(PhalanxError::InvalidUtf8.code(), -3);
+        assert_eq!(PhalanxError::BootFailed.code(), -4);
+        assert_eq!(PhalanxError::AlreadyRunning.code(), -5);
+        assert_eq!(PhalanxError::NotRunning.code(), -6);
+        assert_eq!(PhalanxError::ChannelClosed.code(), -7);
+        assert_eq!(PhalanxError::TrustError.code(), -8);
+        assert_eq!(PhalanxError::PlaybackError.code(), -9);
+        assert_eq!(PhalanxError::ConfigError.code(), -10);
+        assert_eq!(PhalanxError::AlreadyRecording.code(), -11);
+        assert_eq!(PhalanxError::NotRecording.code(), -12);
+    }
+
+    #[test]
+    fn error_codes_are_all_unique() {
+        let codes: Vec<i32> = vec![
+            PhalanxError::Ok.code(),
+            PhalanxError::NullPointer.code(),
+            PhalanxError::InvalidState.code(),
+            PhalanxError::InvalidUtf8.code(),
+            PhalanxError::BootFailed.code(),
+            PhalanxError::AlreadyRunning.code(),
+            PhalanxError::NotRunning.code(),
+            PhalanxError::ChannelClosed.code(),
+            PhalanxError::TrustError.code(),
+            PhalanxError::PlaybackError.code(),
+            PhalanxError::ConfigError.code(),
+            PhalanxError::AlreadyRecording.code(),
+            PhalanxError::NotRecording.code(),
+        ];
+
+        let mut sorted = codes.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), codes.len(), "Duplicate error codes detected");
+    }
+
+    #[test]
+    fn ok_is_zero_errors_are_negative() {
+        assert_eq!(PhalanxError::Ok.code(), 0);
+
+        let error_variants = [
+            PhalanxError::NullPointer,
+            PhalanxError::InvalidState,
+            PhalanxError::InvalidUtf8,
+            PhalanxError::BootFailed,
+            PhalanxError::AlreadyRunning,
+            PhalanxError::NotRunning,
+            PhalanxError::ChannelClosed,
+            PhalanxError::TrustError,
+            PhalanxError::PlaybackError,
+            PhalanxError::ConfigError,
+            PhalanxError::AlreadyRecording,
+            PhalanxError::NotRecording,
+        ];
+
+        for variant in &error_variants {
+            assert!(
+                variant.code() < 0,
+                "Error {variant:?} has non-negative code {}",
+                variant.code()
+            );
+        }
+    }
+}
