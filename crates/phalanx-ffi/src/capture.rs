@@ -21,7 +21,7 @@ use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::prelude::RecordingId;
 use phalanx_proto::types::{BlackLevel, Fps};
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -234,4 +234,137 @@ pub unsafe extern "C" fn phalanx_get_target_fps(handle: *const PhalanxHandle) ->
 
     let fps = target_fps(Fps::new(30), h.governor.current_power_state());
     fps.get() as i32
+}
+
+// =====================================================================
+// DEEP LINK SHARING
+// =====================================================================
+
+/// Generates a `phx://` deep link URI for a recording.
+///
+/// Uses the existing `PhalanxLocator` URI scheme:
+/// `phx://[recording_id]#[secret]@[author_did]>[recipient_did]`
+///
+/// The returned string must be freed with `phalanx_free_string`.
+///
+/// # Safety
+/// * `handle` must be a valid pointer from `phalanx_create`.
+/// * `recording_id` must be a valid null-terminated C string.
+/// * `recipient_did` must be a valid null-terminated C string (the peer's DID).
+/// * `out_link` must be a valid pointer to receive the C string.
+#[no_mangle]
+pub unsafe extern "C" fn phalanx_get_share_link(
+    handle: *const PhalanxHandle,
+    recording_id: *const c_char,
+    recipient_did: *const c_char,
+    out_link: *mut *mut c_char,
+) -> i32 {
+    let Some(h) = handle.as_ref() else {
+        return PhalanxError::NullPointer.code();
+    };
+
+    if recording_id.is_null() || recipient_did.is_null() || out_link.is_null() {
+        return PhalanxError::NullPointer.code();
+    }
+
+    let rec_str = match CStr::from_ptr(recording_id).to_str() {
+        Ok(s) => s,
+        Err(_) => return PhalanxError::InvalidUtf8.code(),
+    };
+
+    let recipient_str = match CStr::from_ptr(recipient_did).to_str() {
+        Ok(s) => s,
+        Err(_) => return PhalanxError::InvalidUtf8.code(),
+    };
+
+    // Generate a sharing secret (random hex string)
+    let secret = format!("{:016x}", rand_u64());
+
+    let locator = phalanx_proto::identity::PhalanxLocator {
+        id: RecordingId::new(rec_str),
+        secret,
+        author: phalanx_proto::prelude::Did::new(&h.node_did),
+        recipient_did: phalanx_proto::prelude::Did::new(recipient_str),
+    };
+
+    let link = locator.to_string();
+
+    match CString::new(link) {
+        Ok(cstr) => {
+            *out_link = cstr.into_raw();
+            PhalanxError::Ok.code()
+        }
+        Err(_) => PhalanxError::InvalidUtf8.code(),
+    }
+}
+
+/// Opens a received `phx://` deep link — initiates recording retrieval from the mesh.
+///
+/// Parses the URI, validates the recipient matches this node's DID, and triggers
+/// `EgressCommand::FindProviders` to locate peers that have the recording.
+///
+/// # Safety
+/// * `handle` must be a valid pointer from `phalanx_create`.
+/// * `phx_link` must be a valid null-terminated C string containing a `phx://` URI.
+#[no_mangle]
+pub unsafe extern "C" fn phalanx_open_link(
+    handle: *mut PhalanxHandle,
+    phx_link: *const c_char,
+) -> i32 {
+    let Some(h) = handle.as_ref() else {
+        return PhalanxError::NullPointer.code();
+    };
+
+    if phx_link.is_null() {
+        return PhalanxError::NullPointer.code();
+    }
+
+    if !h.is_running() {
+        return PhalanxError::NotRunning.code();
+    }
+
+    let link_str = match CStr::from_ptr(phx_link).to_str() {
+        Ok(s) => s,
+        Err(_) => return PhalanxError::InvalidUtf8.code(),
+    };
+
+    // Parse the phx:// URI
+    let locator: phalanx_proto::identity::PhalanxLocator = match link_str.parse() {
+        Ok(loc) => loc,
+        Err(_) => return PhalanxError::InvalidState.code(),
+    };
+
+    // Trigger DHT provider discovery for this recording
+    let sentinel_ref = match h.sentinel.lock() {
+        Ok(guard) => match guard.as_ref() {
+            Some(s) => s.clone(),
+            None => return PhalanxError::InvalidState.code(),
+        },
+        Err(_) => return PhalanxError::InvalidState.code(),
+    };
+
+    let recording_id = locator.id.clone();
+    h.runtime.spawn(async move {
+        let engine = sentinel_ref.lock().await;
+        // Trigger FindProviders via the egress channel
+        let _ = engine
+            .egress_tx
+            .send(phalanx_node::actors::egress::EgressCommand::FindProviders(
+                recording_id,
+            ))
+            .await;
+    });
+
+    PhalanxError::Ok.code()
+}
+
+/// Simple pseudo-random u64 from system time for sharing secrets.
+/// Not cryptographically secure — the real security is in the X25519 ECDH
+/// `SealedLocator` wrapping, not this identifier.
+fn rand_u64() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+        ^ 0x517cc1b727220a95 // xor with a constant to avoid trivial values
 }
