@@ -26,5 +26,8 @@ tracing = { workspace = true }
 libc = "0.2"
 serde_json = "1.0"
 
+# C2PA export (rust_native_crypto avoids OpenSSL dependency)
+c2pa = { version = "0.78", default-features = false, features = ["rust_native_crypto", "file_io"] }
+
 [lints]
 workspace = true

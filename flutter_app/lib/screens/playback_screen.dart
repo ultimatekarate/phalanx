@@ -61,6 +61,21 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
     }
   }
 
+  void _exportC2pa(String recordingId) {
+    final bridge = ref.read(phalanxProvider);
+    // Export to app's documents directory
+    final outPath = '/storage/emulated/0/Download/${recordingId}_c2pa.jpg';
+    try {
+      bridge.exportC2pa(recordingId, outPath);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('C2PA export saved: $outPath')),
+      );
+    } catch (e) {
+      _showError('C2PA export failed: $e');
+    }
+  }
+
   void _showError(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(
@@ -122,6 +137,16 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
                       size: 28,
                     ),
                     onPressed: () => _shareRecording(_activeRecordingId!),
+                  ),
+                  const SizedBox(width: 16),
+                  IconButton(
+                    icon: const Icon(
+                      Icons.verified_user,
+                      color: Colors.blue,
+                      size: 28,
+                    ),
+                    tooltip: 'Export as C2PA',
+                    onPressed: () => _exportC2pa(_activeRecordingId!),
                   ),
                 ],
               ),

@@ -42,3 +42,4 @@ This document establishes the "Linguistic Model" of Phalanx. All code must be pa
 2. **NEVER** allow `std::io` or `tokio::fs` into the Lab. Use the `TransientJournal` trait.
 3. **ALWAYS** define reassembly strategies as `Mold` implementations in the Lab.
 4. **ALWAYS** use the `prelude` for cross-crate imports to maintain namespace sanity.
+5. **NEVER** user mutex. Treat network deadlocks as a conflict of tense.  

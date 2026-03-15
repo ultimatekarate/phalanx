@@ -148,6 +148,14 @@ typedef _PhalanxOpenLinkDart = int Function(
   Pointer<Void>, Pointer<Utf8>,
 );
 
+// C2PA export
+typedef _PhalanxExportC2paC = Int32 Function(
+  Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>,
+);
+typedef _PhalanxExportC2paDart = int Function(
+  Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>,
+);
+
 // Memory
 typedef _PhalanxFreeStringC = Void Function(Pointer<Utf8>);
 typedef _PhalanxFreeStringDart = void Function(Pointer<Utf8>);
@@ -191,6 +199,7 @@ class PhalanxBridge {
   late final _PhalanxI32HandleDart _stopPlayback;
   late final _PhalanxShareLinkDart _getShareLink;
   late final _PhalanxOpenLinkDart _openLink;
+  late final _PhalanxExportC2paDart _exportC2pa;
   late final _PhalanxFreeStringDart _freeString;
   late final _PhalanxFreeBytesDart _freeBytes;
 
@@ -284,6 +293,10 @@ class PhalanxBridge {
     _openLink = _lib.lookupFunction<_PhalanxOpenLinkC, _PhalanxOpenLinkDart>(
       'phalanx_open_link',
     );
+    _exportC2pa =
+        _lib.lookupFunction<_PhalanxExportC2paC, _PhalanxExportC2paDart>(
+          'phalanx_export_c2pa',
+        );
     _freeString =
         _lib.lookupFunction<_PhalanxFreeStringC, _PhalanxFreeStringDart>(
           'phalanx_free_string',
@@ -567,6 +580,21 @@ class PhalanxBridge {
       calloc.free(recNative);
       calloc.free(didNative);
       calloc.free(out);
+    }
+  }
+
+  /// Export a recording frame as a C2PA-compliant JPEG with forensic metadata.
+  void exportC2pa(String recordingId, String outPath) {
+    final recNative = recordingId.toNativeUtf8();
+    final pathNative = outPath.toNativeUtf8();
+    try {
+      _check(
+        _exportC2pa(_handle, recNative.cast(), pathNative.cast()),
+        'phalanx_export_c2pa',
+      );
+    } finally {
+      calloc.free(recNative);
+      calloc.free(pathNative);
     }
   }
 
