@@ -118,6 +118,8 @@ pub unsafe extern "C" fn phalanx_poll_playback_frame(
     // Non-blocking poll — try_recv returns immediately
     match rx.try_recv() {
         Ok(frame) => {
+            // Frame size will never exceed u32::MAX on mobile devices
+            #[allow(clippy::cast_possible_truncation)]
             let len = frame.len() as u32;
             let mut boxed = frame.into_boxed_slice();
             *out_data = boxed.as_mut_ptr();

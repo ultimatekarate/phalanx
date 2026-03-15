@@ -233,7 +233,7 @@ pub unsafe extern "C" fn phalanx_get_target_fps(handle: *const PhalanxHandle) ->
     };
 
     let fps = target_fps(Fps::new(30), h.governor.current_power_state());
-    fps.get() as i32
+    fps.get().cast_signed()
 }
 
 // =====================================================================
@@ -364,7 +364,12 @@ pub unsafe extern "C" fn phalanx_open_link(
 fn rand_u64() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
+        .map(|d| {
+            // Truncation is intentional: nanos won't exceed u64 for ~584 years
+            #[allow(clippy::cast_possible_truncation)]
+            let v = d.as_nanos() as u64;
+            v
+        })
         .unwrap_or(0)
         ^ 0x517cc1b727220a95 // xor with a constant to avoid trivial values
 }
