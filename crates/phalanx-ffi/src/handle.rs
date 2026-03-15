@@ -26,7 +26,9 @@ use phalanx_node::vitals::{HomeostaticConfig, SystemGovernor, ThermalThresholds}
 use phalanx_node::{FileJournal, MeshSentinel};
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::VideoShard;
+use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::{PhalanxIdentity, PhalanxPhysics, RecordingId};
+use phalanx_transport::adapters::local_mesh::{LocalMeshAdapter, OutboundLocalPacket};
 use phalanx_transport::identity_ext::Libp2pExt;
 use phalanx_transport::prelude::Libp2pAdapter;
 
@@ -89,6 +91,12 @@ pub struct PhalanxHandle {
     pub(crate) current_recording_id: Mutex<Option<RecordingId>>,
     /// Vault key for payload encryption.
     pub(crate) vault_key: SymmetricKey,
+    /// Local mesh inbound sender — FFI push functions send NetworkEvents here.
+    pub(crate) local_mesh_tx: Option<mpsc::Sender<NetworkEvent>>,
+    /// Local mesh outbound receiver — Flutter polls outbound packets from here.
+    pub(crate) local_mesh_outbound_rx: Mutex<Option<mpsc::Receiver<OutboundLocalPacket>>>,
+    /// Local mesh availability flag — shared with LocalMeshAdapter.
+    pub(crate) local_mesh_available: Arc<AtomicBool>,
 }
 
 /// Type-erased reference to the running MeshSentinel.
@@ -217,6 +225,10 @@ async fn bootstrap(
     let bridge = Libp2pBridge::new(adapter);
     let (ingress, egress) = bridge.split();
 
+    // Local mesh adapter — channel bridge for BLE/WiFi Direct via Flutter FFI
+    let (local_mesh_adapter, local_mesh_tx, local_mesh_outbound_rx, local_mesh_available) =
+        LocalMeshAdapter::new(64);
+
     // Build SentinelDependencies (mirrors sentinel.rs lines 74-84)
     let deps = SentinelDependencies {
         config,
@@ -227,7 +239,7 @@ async fn bootstrap(
         trust_registry,
         system_governor: governor.clone(),
         vault_key: vault_key.clone(),
-        local_mesh: None, // BLE/WiFi Direct injected later
+        local_mesh: Some(Box::new(local_mesh_adapter)),
     };
 
     let engine = MeshSentinel::new(deps)
@@ -258,6 +270,9 @@ async fn bootstrap(
         recording_active: AtomicBool::new(false),
         current_recording_id: Mutex::new(None),
         vault_key,
+        local_mesh_tx: Some(local_mesh_tx),
+        local_mesh_outbound_rx: Mutex::new(Some(local_mesh_outbound_rx)),
+        local_mesh_available,
     })
 }
 

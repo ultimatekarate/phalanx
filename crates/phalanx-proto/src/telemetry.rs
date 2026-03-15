@@ -20,6 +20,7 @@ pub enum DiscoverySource {
     Mdns,
     Identify,
     Quic,
+    LocalMesh,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -17,6 +17,7 @@ pub mod capture;
 pub mod error;
 pub mod export;
 pub mod handle;
+pub mod local_mesh;
 pub mod memory;
 pub mod playback;
 pub mod probe;
