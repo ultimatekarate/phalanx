@@ -1,0 +1,110 @@
+// flutter_app/android/app/build.gradle
+//
+// Android build configuration for Phalanx.
+// Integrates cargo-ndk to compile the Rust FFI crate (phalanx-ffi) for
+// Android targets before the Flutter build copies JNI libraries.
+
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file('local.properties')
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withReader('UTF-8') { reader ->
+        localProperties.load(reader)
+    }
+}
+
+def flutterVersionCode = localProperties.getProperty('flutter.versionCode')
+if (flutterVersionCode == null) {
+    flutterVersionCode = '1'
+}
+
+def flutterVersionName = localProperties.getProperty('flutter.versionName')
+if (flutterVersionName == null) {
+    flutterVersionName = '1.0'
+}
+
+android {
+    namespace "com.phalanx.app"
+    compileSdk flutter.compileSdkVersion
+    ndkVersion flutter.ndkVersion
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+
+    sourceSets {
+        main.java.srcDirs += 'src/main/kotlin'
+    }
+
+    defaultConfig {
+        applicationId "com.phalanx.app"
+        minSdk flutter.minSdkVersion
+        targetSdk flutter.targetSdkVersion
+        versionCode flutterVersionCode.toInteger()
+        versionName flutterVersionName
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.debug  // TODO: production signing key
+        }
+    }
+}
+
+flutter {
+    source '../..'
+}
+
+dependencies {}
+
+// =====================================================================
+// RUST FFI BUILD — cargo-ndk
+//
+// Compiles phalanx-ffi as a cdylib (.so) for each Android ABI.
+// Prerequisites:
+//   cargo install cargo-ndk
+//   rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+// =====================================================================
+
+def projectRoot = file("${rootProject.projectDir}/../../..") // -> phalanx/
+def jniLibsDir = file("${projectDir}/src/main/jniLibs")
+
+// Determine which targets to build based on the active ABI filters.
+// Default: arm64-v8a, armeabi-v7a, x86_64 (covers all modern Android devices + emulator)
+def cargoNdkTargets = [
+    "arm64-v8a",
+    "armeabi-v7a",
+    "x86_64",
+]
+
+task buildRustFfi(type: Exec) {
+    description = "Build phalanx-ffi with cargo-ndk for Android targets"
+    workingDir projectRoot
+
+    // Build the cargo-ndk command
+    def args = ["cargo", "ndk"]
+    cargoNdkTargets.each { target ->
+        args += ["-t", target]
+    }
+    args += ["-o", jniLibsDir.absolutePath, "build", "--release", "-p", "phalanx-ffi"]
+
+    commandLine args
+}
+
+// Wire Rust build into the Android build pipeline.
+// The .so files must be in jniLibs/ before Gradle merges native libraries.
+tasks.whenTaskAdded { task ->
+    if (task.name.contains("merge") && task.name.contains("JniLibFolders")) {
+        task.dependsOn buildRustFfi
+    }
+}

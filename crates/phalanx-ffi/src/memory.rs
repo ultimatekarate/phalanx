@@ -37,3 +37,55 @@ pub unsafe extern "C" fn phalanx_free_bytes(ptr: *mut u8, len: u32) {
         let _ = Vec::from_raw_parts(ptr, len as usize, len as usize);
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    #[test]
+    fn free_string_null_is_noop() {
+        unsafe {
+            phalanx_free_string(std::ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn free_bytes_null_is_noop() {
+        unsafe {
+            phalanx_free_bytes(std::ptr::null_mut(), 0);
+            phalanx_free_bytes(std::ptr::null_mut(), 100);
+        }
+    }
+
+    #[test]
+    fn free_string_roundtrip() {
+        unsafe {
+            let original = "did:key:z6MkTest";
+            let cstr = CString::new(original).expect("valid cstring");
+            let raw = cstr.into_raw();
+
+            let read_back = CStr::from_ptr(raw).to_str().expect("valid utf8");
+            assert_eq!(read_back, original);
+
+            phalanx_free_string(raw);
+        }
+    }
+
+    #[test]
+    fn free_bytes_roundtrip() {
+        unsafe {
+            let data: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xE0]; // JPEG SOI marker
+            let len = data.len() as u32;
+            let mut boxed = data.into_boxed_slice();
+            let ptr = boxed.as_mut_ptr();
+            std::mem::forget(boxed);
+
+            let slice = std::slice::from_raw_parts(ptr, len as usize);
+            assert_eq!(slice, &[0xFF, 0xD8, 0xFF, 0xE0]);
+
+            phalanx_free_bytes(ptr, len);
+        }
+    }
+}
