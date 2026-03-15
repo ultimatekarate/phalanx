@@ -1,0 +1,5 @@
+{"log":
+ [{"message":
+   ".> LEAN_PATH=.\\.\\.lake/packages\\Cli\\.lake\\build\\lib;.\\.\\.lake/packages\\batteries\\.lake\\build\\lib;.\\.\\.lake/packages\\Qq\\.lake\\build\\lib;.\\.\\.lake/packages\\aesop\\.lake\\build\\lib;.\\.\\.lake/packages\\proofwidgets\\.lake\\build\\lib;.\\.\\.lake/packages\\importGraph\\.lake\\build\\lib;.\\.\\.lake/packages\\LeanSearchClient\\.lake\\build\\lib;.\\.\\.lake/packages\\plausible\\.lake\\build\\lib;.\\.\\.lake/packages\\mathlib\\.lake\\build\\lib;.\\.\\.lake\\build\\lib PATH c:\\Users\\joevo\\.elan\\toolchains\\leanprover--lean4---v4.16.0\\bin\\lean.exe -DautoImplicit=false .\\.\\.\\Phalanx\\MoldCommutativity.lean -R .\\.\\.\\Phalanx -o .\\.\\.lake\\build\\lib\\MoldCommutativity.olean -i .\\.\\.lake\\build\\lib\\MoldCommutativity.ilean -c .\\.\\.lake\\build\\ir\\MoldCommutativity.c --json",
+   "level": "trace"}],
+ "depHash": "13341244858677476756"}
