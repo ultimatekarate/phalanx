@@ -55,7 +55,7 @@ impl EvidenceExt for Evidence {
             Evidence::Video(s) => &s.recording_id,
             Evidence::Audio(s) => &s.recording_id,
             Evidence::Handover(h) => &h.recording_id,
-            _ => unimplemented!("Add other variants here"),
+            Evidence::Gap(g) => &g.recording_id,
         }
     }
     fn sequence_id(&self) -> StorageSequence {
@@ -63,7 +63,7 @@ impl EvidenceExt for Evidence {
             Evidence::Video(s) => s.sequence_id,
             Evidence::Audio(s) => s.sequence_id,
             Evidence::Handover(h) => h.sequence_id,
-            _ => unimplemented!("Add other variants here"),
+            Evidence::Gap(g) => g.start_seq,
         }
     }
     fn timestamp(&self) -> PhalanxTimestamp {
