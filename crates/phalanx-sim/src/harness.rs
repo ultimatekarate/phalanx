@@ -318,12 +318,12 @@ impl TelemetryCollector {
 
         let mut summary = format!(
             "=== Simulation Telemetry Summary ===\n\
-             Nodes observed: {}\n\
-             Total events: {}\n\
-             Total bytes processed: {}\n\
-             Total attacks blocked: {}\n\
-             \n\
-             Event breakdown:\n",
+            Nodes observed: {}\n\
+            Total events: {}\n\
+            Total bytes processed: {}\n\
+            Total attacks blocked: {}\n\
+            \n\
+            Event breakdown:\n",
             node_count,
             events.len(),
             total_bytes,
