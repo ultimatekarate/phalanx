@@ -12,9 +12,9 @@ use tokio::sync::mpsc; // FIX: Corrected from 'use crate::mpsc'
 
 // MODULE REGISTRY
 pub mod adapters {
-    pub mod ble;
     pub mod kademlia;
     pub mod libp2p;
+    pub mod local_mesh;
     pub mod mock;
     pub mod quic;
 }
@@ -28,7 +28,6 @@ pub mod io;
 pub mod kademlia;
 pub mod retrieval;
 pub mod routing {
-    pub mod governor;
     pub mod table;
 }
 pub mod signaling;

@@ -17,6 +17,7 @@ use phalanx_proto::identity::{NetworkId, NodeRole, PhalanxIdentity, RecordingId}
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::*;
 use phalanx_proto::telemetry::{ChaosMode, DiscoverySource, SimEvent};
+use phalanx_transport::adapters::local_mesh::LocalMeshAdapter;
 use phalanx_transport::{EgressPort, IngressPort};
 
 use std::collections::HashMap;
@@ -659,5 +660,92 @@ impl SimulationHarness {
     /// heartbeats, retry ticks, and cleanup intervals deterministically.
     pub async fn advance_time(&self, duration: Duration) {
         VirtualClock::advance(duration).await;
+    }
+
+    /// Spawn a simulated node with a `LocalMeshAdapter` wired in.
+    ///
+    /// Same as `spawn_node()` but creates a `LocalMeshAdapter` channel bridge
+    /// and passes it into `SentinelDependencies`. Returns both the node's `Did`
+    /// and an `mpsc::Sender<NetworkEvent>` so test scripts can inject local mesh
+    /// events (BLE discovery, data received, peer disconnected) directly.
+    pub async fn spawn_node_with_local_mesh(
+        &mut self,
+        name: &str,
+        role: NodeRole,
+    ) -> Result<(Did, mpsc::Sender<NetworkEvent>), Box<dyn std::error::Error + Send + Sync>> {
+        let identity = PhalanxIdentity::new_ephemeral();
+        let node_did = identity.did.clone();
+        let network_id = identity.network_id.clone();
+        let node_config = NodeConfig::default();
+
+        // Create the ingress channel for simulated network events
+        let (ingress_tx, ingress_rx) = mpsc::channel(256);
+
+        // Register in the simulation world routing table
+        {
+            let mut world = self.world.write().await;
+            world.register_node(node_did.clone(), network_id.clone(), ingress_tx);
+        }
+
+        tracing::info!(
+            node = %name,
+            did = %node_did,
+            network_id = %network_id,
+            "Spawning simulated node with local mesh"
+        );
+
+        // Build transport adapters
+        let sim_ingress = SimIngress { rx: ingress_rx };
+        let sim_egress = SimEgress {
+            world: self.world.clone(),
+            source_did: node_did.clone(),
+            source_network_id: network_id.clone(),
+            telemetry_tx: self.telemetry_tx.clone(),
+        };
+
+        // Local mesh adapter — channel bridge for test injection
+        let (local_mesh_adapter, local_mesh_tx, _outbound_rx, _available) =
+            LocalMeshAdapter::new(64);
+
+        // Build the full MeshSentinel actor constellation
+        let vault_key = derive_vault_key(&identity, &[0u8; 32]);
+        let trust_registry = TrustRegistry::build(&node_config).await;
+
+        let deps = SentinelDependencies {
+            config: node_config,
+            identity,
+            ingress: sim_ingress,
+            egress: sim_egress,
+            journal: RecoveryJournal::new(vec![]),
+            trust_registry,
+            system_governor: Arc::new(SystemGovernor::new()),
+            vault_key,
+            local_mesh: Some(Box::new(local_mesh_adapter)),
+        };
+
+        let mut sentinel = MeshSentinel::new(deps).await.map_err(
+            |e| -> Box<dyn std::error::Error + Send + Sync> {
+                format!("Failed to initialize MeshSentinel: {}", e).into()
+            },
+        )?;
+
+        // Detach sentinel execution
+        tokio::spawn(async move {
+            if let Err(e) = sentinel.run().await {
+                tracing::error!(error = %e, "Simulation node terminated unexpectedly");
+            }
+        });
+
+        // Emit telemetry: PeerDiscovered
+        let _ = self
+            .telemetry_tx
+            .send(SimEvent::PeerDiscovered {
+                peer: network_id,
+                source: DiscoverySource::Bootstrap,
+                role,
+            })
+            .await;
+
+        Ok((node_did, local_mesh_tx))
     }
 }
