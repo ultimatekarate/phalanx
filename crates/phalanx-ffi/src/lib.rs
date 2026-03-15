@@ -15,6 +15,7 @@
 
 pub mod capture;
 pub mod error;
+pub mod export;
 pub mod handle;
 pub mod memory;
 pub mod playback;
