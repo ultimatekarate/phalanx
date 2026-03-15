@@ -1,0 +1,380 @@
+// crates/phalanx-ffi/src/handle.rs
+//
+// PhalanxHandle: The opaque state machine exposed across the C-ABI boundary.
+//
+// This is the Larynx — the vocal cords through which the linguistic model speaks.
+// It mirrors the bootstrap sequence in `sentinel.rs` (config → identity → vault →
+// trust → swarm → bridge → sentinel) but wraps it in a lifecycle state machine
+// suitable for mobile: create → start → (operate) → stop → destroy.
+//
+// All Rust complexity is behind this single opaque pointer. Flutter sees only
+// `PhalanxHandle*` and a flat set of `extern "C"` functions.
+
+use crate::error::PhalanxError;
+use crate::probe::MobileProbe;
+
+use phalanx_forensics::PeerEvaluator;
+use phalanx_node::actors::meshsentinel::SentinelDependencies;
+use phalanx_node::actors::trust_actor::TrustCommand;
+use phalanx_node::config::NodeConfig;
+use phalanx_node::identity::PhalanxNodeIdentityExt;
+use phalanx_node::network::bridge::Libp2pBridge;
+use phalanx_node::network::orchestrator::setup_phalanx_swarm;
+use phalanx_node::persistence::vault::{derive_vault_key, load_or_create_vault_salt};
+use phalanx_node::trust::TrustRegistry;
+use phalanx_node::vitals::{HomeostaticConfig, SystemGovernor, ThermalThresholds};
+use phalanx_node::{FileJournal, MeshSentinel};
+use phalanx_proto::crypto::SymmetricKey;
+use phalanx_proto::evidence::VideoShard;
+use phalanx_proto::prelude::{PhalanxIdentity, PhalanxPhysics, RecordingId};
+use phalanx_transport::identity_ext::Libp2pExt;
+use phalanx_transport::prelude::Libp2pAdapter;
+
+use std::ffi::CStr;
+use std::os::raw::c_char;
+use std::path::Path;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+
+use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
+
+// =====================================================================
+// HANDLE STATE MACHINE
+// =====================================================================
+
+/// Lifecycle states of the Phalanx engine.
+///
+/// Transitions: `Booting → Running → Stopped`
+/// Invalid: `Running → Booting`, `Stopped → Running`
+pub(crate) enum HandleState {
+    /// Engine is being initialized. No operations permitted.
+    Booting,
+    /// Engine is running. All operations permitted.
+    Running {
+        /// Send to initiate graceful shutdown.
+        _shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    },
+    /// Engine has been stopped. Only `phalanx_destroy` is valid.
+    Stopped,
+}
+
+/// The opaque handle type exposed to C/Dart.
+///
+/// This is the single point of contact between Rust and the outside world.
+/// All fields are behind synchronization primitives suitable for concurrent
+/// FFI access from arbitrary Dart isolates.
+pub struct PhalanxHandle {
+    /// Tokio runtime — owns all async tasks.
+    pub(crate) runtime: Runtime,
+    /// Lifecycle state.
+    pub(crate) state: Mutex<HandleState>,
+    /// Homeostatic governor — query API for power state, stress, etc.
+    pub(crate) governor: Arc<SystemGovernor>,
+    /// Atomics-based hardware probe for mobile sensor data.
+    pub(crate) probe: Arc<MobileProbe>,
+    /// Trust command channel — dispatch trust operations to the TrustActor.
+    pub(crate) trust_tx: mpsc::Sender<TrustCommand>,
+    /// Video shard sender — FFI pushes processed frames here.
+    pub(crate) video_tx: Option<mpsc::Sender<VideoShard>>,
+    /// Playback frame receiver — FFI polls for decoded frames.
+    pub(crate) playback_rx: Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
+    /// The sentinel itself, behind a Mutex for `spawn_playback(&mut self)`.
+    pub(crate) sentinel: Mutex<Option<SentinelRef>>,
+    /// Node DID — immutable after creation.
+    pub(crate) node_did: String,
+    /// Whether a recording is currently active.
+    pub(crate) recording_active: AtomicBool,
+    /// Current recording ID, if any.
+    pub(crate) current_recording_id: Mutex<Option<RecordingId>>,
+    /// Vault key for payload encryption.
+    pub(crate) vault_key: SymmetricKey,
+}
+
+/// Type-erased reference to the running MeshSentinel.
+/// We need this to call `spawn_playback()`.
+type SentinelRef =
+    Arc<tokio::sync::Mutex<MeshSentinel<phalanx_node::network::bridge::BridgeIngress>>>;
+
+// =====================================================================
+// FFI LIFECYCLE FUNCTIONS
+// =====================================================================
+
+/// Creates a new PhalanxHandle by bootstrapping the full engine stack.
+///
+/// Mirrors `sentinel.rs` lines 24-91:
+/// config → identity → vault → trust → probe → swarm → bridge → sentinel
+///
+/// Returns `null` on any failure. Rust's `Drop` semantics clean up partial state.
+///
+/// # Safety
+/// * `config_path` must be a valid null-terminated C string, or null for defaults.
+/// * `storage_path` must be a valid null-terminated C string pointing to writable storage.
+/// * `passphrase` must be a valid null-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn phalanx_create(
+    config_path: *const c_char,
+    storage_path: *const c_char,
+    passphrase: *const c_char,
+) -> *mut PhalanxHandle {
+    // Validate required parameters
+    if storage_path.is_null() || passphrase.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let storage_str = match CStr::from_ptr(storage_path).to_str() {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    let passphrase_str = match CStr::from_ptr(passphrase).to_str() {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    // Optional config path — use defaults if null
+    let config = if config_path.is_null() {
+        NodeConfig::default()
+    } else {
+        match CStr::from_ptr(config_path).to_str() {
+            Ok(path) => NodeConfig::load(path).unwrap_or_default(),
+            Err(_) => return std::ptr::null_mut(),
+        }
+    };
+
+    // Build tokio runtime
+    let runtime = match Runtime::new() {
+        Ok(rt) => rt,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    // Run the async bootstrap sequence on the runtime.
+    // Each step returns Result — on failure, prior resources drop naturally.
+    let handle_result =
+        runtime.block_on(async { bootstrap(config, storage_str, passphrase_str).await });
+
+    match handle_result {
+        Ok(mut handle) => {
+            // Move the runtime into the handle (it was created outside the async block)
+            handle.runtime = runtime;
+            Box::into_raw(Box::new(handle))
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Internal async bootstrap — mirrors `sentinel.rs` dependency graph.
+async fn bootstrap(
+    config: NodeConfig,
+    storage_path: &str,
+    passphrase: &str,
+) -> Result<PhalanxHandle, PhalanxError> {
+    let physics = PhalanxPhysics::default_wan();
+
+    // Identity
+    let identity_path = Path::new(storage_path).join("identity.bin");
+    let identity =
+        PhalanxIdentity::init(&identity_path, passphrase).map_err(|_| PhalanxError::BootFailed)?;
+
+    let node_did = identity.did.as_str().to_string();
+
+    // Vault
+    let vault_path = Path::new(storage_path).join("vault");
+    let vault_str = vault_path.to_str().ok_or(PhalanxError::BootFailed)?;
+    let vault_salt = load_or_create_vault_salt(vault_str).map_err(|_| PhalanxError::BootFailed)?;
+    let vault_key = derive_vault_key(&identity, &vault_salt);
+
+    // Journal (WAL)
+    let wal_path = Path::new(storage_path).join("sentinel_transient_wal.bin");
+    let wal_str = wal_path.to_str().ok_or(PhalanxError::BootFailed)?;
+    let journal = FileJournal::new(wal_str, vault_key.clone())
+        .await
+        .map_err(|_| PhalanxError::BootFailed)?;
+
+    // Trust
+    let trust_registry = TrustRegistry::build(&config).await;
+    let reputation_projection = trust_registry.projection_handle();
+
+    // Mobile hardware probe (atomics-based)
+    let probe = Arc::new(MobileProbe::new(ThermalThresholds::default()));
+    let governor = Arc::new(SystemGovernor::with_probe(
+        HomeostaticConfig::default(),
+        probe.clone() as Arc<dyn phalanx_node::vitals::HardwareProbe>,
+    ));
+
+    // Network
+    let network_keypair = identity.to_libp2p_keypair();
+    let swarm = setup_phalanx_swarm(
+        network_keypair,
+        &config,
+        &physics,
+        None, // PSK: None for public swarm on mobile (can be extended later)
+        Arc::new(reputation_projection) as Arc<dyn PeerEvaluator>,
+    )
+    .map_err(|_| PhalanxError::BootFailed)?;
+
+    let adapter = Libp2pAdapter::new(swarm);
+    let bridge = Libp2pBridge::new(adapter);
+    let (ingress, egress) = bridge.split();
+
+    // Build SentinelDependencies (mirrors sentinel.rs lines 74-84)
+    let deps = SentinelDependencies {
+        config,
+        identity,
+        ingress,
+        egress,
+        journal,
+        trust_registry,
+        system_governor: governor.clone(),
+        vault_key: vault_key.clone(),
+        local_mesh: None, // BLE/WiFi Direct injected later
+    };
+
+    let engine = MeshSentinel::new(deps)
+        .await
+        .map_err(|_| PhalanxError::BootFailed)?;
+
+    // Extract channels before wrapping in Arc<Mutex>
+    let trust_tx = engine.trust_tx.clone();
+    let video_tx = Some(engine.video_tx.clone());
+
+    let sentinel = Arc::new(tokio::sync::Mutex::new(engine));
+
+    // Create a dummy runtime — will be replaced by the caller
+    let dummy_rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .map_err(|_| PhalanxError::BootFailed)?;
+
+    Ok(PhalanxHandle {
+        runtime: dummy_rt,
+        state: Mutex::new(HandleState::Booting),
+        governor,
+        probe,
+        trust_tx,
+        video_tx,
+        playback_rx: Mutex::new(None),
+        sentinel: Mutex::new(Some(sentinel)),
+        node_did,
+        recording_active: AtomicBool::new(false),
+        current_recording_id: Mutex::new(None),
+        vault_key,
+    })
+}
+
+/// Starts the engine's main run loop on a background tokio task.
+///
+/// Transitions: `Booting → Running`.
+/// Returns `PhalanxError::AlreadyRunning` if called twice.
+///
+/// # Safety
+/// * `handle` must be a valid pointer from `phalanx_create`.
+#[no_mangle]
+pub unsafe extern "C" fn phalanx_start(handle: *mut PhalanxHandle) -> i32 {
+    let Some(h) = handle.as_ref() else {
+        return PhalanxError::NullPointer.code();
+    };
+
+    let Ok(mut state) = h.state.lock() else {
+        return PhalanxError::InvalidState.code();
+    };
+
+    match &*state {
+        HandleState::Running { .. } => return PhalanxError::AlreadyRunning.code(),
+        HandleState::Stopped => return PhalanxError::InvalidState.code(),
+        HandleState::Booting => {}
+    }
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+    // Clone the sentinel Arc for the spawned task
+    let sentinel_ref = {
+        let Ok(guard) = h.sentinel.lock() else {
+            return PhalanxError::InvalidState.code();
+        };
+        match guard.as_ref() {
+            Some(s) => s.clone(),
+            None => return PhalanxError::InvalidState.code(),
+        }
+    };
+
+    // Spawn the engine's run loop
+    h.runtime.spawn(async move {
+        let mut engine = sentinel_ref.lock().await;
+
+        tokio::select! {
+            result = engine.run() => {
+                if let Err(e) = result {
+                    tracing::error!("MeshSentinel exited with error: {}", e);
+                }
+            }
+            _ = shutdown_rx => {
+                tracing::info!("MeshSentinel shutdown signal received.");
+            }
+        }
+    });
+
+    *state = HandleState::Running {
+        _shutdown_tx: shutdown_tx,
+    };
+
+    PhalanxError::Ok.code()
+}
+
+/// Stops the engine gracefully by dropping the shutdown oneshot sender.
+///
+/// Transitions: `Running → Stopped`.
+///
+/// # Safety
+/// * `handle` must be a valid pointer from `phalanx_create`.
+#[no_mangle]
+pub unsafe extern "C" fn phalanx_stop(handle: *mut PhalanxHandle) -> i32 {
+    let Some(h) = handle.as_ref() else {
+        return PhalanxError::NullPointer.code();
+    };
+
+    let Ok(mut state) = h.state.lock() else {
+        return PhalanxError::InvalidState.code();
+    };
+
+    match &*state {
+        HandleState::Running { .. } => {
+            // Replace with Stopped — dropping the old state drops shutdown_tx,
+            // which signals the select! loop to terminate.
+            *state = HandleState::Stopped;
+            PhalanxError::Ok.code()
+        }
+        HandleState::Booting => PhalanxError::NotRunning.code(),
+        HandleState::Stopped => PhalanxError::NotRunning.code(),
+    }
+}
+
+/// Destroys the handle and frees all resources.
+///
+/// After this call, the pointer is invalid. Double-destroy is UB.
+///
+/// # Safety
+/// * `handle` must be a valid pointer from `phalanx_create`.
+/// * Must be called exactly once per handle.
+/// * Null is a safe no-op.
+#[no_mangle]
+pub unsafe extern "C" fn phalanx_destroy(handle: *mut PhalanxHandle) {
+    if !handle.is_null() {
+        // Reconstruct the Box so Rust drops everything in order:
+        // runtime drop → cancels all spawned tasks → channels close → actors stop
+        let _ = Box::from_raw(handle);
+    }
+}
+
+// =====================================================================
+// INTERNAL HELPERS
+// =====================================================================
+
+impl PhalanxHandle {
+    /// Check if the engine is in the Running state.
+    pub(crate) fn is_running(&self) -> bool {
+        self.state
+            .lock()
+            .map(|s| matches!(&*s, HandleState::Running { .. }))
+            .unwrap_or(false)
+    }
+}
