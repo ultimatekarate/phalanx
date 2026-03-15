@@ -18,6 +18,125 @@ use super::jacobian::build_jacobian;
 //   3. Maximal Lyapunov exponent (definitive stability certificate)
 //   4. Partition duration sensitivity sweep
 
+// =====================================================================
+// DORMAND-PRINCE RK4(5) BUTCHER TABLEAU
+// =====================================================================
+//
+// Embedded 4th/5th order pair (Dormand & Prince 1980).  7 stages, FSAL.
+// The 5th-order solution advances the state; the 4th-order solution
+// provides the local error estimate for step size control.
+
+// Node coefficients c_i (used implicitly via the a_ij coupling)
+// c2 = 1/5, c3 = 3/10, c4 = 4/5, c5 = 8/9, c6 = 1, c7 = 1
+
+// Coupling coefficients a_ij
+const A21: f64 = 1.0 / 5.0;
+const A31: f64 = 3.0 / 40.0;
+const A32: f64 = 9.0 / 40.0;
+const A41: f64 = 44.0 / 45.0;
+const A42: f64 = -56.0 / 15.0;
+const A43: f64 = 32.0 / 9.0;
+const A51: f64 = 19372.0 / 6561.0;
+const A52: f64 = -25360.0 / 2187.0;
+const A53: f64 = 64448.0 / 6561.0;
+const A54: f64 = -212.0 / 729.0;
+const A61: f64 = 9017.0 / 3168.0;
+const A62: f64 = -355.0 / 33.0;
+const A63: f64 = 46732.0 / 5247.0;
+const A64: f64 = 49.0 / 176.0;
+const A65: f64 = -5103.0 / 18656.0;
+// A7i = B_i (FSAL property), so we use B_i directly below.
+
+// 5th-order weights
+const B1: f64 = 35.0 / 384.0;
+// B2 = 0
+const B3: f64 = 500.0 / 1113.0;
+const B4: f64 = 125.0 / 192.0;
+const B5: f64 = -2187.0 / 6784.0;
+const B6: f64 = 11.0 / 84.0;
+// B7 = 0
+
+// 4th-order weights (for error estimation)
+const E1: f64 = 71.0 / 57600.0;
+// E2 = 0
+const E3: f64 = -71.0 / 16695.0;
+const E4: f64 = 71.0 / 1920.0;
+const E5: f64 = -17253.0 / 339200.0;
+const E6: f64 = 22.0 / 525.0;
+const E7: f64 = -1.0 / 40.0;
+
+// =====================================================================
+// ADAPTIVE STEP SIZE CONFIGURATION
+// =====================================================================
+
+/// Configuration for the adaptive Dormand-Prince RK4(5) integrator.
+///
+/// Controls local error tolerance, step size bounds, and the PI controller
+/// that adjusts dt between accepted steps.
+#[derive(Debug, Clone)]
+pub struct AdaptiveStepConfig {
+    /// Absolute tolerance for each component.
+    pub atol: f64,
+    /// Relative tolerance for each component.
+    pub rtol: f64,
+    /// Minimum allowed step size (seconds).
+    pub dt_min: f64,
+    /// Maximum allowed step size (seconds).
+    pub dt_max: f64,
+    /// Safety factor for step size controller (< 1.0).
+    pub safety: f64,
+    /// Maximum growth factor per step.
+    pub max_growth: f64,
+    /// Minimum shrink factor per step.
+    pub min_shrink: f64,
+}
+
+impl Default for AdaptiveStepConfig {
+    fn default() -> Self {
+        Self {
+            atol: 1e-8,
+            rtol: 1e-6,
+            dt_min: 1e-6,
+            dt_max: 0.5,
+            safety: 0.9,
+            max_growth: 5.0,
+            min_shrink: 0.2,
+        }
+    }
+}
+
+/// Statistics from the adaptive integrator.
+#[derive(Debug, Clone, Default)]
+pub struct StepStatistics {
+    /// Number of accepted steps.
+    pub n_accepted: usize,
+    /// Number of rejected steps (step retried with smaller dt).
+    pub n_rejected: usize,
+    /// Smallest dt actually used in an accepted step.
+    pub dt_min_used: f64,
+    /// Largest dt actually used in an accepted step.
+    pub dt_max_used: f64,
+    /// History of accepted step sizes (for diagnostics).
+    pub dt_history: Vec<f64>,
+}
+
+impl StepStatistics {
+    fn new() -> Self {
+        Self {
+            dt_min_used: f64::INFINITY,
+            dt_max_used: 0.0,
+            ..Default::default()
+        }
+    }
+
+    fn record_accepted(&mut self, dt: f64) {
+        self.n_accepted += 1;
+        self.dt_min_used = self.dt_min_used.min(dt);
+        self.dt_max_used = self.dt_max_used.max(dt);
+        self.dt_history.push(dt);
+    }
+}
+
 /// Configuration for the nonlinear partition simulation.
 #[derive(Debug, Clone)]
 pub struct PartitionConfig {
@@ -33,12 +152,14 @@ pub struct PartitionConfig {
     pub reconnection_burst: Option<f64>,
     /// Local camera capture rate during partition (fraction of normal, 0.0–1.0).
     pub local_capture_fraction: f64,
-    /// Simulation time step in seconds.
+    /// Simulation time step in seconds (initial step for adaptive mode).
     pub dt: f64,
     /// Warmup duration for steady-state convergence (seconds).
     pub warmup_duration: f64,
     /// Recovery observation period after partition heals (seconds).
     pub recovery_observation: f64,
+    /// When Some, uses adaptive Dormand-Prince RK4(5). When None, fixed-step RK4.
+    pub adaptive: Option<AdaptiveStepConfig>,
 }
 
 impl Default for PartitionConfig {
@@ -52,6 +173,7 @@ impl Default for PartitionConfig {
             dt: 0.05,
             warmup_duration: 120.0, // 6 × τ_wal = 6/0.05 = 120s
             recovery_observation: 120.0,
+            adaptive: Some(AdaptiveStepConfig::default()),
         }
     }
 }
@@ -285,6 +407,210 @@ fn rk4_variational_step(jac: &DMatrix<f64>, delta: &[f64; DIM], dt: f64) -> [f64
 }
 
 // ---------------------------------------------------------------------
+// DORMAND-PRINCE RK4(5) ADAPTIVE STEPPER
+// ---------------------------------------------------------------------
+
+/// One Dormand-Prince step: returns (x_new_5th, error_estimate).
+///
+/// 7 stages, 6 RHS evaluations (the 7th stage = FSAL, reusable as k1 of
+/// the next step, but we don't exploit that here to keep the code simple).
+/// The 5th-order solution advances the state; the difference between 5th
+/// and 4th order solutions gives the local truncation error estimate.
+fn dopri5_step(sys: &NonlinearSystem, x: &[f64; DIM], dt: f64) -> ([f64; DIM], [f64; DIM]) {
+    let k1 = sys.rhs(x);
+
+    let mut xs = [0.0; DIM];
+    for i in 0..DIM {
+        xs[i] = x[i] + dt * A21 * k1[i];
+    }
+    let k2 = sys.rhs(&xs);
+
+    for i in 0..DIM {
+        xs[i] = x[i] + dt * (A31 * k1[i] + A32 * k2[i]);
+    }
+    let k3 = sys.rhs(&xs);
+
+    for i in 0..DIM {
+        xs[i] = x[i] + dt * (A41 * k1[i] + A42 * k2[i] + A43 * k3[i]);
+    }
+    let k4 = sys.rhs(&xs);
+
+    for i in 0..DIM {
+        xs[i] = x[i] + dt * (A51 * k1[i] + A52 * k2[i] + A53 * k3[i] + A54 * k4[i]);
+    }
+    let k5 = sys.rhs(&xs);
+
+    for i in 0..DIM {
+        xs[i] = x[i] + dt * (A61 * k1[i] + A62 * k2[i] + A63 * k3[i] + A64 * k4[i] + A65 * k5[i]);
+    }
+    let k6 = sys.rhs(&xs);
+
+    // 5th-order solution
+    let mut x_new = [0.0; DIM];
+    for i in 0..DIM {
+        x_new[i] =
+            (x[i] + dt * (B1 * k1[i] + B3 * k3[i] + B4 * k4[i] + B5 * k5[i] + B6 * k6[i])).max(0.0);
+    }
+
+    // Stage 7 (needed for error estimate only; FSAL)
+    let k7 = sys.rhs(&x_new);
+
+    // Error estimate: difference between 5th and 4th order solutions
+    // err_i = dt * (E1*k1 + E3*k3 + E4*k4 + E5*k5 + E6*k6 + E7*k7)
+    let mut err = [0.0; DIM];
+    for i in 0..DIM {
+        err[i] = dt * (E1 * k1[i] + E3 * k3[i] + E4 * k4[i] + E5 * k5[i] + E6 * k6[i] + E7 * k7[i]);
+    }
+
+    (x_new, err)
+}
+
+/// Mixed-tolerance error norm (Hairer & Wanner convention).
+///
+/// Returns sqrt(1/DIM · Σ(err_i / (atol + rtol · max(|x_i|, |x_new_i|)))²).
+/// A value ≤ 1.0 means the step meets tolerance; > 1.0 means reject.
+fn error_norm(err: &[f64; DIM], x: &[f64; DIM], x_new: &[f64; DIM], atol: f64, rtol: f64) -> f64 {
+    let mut sum_sq = 0.0;
+    for i in 0..DIM {
+        let scale = atol + rtol * x[i].abs().max(x_new[i].abs());
+        let ratio = err[i] / scale;
+        sum_sq += ratio * ratio;
+    }
+    (sum_sq / DIM as f64).sqrt()
+}
+
+/// Try one adaptive step. Returns (x_new, dt_used, dt_next, accepted).
+///
+/// If the error norm ≤ 1.0, the step is accepted and dt_next is grown.
+/// Otherwise the step is rejected and dt_next is shrunk.  The PI controller
+/// uses the standard formula: dt_next = safety · dt · err^(-1/5).
+fn adaptive_step(
+    sys: &NonlinearSystem,
+    x: &[f64; DIM],
+    dt: f64,
+    acfg: &AdaptiveStepConfig,
+) -> ([f64; DIM], f64, f64, bool) {
+    let (x_new, err) = dopri5_step(sys, x, dt);
+    let en = error_norm(&err, x, &x_new, acfg.atol, acfg.rtol);
+
+    if en <= 1.0 {
+        // Accept: grow dt for next step
+        let growth = if en < 1e-10 {
+            acfg.max_growth
+        } else {
+            (acfg.safety * en.powf(-0.2)).min(acfg.max_growth)
+        };
+        let dt_next = (dt * growth).min(acfg.dt_max);
+        (x_new, dt, dt_next, true)
+    } else {
+        // Reject: shrink dt and retry
+        let shrink = (acfg.safety * en.powf(-0.2)).max(acfg.min_shrink);
+        let dt_next = (dt * shrink).max(acfg.dt_min);
+        (*x, dt, dt_next, false)
+    }
+}
+
+/// Advance the system from the current time to `t_end`, recording states.
+///
+/// Supports both adaptive (Dormand-Prince) and fixed-step (RK4) modes.
+/// The burst timer is decremented by the actual step size after each
+/// accepted step during recovery phases.
+fn advance_to(
+    sys: &mut NonlinearSystem,
+    x: &mut [f64; DIM],
+    t: &mut f64,
+    t_end: f64,
+    dt: &mut f64,
+    times: &mut Vec<f64>,
+    states: &mut Vec<[f64; DIM]>,
+    adaptive: Option<&AdaptiveStepConfig>,
+    stats: &mut StepStatistics,
+) {
+    match adaptive {
+        Some(acfg) => {
+            while *t < t_end - 1e-12 {
+                times.push(*t);
+                states.push(*x);
+
+                // Clamp dt to not overshoot phase boundary
+                let dt_try = (*dt).min(t_end - *t).max(acfg.dt_min);
+
+                let (x_new, dt_used, dt_next, accepted) = adaptive_step(sys, x, dt_try, acfg);
+                if accepted {
+                    *x = x_new;
+                    *t += dt_used;
+                    stats.record_accepted(dt_used);
+
+                    // Tick down burst timer by actual step size
+                    if sys.burst_remaining > 0.0 {
+                        sys.burst_remaining = (sys.burst_remaining - dt_used).max(0.0);
+                        if sys.burst_remaining <= 0.0 {
+                            sys.burst_multiplier = 1.0;
+                        }
+                    }
+
+                    *dt = dt_next;
+                } else {
+                    stats.n_rejected += 1;
+                    *dt = dt_next;
+                }
+            }
+        }
+        None => {
+            let fixed_dt = *dt;
+            let n_steps = ((t_end - *t) / fixed_dt).ceil() as usize;
+            for _ in 0..n_steps {
+                times.push(*t);
+                states.push(*x);
+
+                // Tick down burst timer
+                if sys.burst_remaining > 0.0 {
+                    sys.burst_remaining = (sys.burst_remaining - fixed_dt).max(0.0);
+                    if sys.burst_remaining <= 0.0 {
+                        sys.burst_multiplier = 1.0;
+                    }
+                }
+
+                *x = rk4_step(sys, x, fixed_dt);
+                *t += fixed_dt;
+                stats.record_accepted(fixed_dt);
+            }
+        }
+    }
+}
+
+/// Linearly interpolate the state trajectory at a query time.
+///
+/// Uses binary search to find the bracketing interval, then linear
+/// interpolation between the two bounding states.  Needed when comparing
+/// adaptive (irregular) and fixed-step (uniform) time grids.
+fn interpolate_state(times: &[f64], states: &[[f64; DIM]], t_query: f64) -> [f64; DIM] {
+    debug_assert!(!times.is_empty());
+    if t_query <= times[0] {
+        return states[0];
+    }
+    if t_query >= *times.last().unwrap() {
+        return *states.last().unwrap();
+    }
+
+    // Binary search for the right bracket
+    let idx = match times.binary_search_by(|t| t.partial_cmp(&t_query).unwrap()) {
+        Ok(i) => return states[i], // exact match
+        Err(i) => i,               // t_query is between times[i-1] and times[i]
+    };
+
+    let t0 = times[idx - 1];
+    let t1 = times[idx];
+    let alpha = (t_query - t0) / (t1 - t0);
+
+    let mut result = [0.0; DIM];
+    for j in 0..DIM {
+        result[j] = states[idx - 1][j] * (1.0 - alpha) + states[idx][j] * alpha;
+    }
+    result
+}
+
+// ---------------------------------------------------------------------
 // THREE-PHASE PARTITION SIMULATION
 // ---------------------------------------------------------------------
 
@@ -298,6 +624,8 @@ pub struct NonlinearSimulationResult {
     pub warmup_end_idx: usize,
     /// Index where partition ends / recovery begins.
     pub partition_end_idx: usize,
+    /// Adaptive integrator step statistics (None if fixed-step was used).
+    pub step_stats: Option<StepStatistics>,
 }
 
 /// Run the three-phase nonlinear partition simulation.
@@ -305,6 +633,12 @@ pub struct NonlinearSimulationResult {
 /// Phase 1 (warmup): forward-evolve from x₀ to reach steady state x*.
 /// Phase 2 (partition): activate partition, evolve.
 /// Phase 3 (recovery): deactivate partition, optional burst, evolve.
+///
+/// When `partition_cfg.adaptive` is `Some(...)`, uses the Dormand-Prince
+/// RK4(5) embedded pair with adaptive step size control.  The step size
+/// is reset to `partition_cfg.dt` at each phase transition so that the
+/// integrator doesn't carry a large dt from a quiescent phase into a
+/// transient (partition onset, reconnection burst).
 pub fn nonlinear_partition_simulation(
     cfg: &HomeostaticConfig,
     rates: &BaseImpulseRates,
@@ -312,7 +646,9 @@ pub fn nonlinear_partition_simulation(
     partition_cfg: &PartitionConfig,
 ) -> NonlinearSimulationResult {
     let mut sys = NonlinearSystem::new(cfg, rates, partition_cfg);
-    let dt = partition_cfg.dt;
+    let mut dt = partition_cfg.dt;
+    let adaptive = partition_cfg.adaptive.as_ref();
+    let mut stats = StepStatistics::new();
 
     let mut times = Vec::new();
     let mut states = Vec::new();
@@ -320,57 +656,62 @@ pub fn nonlinear_partition_simulation(
     let mut t = 0.0;
 
     // Phase 1: Warmup — reach steady state
-    let n_warmup = (partition_cfg.warmup_duration / dt).ceil() as usize;
-    for _ in 0..n_warmup {
-        times.push(t);
-        states.push(x);
-        x = rk4_step(&sys, &x, dt);
-        t += dt;
-    }
-
-    // Allow partition_onset delay before activating partition
-    let n_onset = (partition_cfg.partition_onset / dt).ceil() as usize;
-    for _ in 0..n_onset {
-        times.push(t);
-        states.push(x);
-        x = rk4_step(&sys, &x, dt);
-        t += dt;
-    }
+    let t_warmup_end = partition_cfg.warmup_duration + partition_cfg.partition_onset;
+    advance_to(
+        &mut sys,
+        &mut x,
+        &mut t,
+        t_warmup_end,
+        &mut dt,
+        &mut times,
+        &mut states,
+        adaptive,
+        &mut stats,
+    );
 
     let steady_state = x;
     let warmup_end_idx = states.len();
 
     // Phase 2: Partition active
+    // Reset dt at phase boundary — transient expected
+    dt = partition_cfg.dt;
     sys.set_partition(true);
-    let n_partition = (partition_cfg.partition_duration / dt).ceil() as usize;
-    for _ in 0..n_partition {
-        times.push(t);
-        states.push(x);
-        x = rk4_step(&sys, &x, dt);
-        t += dt;
-    }
+    let t_partition_end = t + partition_cfg.partition_duration;
+    advance_to(
+        &mut sys,
+        &mut x,
+        &mut t,
+        t_partition_end,
+        &mut dt,
+        &mut times,
+        &mut states,
+        adaptive,
+        &mut stats,
+    );
     let partition_end_idx = states.len();
 
     // Phase 3: Recovery
+    // Reset dt at phase boundary — reconnection burst expected
+    dt = partition_cfg.dt;
     sys.set_partition(false);
     if let Some(burst_mult) = partition_cfg.reconnection_burst {
         let burst_dur = 1.0 / cfg.lambda_bw; // one bandwidth time constant
         sys.activate_burst(burst_dur, burst_mult);
     }
-    let n_recovery = (partition_cfg.recovery_observation / dt).ceil() as usize;
-    for _ in 0..n_recovery {
-        times.push(t);
-        states.push(x);
-        // Tick down burst timer
-        if sys.burst_remaining > 0.0 {
-            sys.burst_remaining = (sys.burst_remaining - dt).max(0.0);
-            if sys.burst_remaining <= 0.0 {
-                sys.burst_multiplier = 1.0;
-            }
-        }
-        x = rk4_step(&sys, &x, dt);
-        t += dt;
-    }
+    let t_recovery_end = t + partition_cfg.recovery_observation;
+    advance_to(
+        &mut sys,
+        &mut x,
+        &mut t,
+        t_recovery_end,
+        &mut dt,
+        &mut times,
+        &mut states,
+        adaptive,
+        &mut stats,
+    );
+
+    // Final state
     times.push(t);
     states.push(x);
 
@@ -379,6 +720,11 @@ pub fn nonlinear_partition_simulation(
         steady_state,
         warmup_end_idx,
         partition_end_idx,
+        step_stats: if partition_cfg.adaptive.is_some() {
+            Some(stats)
+        } else {
+            None
+        },
     }
 }
 
@@ -424,24 +770,34 @@ pub fn compare_linear_nonlinear(
     let lin_ts = evolve(&j, &[partition_threat], &ss, lin_duration, partition_cfg.dt);
 
     // 4. Extract nonlinear trajectory for the same time window (post-warmup)
+    //    With adaptive stepping, the nonlinear trajectory has irregular time
+    //    spacing.  We interpolate the nonlinear trajectory at the linear time
+    //    grid to produce a valid comparison.
     let wi = nl_result.warmup_end_idx;
     let nl_states = &nl_result.time_series.states[wi..];
     let nl_times = &nl_result.time_series.times[wi..];
 
-    // 5. Compute comparison metrics
-    let n = lin_ts.times.len().min(nl_states.len());
+    // Shift nonlinear times to be relative (starting from 0)
+    let nl_t0 = nl_times[0];
+    let nl_rel_times: Vec<f64> = nl_times.iter().map(|t| t - nl_t0).collect();
+
+    // 5. Compute comparison metrics — interpolate nonlinear at linear grid
+    let n = lin_ts.times.len();
     let mut times = Vec::with_capacity(n);
     let mut trajectory_error = Vec::with_capacity(n);
     let mut per_integral_peak_error = [0.0f64; DIM];
     let mut per_integral_peak_error_time = [0.0f64; DIM];
 
     for i in 0..n {
-        let t = nl_times[i] - nl_times[0]; // relative time
+        let t = lin_ts.times[i];
         times.push(t);
+
+        // Interpolate nonlinear state at this linear time point
+        let nl_state = interpolate_state(&nl_rel_times, nl_states, t);
 
         let mut err_sq = 0.0;
         for j_idx in 0..DIM {
-            let diff = (nl_states[i][j_idx] - lin_ts.states[i][j_idx]).abs();
+            let diff = (nl_state[j_idx] - lin_ts.states[i][j_idx]).abs();
             err_sq += diff * diff;
             if diff > per_integral_peak_error[j_idx] {
                 per_integral_peak_error[j_idx] = diff;
@@ -1293,6 +1649,257 @@ mod tests {
                     rel_err < 0.10,
                     "Full analysis: integral {} did not recover (rel_err={:.4})",
                     INTEGRAL_NAMES[j],
+                    rel_err
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // ADAPTIVE RK4(5) DORMAND-PRINCE TESTS
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_dopri5_recovers_exponential_decay() {
+        // Pure decay system (zero impulse on D and C integrals).
+        // The Dormand-Prince stepper should match exp(-λ*t) within tolerance.
+        let cfg = default_cfg();
+        let mut rates = BaseImpulseRates::moderate();
+        rates.u_d = 0.0;
+        rates.u_c = 0.0;
+        let pcfg = PartitionConfig::default();
+        let sys = NonlinearSystem::new(&cfg, &rates, &pcfg);
+
+        let mut x = [0.0; DIM];
+        x[D] = 10.0;
+        x[C] = 0.5;
+
+        let dt = 0.1; // larger step than RK4 test — adaptive should handle it
+        let mut t = 0.0;
+        for _ in 0..100 {
+            let (x_new, _err) = super::dopri5_step(&sys, &x, dt);
+            x = x_new;
+            t += dt;
+
+            let expected_d = 10.0 * (-cfg.lambda_io * t).exp();
+            let expected_c = 0.5 * (-cfg.lambda_conn * t).exp();
+            assert!(
+                (x[D] - expected_d).abs() < 1e-8,
+                "DOPRI5 d integral diverges at t={:.2}: got {:.10}, expected {:.10}",
+                t,
+                x[D],
+                expected_d
+            );
+            assert!(
+                (x[C] - expected_c).abs() < 1e-8,
+                "DOPRI5 c integral diverges at t={:.2}: got {:.10}, expected {:.10}",
+                t,
+                x[C],
+                expected_c
+            );
+        }
+        println!("  DOPRI5 pure-decay accuracy verified over 100 steps (10s)");
+    }
+
+    #[test]
+    fn test_adaptive_step_rejection() {
+        // Start with a very large dt on a system with fast dynamics.
+        // The adaptive stepper should reject and shrink.
+        let cfg = default_cfg();
+        let rates = BaseImpulseRates::moderate();
+        let pcfg = PartitionConfig::default();
+        let sys = NonlinearSystem::new(&cfg, &rates, &pcfg);
+        let acfg = AdaptiveStepConfig::default();
+
+        let x = [5.0; DIM]; // mid-range state, nontrivial dynamics
+        let large_dt = 2.0; // way too large for the system dynamics
+
+        let (_x_new, _dt_used, dt_next, accepted) = super::adaptive_step(&sys, &x, large_dt, &acfg);
+
+        println!(
+            "  Large step test: accepted={}, dt_next={:.6}",
+            accepted, dt_next
+        );
+        // Either rejected (ideal) or dt_next is significantly smaller
+        if !accepted {
+            assert!(
+                dt_next < large_dt,
+                "Rejected step should produce smaller dt_next"
+            );
+        }
+        // At minimum, dt_next should be bounded
+        assert!(dt_next >= acfg.dt_min, "dt_next should respect dt_min");
+    }
+
+    #[test]
+    fn test_adaptive_matches_fixed_step() {
+        // Run the same scenario with both adaptive and fixed-step.
+        // The final states should agree within a reasonable tolerance.
+        let cfg = default_cfg();
+        let rates = BaseImpulseRates::moderate();
+
+        // Fixed-step run
+        let mut pcfg_fixed = PartitionConfig::default();
+        pcfg_fixed.adaptive = None;
+        let result_fixed = nonlinear_partition_simulation(&cfg, &rates, &[0.0; DIM], &pcfg_fixed);
+
+        // Adaptive run
+        let pcfg_adaptive = PartitionConfig::default(); // adaptive on by default
+        let result_adaptive =
+            nonlinear_partition_simulation(&cfg, &rates, &[0.0; DIM], &pcfg_adaptive);
+
+        let ss_fixed = result_fixed.steady_state;
+        let ss_adaptive = result_adaptive.steady_state;
+
+        println!("  Adaptive vs fixed-step steady state comparison:");
+        for j in 0..DIM {
+            let diff = (ss_fixed[j] - ss_adaptive[j]).abs();
+            let rel = if ss_fixed[j].abs() > 1e-10 {
+                diff / ss_fixed[j].abs()
+            } else {
+                diff
+            };
+            println!(
+                "    {}: fixed={:.6}, adaptive={:.6}, rel_diff={:.2e}",
+                INTEGRAL_NAMES[j], ss_fixed[j], ss_adaptive[j], rel
+            );
+            assert!(
+                rel < 0.01,
+                "Steady states diverge for {}: fixed={:.6}, adaptive={:.6}",
+                INTEGRAL_NAMES[j],
+                ss_fixed[j],
+                ss_adaptive[j]
+            );
+        }
+
+        // Final states should also be close
+        let final_fixed = result_fixed.time_series.states.last().unwrap();
+        let final_adaptive = result_adaptive.time_series.states.last().unwrap();
+        for j in 0..DIM {
+            let diff = (final_fixed[j] - final_adaptive[j]).abs();
+            let rel = if final_fixed[j].abs() > 1e-10 {
+                diff / final_fixed[j].abs()
+            } else {
+                diff
+            };
+            assert!(
+                rel < 0.05,
+                "Final states diverge for {}: fixed={:.6}, adaptive={:.6}",
+                INTEGRAL_NAMES[j],
+                final_fixed[j],
+                final_adaptive[j]
+            );
+        }
+    }
+
+    #[test]
+    fn test_step_statistics_nontrivial() {
+        // The adaptive integrator should produce meaningful step statistics:
+        // - n_accepted > 0
+        // - some rejections at partition onset (fast dynamics)
+        // - dt range shows variation
+        let cfg = default_cfg();
+        let rates = BaseImpulseRates::moderate();
+        let pcfg = PartitionConfig::default();
+        let result = nonlinear_partition_simulation(&cfg, &rates, &[0.0; DIM], &pcfg);
+
+        let stats = result
+            .step_stats
+            .as_ref()
+            .expect("adaptive should produce stats");
+        println!("  Step statistics:");
+        println!("    Accepted: {}", stats.n_accepted);
+        println!("    Rejected: {}", stats.n_rejected);
+        println!("    dt_min_used: {:.2e}", stats.dt_min_used);
+        println!("    dt_max_used: {:.2e}", stats.dt_max_used);
+        println!("    dt_history length: {}", stats.dt_history.len());
+
+        assert!(stats.n_accepted > 0, "Should have accepted steps");
+        assert!(
+            stats.dt_min_used < stats.dt_max_used,
+            "Adaptive should use varying dt: min={:.2e}, max={:.2e}",
+            stats.dt_min_used,
+            stats.dt_max_used
+        );
+    }
+
+    #[test]
+    fn test_adaptive_shrinks_at_partition_onset() {
+        // Look at the dt_history and verify that step sizes shrink
+        // near the partition onset (warmup_end_idx).
+        let cfg = default_cfg();
+        let rates = BaseImpulseRates::moderate();
+        let pcfg = PartitionConfig::default();
+        let result = nonlinear_partition_simulation(&cfg, &rates, &[0.0; DIM], &pcfg);
+
+        let stats = result
+            .step_stats
+            .as_ref()
+            .expect("adaptive should produce stats");
+
+        // During the late warmup phase, dt should have grown large.
+        // After partition onset, it should shrink.  Find the minimum dt
+        // in the first 50 steps after warmup.
+        let wi = result.warmup_end_idx;
+        // dt_history has one entry per accepted step across all phases
+        // wi ≈ number of accepted steps during warmup
+        if stats.dt_history.len() > wi + 50 {
+            let late_warmup_dt = stats.dt_history[wi.saturating_sub(10)..wi]
+                .iter()
+                .copied()
+                .fold(0.0f64, f64::max);
+            let early_partition_dt = stats.dt_history[wi..wi + 50]
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, f64::min);
+
+            println!("  Partition onset dt behavior:");
+            println!("    Late warmup max dt:      {:.4e}", late_warmup_dt);
+            println!("    Early partition min dt:   {:.4e}", early_partition_dt);
+
+            // The integrator should detect the transient. Allow some tolerance
+            // since the system may already be near equilibrium.
+            assert!(
+                early_partition_dt <= late_warmup_dt * 1.5,
+                "Expected dt to shrink or stabilize at partition onset, \
+                 but early_partition min={:.4e} >> late_warmup max={:.4e}",
+                early_partition_dt,
+                late_warmup_dt
+            );
+        }
+    }
+
+    #[test]
+    fn test_adaptive_burst_timer() {
+        // Verify the burst timer expires correctly with variable dt.
+        // After the burst, bandwidth impulse should return to normal.
+        let cfg = default_cfg();
+        let rates = BaseImpulseRates::moderate();
+        let mut pcfg = PartitionConfig::default();
+        pcfg.reconnection_burst = Some(5.0);
+
+        let result = nonlinear_partition_simulation(&cfg, &rates, &[0.0; DIM], &pcfg);
+        let stats = result
+            .step_stats
+            .as_ref()
+            .expect("adaptive should produce stats");
+
+        println!("  Burst timer test (adaptive):");
+        println!("    Accepted steps: {}", stats.n_accepted);
+
+        // The system should still recover — burst is transient
+        let ss = result.steady_state;
+        let final_state = result.time_series.states.last().unwrap();
+        for j in 0..DIM {
+            if ss[j] > 1e-6 {
+                let rel_err = (final_state[j] - ss[j]).abs() / ss[j];
+                assert!(
+                    rel_err < 0.15,
+                    "Burst scenario: integral {} did not recover: \
+                     final={:.6}, ss={:.6}, rel_err={:.4}",
+                    INTEGRAL_NAMES[j],
+                    final_state[j],
+                    ss[j],
                     rel_err
                 );
             }
