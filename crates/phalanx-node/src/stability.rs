@@ -4,7 +4,67 @@
 //! computes eigenvalues.  All eigenvalues with negative real parts → the system
 //! is asymptotically stable at the given operating point.
 //!
-//! Enabled via the `stability-analysis` cargo feature.
+//! Enabled via the `stability-analysis` cargo feature
+
+// I had to pull out the rat glue for this one. This is 100% 'roach scholar' energy. Thank you Dr. Calvetti.
+
+// This is what happens when a numerical analyst who doesn't know any better decides to
+// design a distributed mesh.
+
+// What you see here is a result of frustration. I am not a good programmer in the classical
+// sense- or any sense really. I am a compulsive problem solver with a deep disdain for friction;
+// not the physical concept of friction- that's supremely useful. I'm talking about design friction.
+//
+// The first pass at Phalanx started as many hobby projects do- a monolithic ball of mud. This was fine
+// when the project was 5-10 files and didn't do much beyond send a jpeg still over gossipsub. As the project
+// grew, so did the parameter count. Now, because I'm a bad programmer, who is always trying to become a
+// better programmer, I was forcing myself to use test driven design because that is what the 'best'
+// (for my particular definition of best) programmers do. And because I'm a bad programmer, who had a
+// shit architecture to start, my tests would break every time I added a new feature. I found myself
+// changing parameters to make one test work only to break another. It. fucking. sucked.
+//
+// There had to be a better way, so I set out to build one. My first idea was to derive a fundamental
+// set of constants that every parameter in the code base would depend on. I forget what the initial ones
+// were (they're in the git history so I guess I don't have to remember.), but I do remember network round trip
+// time being the big one. I implemented it and it worked! For a while. Testing revealed that the mesh was still
+// brittle which, in hindsight, makes so much sense because I didn't actually solve the real problem. I just
+// reduced the number of parameters I was arbitrarily assigning values to. There had to be a better way.
+//
+// The insight came to me in the small hours of the morning while I was watching my parents very fancy
+// coffee machine make my coffee. What if I just didn't use constants at all? What if I tried
+// modeling this whole thing using a system of differential equations. So that's what I tried. And before
+// my pencil hit the paper, I realized that that idea too would fail. Network signals are inherently
+// non-differentiable; and even if they were, numerical differentiation is inherently unstable. It
+// could never work. It would simply be a 'clever' trick that wasn't all that clever.
+//
+// And then I remembered my training- I could hear Dr. Somersalo (not unlike Yoda whispering to Luke,
+// except with less magic) "Use the integral equations, Joe." And as this is all coming to me while
+// staring at this coffee machine, I'm watching this machine force hot water through a brick of coffee
+// grounds until the pressure accumulates to a point where it must pass through.
+//
+// Pressure. The whole system could be modeled by a system of coupled integral equations. Integral
+// equations (for the most part) are inherently stable. I could model the pressure using Volterra
+// integral equations of the second kind. So I did- and this time it really worked.
+//
+// I still had one last problem to solve. How would I know if it always worked? You see,
+// I've never designed a distributed system before. How would I test this idea at scale?
+// That would require programming an elaborate simulation harness, and what would that prove?
+// That the system would work as intended simply because I the simulation long enough using
+// similarly contrived parameters? No. Unacceptable. Once again, there had to be a better way.
+//
+// This time, it was Dr. Calvetti that whispered to me. "You're a roach scholar, Joe. This is the
+// time for that rat glue. You glue yourself to the chair until the work is done." So I did- not
+// literally, I'm not a psychopath. My plan of attack went something like this:
+// 1. Show that a node is locally stable by looking at my freshly minted system Jacobian
+// 2. Show that a failure in one node couldn't cascade into another.
+// 3. Show that a node could survive under duress as t -> \infty
+//
+// What you see here is that plan in action. And oh, by they way, if you happen to model your
+// distributed system this way you get Byzantine actor detection for roughly 100 FLOPS of
+// additional work. You just have to look at the spectral gap between what the nodes claims
+// they are doing and what they are actually doing. All nodes must live in the manifold
+// defined by the integral equations that govern this system. A dishonest node has nowhere to
+// hide- it cannot escape the math.
 
 use crate::vitals::HomeostaticConfig;
 use nalgebra::{Complex, DMatrix, DVector};
@@ -333,7 +393,7 @@ pub fn analyze_stability(scenario: &str, jacobian: &DMatrix<f64>) -> StabilityRe
     let (dominant_idx, max_re) = eigs
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.re.partial_cmp(&b.re).unwrap())
+        .max_by(|(_, a), (_, b)| a.re.partial_cmp(&b.re).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, v)| (i, v.re))
         .unwrap_or((0, f64::NEG_INFINITY));
 
@@ -809,17 +869,14 @@ pub fn evolve(
         }
 
         // Select propagator and LU based on active coupling
-        let (g, lu) = if let Some(idx) = active_coupling {
-            (&coupling_cache[idx].1, &coupling_cache[idx].2)
+        let (g, lu, g_ref) = if let Some(idx) = active_coupling {
+            (
+                &coupling_cache[idx].1,
+                &coupling_cache[idx].2,
+                &coupling_cache[idx].1 - &id,
+            )
         } else {
-            (&g0, &lu_j)
-        };
-
-        // Exponential integrator step
-        let g_ref = if active_coupling.is_some() {
-            &coupling_cache[active_coupling.unwrap()].1 - &id
-        } else {
-            g0_minus_i.clone()
+            (&g0, &lu_j, g0_minus_i.clone())
         };
 
         x = g * &x;
@@ -1099,9 +1156,27 @@ pub fn full_dyson_analysis(cfg: &HomeostaticConfig) -> DysonAnalysisReport {
     let cascade_threats = ThreatProfile::cascade_ddos_then_sybil();
     let cascade = cascade_analysis(&j, &cascade_threats[0], &cascade_threats[1]);
 
-    // Dyson terms for network partition (has coupling change V)
+    // Dyson terms for network partition (has coupling change V).
+    // network_partition() always produces Some(coupling_delta) by construction.
     let partition_threat = ThreatProfile::network_partition(&j);
-    let v = partition_threat.coupling_delta.as_ref().unwrap();
+    let v = match partition_threat.coupling_delta.as_ref() {
+        Some(v) => v,
+        None => {
+            // Structurally unreachable: network_partition always sets coupling_delta.
+            // If we're here, someone broke the ThreatProfile constructor.
+            return DysonAnalysisReport {
+                threat_responses: vec![sybil, ddos, storage, partition],
+                cascade,
+                dyson_terms: DysonTerms {
+                    zeroth: DMatrix::identity(DIM, DIM),
+                    first: DMatrix::zeros(DIM, DIM),
+                    second: DMatrix::zeros(DIM, DIM),
+                    convergence_ratio: 0.0,
+                },
+                convergence_radius: f64::INFINITY,
+            };
+        }
+    };
     let dyson = compute_dyson_terms(
         &j,
         v,
@@ -1925,18 +2000,23 @@ pub fn full_nonlinear_partition_analysis(cfg: &HomeostaticConfig) -> NonlinearPa
     let sensitivity_sweep = partition_duration_sweep(cfg, &rates, &durations);
 
     // 5. Dyson convergence ratio for cross-reference (at idle, matching
-    //    the original Dyson analysis which found ρ = 1.30)
+    //    the original Dyson analysis which found ρ ≈ 1.30).
+    // network_partition() always produces Some(coupling_delta) by construction.
     let op = OperatingPoint::idle();
     let j = build_jacobian(cfg, &rates, &op);
     let partition_threat = ThreatProfile::network_partition(&j);
-    let v = partition_threat.coupling_delta.as_ref().unwrap();
-    let dyson = compute_dyson_terms(
-        &j,
-        v,
-        partition_threat.onset,
-        partition_threat.onset + partition_threat.duration,
-    );
-    let dyson_rho = dyson.convergence_ratio;
+    let dyson_rho = match partition_threat.coupling_delta.as_ref() {
+        Some(v) => {
+            let dyson = compute_dyson_terms(
+                &j,
+                v,
+                partition_threat.onset,
+                partition_threat.onset + partition_threat.duration,
+            );
+            dyson.convergence_ratio
+        }
+        None => 0.0, // structurally unreachable
+    };
 
     NonlinearPartitionReport {
         steady_state,
@@ -2189,6 +2269,8 @@ pub struct FullSpectralReport {
     pub worst_stability_radius: f64,
     /// Worst (largest) eigenvector condition number across all scenarios.
     pub worst_condition_number: f64,
+    /// Maximal Lyapunov exponent from nonlinear partition analysis, if computed.
+    pub lyapunov_mu1: Option<f64>,
 }
 
 // ----- eigenvector computation via SVD null-space -----
@@ -2528,7 +2610,15 @@ pub fn full_spectral_analysis(cfg: &HomeostaticConfig) -> FullSpectralReport {
         .map(|r| r.eigenvector_condition_number)
         .fold(0.0_f64, f64::max);
 
-    let cert = build_combined_certificate(&results, worst_g1, worst_rad, worst_kappa);
+    // Compute the nonlinear Lyapunov exponent so the certificate is self-contained.
+    let lyap = compute_lyapunov_exponent(
+        cfg,
+        &BaseImpulseRates::moderate(),
+        &PartitionConfig::default(),
+    );
+    let mu1 = lyap.mu1;
+
+    let cert = build_combined_certificate(&results, worst_g1, worst_rad, worst_kappa, Some(mu1));
 
     FullSpectralReport {
         scenarios: results,
@@ -2536,6 +2626,7 @@ pub fn full_spectral_analysis(cfg: &HomeostaticConfig) -> FullSpectralReport {
         worst_gamma1: worst_g1,
         worst_stability_radius: worst_rad,
         worst_condition_number: worst_kappa,
+        lyapunov_mu1: Some(mu1),
     }
 }
 
@@ -2544,6 +2635,7 @@ fn build_combined_certificate(
     worst_g1: f64,
     worst_rad: f64,
     worst_kappa: f64,
+    lyapunov_mu1: Option<f64>,
 ) -> String {
     let mut out = String::new();
     out.push_str("COMBINED ROBUSTNESS CERTIFICATE\n");
@@ -2592,12 +2684,29 @@ fn build_combined_certificate(
         worst_decay
     ));
 
-    // Layer 5: nonlinear certificate (cross-reference)
-    out.push_str("  [PASS] Nonlinear Lyapunov:  μ₁ = −0.666 < 0  (from partition analysis)\n");
-    out.push_str("         system is Lyapunov-stable through worst-case transient\n");
+    // Layer 5: nonlinear certificate (computed, not hardcoded)
+    match lyapunov_mu1 {
+        Some(mu1) if mu1 < 0.0 => {
+            out.push_str(&format!(
+                "  [PASS] Nonlinear Lyapunov:  μ₁ = {:.6} < 0  (from partition analysis)\n",
+                mu1
+            ));
+            out.push_str("         system is Lyapunov-stable through worst-case transient\n");
+        }
+        Some(mu1) => {
+            out.push_str(&format!(
+                "  [FAIL] Nonlinear Lyapunov:  μ₁ = {:.6} ≥ 0  (UNSTABLE through partition!)\n",
+                mu1
+            ));
+        }
+        None => {
+            out.push_str("  [????] Nonlinear Lyapunov:  not computed\n");
+        }
+    }
 
     out.push_str("\n");
-    if all_stable && worst_rad > 0.0 && worst_kappa < f64::INFINITY {
+    let lyapunov_stable = lyapunov_mu1.map_or(false, |mu| mu < 0.0);
+    if all_stable && worst_rad > 0.0 && worst_kappa < f64::INFINITY && lyapunov_stable {
         out.push_str("  VERDICT: The 8-integral Volterra feedback system possesses a\n");
         out.push_str("  mathematically complete stability certificate across all four layers.\n");
         out.push_str("  No perturbation within the stability radius can induce failure.\n");
@@ -3011,6 +3120,7 @@ mod tests {
     #[test]
     fn test_mat_exp_diagonal() {
         // exp(diag(λ)) = diag(exp(λ))
+        // Shout out to Dr. Turc for forcing me to learn this shit.
         let lambdas = [-4.0, -0.5, -0.1, -1.0, -0.3, -0.05, -0.5, -0.2];
         let mut diag = DMatrix::zeros(DIM, DIM);
         for i in 0..DIM {
@@ -3391,6 +3501,7 @@ mod tests {
     #[test]
     fn test_rk4_recovers_exponential_decay() {
         // For decoupled integrals with zero impulse, RK4 should match exp(-λ*t).
+        // This is pure Dr. Somersalo here.
         let cfg = default_cfg();
         let mut rates = BaseImpulseRates::moderate();
         rates.u_d = 0.0; // zero I/O impulse for pure decay test
