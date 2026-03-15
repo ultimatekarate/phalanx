@@ -8,13 +8,11 @@ use tokio::time::Instant;
 
 use phalanx_proto::types::{PowerState, SystemStress};
 
-use super::config::{
-    DecayingIntegral, HomeostaticConfig, Homeostasis, IntegralState,
-};
+use super::config::{DecayingIntegral, Homeostasis, HomeostaticConfig, IntegralState};
 use super::hardware::{HardwareProbe, SysfsProbe};
 use super::types::{
-    BandwidthScale, ConnectionScale, FinalizationScale, IngestionScale, MemoryScale,
-    StorageScale, SybilEndowment,
+    BandwidthScale, ConnectionScale, FinalizationScale, IngestionScale, MemoryScale, StorageScale,
+    SybilEndowment,
 };
 
 pub struct SystemGovernor {
@@ -536,8 +534,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
-    use tokio::time::Instant;
     use tempfile::tempdir;
+    use tokio::time::Instant;
 
     // --- MockProbe: Configurable hardware probe for testing ---
 
