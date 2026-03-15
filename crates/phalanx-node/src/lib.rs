@@ -37,10 +37,41 @@ pub mod persistence {
 }
 
 pub mod trust;
-pub mod vitals;
+
+pub mod vitals {
+    pub mod config;
+    pub mod governor;
+    pub mod hardware;
+    pub mod health;
+    pub mod spectral;
+    pub mod types;
+
+    pub use config::*;
+    pub use governor::*;
+    pub use hardware::*;
+    pub use health::*;
+    pub use spectral::*;
+    pub use types::*;
+}
 
 #[cfg(feature = "stability-analysis")]
-pub mod stability;
+pub mod stability {
+    pub mod config;
+    pub mod dyson;
+    pub mod eigenvalues;
+    pub mod jacobian;
+    pub mod nonlinear;
+    pub mod pade;
+    pub mod spectral;
+
+    pub use config::*;
+    pub use dyson::*;
+    pub use eigenvalues::*;
+    pub use jacobian::*;
+    pub use nonlinear::*;
+    pub use pade::*;
+    pub use spectral::*;
+}
 
 #[macro_use]
 extern crate tracing;
