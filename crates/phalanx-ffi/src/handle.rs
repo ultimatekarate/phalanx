@@ -25,9 +25,9 @@ use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::{HomeostaticConfig, SystemGovernor, ThermalThresholds};
 use phalanx_node::{FileJournal, MeshSentinel};
 use phalanx_proto::crypto::SymmetricKey;
-use phalanx_proto::evidence::VideoShard;
+use phalanx_proto::evidence::{AudioShard, VideoShard};
 use phalanx_proto::network::NetworkEvent;
-use phalanx_proto::prelude::{PhalanxIdentity, PhalanxPhysics, RecordingId};
+use phalanx_proto::prelude::{PhalanxIdentity, PhalanxPhysics};
 use phalanx_transport::adapters::local_mesh::{LocalMeshAdapter, OutboundLocalPacket};
 use phalanx_transport::identity_ext::Libp2pExt;
 use phalanx_transport::prelude::Libp2pAdapter;
@@ -79,16 +79,16 @@ pub struct PhalanxHandle {
     pub(crate) trust_tx: mpsc::Sender<TrustCommand>,
     /// Video shard sender — FFI pushes processed frames here.
     pub(crate) video_tx: Option<mpsc::Sender<VideoShard>>,
-    /// Playback frame receiver — FFI polls for decoded frames.
-    pub(crate) playback_rx: Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
+    /// Audio shard sender — FFI pushes PCM audio here.
+    pub(crate) audio_tx: Option<mpsc::Sender<AudioShard>>,
     /// The sentinel itself, behind a Mutex for `spawn_playback(&mut self)`.
+    /// This is the only Mutex on PhalanxHandle — justified by genuine
+    /// cross-thread access (FFI thread + h.runtime.spawn() tasks).
     pub(crate) sentinel: Mutex<Option<SentinelRef>>,
     /// Node DID — immutable after creation.
     pub(crate) node_did: String,
     /// Whether a recording is currently active.
     pub(crate) recording_active: AtomicBool,
-    /// Current recording ID, if any.
-    pub(crate) current_recording_id: Mutex<Option<RecordingId>>,
     /// Vault key for payload encryption.
     pub(crate) vault_key: SymmetricKey,
     /// Local mesh inbound sender — FFI push functions send NetworkEvents here.
@@ -249,6 +249,7 @@ async fn bootstrap(
     // Extract channels before wrapping in Arc<Mutex>
     let trust_tx = engine.trust_tx.clone();
     let video_tx = Some(engine.video_tx.clone());
+    let audio_tx = Some(engine.audio_tx.clone());
 
     let sentinel = Arc::new(tokio::sync::Mutex::new(engine));
 
@@ -264,11 +265,10 @@ async fn bootstrap(
         probe,
         trust_tx,
         video_tx,
-        playback_rx: Mutex::new(None),
+        audio_tx,
         sentinel: Mutex::new(Some(sentinel)),
         node_did,
         recording_active: AtomicBool::new(false),
-        current_recording_id: Mutex::new(None),
         vault_key,
         local_mesh_tx: Some(local_mesh_tx),
         local_mesh_outbound_rx: Mutex::new(Some(local_mesh_outbound_rx)),

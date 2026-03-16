@@ -38,8 +38,8 @@ echo ""
 echo "[1/5] Generating phalanx.h via cbindgen..."
 if command -v cbindgen &> /dev/null; then
   cbindgen --config "$FFI_CRATE/cbindgen.toml" \
-           --crate phalanx-ffi \
-           --output "$FFI_CRATE/phalanx.h"
+          --crate phalanx-ffi \
+          --output "$FFI_CRATE/phalanx.h"
   echo "  -> $FFI_CRATE/phalanx.h generated"
 else
   echo "  -> cbindgen not found, skipping header generation"

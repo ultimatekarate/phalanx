@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ffi';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -20,17 +21,31 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
   Uint8List? _currentFrame;
   Timer? _pollTimer;
 
+  /// Opaque session pointer returned from Rust. Owns video + audio receivers.
+  Pointer<Void>? _session;
+
   void _startPlayback(String recordingId) {
     final bridge = ref.read(phalanxProvider);
     try {
-      bridge.startPlayback(recordingId);
-      setState(() => _activeRecordingId = recordingId);
+      final session = bridge.startPlayback(recordingId);
+      setState(() {
+        _activeRecordingId = recordingId;
+        _session = session;
+      });
 
-      // Poll for frames at ~30fps
+      // Poll for video + audio at ~30fps
       _pollTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
-        final frame = bridge.pollPlaybackFrame();
+        if (_session == null) return;
+
+        final frame = bridge.pollVideoFrame(_session!);
         if (frame != null) {
           setState(() => _currentFrame = frame);
+        }
+
+        // Poll audio — for now, discard (audio playback output TBD)
+        final audio = bridge.pollAudioFrame(_session!);
+        if (audio != null) {
+          // TODO: feed PCM to audio output sink
         }
       });
     } catch (e) {
@@ -41,8 +56,13 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
   void _stopPlayback() {
     _pollTimer?.cancel();
     _pollTimer = null;
-    final bridge = ref.read(phalanxProvider);
-    bridge.stopPlayback();
+
+    if (_session != null) {
+      final bridge = ref.read(phalanxProvider);
+      bridge.stopPlayback(_session!);
+      _session = null;
+    }
+
     setState(() {
       _activeRecordingId = null;
       _currentFrame = null;
@@ -63,8 +83,8 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
 
   void _exportC2pa(String recordingId) {
     final bridge = ref.read(phalanxProvider);
-    // Export to app's documents directory
-    final outPath = '/storage/emulated/0/Download/${recordingId}_c2pa.jpg';
+    // Export to app's documents directory — will be MP4 after Part D
+    final outPath = '/storage/emulated/0/Download/${recordingId}_c2pa.mp4';
     try {
       bridge.exportC2pa(recordingId, outPath);
       if (!mounted) return;
@@ -86,6 +106,11 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
   @override
   void dispose() {
     _pollTimer?.cancel();
+    if (_session != null) {
+      final bridge = ref.read(phalanxProvider);
+      bridge.stopPlayback(_session!);
+      _session = null;
+    }
     super.dispose();
   }
 

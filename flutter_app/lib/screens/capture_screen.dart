@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:record/record.dart';
 
 import '../providers/capture_provider.dart';
 import '../providers/phalanx_provider.dart';
@@ -25,6 +27,8 @@ class _CaptureScreenState extends ConsumerState<CaptureScreen> {
   CameraController? _controller;
   bool _cameraReady = false;
   Timer? _fpsTimer;
+  AudioRecorder? _audioRecorder;
+  StreamSubscription<Uint8List>? _audioSub;
 
   @override
   void initState() {
@@ -68,30 +72,40 @@ class _CaptureScreenState extends ConsumerState<CaptureScreen> {
       // Stop
       _controller?.stopImageStream();
       _fpsTimer?.cancel();
+      _stopAudioCapture();
       notifier.stopRecording();
     } else {
       // Start
       notifier.startRecording();
       _startFrameStream();
+      _startAudioCapture();
     }
   }
 
   void _startFrameStream() {
     final bridge = ref.read(phalanxProvider);
+    final recordingId = ref.read(recordingProvider).recordingId;
+    if (recordingId == null) return;
+
+    // NV12 on iOS, NV21 on Android — only the chroma byte order differs.
+    final pixelFormat = Platform.isIOS ? 1 : 0;
 
     _controller?.startImageStream((CameraImage image) {
-      // Extract Y-plane from the first plane (NV21 on Android, YUV420 on iOS)
-      // The Y-plane is always the first plane and contains width * height bytes.
-      if (image.planes.isEmpty) return;
+      // Plane 0: Y (luminance) — width × height bytes
+      // Plane 1: UV/VU (interleaved chroma) — width × height/2 bytes
+      if (image.planes.length < 2) return;
 
       final yPlane = image.planes[0].bytes;
+      final uvPlane = image.planes[1].bytes;
       final width = image.width;
       final height = image.height;
       final timestamp = DateTime.now().millisecondsSinceEpoch;
 
-      // Push to the Rust forensic pipeline — non-blocking, drops on backpressure
+      // Push full YUV to the Rust forensic pipeline — non-blocking, drops on backpressure
       try {
-        bridge.pushVideoFrame(yPlane, width, height, timestamp);
+        bridge.pushVideoFrame(
+          yPlane, uvPlane, width, height, pixelFormat, recordingId, timestamp,
+        );
       } catch (_) {
         // Frame dropped — the homeostatic integrals will adapt
       }
@@ -103,9 +117,44 @@ class _CaptureScreenState extends ConsumerState<CaptureScreen> {
     });
   }
 
+  Future<void> _startAudioCapture() async {
+    final bridge = ref.read(phalanxProvider);
+    final recordingId = ref.read(recordingProvider).recordingId;
+    if (recordingId == null) return;
+
+    _audioRecorder = AudioRecorder();
+
+    // Check permission
+    if (!await _audioRecorder!.hasPermission()) return;
+
+    // Start PCM stream: 16-bit LE, 44100 Hz, mono
+    final stream = await _audioRecorder!.startStream(const RecordConfig(
+      encoder: AudioEncoder.pcm16bits,
+      sampleRate: 44100,
+      numChannels: 1,
+    ));
+
+    _audioSub = stream.listen((Uint8List pcmBytes) {
+      try {
+        bridge.pushAudioFrame(pcmBytes, 44100, 1, recordingId);
+      } catch (_) {
+        // Audio chunk dropped — backpressure handled by Rust
+      }
+    });
+  }
+
+  void _stopAudioCapture() {
+    _audioSub?.cancel();
+    _audioSub = null;
+    _audioRecorder?.stop();
+    _audioRecorder?.dispose();
+    _audioRecorder = null;
+  }
+
   @override
   void dispose() {
     _fpsTimer?.cancel();
+    _stopAudioCapture();
     _controller?.dispose();
     super.dispose();
   }

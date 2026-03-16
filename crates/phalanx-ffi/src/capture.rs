@@ -1,25 +1,28 @@
 // crates/phalanx-ffi/src/capture.rs
 //
-// Frame capture FFI — receives raw Y-plane data from Flutter's camera plugin
+// Frame capture FFI — receives raw YUV data from Flutter's camera plugin
 // and runs the full forensic pipeline:
 //
-//   Y-plane → ForensicLens::analyze() → compress_frame() → create_video_shard() → encrypt → send
+//   Y-plane + UV-plane → ForensicLens::analyze(Y) → compress_frame(YUV) → create_video_shard() → encrypt → send
 //
-// Flutter delivers NV21 (Android) or YUV420 (iOS). In both formats, the raw Y-plane
-// is the first `width * height` bytes. No BT.601 RGB→Y conversion needed.
-// This eliminates quantization error and preserves PRNU signal integrity.
+// Flutter delivers NV21 (Android) or NV12 (iOS). Both formats provide:
+//   - Y plane: width × height bytes of luminance
+//   - UV plane: width × (height/2) bytes of interleaved chroma
+//
+// ForensicLens operates on Y-plane only (PRNU, Moiré, Laplacian).
+// compress_frame receives both planes for full-color JPEG via turbojpeg.
 
 use crate::error::PhalanxError;
 use crate::handle::PhalanxHandle;
 
 use phalanx_forensics::judge::PayloadCipher;
-use phalanx_forensics::reassembler::{compress_frame, create_video_shard};
+use phalanx_forensics::reassembler::{compress_frame, create_audio_shard, create_video_shard};
 use phalanx_lens::scalar::ScalarLens;
 use phalanx_lens::ForensicLens;
 use phalanx_node::hardware::camera::target_fps;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::prelude::RecordingId;
-use phalanx_proto::types::{BlackLevel, Fps};
+use phalanx_proto::types::{BlackLevel, ChannelCount, Fps, SampleRate};
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -35,6 +38,23 @@ static LENS: ScalarLens = ScalarLens;
 /// Sequence counter for video shards within a recording.
 /// Reset on each `phalanx_start_recording`.
 static SEQUENCE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+// =====================================================================
+// PIXEL FORMAT
+// =====================================================================
+
+/// Pixel format of the interleaved chroma plane from the camera.
+///
+/// Android's Camera2 API delivers NV21 (VU interleaved).
+/// iOS AVFoundation delivers NV12 (UV interleaved).
+/// Both share the same Y plane — only the chroma byte order differs.
+#[repr(C)]
+pub enum PixelFormat {
+    /// NV21: V then U interleaved. Android default.
+    Nv21 = 0,
+    /// NV12: U then V interleaved. iOS default.
+    Nv12 = 1,
+}
 
 /// Starts a new recording session.
 ///
@@ -75,15 +95,12 @@ pub unsafe extern "C" fn phalanx_start_recording(
         &h.node_did[..8.min(h.node_did.len())],
         timestamp
     );
-    let recording_id = RecordingId::new(&id_str);
-
-    // Reset sequence counter
+    // Reset sequence counters
     SEQUENCE.store(0, Ordering::Relaxed);
+    AUDIO_SEQUENCE.store(0, Ordering::Relaxed);
 
-    // Store recording state
-    if let Ok(mut guard) = h.current_recording_id.lock() {
-        *guard = Some(recording_id);
-    }
+    // Set recording active — recording_id is returned to the caller
+    // and passed back on each push call (no Mutex storage needed).
     h.recording_active.store(true, Ordering::Relaxed);
 
     // Return recording ID to caller
@@ -111,18 +128,15 @@ pub unsafe extern "C" fn phalanx_stop_recording(handle: *mut PhalanxHandle) -> i
     }
 
     h.recording_active.store(false, Ordering::Relaxed);
-    if let Ok(mut guard) = h.current_recording_id.lock() {
-        *guard = None;
-    }
 
     PhalanxError::Ok.code()
 }
 
-/// Pushes a raw Y-plane video frame through the forensic pipeline.
+/// Pushes a raw YUV video frame through the forensic pipeline.
 ///
 /// Pipeline:
-/// 1. `ForensicLens::analyze()` — PRNU variance, Moiré detection, Laplacian energy (256x256 center crop, 64KB, fits L1)
-/// 2. `compress_frame()` — JPEG compression
+/// 1. `ForensicLens::analyze()` — PRNU variance, Moiré detection, Laplacian energy (Y-plane only, 256×256 center crop, 64KB, fits L1)
+/// 2. `compress_frame()` — full-color YUV→JPEG via turbojpeg (no RGB conversion)
 /// 3. `create_video_shard()` — shard with forensic metrics
 /// 4. `try_send` to video channel → `MediaEgressActor` handles mesh distribution
 ///
@@ -131,22 +145,27 @@ pub unsafe extern "C" fn phalanx_stop_recording(handle: *mut PhalanxHandle) -> i
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
-/// * `y_plane` must point to `y_len` valid bytes of raw luma data.
-/// * `y_len` must equal `width * height`.
+/// * `y_plane` must point to `y_len` valid bytes of raw luma data (`width * height`).
+/// * `uv_plane` must point to `uv_len` valid bytes of interleaved chroma (`width * height / 2`).
+/// * `recording_id` must be a valid null-terminated C string (returned from `phalanx_start_recording`).
 #[no_mangle]
 pub unsafe extern "C" fn phalanx_push_video_frame(
     handle: *mut PhalanxHandle,
     y_plane: *const u8,
     y_len: u32,
+    uv_plane: *const u8,
+    uv_len: u32,
     width: u32,
     height: u32,
+    pixel_format: PixelFormat,
+    recording_id: *const c_char,
     _timestamp_ms: u64,
 ) -> i32 {
     let Some(h) = handle.as_ref() else {
         return PhalanxError::NullPointer.code();
     };
 
-    if y_plane.is_null() {
+    if y_plane.is_null() || uv_plane.is_null() || recording_id.is_null() {
         return PhalanxError::NullPointer.code();
     }
 
@@ -154,14 +173,12 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
         return PhalanxError::NotRecording.code();
     }
 
-    // Get current recording ID
-    let recording_id = match h.current_recording_id.lock() {
-        Ok(guard) => match guard.as_ref() {
-            Some(id) => id.clone(),
-            None => return PhalanxError::NotRecording.code(),
-        },
-        Err(_) => return PhalanxError::InvalidState.code(),
+    // Parse recording ID from caller (no Mutex — stateless)
+    let rec_str = match CStr::from_ptr(recording_id).to_str() {
+        Ok(s) => s,
+        Err(_) => return PhalanxError::InvalidUtf8.code(),
     };
+    let rec_id = RecordingId::new(rec_str);
 
     // Get video sender
     let video_tx = match &h.video_tx {
@@ -169,10 +186,18 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
         None => return PhalanxError::ChannelClosed.code(),
     };
 
-    // Copy Y-plane data from the FFI boundary
-    let y_data = std::slice::from_raw_parts(y_plane, y_len as usize).to_vec();
+    // Validate UV plane size: must be width * height / 2 (NV12/NV21 interleaved)
+    let expected_uv = (width * height) / 2;
+    if uv_len != expected_uv {
+        return PhalanxError::InvalidState.code();
+    }
 
-    // Step 1: ForensicLens — sensor provenance analysis (PRNU, Moiré, Laplacian)
+    // Copy planes from the FFI boundary
+    let y_data = std::slice::from_raw_parts(y_plane, y_len as usize).to_vec();
+    let uv_data = std::slice::from_raw_parts(uv_plane, uv_len as usize).to_vec();
+
+    // Step 1: ForensicLens — sensor provenance analysis (Y-plane only)
+    // PRNU, Moiré, and Laplacian operate on luminance exclusively.
     let lens_metrics = LENS.analyze(
         &y_data,
         width as usize,
@@ -180,8 +205,9 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
         BlackLevel(DEFAULT_BLACK_LEVEL),
     );
 
-    // Step 2: Compress frame (JPEG)
-    let compressed = match compress_frame(y_data, width, height) {
+    // Step 2: Compress full-color frame (YUV→JPEG via turbojpeg)
+    let is_nv12 = matches!(pixel_format, PixelFormat::Nv12);
+    let compressed = match compress_frame(y_data, uv_data, width, height, is_nv12) {
         Ok(data) => data,
         Err(_) => return PhalanxError::InvalidState.code(),
     };
@@ -194,7 +220,7 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
         vec![compressed],
         sequence,
         current_fps,
-        recording_id,
+        rec_id,
         lens_metrics,
     ) {
         Ok(s) => s,
@@ -211,6 +237,89 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
             // Backpressure: frame dropped silently. This is correct behavior —
             // the homeostatic integrals will adapt the duty cycle.
+            PhalanxError::Ok.code()
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            PhalanxError::ChannelClosed.code()
+        }
+    }
+}
+
+/// Sequence counter for audio shards within a recording.
+/// Reset on each `phalanx_start_recording`.
+static AUDIO_SEQUENCE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Pushes a raw PCM audio frame through the forensic pipeline.
+///
+/// Pipeline:
+/// 1. `create_audio_shard()` — wraps PCM data with LZ4 compression
+/// 2. Encrypt payload with vault key
+/// 3. `try_send` to audio channel → `MediaEgressActor` handles mesh distribution
+///
+/// Uses `try_send` — returns immediately, drops on backpressure.
+///
+/// # Safety
+/// * `handle` must be a valid pointer from `phalanx_create`.
+/// * `pcm_data` must point to `pcm_len` valid bytes of 16-bit LE PCM audio.
+/// * `recording_id` must be a valid null-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn phalanx_push_audio_frame(
+    handle: *mut PhalanxHandle,
+    pcm_data: *const u8,
+    pcm_len: u32,
+    sample_rate: u32,
+    channels: u8,
+    recording_id: *const c_char,
+) -> i32 {
+    let Some(h) = handle.as_ref() else {
+        return PhalanxError::NullPointer.code();
+    };
+
+    if pcm_data.is_null() || recording_id.is_null() {
+        return PhalanxError::NullPointer.code();
+    }
+
+    if !h.recording_active.load(Ordering::Relaxed) {
+        return PhalanxError::NotRecording.code();
+    }
+
+    // Parse recording ID from caller (stateless — no Mutex)
+    let rec_str = match CStr::from_ptr(recording_id).to_str() {
+        Ok(s) => s,
+        Err(_) => return PhalanxError::InvalidUtf8.code(),
+    };
+    let rec_id = RecordingId::new(rec_str);
+
+    // Get audio sender
+    let audio_tx = match &h.audio_tx {
+        Some(tx) => tx,
+        None => return PhalanxError::ChannelClosed.code(),
+    };
+
+    // Copy PCM data from the FFI boundary
+    let pcm = std::slice::from_raw_parts(pcm_data, pcm_len as usize).to_vec();
+
+    // Create audio shard (LZ4 compressed internally)
+    let sequence = StorageSequence(AUDIO_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+    let mut shard = match create_audio_shard(
+        pcm,
+        sequence,
+        SampleRate::new(sample_rate),
+        ChannelCount::new(channels),
+        rec_id,
+    ) {
+        Ok(s) => s,
+        Err(_) => return PhalanxError::InvalidState.code(),
+    };
+
+    // Encrypt payload
+    let _ = shard.payload.apply_encryption(&h.vault_key);
+
+    // Non-blocking send to MediaEgressActor
+    match audio_tx.try_send(shard) {
+        Ok(()) => PhalanxError::Ok.code(),
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            // Backpressure: audio chunk dropped silently.
             PhalanxError::Ok.code()
         }
         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
