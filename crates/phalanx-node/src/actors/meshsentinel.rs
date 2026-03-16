@@ -566,10 +566,11 @@ impl<I: IngressPort> MeshSentinel<I> {
         }
     }
 
-    pub fn spawn_playback<S: PlaybackSink + 'static>(
+    pub fn spawn_playback<V: PlaybackSink + 'static, A: PlaybackSink + 'static>(
         &mut self,
         recording_id: RecordingId,
-        sink: S,
+        video_sink: V,
+        audio_sink: A,
     ) -> tokio::task::JoinHandle<()> {
         // Fresh channel per playback session — only one active at a time.
         // Replacing providers_tx drops the old sender, signaling the previous
@@ -581,7 +582,8 @@ impl<I: IngressPort> MeshSentinel<I> {
             self.storage_tx.clone(),
             self.egress_tx.clone(),
             Some((*self.network_key).clone()),
-            sink,
+            video_sink,
+            audio_sink,
             self.discovery_tx.clone(),
             providers_rx,
             self.identity.clone(),

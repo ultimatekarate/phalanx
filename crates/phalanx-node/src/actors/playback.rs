@@ -16,23 +16,25 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-pub struct PlaybackCoordinator<S: PlaybackSink> {
+pub struct PlaybackCoordinator<V: PlaybackSink, A: PlaybackSink> {
     storage_tx: mpsc::Sender<StorageCommand>,
     egress_tx: mpsc::Sender<EgressCommand>,
     decryption_key: Option<SymmetricKey>,
-    sink: S,
+    video_sink: V,
+    audio_sink: A,
     discovery_tx: mpsc::Sender<(RecordingId, StorageSequence)>,
     providers_rx: mpsc::Receiver<(RecordingId, Vec<NetworkId>)>,
     identity: Arc<PhalanxIdentity>,
     current_sequence: StorageSequence,
 }
 
-impl<S: PlaybackSink> PlaybackCoordinator<S> {
+impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
     pub fn new(
         storage_tx: mpsc::Sender<StorageCommand>,
         egress_tx: mpsc::Sender<EgressCommand>,
         decryption_key: Option<SymmetricKey>,
-        sink: S,
+        video_sink: V,
+        audio_sink: A,
         discovery_tx: mpsc::Sender<(RecordingId, StorageSequence)>,
         providers_rx: mpsc::Receiver<(RecordingId, Vec<NetworkId>)>,
         identity: Arc<PhalanxIdentity>,
@@ -41,7 +43,8 @@ impl<S: PlaybackSink> PlaybackCoordinator<S> {
             storage_tx,
             egress_tx,
             decryption_key,
-            sink,
+            video_sink,
+            audio_sink,
             discovery_tx,
             providers_rx,
             identity,
@@ -78,9 +81,10 @@ impl<S: PlaybackSink> PlaybackCoordinator<S> {
                 .context("StorageActor dropped the response channel")?;
             match shard_opt {
                 Some(envelope) => {
-                    let payload = match &envelope.evidence {
-                        Evidence::Video(v) => &v.payload,
-                        Evidence::Audio(a) => &a.payload,
+                    // Demux: extract payload and determine which sink receives the data.
+                    let (payload, is_audio) = match &envelope.evidence {
+                        Evidence::Video(v) => (&v.payload, false),
+                        Evidence::Audio(a) => (&a.payload, true),
                         Evidence::Gap(_) | Evidence::Handover(_) => {
                             self.current_sequence.0 += 1;
                             continue;
@@ -99,7 +103,6 @@ impl<S: PlaybackSink> PlaybackCoordinator<S> {
                             self.current_sequence.0 += 1;
                             continue;
                         }
-                        // FIX: Added exhaustive match arm for Compressed payloads
                         DataPayload::Compressed(compressed_data) => {
                             phalanx_forensics::reassembler::decompress_payload(compressed_data)
                                 .map_err(|e| {
@@ -108,9 +111,16 @@ impl<S: PlaybackSink> PlaybackCoordinator<S> {
                         }
                     };
 
-                    self.sink
-                        .handle_chunk(self.current_sequence, frame_data)
-                        .await?;
+                    // Route to the correct sink — Rust demuxes, Flutter reads two channels.
+                    if is_audio {
+                        self.audio_sink
+                            .handle_chunk(self.current_sequence, frame_data)
+                            .await?;
+                    } else {
+                        self.video_sink
+                            .handle_chunk(self.current_sequence, frame_data)
+                            .await?;
+                    }
                     self.current_sequence.0 += 1;
                 }
                 None => {
