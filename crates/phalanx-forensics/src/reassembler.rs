@@ -33,8 +33,8 @@ const OTI_PREFIX_LEN: usize = 12;
 ///
 /// `is_nv12`: true for iOS (UV order), false for Android NV21 (VU order).
 pub fn compress_frame(
-    y_data: Vec<u8>,
-    uv_data: Vec<u8>,
+    y_data: &[u8],
+    uv_data: &[u8],
     width: u32,
     height: u32,
     is_nv12: bool,
@@ -62,27 +62,26 @@ pub fn compress_frame(
         ));
     }
 
-    // De-interleave NV12/NV21 into planar Y || U || V
-    let mut planar = Vec::with_capacity(w * h + chroma_samples * 2);
-    planar.extend_from_slice(&y_data);
+    // De-interleave NV12/NV21 into planar Y || U || V.
+    // Single allocation — U and V written at computed offsets, no intermediate Vecs.
+    let total = w * h + chroma_samples * 2;
+    let mut planar = vec![0u8; total];
+    planar[..w * h].copy_from_slice(y_data);
 
-    let mut u_plane = Vec::with_capacity(chroma_samples);
-    let mut v_plane = Vec::with_capacity(chroma_samples);
+    let u_offset = w * h;
+    let v_offset = u_offset + chroma_samples;
 
     for i in 0..chroma_samples {
         if is_nv12 {
             // NV12 (iOS): UV UV UV ...
-            u_plane.push(uv_data[2 * i]);
-            v_plane.push(uv_data[2 * i + 1]);
+            planar[u_offset + i] = uv_data[2 * i];
+            planar[v_offset + i] = uv_data[2 * i + 1];
         } else {
             // NV21 (Android): VU VU VU ...
-            v_plane.push(uv_data[2 * i]);
-            u_plane.push(uv_data[2 * i + 1]);
+            planar[v_offset + i] = uv_data[2 * i];
+            planar[u_offset + i] = uv_data[2 * i + 1];
         }
     }
-
-    planar.extend_from_slice(&u_plane);
-    planar.extend_from_slice(&v_plane);
 
     let yuv_image = turbojpeg::YuvImage {
         pixels: planar.as_slice(),
