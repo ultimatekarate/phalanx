@@ -194,14 +194,15 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
         return PhalanxError::InvalidState.code();
     }
 
-    // Copy planes from the FFI boundary
-    let y_data = std::slice::from_raw_parts(y_plane, y_len as usize).to_vec();
-    let uv_data = std::slice::from_raw_parts(uv_plane, uv_len as usize).to_vec();
+    // Borrow directly from Flutter's memory — no copies until compress_frame
+    // needs to build the planar buffer internally.
+    let y_slice = std::slice::from_raw_parts(y_plane, y_len as usize);
+    let uv_slice = std::slice::from_raw_parts(uv_plane, uv_len as usize);
 
     // Step 1: ForensicLens — sensor provenance analysis (Y-plane only)
     // PRNU, Moiré, and Laplacian operate on luminance exclusively.
     let lens_metrics = LENS.analyze(
-        &y_data,
+        y_slice,
         width as usize,
         height as usize,
         BlackLevel(DEFAULT_BLACK_LEVEL),
@@ -209,7 +210,7 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
 
     // Step 2: Compress full-color frame (YUV→JPEG via turbojpeg)
     let is_nv12 = matches!(pixel_format, PixelFormat::Nv12);
-    let compressed = match compress_frame(y_data, uv_data, width, height, is_nv12) {
+    let compressed = match compress_frame(y_slice, uv_slice, width, height, is_nv12) {
         Ok(data) => data,
         Err(_) => return PhalanxError::InvalidState.code(),
     };

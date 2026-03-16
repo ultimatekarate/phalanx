@@ -347,7 +347,7 @@ impl PhalanxCameraThread {
                 let uv_size = w * (h / 2); // NV12 interleaved chroma
                 let neutral_uv = vec![128u8; uv_size];
                 if let Ok(jpeg) =
-                    compress_frame(y_plane.clone(), neutral_uv, frame.width, frame.height, true)
+                    compress_frame(&y_plane, &neutral_uv, frame.width, frame.height, true)
                 {
                     frame_buffer.push(jpeg);
                 }
