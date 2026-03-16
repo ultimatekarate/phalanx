@@ -25,9 +25,7 @@ pub mod events;
 pub mod identity_ext;
 pub mod io;
 pub mod kademlia;
-pub mod routing {
-    pub mod table;
-}
+pub mod routing;
 
 #[cfg(test)]
 pub mod mock;
