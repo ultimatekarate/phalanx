@@ -83,10 +83,38 @@ typedef _PhalanxStartRecordingDart = int Function(
 );
 
 typedef _PhalanxPushFrameC = Int32 Function(
-  Pointer<Void>, Pointer<Uint8>, Uint32, Uint32, Uint32, Uint64,
+  Pointer<Void>,
+  Pointer<Uint8>, Uint32,       // y_plane, y_len
+  Pointer<Uint8>, Uint32,       // uv_plane, uv_len
+  Uint32, Uint32,               // width, height
+  Int32,                        // pixel_format (0=NV21, 1=NV12)
+  Pointer<Utf8>,                // recording_id
+  Uint64,                       // timestamp_ms
 );
 typedef _PhalanxPushFrameDart = int Function(
-  Pointer<Void>, Pointer<Uint8>, int, int, int, int,
+  Pointer<Void>,
+  Pointer<Uint8>, int,          // y_plane, y_len
+  Pointer<Uint8>, int,          // uv_plane, uv_len
+  int, int,                     // width, height
+  int,                          // pixel_format
+  Pointer<Utf8>,                // recording_id
+  int,                          // timestamp_ms
+);
+
+// Audio capture
+typedef _PhalanxPushAudioC = Int32 Function(
+  Pointer<Void>,
+  Pointer<Uint8>, Uint32,       // pcm_data, pcm_len
+  Uint32,                       // sample_rate
+  Uint8,                        // channels
+  Pointer<Utf8>,                // recording_id
+);
+typedef _PhalanxPushAudioDart = int Function(
+  Pointer<Void>,
+  Pointer<Uint8>, int,          // pcm_data, pcm_len
+  int,                          // sample_rate
+  int,                          // channels
+  Pointer<Utf8>,                // recording_id
 );
 
 // Trust
@@ -118,11 +146,11 @@ typedef _PhalanxRemovePeerDart = int Function(
   Pointer<Void>, Pointer<Utf8>,
 );
 
-// Playback
-typedef _PhalanxStartPlaybackC = Int32 Function(
+// Playback — session-based (PlaybackSession* returned from start)
+typedef _PhalanxStartPlaybackC = Pointer<Void> Function(
   Pointer<Void>, Pointer<Utf8>,
 );
-typedef _PhalanxStartPlaybackDart = int Function(
+typedef _PhalanxStartPlaybackDart = Pointer<Void> Function(
   Pointer<Void>, Pointer<Utf8>,
 );
 
@@ -132,6 +160,9 @@ typedef _PhalanxPollFrameC = Int32 Function(
 typedef _PhalanxPollFrameDart = int Function(
   Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Uint32>,
 );
+
+typedef _PhalanxStopPlaybackC = Void Function(Pointer<Void>);
+typedef _PhalanxStopPlaybackDart = void Function(Pointer<Void>);
 
 // Deep links
 typedef _PhalanxShareLinkC = Int32 Function(
@@ -190,13 +221,15 @@ class PhalanxBridge {
   late final _PhalanxStartRecordingDart _startRecording;
   late final _PhalanxI32HandleDart _stopRecording;
   late final _PhalanxPushFrameDart _pushFrame;
+  late final _PhalanxPushAudioDart _pushAudio;
   late final _PhalanxGetPeersDart _getPeers;
   late final _PhalanxTrustOpDart _setTrustLevel;
   late final _PhalanxPetNameDart _assignPetName;
   late final _PhalanxRemovePeerDart _removePeer;
   late final _PhalanxStartPlaybackDart _startPlayback;
-  late final _PhalanxPollFrameDart _pollPlaybackFrame;
-  late final _PhalanxI32HandleDart _stopPlayback;
+  late final _PhalanxPollFrameDart _pollVideoFrame;
+  late final _PhalanxPollFrameDart _pollAudioFrame;
+  late final _PhalanxStopPlaybackDart _stopPlayback;
   late final _PhalanxShareLinkDart _getShareLink;
   late final _PhalanxOpenLinkDart _openLink;
   late final _PhalanxExportC2paDart _exportC2pa;
@@ -259,6 +292,10 @@ class PhalanxBridge {
     _pushFrame = _lib.lookupFunction<_PhalanxPushFrameC, _PhalanxPushFrameDart>(
       'phalanx_push_video_frame',
     );
+    _pushAudio =
+        _lib.lookupFunction<_PhalanxPushAudioC, _PhalanxPushAudioDart>(
+          'phalanx_push_audio_frame',
+        );
     _getPeers = _lib.lookupFunction<_PhalanxGetPeersC, _PhalanxGetPeersDart>(
       'phalanx_get_peers',
     );
@@ -278,12 +315,16 @@ class PhalanxBridge {
       _PhalanxStartPlaybackC,
       _PhalanxStartPlaybackDart
     >('phalanx_start_playback');
-    _pollPlaybackFrame =
+    _pollVideoFrame =
         _lib.lookupFunction<_PhalanxPollFrameC, _PhalanxPollFrameDart>(
-          'phalanx_poll_playback_frame',
+          'phalanx_poll_video_frame',
+        );
+    _pollAudioFrame =
+        _lib.lookupFunction<_PhalanxPollFrameC, _PhalanxPollFrameDart>(
+          'phalanx_poll_audio_frame',
         );
     _stopPlayback =
-        _lib.lookupFunction<_PhalanxI32HandleC, _PhalanxI32HandleDart>(
+        _lib.lookupFunction<_PhalanxStopPlaybackC, _PhalanxStopPlaybackDart>(
           'phalanx_stop_playback',
         );
     _getShareLink =
@@ -431,29 +472,75 @@ class PhalanxBridge {
     _check(_stopRecording(_handle), 'phalanx_stop_recording');
   }
 
-  /// Push a raw Y-plane video frame through the forensic pipeline.
+  /// Push a raw YUV video frame through the forensic pipeline.
+  ///
+  /// [yPlane] — luminance data (width × height bytes).
+  /// [uvPlane] — interleaved chroma data (width × height / 2 bytes).
+  /// [pixelFormat] — 0 = NV21 (Android), 1 = NV12 (iOS).
+  /// [recordingId] — the ID returned from [startRecording].
   void pushVideoFrame(
     Uint8List yPlane,
+    Uint8List uvPlane,
     int width,
     int height,
+    int pixelFormat,
+    String recordingId,
     int timestampMs,
   ) {
-    final native = calloc<Uint8>(yPlane.length);
+    final yNative = calloc<Uint8>(yPlane.length);
+    final uvNative = calloc<Uint8>(uvPlane.length);
+    final recNative = recordingId.toNativeUtf8();
     try {
-      native.asTypedList(yPlane.length).setAll(0, yPlane);
+      yNative.asTypedList(yPlane.length).setAll(0, yPlane);
+      uvNative.asTypedList(uvPlane.length).setAll(0, uvPlane);
       _check(
         _pushFrame(
           _handle,
-          native,
-          yPlane.length,
-          width,
-          height,
+          yNative, yPlane.length,
+          uvNative, uvPlane.length,
+          width, height,
+          pixelFormat,
+          recNative.cast(),
           timestampMs,
         ),
         'phalanx_push_video_frame',
       );
     } finally {
+      calloc.free(yNative);
+      calloc.free(uvNative);
+      calloc.free(recNative);
+    }
+  }
+
+  /// Push a raw PCM audio frame through the forensic pipeline.
+  ///
+  /// [pcmData] — 16-bit LE PCM audio bytes.
+  /// [sampleRate] — sample rate in Hz (e.g. 44100).
+  /// [channels] — channel count (1 = mono, 2 = stereo).
+  /// [recordingId] — the ID returned from [startRecording].
+  void pushAudioFrame(
+    Uint8List pcmData,
+    int sampleRate,
+    int channels,
+    String recordingId,
+  ) {
+    final native = calloc<Uint8>(pcmData.length);
+    final recNative = recordingId.toNativeUtf8();
+    try {
+      native.asTypedList(pcmData.length).setAll(0, pcmData);
+      _check(
+        _pushAudio(
+          _handle,
+          native, pcmData.length,
+          sampleRate,
+          channels,
+          recNative.cast(),
+        ),
+        'phalanx_push_audio_frame',
+      );
+    } finally {
       calloc.free(native);
+      calloc.free(recNative);
     }
   }
 
@@ -522,25 +609,46 @@ class PhalanxBridge {
   // PLAYBACK
   // =====================================================================
 
-  /// Start playback of a recording.
-  void startPlayback(String recordingId) {
+  /// Start playback of a recording. Returns an opaque session pointer.
+  ///
+  /// Pass the returned pointer to [pollVideoFrame], [pollAudioFrame],
+  /// and [stopPlayback]. The session owns the receiver channels.
+  Pointer<Void> startPlayback(String recordingId) {
     final idNative = recordingId.toNativeUtf8();
     try {
-      _check(
-        _startPlayback(_handle, idNative.cast()),
-        'phalanx_start_playback',
-      );
+      final session = _startPlayback(_handle, idNative.cast());
+      if (session == nullptr) {
+        throw PhalanxException(PhalanxError.playbackError, 'phalanx_start_playback');
+      }
+      return session;
     } finally {
       calloc.free(idNative);
     }
   }
 
-  /// Poll for the next decoded playback frame. Returns null if none available.
-  Uint8List? pollPlaybackFrame() {
+  /// Poll for the next decoded video frame. Returns null if none available.
+  Uint8List? pollVideoFrame(Pointer<Void> session) {
+    return _pollChannel(session, _pollVideoFrame);
+  }
+
+  /// Poll for the next decoded audio frame. Returns null if none available.
+  Uint8List? pollAudioFrame(Pointer<Void> session) {
+    return _pollChannel(session, _pollAudioFrame);
+  }
+
+  /// Stop active playback and free the session.
+  void stopPlayback(Pointer<Void> session) {
+    _stopPlayback(session);
+  }
+
+  Uint8List? _pollChannel(
+    Pointer<Void> session,
+    int Function(Pointer<Void>, Pointer<Pointer<Uint8>>, Pointer<Uint32>) pollFn,
+  ) {
     final outData = calloc<Pointer<Uint8>>();
     final outLen = calloc<Uint32>();
     try {
-      final code = _pollPlaybackFrame(_handle, outData, outLen);
+      final code = pollFn(session, outData, outLen);
       if (code < 0) return null;
       if (outData.value == nullptr) return null;
 
@@ -552,11 +660,6 @@ class PhalanxBridge {
       calloc.free(outData);
       calloc.free(outLen);
     }
-  }
-
-  /// Stop active playback.
-  void stopPlayback() {
-    _check(_stopPlayback(_handle), 'phalanx_stop_playback');
   }
 
   // =====================================================================

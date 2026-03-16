@@ -2,7 +2,6 @@
 
 use crate::crucible::{Crucible, Mold};
 use crate::prelude::TransientJournal;
-use image::DynamicImage;
 use phalanx_proto::evidence::{
     AudioShard, ChunkType, EnvelopeState, ForensicMetrics, StorageSequence, VideoShard,
     WitnessEnvelope,
@@ -25,18 +24,78 @@ use std::time::{Duration, Instant};
 const OTI_PREFIX_LEN: usize = 12;
 
 // BRIDGE API (Restored for Hardware Drivers) ---
-pub fn compress_frame(raw_data: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let img = DynamicImage::ImageRgb8(
-        image::ImageBuffer::from_raw(width, height, raw_data)
-            .ok_or("Failed to create image buffer")?,
-    );
 
-    let mut output = Vec::new();
-    let encoder = image::codecs::jpeg::JpegEncoder::new(&mut output);
-    img.write_with_encoder(encoder)
-        .map_err(|e| format!("JPEG Compression error: {}", e))?;
+/// Compresses a YUV420 frame (NV21 or NV12) directly to JPEG via turbojpeg.
+///
+/// No RGB conversion — JPEG is natively YCbCr. The Y-plane and interleaved
+/// UV-plane are de-interleaved into planar Y+U+V, then passed directly to
+/// the turbojpeg encoder. This eliminates the YUV→RGB→YCbCr round-trip.
+///
+/// `is_nv12`: true for iOS (UV order), false for Android NV21 (VU order).
+pub fn compress_frame(
+    y_data: Vec<u8>,
+    uv_data: Vec<u8>,
+    width: u32,
+    height: u32,
+    is_nv12: bool,
+) -> Result<Vec<u8>, String> {
+    let w = width as usize;
+    let h = height as usize;
+    let chroma_samples = (w / 2) * (h / 2);
 
-    Ok(output)
+    if y_data.len() != w * h {
+        return Err(format!(
+            "Y-plane size mismatch: expected {} ({}x{}), got {}",
+            w * h,
+            w,
+            h,
+            y_data.len()
+        ));
+    }
+    if uv_data.len() != chroma_samples * 2 {
+        return Err(format!(
+            "UV-plane size mismatch: expected {} ({}x{}/4*2), got {}",
+            chroma_samples * 2,
+            w,
+            h,
+            uv_data.len()
+        ));
+    }
+
+    // De-interleave NV12/NV21 into planar Y || U || V
+    let mut planar = Vec::with_capacity(w * h + chroma_samples * 2);
+    planar.extend_from_slice(&y_data);
+
+    let mut u_plane = Vec::with_capacity(chroma_samples);
+    let mut v_plane = Vec::with_capacity(chroma_samples);
+
+    for i in 0..chroma_samples {
+        if is_nv12 {
+            // NV12 (iOS): UV UV UV ...
+            u_plane.push(uv_data[2 * i]);
+            v_plane.push(uv_data[2 * i + 1]);
+        } else {
+            // NV21 (Android): VU VU VU ...
+            v_plane.push(uv_data[2 * i]);
+            u_plane.push(uv_data[2 * i + 1]);
+        }
+    }
+
+    planar.extend_from_slice(&u_plane);
+    planar.extend_from_slice(&v_plane);
+
+    let yuv_image = turbojpeg::YuvImage {
+        pixels: planar.as_slice(),
+        width: w,
+        height: h,
+        align: 1,
+        subsamp: turbojpeg::Subsamp::Sub2x2, // YUV420
+    };
+
+    let jpeg_buf = turbojpeg::compress_yuv(yuv_image, 85)
+        .map_err(|e| format!("JPEG compression error: {}", e))?;
+
+    Ok(jpeg_buf.to_vec())
 }
 
 /// `lens_metrics` carries the sensor fingerprint computed by the ForensicLens pipeline.

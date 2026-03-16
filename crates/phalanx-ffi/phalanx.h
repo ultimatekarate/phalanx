@@ -172,6 +172,48 @@ int32_t phalanx_get_share_link(const struct PhalanxHandle *handle,
  int32_t phalanx_open_link(struct PhalanxHandle *handle, const char *phx_link) ;
 
 /**
+ * Exports a recording frame as a C2PA-compliant JPEG with embedded forensic metadata.
+ *
+ * Reads the most recent shard for the given recording ID from storage,
+ * decrypts it, and writes a JPEG with a C2PA manifest containing:
+ *   - Sensor provenance assertions (PRNU, Moiré, Laplacian)
+ *   - Author DID
+ *   - Timestamp
+ *   - Self-signed with the node's Ed25519 key
+ *
+ * The output file is a standard JPEG that any C2PA validator can inspect.
+ * Self-signed certificates will show as "untrusted" — that's honest.
+ * The forensic data speaks for itself.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `recording_id` must be a valid null-terminated C string.
+ * * `out_path` must be a valid null-terminated C string (writable file path).
+ */
+
+int32_t phalanx_export_c2pa(const struct PhalanxHandle *handle,
+                            const char *recording_id,
+                            const char *out_path)
+;
+
+/**
+ * Returns the file path of the last C2PA export, if any.
+ * Convenience for Flutter to know where the file landed.
+ *
+ * The returned string must be freed with `phalanx_free_string`.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `recording_id` must be a valid null-terminated C string.
+ * * `out_path` must be a valid pointer to receive the C string.
+ */
+
+int32_t phalanx_get_c2pa_export_path(const struct PhalanxHandle *handle,
+                                     const char *recording_id,
+                                     char **out_path)
+;
+
+/**
  * Creates a new PhalanxHandle by bootstrapping the full engine stack.
  *
  * Mirrors `sentinel.rs` lines 24-91:
@@ -222,6 +264,86 @@ struct PhalanxHandle *phalanx_create(const char *config_path,
  * * Null is a safe no-op.
  */
  void phalanx_destroy(struct PhalanxHandle *handle) ;
+
+/**
+ * Pushes a peer discovery event from Flutter into the local mesh channel.
+ *
+ * Called when BLE/WiFi Direct discovers a nearby device.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `peer_id` must be a valid null-terminated C string.
+ */
+
+int32_t phalanx_local_mesh_push_peer_discovered(struct PhalanxHandle *handle,
+                                                const char *peer_id)
+;
+
+/**
+ * Pushes received data from a local mesh peer into the channel.
+ *
+ * Called when BLE/WiFi Direct receives data from a nearby device.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `peer_id` must be a valid null-terminated C string.
+ * * `topic` must be a valid null-terminated C string.
+ * * `data` must point to `data_len` valid bytes.
+ */
+
+int32_t phalanx_local_mesh_push_data_received(struct PhalanxHandle *handle,
+                                              const char *peer_id,
+                                              const char *topic,
+                                              const uint8_t *data,
+                                              uint32_t data_len)
+;
+
+/**
+ * Pushes a peer disconnection event from Flutter into the local mesh channel.
+ *
+ * Called when a BLE/WiFi Direct peer goes out of range or disconnects.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `peer_id` must be a valid null-terminated C string.
+ */
+
+int32_t phalanx_local_mesh_push_peer_disconnected(struct PhalanxHandle *handle,
+                                                  const char *peer_id)
+;
+
+/**
+ * Polls for the next outbound local mesh packet.
+ *
+ * Flutter calls this to retrieve data that Rust wants to send to a local peer.
+ * Returns the target peer ID, data, and data length through output parameters.
+ * If no packet is available, `*out_data` is set to null and returns Ok.
+ *
+ * Caller must free `*out_peer` with `phalanx_free_string` and `*out_data`
+ * with `phalanx_free_bytes`.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `out_peer`, `out_data`, and `out_len` must be valid pointers.
+ */
+
+int32_t phalanx_local_mesh_poll_outbound(struct PhalanxHandle *handle,
+                                         char **out_peer,
+                                         uint8_t **out_data,
+                                         uint32_t *out_len)
+;
+
+/**
+ * Sets the local mesh transport availability flag.
+ *
+ * Flutter calls this when BLE/WiFi Direct becomes available or unavailable.
+ * The MeshSentinel's select! loop checks `is_available()` to decide whether
+ * to poll the local mesh adapter.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ */
+ int32_t phalanx_local_mesh_set_available(struct PhalanxHandle *handle, bool available) ;
 
 /**
  * Frees a null-terminated C string allocated by Rust.

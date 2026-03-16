@@ -30,11 +30,16 @@ x25519-dalek = {version = "2.0.1", features = ["static_secrets"]}
 blake3 = "1.8.3"
 base64 = "0.22.1"
 flate2 = "1.1.9"
-image = "0.25.9"
+turbojpeg = "1.3"
 bs58 = "0.5.1"
 lz4_flex = "0.11"
 raptorq = "2"
 c2pa = {version="0.78.0", default-features = false, features = ["rust_native_crypto"]}
+
+# Video/Audio encoding — pure byte transformations (no IO)
+openh264 = "0.6"
+fdk-aac = "0.6"
+mp4 = "0.14"
 
 [dev-dependencies]
 # For testing the Weaver without a network

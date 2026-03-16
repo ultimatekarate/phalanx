@@ -338,9 +338,17 @@ impl PhalanxCameraThread {
                     BlackLevel(DEFAULT_BLACK_LEVEL),
                 );
 
-                // Compression (Simulated or Real JPEG)
-                // Using the dimensions provided by the frame itself
-                if let Ok(jpeg) = compress_frame(frame.data, frame.width, frame.height) {
+                // Compression (YUV→JPEG via turbojpeg)
+                // Desktop path: frame.data is RGB. We already have the Y plane
+                // from extract_y_plane(). Synthesize neutral chroma (128) for
+                // grayscale JPEG — desktop is for testing, not color-critical.
+                let w = frame.width as usize;
+                let h = frame.height as usize;
+                let uv_size = w * (h / 2); // NV12 interleaved chroma
+                let neutral_uv = vec![128u8; uv_size];
+                if let Ok(jpeg) =
+                    compress_frame(y_plane.clone(), neutral_uv, frame.width, frame.height, true)
+                {
                     frame_buffer.push(jpeg);
                 }
 
