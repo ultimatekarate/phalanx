@@ -1,4 +1,4 @@
-use crate::routing::table::MeshRoutingTable;
+use crate::routing::MeshRoutingTable;
 use async_trait::async_trait;
 
 use crate::TransportAdapter;
