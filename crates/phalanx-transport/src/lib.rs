@@ -12,7 +12,6 @@ use tokio::sync::mpsc; // FIX: Corrected from 'use crate::mpsc'
 
 // MODULE REGISTRY
 pub mod adapters {
-    pub mod kademlia;
     pub mod libp2p;
     pub mod local_mesh;
     pub mod mock;
@@ -26,11 +25,9 @@ pub mod events;
 pub mod identity_ext;
 pub mod io;
 pub mod kademlia;
-pub mod retrieval;
 pub mod routing {
     pub mod table;
 }
-pub mod signaling;
 
 #[cfg(test)]
 pub mod mock;
@@ -250,6 +247,7 @@ pub mod prelude {
     pub use crate::adapters::quic::{
         QuicAdapter, QuicClientConfig, QuicEgress, QuicIngress, QuicServerConfig,
     };
+    pub use crate::identity_ext::Libp2pExt;
     pub use crate::EgressPort;
     pub use crate::IngressPort;
     pub use crate::LocalMeshPort;
