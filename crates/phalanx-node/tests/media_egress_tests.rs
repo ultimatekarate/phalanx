@@ -5,6 +5,7 @@
 
 use phalanx_node::actors::media_egress::{MediaEgressActor, MediaEgressConfig};
 use phalanx_node::vitals::SystemGovernor;
+use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{AudioShard, VideoShard};
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity};
 use phalanx_proto::prelude::*;
@@ -101,6 +102,7 @@ async fn build_media_egress<E: EgressPort + 'static>(
         wal_dir: temp.path().to_path_buf(),
         system_governor: gov,
         max_storage_bytes: 100_000_000,
+        vault_key: SymmetricKey([0u8; 32]),
     };
 
     let actor = MediaEgressActor::new(egress, identity, local_id, config)

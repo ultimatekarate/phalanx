@@ -2,7 +2,9 @@ use crate::persistence::outbound::OutboundQueue;
 use crate::vitals::{Homeostasis, SystemGovernor};
 use phalanx_forensics::crucible::EnvelopeHashExt;
 use phalanx_forensics::gate::WitnessGate;
+use phalanx_forensics::judge::PayloadCipher;
 use phalanx_forensics::reassembler::FountainChunkifier;
+use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{AudioShard, ChunkType, Evidence, SignatureHash, VideoShard};
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId};
 use phalanx_proto::prelude::*;
@@ -30,6 +32,14 @@ pub struct MediaEgressConfig {
     pub system_governor: Arc<SystemGovernor>,
     /// Denominator for storage pressure ratio (typically `config.storage.max_storage_bytes`).
     pub max_storage_bytes: u64,
+    /// Encryption key for payload AEAD. Encryption runs here (async worker thread)
+    /// rather than on the FFI capture thread — keeps the camera callback fast.
+    /// Apparently, low-end Mediatek devices with weak entropy sources and
+    /// slow cores drop frames when XChaCha20 + getrandom() block the camera HAL
+    /// return path. Moving encryption off the capture thread eliminates that jitter.
+    /// Cleartext in the in-process mpsc channel is not a threat model concern: an
+    /// attacker with process memory access already has the key.
+    pub vault_key: SymmetricKey, // Phalanx is for the people.
 }
 
 pub struct MediaEgressActor<E: EgressPort> {
@@ -44,6 +54,8 @@ pub struct MediaEgressActor<E: EgressPort> {
     audio_prev_hash: Option<SignatureHash>,
     symbol_size: SymbolSize,
     repair_ratio: RepairRatio,
+    /// Encryption key — encrypt payloads on the async thread, not the FFI capture thread.
+    vault_key: SymmetricKey,
     /// Monotonic shard ID counter. Each sealed envelope gets a unique ShardId
     /// so the receiver's Crucible can track reassembly contexts independently.
     next_shard_id: u64,
@@ -76,6 +88,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
             audio_prev_hash: None,
             symbol_size: config.symbol_size,
             repair_ratio: config.repair_ratio,
+            vault_key: config.vault_key,
             next_shard_id: 0,
             outbound_queue,
             system_governor: config.system_governor,
@@ -114,7 +127,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
         }
     }
 
-    async fn process_media_egress(&mut self, evidence: Evidence, is_video: bool) {
+    async fn process_media_egress(&mut self, mut evidence: Evidence, is_video: bool) {
         let topic = match &evidence {
             Evidence::Video(_) => &self.video_topic,
             Evidence::Audio(_) => &self.audio_topic,
@@ -123,6 +136,17 @@ impl<E: EgressPort> MediaEgressActor<E> {
                 return;
             }
         };
+
+        // Encrypt payload on the async worker thread (not the FFI capture thread).
+        match &mut evidence {
+            Evidence::Video(v) => {
+                let _ = v.payload.apply_encryption(&self.vault_key);
+            }
+            Evidence::Audio(a) => {
+                let _ = a.payload.apply_encryption(&self.vault_key);
+            }
+            _ => {}
+        }
 
         let prev_hash = if is_video {
             self.video_prev_hash.take()

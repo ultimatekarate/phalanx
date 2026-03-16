@@ -15,7 +15,6 @@
 use crate::error::PhalanxError;
 use crate::handle::PhalanxHandle;
 
-use phalanx_forensics::judge::PayloadCipher;
 use phalanx_forensics::reassembler::{compress_frame, create_audio_shard, create_video_shard};
 use phalanx_lens::scalar::ScalarLens;
 use phalanx_lens::ForensicLens;
@@ -219,7 +218,7 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
     let sequence = StorageSequence(SEQUENCE.fetch_add(1, Ordering::Relaxed));
     let current_fps = target_fps(Fps::new(30), h.governor.current_power_state());
 
-    let mut shard = match create_video_shard(
+    let shard = match create_video_shard(
         vec![compressed],
         sequence,
         current_fps,
@@ -230,10 +229,8 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
         Err(_) => return PhalanxError::InvalidState.code(),
     };
 
-    // Step 4: Encrypt payload
-    let _ = shard.payload.apply_encryption(&h.vault_key);
-
-    // Step 5: Non-blocking send to MediaEgressActor
+    // Step 4: Non-blocking send to MediaEgressActor
+    // Encryption deferred to MediaEgressActor (async thread) — see media_egress.rs.
     // try_send returns immediately — drops frame on backpressure (by design)
     match video_tx.try_send(shard) {
         Ok(()) => PhalanxError::Ok.code(),
@@ -256,8 +253,7 @@ static AUDIO_SEQUENCE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU
 ///
 /// Pipeline:
 /// 1. `create_audio_shard()` — wraps PCM data with LZ4 compression
-/// 2. Encrypt payload with vault key
-/// 3. `try_send` to audio channel → `MediaEgressActor` handles mesh distribution
+/// 2. `try_send` to audio channel → `MediaEgressActor` encrypts + handles mesh distribution
 ///
 /// Uses `try_send` — returns immediately, drops on backpressure.
 ///
@@ -304,7 +300,7 @@ pub unsafe extern "C" fn phalanx_push_audio_frame(
 
     // Create audio shard (LZ4 compressed internally)
     let sequence = StorageSequence(AUDIO_SEQUENCE.fetch_add(1, Ordering::Relaxed));
-    let mut shard = match create_audio_shard(
+    let shard = match create_audio_shard(
         pcm,
         sequence,
         SampleRate::new(sample_rate),
@@ -315,10 +311,8 @@ pub unsafe extern "C" fn phalanx_push_audio_frame(
         Err(_) => return PhalanxError::InvalidState.code(),
     };
 
-    // Encrypt payload
-    let _ = shard.payload.apply_encryption(&h.vault_key);
-
     // Non-blocking send to MediaEgressActor
+    // Encryption deferred to MediaEgressActor (async thread) — see media_egress.rs.
     match audio_tx.try_send(shard) {
         Ok(()) => PhalanxError::Ok.code(),
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {

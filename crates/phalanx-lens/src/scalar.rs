@@ -87,8 +87,7 @@ impl ForensicLens for ScalarLens {
         let mut crop_buf = [0u8; CROP_BYTES];
         for row in 0..crop {
             let src_start = (y_off + row) * width + x_off;
-            crop_buf[row * crop..][..crop]
-                .copy_from_slice(&y_plane[src_start..src_start + crop]);
+            crop_buf[row * crop..][..crop].copy_from_slice(&y_plane[src_start..src_start + crop]);
         }
 
         // ── PASS 1: PRNU VARIANCE + MEAN LUMINANCE ────────────────────────

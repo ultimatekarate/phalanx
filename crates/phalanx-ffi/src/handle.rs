@@ -24,7 +24,6 @@ use phalanx_node::persistence::vault::{derive_vault_key, load_or_create_vault_sa
 use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::{HomeostaticConfig, SystemGovernor, ThermalThresholds};
 use phalanx_node::{FileJournal, MeshSentinel};
-use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{AudioShard, VideoShard};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::{PhalanxIdentity, PhalanxPhysics};
@@ -89,8 +88,6 @@ pub struct PhalanxHandle {
     pub(crate) node_did: String,
     /// Whether a recording is currently active.
     pub(crate) recording_active: AtomicBool,
-    /// Vault key for payload encryption.
-    pub(crate) vault_key: SymmetricKey,
     /// Local mesh inbound sender — FFI push functions send NetworkEvents here.
     pub(crate) local_mesh_tx: Option<mpsc::Sender<NetworkEvent>>,
     /// Local mesh outbound receiver — Flutter polls outbound packets from here.
@@ -238,7 +235,7 @@ async fn bootstrap(
         journal,
         trust_registry,
         system_governor: governor.clone(),
-        vault_key: vault_key.clone(),
+        vault_key,
         local_mesh: Some(Box::new(local_mesh_adapter)),
     };
 
@@ -269,7 +266,6 @@ async fn bootstrap(
         sentinel: Mutex::new(Some(sentinel)),
         node_did,
         recording_active: AtomicBool::new(false),
-        vault_key,
         local_mesh_tx: Some(local_mesh_tx),
         local_mesh_outbound_rx: Mutex::new(Some(local_mesh_outbound_rx)),
         local_mesh_available,
