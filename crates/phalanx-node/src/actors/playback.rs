@@ -29,6 +29,7 @@ pub struct PlaybackCoordinator<V: PlaybackSink, A: PlaybackSink> {
 }
 
 impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
+    #[allow(clippy::too_many_arguments)] // Coordinator is assembled once per playback session
     pub fn new(
         storage_tx: mpsc::Sender<StorageCommand>,
         egress_tx: mpsc::Sender<EgressCommand>,
