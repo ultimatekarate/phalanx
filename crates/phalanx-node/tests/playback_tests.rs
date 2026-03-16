@@ -70,7 +70,9 @@ async fn test_exodus_resurrection_logic() {
         }
     });
 
-    let sink = VideoPlayerSink::new(ui_tx);
+    let video_sink = VideoPlayerSink::new(ui_tx);
+    let (audio_ui_tx, _audio_ui_rx) = mpsc::channel(10);
+    let audio_sink = VideoPlayerSink::new(audio_ui_tx);
     let recording_id = RecordingId::new("v_exodus_test");
     let (egress_tx, _egress_rx) = mpsc::channel::<EgressCommand>(10);
     let (_providers_tx, providers_rx) = mpsc::channel(1);
@@ -78,7 +80,8 @@ async fn test_exodus_resurrection_logic() {
         storage_tx.clone(),
         egress_tx,
         None,
-        sink,
+        video_sink,
+        audio_sink,
         disc_tx,
         providers_rx,
         Arc::new(identity.clone()),
@@ -203,7 +206,9 @@ async fn test_playback_resurrection_with_mesh_gap() {
         }
     });
 
-    let sink = VideoPlayerSink::new(ui_tx);
+    let video_sink = VideoPlayerSink::new(ui_tx);
+    let (audio_ui_tx, _audio_ui_rx) = mpsc::channel(10);
+    let audio_sink = VideoPlayerSink::new(audio_ui_tx);
     let recording_id = RecordingId::new("v_resurrection");
     let (egress_tx, _egress_rx) = mpsc::channel::<EgressCommand>(10);
     let (_providers_tx, providers_rx) = mpsc::channel(1);
@@ -211,7 +216,8 @@ async fn test_playback_resurrection_with_mesh_gap() {
         storage_tx.clone(),
         egress_tx,
         None,
-        sink,
+        video_sink,
+        audio_sink,
         disc_tx,
         providers_rx,
         Arc::new(identity.clone()),
@@ -401,11 +407,13 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
 
     let (egress_tx, _egress_rx) = mpsc::channel::<EgressCommand>(10);
     let (_providers_tx, providers_rx) = mpsc::channel(1);
+    let (audio_ui_tx, _audio_ui_rx) = mpsc::channel(100);
     let mut coordinator = PlaybackCoordinator::new(
         storage_tx.clone(),
         egress_tx,
         None,
         VideoPlayerSink::new(ui_tx),
+        VideoPlayerSink::new(audio_ui_tx),
         disc_tx,
         providers_rx,
         Arc::new(identity_main.clone()),

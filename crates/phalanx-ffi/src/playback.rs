@@ -74,13 +74,15 @@ pub unsafe extern "C" fn phalanx_start_playback(
 
     let rec_id = RecordingId::new(id_str);
 
-    // Channel buffer size = 1: lock-step with Flutter's poll rate.
-    // Minimal buffered state — the coordinator blocks until Flutter consumes.
-    let (video_tx, video_rx) = mpsc::channel(1);
-    let (audio_tx, audio_rx) = mpsc::channel(1);
+    // Channel buffer = ceil(max_consumer_stall / frame_interval).
+    // Flutter polls at ~33ms (30fps). Worst-case Android UI stall (old-space GC +
+    // layout in same frame) ≈ 80ms → ceil(80/33) = 3. Small enough that
+    // backpressure keeps the coordinator from prefetching the whole recording.
+    let (video_tx, video_rx) = mpsc::channel(3);
+    let (audio_tx, audio_rx) = mpsc::channel(3);
 
     let video_sink = VideoPlayerSink::new(video_tx);
-    let _audio_sink = VideoPlayerSink::new(audio_tx); // Same type — just a channel wrapper
+    let audio_sink = VideoPlayerSink::new(audio_tx); // Same type — just a channel wrapper
 
     // Spawn playback via MeshSentinel
     let sentinel_ref = match h.sentinel.lock() {
@@ -93,10 +95,9 @@ pub unsafe extern "C" fn phalanx_start_playback(
 
     h.runtime.spawn(async move {
         let mut engine = sentinel_ref.lock().await;
-        let _task = engine.spawn_playback(rec_id, video_sink);
-        // TODO: pass audio_sink once PlaybackCoordinator supports dual sinks (Part C1)
-        // The JoinHandle is dropped — playback runs independently.
-        // It self-terminates when the recording is fully played or the channel closes.
+        // Rust demuxes — Evidence::Video → video_sink, Evidence::Audio → audio_sink.
+        // Flutter reads two stateless channels via poll_video_frame / poll_audio_frame.
+        let _task = engine.spawn_playback(rec_id, video_sink, audio_sink);
     });
 
     // Return opaque session pointer — caller owns this
