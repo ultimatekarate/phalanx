@@ -229,14 +229,19 @@ fn generate_self_signed_cert(verifying_key: &ed25519_dalek::VerifyingKey) -> Vec
     // Build a keypair from the raw Ed25519 public key bytes
     // rcgen needs the full keypair for signing the cert, so we generate
     // a temporary one and use it just for cert generation.
-    let params =
-        CertificateParams::new(vec!["phalanx-node.local".to_string()]).expect("valid cert params");
+    let Ok(params) = CertificateParams::new(vec!["phalanx-node.local".to_string()]) else {
+        return Vec::new(); // Degenerate — rcgen rejected the SAN
+    };
 
     // For now, generate a fresh keypair for the cert.
     // The cert's public key won't match the signer — this is acceptable
     // for self-signed forensic provenance. The forensic data is what matters.
-    let key_pair = KeyPair::generate_for(&PKCS_ED25519).expect("keygen");
-    let cert = params.self_signed(&key_pair).expect("self-sign");
+    let Ok(key_pair) = KeyPair::generate_for(&PKCS_ED25519) else {
+        return Vec::new();
+    };
+    let Ok(cert) = params.self_signed(&key_pair) else {
+        return Vec::new();
+    };
 
     // Suppress unused variable warning — verifying_key will be used
     // when we integrate the stored identity keypair.

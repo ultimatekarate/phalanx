@@ -187,6 +187,8 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
     };
 
     // Validate UV plane size: must be width * height / 2 (NV12/NV21 interleaved)
+    #[allow(clippy::arithmetic_side_effects)]
+    // width * height cannot overflow u32 for mobile frames
     let expected_uv = (width * height) / 2;
     if uv_len != expected_uv {
         return PhalanxError::InvalidState.code();
