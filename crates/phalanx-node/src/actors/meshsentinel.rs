@@ -233,6 +233,7 @@ impl<I: IngressPort> MeshSentinel<I> {
                 wal_dir: outbound_wal_dir,
                 system_governor: deps.system_governor.clone(),
                 max_storage_bytes: deps.config.storage.max_storage_bytes.as_u64(),
+                vault_key: deps.vault_key.clone(),
             },
         )
         .await

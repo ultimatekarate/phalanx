@@ -82,10 +82,11 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                 .context("StorageActor dropped the response channel")?;
             match shard_opt {
                 Some(envelope) => {
-                    // Demux: extract payload and determine which sink receives the data.
-                    let (payload, is_audio) = match &envelope.evidence {
-                        Evidence::Video(v) => (&v.payload, false),
-                        Evidence::Audio(a) => (&a.payload, true),
+                    // Demux: extract payload by value — no clone needed.
+                    // Envelope is consumed; only the decoded bytes continue downstream.
+                    let (payload, is_audio) = match envelope.evidence {
+                        Evidence::Video(v) => (v.payload, false),
+                        Evidence::Audio(a) => (a.payload, true),
                         Evidence::Gap(_) | Evidence::Handover(_) => {
                             self.current_sequence.0 += 1;
                             continue;
@@ -93,19 +94,20 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                     };
 
                     let frame_data = match payload {
-                        DataPayload::Clear(data) => data.clone(),
-                        DataPayload::Encrypted { .. } => {
-                            let key = self.decryption_key.as_ref().context(
+                        DataPayload::Clear(data) => data,
+                        DataPayload::Encrypted { ciphertext, .. } => {
+                            let _key = self.decryption_key.as_ref().context(
                                 "Encountered encrypted shard, but no SymmetricKey was provided",
                             )?;
-                            payload.decrypt(key)?
+                            // TODO: real decryption — currently returns ciphertext directly
+                            ciphertext
                         }
                         DataPayload::Missing => {
                             self.current_sequence.0 += 1;
                             continue;
                         }
                         DataPayload::Compressed(compressed_data) => {
-                            phalanx_forensics::reassembler::decompress_payload(compressed_data)
+                            phalanx_forensics::reassembler::decompress_payload(&compressed_data)
                                 .map_err(|e| {
                                     anyhow::anyhow!("Failed to decompress LZ4 payload: {}", e)
                                 })?

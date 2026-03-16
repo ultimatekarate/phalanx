@@ -64,6 +64,7 @@ pub fn compress_frame(
 
     // De-interleave NV12/NV21 into planar Y || U || V.
     // Single allocation — U and V written at computed offsets, no intermediate Vecs.
+    // Branch hoisted outside the loop so the compiler can autovectorize the inner loop.
     let total = w * h + chroma_samples * 2;
     let mut planar = vec![0u8; total];
     planar[..w * h].copy_from_slice(y_data);
@@ -71,16 +72,17 @@ pub fn compress_frame(
     let u_offset = w * h;
     let v_offset = u_offset + chroma_samples;
 
+    // NV12 (iOS): even bytes are U, odd are V
+    // NV21 (Android): even bytes are V, odd are U
+    let (even_offset, odd_offset) = if is_nv12 {
+        (u_offset, v_offset)
+    } else {
+        (v_offset, u_offset)
+    };
+
     for i in 0..chroma_samples {
-        if is_nv12 {
-            // NV12 (iOS): UV UV UV ...
-            planar[u_offset + i] = uv_data[2 * i];
-            planar[v_offset + i] = uv_data[2 * i + 1];
-        } else {
-            // NV21 (Android): VU VU VU ...
-            planar[v_offset + i] = uv_data[2 * i];
-            planar[u_offset + i] = uv_data[2 * i + 1];
-        }
+        planar[even_offset + i] = uv_data[2 * i];
+        planar[odd_offset + i] = uv_data[2 * i + 1];
     }
 
     let yuv_image = turbojpeg::YuvImage {
