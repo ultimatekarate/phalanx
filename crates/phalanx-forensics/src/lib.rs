@@ -27,6 +27,11 @@ pub use crucible::{Crucible, Mold, RecordingAmalgam};
 pub use cryptography::{decrypt_bytes, encrypt_bytes, generate_session_key};
 pub use judge::{Decryptor, HandoverJudge, PayloadCipher};
 pub use policy::TrafficGovernor;
+pub use policy::{
+    BandwidthScale, ConnectionScale, DecayingIntegral, FinalizationScale, Homeostasis,
+    HomeostaticConfig, IngestionScale, MemoryScale, ResourceIntegrals, StorageScale,
+    SybilEndowment,
+};
 pub use reassembler::{AudioWeaver, FountainChunkifier, Reassembler, ShardMold, VideoWeaver};
 pub use trust::{PeerEvaluator, ReputationGate};
 
