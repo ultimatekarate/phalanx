@@ -176,6 +176,7 @@ pub trait Homeostasis {
     fn record_latency_pressure(&self, duration: Duration);
     fn record_io_pressure(&self, duration: Duration);
     fn record_entry_pressure(&self);
+    fn record_eclipse_impulse(&self, magnitude: f64);
     fn ingestion_scaler(&self) -> IngestionScale;
     fn finalization_scaler(&self) -> FinalizationScale;
     fn sybil_endowment(&self) -> SybilEndowment;

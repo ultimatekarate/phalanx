@@ -717,19 +717,21 @@ impl<I: IngressPort> MeshSentinel<I> {
 
         match risk {
             EclipseRisk::Elevated => {
+                self.system_governor.record_eclipse_impulse(5.0);
                 tracing::warn!(
                     target: "phalanx::shield_wall",
                     event = "eclipse_risk_elevated",
                     peer_count = peer_count,
-                    "Eclipse probe: ELEVATED risk — peer set stagnation or subnet concentration"
+                    "Eclipse probe: ELEVATED risk — Sybil pressure injected"
                 );
             }
             EclipseRisk::Critical => {
+                self.system_governor.record_eclipse_impulse(20.0);
                 tracing::warn!(
                     target: "phalanx::shield_wall",
                     event = "eclipse_risk_critical",
                     peer_count = peer_count,
-                    "Eclipse probe: CRITICAL risk — triggering re-bootstrap"
+                    "Eclipse probe: CRITICAL risk — Sybil pressure injected, triggering re-bootstrap"
                 );
 
                 // Record EclipseAttempt offense against concentrated-subnet peers.
