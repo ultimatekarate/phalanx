@@ -84,6 +84,10 @@ pub enum Evidence {
     Audio(AudioShard),
     Gap(ForensicGap),
     Handover(HandoverProof),
+    /// Proximity witness: two devices observed on the same local mesh.
+    /// Captured by MeshSentinel during recording, flows through the standard
+    /// evidence pipeline (signed, sharded, distributed) to the Stronghold.
+    Proximity(crate::corroboration::ProximityWitness),
 }
 
 /// Sensor fingerprint metrics computed by the ForensicLens pipeline.

@@ -36,6 +36,27 @@ impl std::fmt::Debug for SymmetricKey {
     }
 }
 
+/// Permission flags on a sealed locator.
+///
+/// Authenticated via AAD in the ECDH seal — a MITM cannot modify
+/// permissions without breaking the cryptographic seal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantPermissions {
+    /// Recipient may play back the recording.
+    pub playback: bool,
+    /// Recipient may C2PA-export the recording.
+    pub export: bool,
+}
+
+impl Default for GrantPermissions {
+    fn default() -> Self {
+        Self {
+            playback: true,
+            export: false,
+        }
+    }
+}
+
 /// A targeted access grant.
 ///
 /// Unlike the `PhalanxLocator`, this struct does NOT expose the raw key.
@@ -55,6 +76,8 @@ pub struct SealedLocator {
     /// Ephemeral Nonce for the encryption wrapper.
     #[serde(with = "base64_serde")]
     pub nonce: Vec<u8>,
+    /// What the recipient is authorized to do. Authenticated via AAD.
+    pub permissions: GrantPermissions,
 }
 
 impl fmt::Display for SealedLocator {

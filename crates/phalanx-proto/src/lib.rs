@@ -1,6 +1,8 @@
 // crates/phalanx-proto/src/lib.rs
 
+pub mod community; // The Shield Wall
 pub mod constants;
+pub mod corroboration; // The Proof
 pub mod crypto;
 pub mod error; // The Oops
 pub mod evidence; // The What

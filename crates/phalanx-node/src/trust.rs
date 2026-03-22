@@ -5,7 +5,7 @@ use phalanx_proto::prelude::*;
 use phalanx_proto::trust::MonotonicClock;
 use phalanx_proto::trust::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs::{self, File};
@@ -13,6 +13,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use phalanx_proto::prelude::NetworkId;
 use std::sync::{Arc, RwLock as StdRwLock};
+
+/// Community trust data: pairs of (baseline_trust, member_dids) for each community.
+type CommunityTrustData = Vec<(TrustLevel, HashSet<Did>)>;
 
 #[derive(Clone, Default, Debug)]
 pub struct PeerReputationInfo {
@@ -25,11 +28,21 @@ pub struct PeerReputationInfo {
 pub struct ReputationProjection {
     scores: Arc<StdRwLock<HashMap<NetworkId, PeerReputationInfo>>>,
     did_to_network_id: Arc<StdRwLock<HashMap<Did, NetworkId>>>,
+    /// Community data for effective_trust calculation.
+    communities: Arc<StdRwLock<CommunityTrustData>>,
 }
 
 pub trait TrustOracle: Send + Sync {
     fn is_blacklisted_by_did(&self, did: &Did) -> bool;
     fn check_trust_by_did(&self, did: &Did) -> TrustLevel;
+
+    /// Community-aware trust: returns the effective trust level considering
+    /// community membership elevation. Blacklisting is absolute — community
+    /// membership cannot rehabilitate a Blocked peer.
+    fn effective_trust(&self, did: &Did) -> TrustLevel {
+        // Default: no community awareness, just return individual trust
+        self.check_trust_by_did(did)
+    }
 }
 
 impl TrustOracle for ReputationProjection {
@@ -54,6 +67,34 @@ impl TrustOracle for ReputationProjection {
         } else {
             TrustLevel::Ignored
         }
+    }
+
+    fn effective_trust(&self, did: &Did) -> TrustLevel {
+        let individual = self.check_trust_by_did(did);
+
+        // Blacklisting is absolute — community membership cannot rehabilitate.
+        if individual == TrustLevel::Blocked {
+            return TrustLevel::Blocked;
+        }
+
+        // Check community membership for trust elevation.
+        let communities = self.communities.read().unwrap();
+        let mut best = individual;
+        for (baseline_trust, member_dids) in communities.iter() {
+            if member_dids.contains(did) && *baseline_trust > best {
+                best = *baseline_trust;
+            }
+        }
+        best
+    }
+}
+
+impl ReputationProjection {
+    /// Sync community data for effective_trust lookups.
+    /// Called by TrustRegistry when communities are loaded or updated.
+    pub fn sync_communities(&self, community_data: CommunityTrustData) {
+        let mut communities = self.communities.write().unwrap();
+        *communities = community_data;
     }
 }
 
@@ -115,6 +156,11 @@ pub struct TrustRegistry {
     #[serde(skip)]
     pub live_projection: ReputationProjection,
     storage_path: PathBuf,
+    /// Trusted communities. Loaded from disk, updated via FFI (deep link import).
+    /// NOT gossiped — membership is private. Keyed by CommunityId.
+    #[serde(skip)]
+    pub communities:
+        HashMap<phalanx_proto::community::CommunityId, phalanx_proto::community::Community>,
 }
 
 impl TrustRegistry {
@@ -134,6 +180,7 @@ impl TrustRegistry {
             pet_name_index: HashMap::new(),
             live_projection: ReputationProjection::default(),
             storage_path,
+            communities: HashMap::new(),
         };
 
         if let Err(e) = registry.load().await {

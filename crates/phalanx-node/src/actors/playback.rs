@@ -87,7 +87,7 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                     let (payload, is_audio) = match envelope.evidence {
                         Evidence::Video(v) => (v.payload, false),
                         Evidence::Audio(a) => (a.payload, true),
-                        Evidence::Gap(_) | Evidence::Handover(_) => {
+                        Evidence::Gap(_) | Evidence::Handover(_) | Evidence::Proximity(_) => {
                             self.current_sequence.0 += 1;
                             continue;
                         }
@@ -159,6 +159,7 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
             key_bytes,
             &self.identity,
             self.identity.did.clone(), // self-recovery: recipient is self
+            phalanx_proto::crypto::GrantPermissions::default(),
         ) {
             Ok(loc) => loc,
             Err(e) => {
