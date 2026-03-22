@@ -50,6 +50,20 @@ pub fn unmarshal<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// Gate 0b: Deserialize + enforce semantic wire bounds in one monadic step.
+///
+/// Chains Gate 0a (byte-size rejection) → postcard decoding → Gate 0b
+/// (structural validation via [`WireBound`]). Use this for any type
+/// received over the wire that declares its own invariants.
+pub fn unmarshal_checked<T: serde::de::DeserializeOwned + phalanx_proto::wire::WireBound>(
+    data: &[u8],
+    context: &str,
+) -> Result<T, ShardError> {
+    let mut val: T = unmarshal(data, context)?;
+    val.enforce_wire_bounds();
+    Ok(val)
+}
+
 /// Gate 0: The Trust Gate (Peer Standing)
 pub trait TrustGate {
     fn verify_standing(&self, oracle: &dyn ReputationGate) -> Result<(), ShardError>;

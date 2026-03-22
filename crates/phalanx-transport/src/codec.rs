@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::request_response;
 use libp2p::swarm::StreamProtocol;
+use phalanx_proto::wire::WireBound;
 use phalanx_proto::{RecordingRequest, RecordingResponse, MAX_PAYLOAD_SIZE};
 use std::io;
 
@@ -32,8 +33,10 @@ impl request_response::Codec for PhalanxRetrievalProtocol {
         T: AsyncRead + Unpin + Send,
     {
         let payload = self.read_length_prefixed(io).await?;
-        postcard::from_bytes(&payload)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        let mut response: RecordingResponse = postcard::from_bytes(&payload)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        response.enforce_wire_bounds();
+        Ok(response)
     }
 
     async fn write_request<T>(

@@ -166,6 +166,28 @@ impl SystemGovernor {
         });
     }
 
+    /// Per-recording retrieval rate limit.
+    /// Returns false if this recording has been requested too frequently.
+    pub fn is_retrieval_rate_ok(&self, recording_id: &str) -> bool {
+        let key = format!("ret:{}", recording_id);
+        self.with_state(|s| {
+            s.r_integrals
+                .get(&key)
+                .is_none_or(|r| r.value < self.config.psi_max)
+        })
+    }
+
+    /// Record a retrieval attempt for rate limiting.
+    pub fn record_retrieval_attempt(&self, recording_id: &str) {
+        let key = format!("ret:{}", recording_id);
+        self.with_state_mut(|s| {
+            s.r_integrals
+                .entry(key)
+                .or_insert_with(DecayingIntegral::new)
+                .record(1.0, self.config.lambda_rep);
+        });
+    }
+
     /// Shield Wall: record a spectral anomaly for a peer.
     ///
     /// Drives the peer's reputation integral toward decoupling via

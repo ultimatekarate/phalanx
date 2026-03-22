@@ -185,7 +185,7 @@ impl ProviderAuthority for DhtProviderSet {
                 providers: Vec::new(),
             });
         }
-        crate::gate::unmarshal(bytes, "DhtProviderSet::decode")
+        crate::gate::unmarshal_checked(bytes, "DhtProviderSet::decode")
     }
 
     fn encode(&self) -> Vec<u8> {

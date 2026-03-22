@@ -86,6 +86,24 @@ impl RetrievalActor {
         request: RecordingRequest,
         channel_id: String,
     ) {
+        // Per-recording rate limit: prevent targeted DoS on a single recording.
+        if !self
+            .system_governor
+            .is_retrieval_rate_ok(&request.recording_id.0)
+        {
+            tracing::warn!(
+                target: "phalanx::retrieval",
+                recording = %request.recording_id,
+                peer = %origin,
+                "Per-recording retrieval rate limit exceeded"
+            );
+            self.dispatch_resilient_response(channel_id, RecordingResponse::Busy)
+                .await;
+            return;
+        }
+        self.system_governor
+            .record_retrieval_attempt(&request.recording_id.0);
+
         let local_id = &self.identity.network_id;
         let io_scale: FinalizationScale = self.system_governor.finalization_scaler();
 

@@ -163,6 +163,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             current_tolerance: Duration::from_millis(1000),
             system_governor: deps.system_governor.clone(),
             commit_notify_tx: Some(commit_notify_tx),
+            replay_filter: phalanx_forensics::bloom::RotatingBloomFilter::new(1_000_000),
         };
 
         let storage_task = tokio::spawn(async move {

@@ -17,6 +17,7 @@ pub mod topology; // The Network Origin
 pub mod trust; // The Social Graph
 pub mod types;
 pub mod vitals; // The Health Nouns
+pub mod wire; // The Structural Contract
 pub mod prelude {
     // Identity Nouns
     pub use crate::identity::{
@@ -54,6 +55,9 @@ pub mod prelude {
 
     // Playback Nouns
     pub use crate::playback::PlaybackSink;
+
+    // Wire Contract
+    pub use crate::wire::WireBound;
 }
 
 // Re-export the canonical Retrieval Nouns from their home modules.
