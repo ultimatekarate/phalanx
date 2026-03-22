@@ -1,4 +1,5 @@
 // crates/phalanx-forensics/src/lib.rs
+pub mod bloom;
 pub mod c2pa_ext;
 pub mod crucible;
 pub mod cryptography;

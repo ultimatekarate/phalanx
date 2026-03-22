@@ -2,6 +2,7 @@
 use crate::config::NodeConfig;
 use crate::persistence::vault::Guardian;
 use crate::vitals::{Homeostasis, SystemGovernor};
+use phalanx_forensics::bloom::RotatingBloomFilter;
 use phalanx_forensics::crucible::EvidenceExt;
 use phalanx_forensics::prelude::TransientJournal;
 use phalanx_forensics::prelude::*;
@@ -30,6 +31,9 @@ pub struct StorageActor<J: TransientJournal> {
     pub system_governor: Arc<SystemGovernor>,
     /// Fires after each successful shard write. MeshSentinel uses this for DHT announcements.
     pub commit_notify_tx: Option<mpsc::Sender<RecordingId>>,
+    /// Replay detection: rotating Bloom filter for evidence_hash dedup.
+    /// 1M bits per generation (~125KB × 2 = ~250KB fixed). Rotates on maintenance tick.
+    pub replay_filter: RotatingBloomFilter,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -129,6 +133,7 @@ impl<J: TransientJournal> StorageActor<J> {
                     }
                 }
                 _ = maintenance_timer.tick() => {
+                    self.replay_filter.rotate();
                     let _ = self.guardian.check_and_finalize_recording(self.current_tolerance).await;
                 }
             }
@@ -246,7 +251,17 @@ impl<J: TransientJournal> StorageActor<J> {
                 // 1. Disk first — persist to recording log before verification
                 match &envelope_state {
                     EnvelopeState::Intact(envelope) => {
+                        // Replay detection: reject evidence_hash seen recently.
+                        if self.replay_filter.contains(&envelope.evidence_hash) {
+                            tracing::warn!(
+                                target: "phalanx::storage",
+                                "Replay detected: evidence_hash recently ingested"
+                            );
+                            return Err(GuardianError::ReplayDetected(0));
+                        }
+
                         self.guardian.append_shard(envelope).await?;
+                        self.replay_filter.insert(&envelope.evidence_hash);
                         let recording_id = envelope.evidence.recording_id().clone();
                         if let Some(ref tx) = self.commit_notify_tx {
                             let _ = tx.try_send(recording_id);
