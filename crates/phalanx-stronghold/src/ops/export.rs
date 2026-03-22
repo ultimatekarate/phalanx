@@ -1,0 +1,218 @@
+// crates/phalanx-stronghold/src/ops/export.rs
+//
+// One-shot export: re-decrypt with grants, re-verify gate bindings (zero trust),
+// serialize proof + decrypted evidence to disk as postcard files.
+//
+// Hands layer — owns IO. Keys are zeroized on drop (SymmetricKey
+// derives ZeroizeOnDrop). No persistent decrypted state.
+//
+// TODO: C2PA manifest building. For v1, we write postcard-serialized
+// proof + evidence binaries. The C2PA packaging path (c2pa_ext.rs)
+// will be wired in once the Builder API is stabilized for multi-asset
+// manifests with embedded forensic assertions.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use phalanx_forensics::cryptography::grant::GrantAuthority;
+use phalanx_forensics::judge::PayloadCipher;
+use phalanx_proto::community::CommunityId;
+use phalanx_proto::crypto::{SealedLocator, SymmetricKey};
+use phalanx_proto::evidence::Evidence;
+use phalanx_proto::identity::{PhalanxIdentity, RecordingId};
+
+use tracing::{debug, info};
+
+use crate::config::CorroborationConfig;
+use crate::error::StrongholdError;
+use crate::persistence::evidence_store::EvidenceStore;
+use crate::persistence::proof_store::ProofStore;
+
+/// One-shot export operation.
+///
+/// Loads a previously-stored proof, re-decrypts the contributing recordings
+/// with grants (zero trust — never cache decrypted state), and writes
+/// postcard-serialized evidence files to `output_dir`.
+///
+/// Returns the paths of all files written.
+pub async fn run_export(
+    identity: &PhalanxIdentity,
+    evidence_store: &EvidenceStore,
+    proof_store: &ProofStore,
+    _config: &CorroborationConfig,
+    community_id: &CommunityId,
+    proof_hash: &[u8; 32],
+    grant_paths: &[PathBuf],
+    output_dir: &Path,
+) -> Result<Vec<PathBuf>, StrongholdError> {
+    // ── 1. Load the proof ──────────────────────────────────────────────
+    let proof = proof_store.load_proof(community_id, proof_hash).await?;
+
+    info!(
+        attestations = proof.attestations.len(),
+        proof_hash = %hex_hash(proof_hash),
+        "Export: proof loaded"
+    );
+
+    // ── 2. Collect recording IDs from the proof's attestations ─────────
+    let recording_ids: Vec<RecordingId> = proof
+        .attestations
+        .iter()
+        .map(|a| a.recording_id.clone())
+        .collect();
+
+    // ── 3. Load and unlock grants ──────────────────────────────────────
+    //
+    // Same pattern as corroborate: each grant file is a postcard-serialized
+    // SealedLocator. We unlock with our identity to recover the SymmetricKey.
+    //
+    // RT-9: verify grant-community binding — the grant's target recording
+    // must reference one of the recordings in this proof.
+
+    let mut key_map: HashMap<RecordingId, SymmetricKey> = HashMap::new();
+
+    for path in grant_paths {
+        let grant_bytes = tokio::fs::read(path).await.map_err(|e| {
+            StrongholdError::Grant(format!("Failed to read grant file {}: {e}", path.display()))
+        })?;
+
+        let locator: SealedLocator = postcard::from_bytes(&grant_bytes).map_err(|e| {
+            StrongholdError::Grant(format!(
+                "Failed to deserialize grant {}: {e}",
+                path.display()
+            ))
+        })?;
+
+        // RT-9: The grant's target must reference one of the proof's recordings.
+        if !recording_ids.contains(&locator.target) {
+            return Err(StrongholdError::Grant(format!(
+                "Grant target {} does not match any recording in the proof",
+                locator.target.as_str()
+            )));
+        }
+
+        let raw_key = locator.unlock(identity).map_err(|e| {
+            StrongholdError::Grant(format!(
+                "Failed to unlock grant for {}: {e}",
+                locator.target.as_str()
+            ))
+        })?;
+
+        debug!(recording = %locator.target.as_str(), "Grant unlocked for export");
+        key_map.insert(locator.target, SymmetricKey(raw_key));
+    }
+
+    // ── 4. Load recordings for each attestation ────────────────────────
+
+    let mut recordings = Vec::with_capacity(recording_ids.len());
+    for rid in &recording_ids {
+        let rec = evidence_store.read_recording(community_id, rid).await?;
+        recordings.push(rec);
+    }
+
+    // ── 5. Decrypt encrypted payloads in memory ────────────────────────
+    //
+    // Same pattern as corroborate: iterate artifacts, decrypt DataPayload
+    // in place using the corresponding grant key.
+
+    for rec in &mut recordings {
+        let key = match key_map.get(&rec.id) {
+            Some(k) => k,
+            None => {
+                return Err(StrongholdError::RecordingEncrypted(rec.id.clone()));
+            }
+        };
+
+        for env in &mut rec.artifacts {
+            match &mut env.evidence {
+                Evidence::Video(shard) => {
+                    let clear = shard.payload.reveal(key).map_err(|e| {
+                        StrongholdError::Grant(format!(
+                            "Decryption failed for video shard in {}: {e}",
+                            rec.id.as_str()
+                        ))
+                    })?;
+                    shard.payload = phalanx_proto::evidence::DataPayload::Clear(clear);
+                }
+                Evidence::Audio(shard) => {
+                    let clear = shard.payload.reveal(key).map_err(|e| {
+                        StrongholdError::Grant(format!(
+                            "Decryption failed for audio shard in {}: {e}",
+                            rec.id.as_str()
+                        ))
+                    })?;
+                    shard.payload = phalanx_proto::evidence::DataPayload::Clear(clear);
+                }
+                // Gap, Handover, and Proximity evidence carry no encrypted payload.
+                _ => {}
+            }
+        }
+    }
+
+    // ── 6. Write export files ──────────────────────────────────────────
+    //
+    // For v1: postcard-serialized binary files.
+    // TODO: Build C2PA manifest with embedded forensic assertions.
+    //       Wire through C2paOrchestrator::build_manifest_with_lens()
+    //       once multi-asset manifest signing is stabilized.
+
+    tokio::fs::create_dir_all(output_dir).await.map_err(|e| {
+        StrongholdError::Export(format!(
+            "Failed to create output directory {}: {e}",
+            output_dir.display()
+        ))
+    })?;
+
+    let mut written_paths: Vec<PathBuf> = Vec::new();
+
+    // Write each recording's decrypted envelopes
+    for rec in &recordings {
+        let filename = format!("{}.evidence.bin", rec.id.as_str());
+        let path = output_dir.join(&filename);
+
+        let bytes = postcard::to_allocvec(&rec.artifacts).map_err(|e| {
+            StrongholdError::Serialization(format!(
+                "Failed to serialize evidence for {}: {e}",
+                rec.id.as_str()
+            ))
+        })?;
+
+        tokio::fs::write(&path, &bytes).await.map_err(|e| {
+            StrongholdError::Export(format!("Failed to write {}: {e}", path.display()))
+        })?;
+
+        debug!(path = %path.display(), bytes = bytes.len(), "Evidence file written");
+        written_paths.push(path);
+    }
+
+    // Write the proof itself
+    let proof_path = output_dir.join("proof.bin");
+    let proof_bytes = postcard::to_allocvec(&proof)
+        .map_err(|e| StrongholdError::Serialization(format!("Failed to serialize proof: {e}")))?;
+
+    tokio::fs::write(&proof_path, &proof_bytes)
+        .await
+        .map_err(|e| {
+            StrongholdError::Export(format!("Failed to write {}: {e}", proof_path.display()))
+        })?;
+
+    written_paths.push(proof_path);
+
+    info!(
+        files = written_paths.len(),
+        output = %output_dir.display(),
+        "Export complete"
+    );
+
+    // Keys in key_map are dropped here → ZeroizeOnDrop wipes memory.
+    Ok(written_paths)
+}
+
+/// Format a 32-byte hash as a hex string for logging.
+fn hex_hash(hash: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in hash {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}

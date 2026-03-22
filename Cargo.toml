@@ -7,6 +7,7 @@ members = [
     "crates/phalanx-lens",
     "crates/phalanx-ffi",
     "crates/phalanx-sim",
+    "crates/phalanx-stronghold",
 ]
 resolver = "2"
 
