@@ -23,6 +23,10 @@ pub enum EgressCommand {
         target: NetworkId,
         request: RecordingRequest,
     },
+    /// Eclipse remediation: actively disconnect a peer rejected or evicted by TopologyGate.
+    DisconnectPeer(NetworkId),
+    /// Eclipse remediation: re-dial bootstrap peers and trigger Kademlia random walk.
+    ReBootstrap(Vec<String>),
 }
 
 pub struct EgressActor<E: EgressPort> {
@@ -116,6 +120,17 @@ impl<E: EgressPort> EgressActor<E> {
                                     peer = %target,
                                     error = %e,
                                     "DHT: Failed to send shard request"
+                                );
+                            }
+                        }
+                        EgressCommand::DisconnectPeer(peer) => {
+                            self.port.disconnect_peer(&peer).await;
+                        }
+                        EgressCommand::ReBootstrap(peers) => {
+                            if let Err(e) = self.port.rebootstrap(&peers).await {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Eclipse: Re-bootstrap failed"
                                 );
                             }
                         }

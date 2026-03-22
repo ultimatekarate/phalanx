@@ -14,6 +14,7 @@ use crate::handle::PhalanxHandle;
 use phalanx_proto::identity::NetworkId;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::telemetry::DiscoverySource;
+use phalanx_proto::topology::{SubnetBucket, TransportClass};
 
 use std::ffi::CStr;
 use std::os::raw::c_char;
@@ -52,6 +53,8 @@ pub unsafe extern "C" fn phalanx_local_mesh_push_peer_discovered(
     let event = NetworkEvent::PeerDiscovered {
         peer: NetworkId(peer_str.to_string()),
         source: DiscoverySource::LocalMesh,
+        bucket: SubnetBucket::local_mesh(),
+        transport: TransportClass::LocalMesh,
     };
 
     match tx.try_send(event) {

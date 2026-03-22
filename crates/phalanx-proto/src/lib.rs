@@ -13,6 +13,7 @@ pub mod storage; // The Vault Nouns
 pub mod telemetry;
 pub mod time; // The When
 pub mod topic; // The Where
+pub mod topology; // The Network Origin
 pub mod trust; // The Social Graph
 pub mod types;
 pub mod vitals; // The Health Nouns
@@ -47,6 +48,7 @@ pub mod prelude {
     // Trust & Networking Nouns
     pub use crate::kademlia::{DhtPayload, PayloadKind};
     pub use crate::network::{NetworkEvent, DISCOVERY_TOPIC_ID, RETRIEVAL_PROTOCOL_ID};
+    pub use crate::topology::{EclipseRisk, SubnetBucket, SubnetQuota, TransportClass};
     pub use crate::trust::{MonotonicClock, PetName, TrustLevel};
     pub use crate::vitals::ControlMessage;
 

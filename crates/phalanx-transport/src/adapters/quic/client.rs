@@ -10,6 +10,7 @@ use phalanx_proto::identity::NetworkId;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::telemetry::DiscoverySource;
 use phalanx_proto::topic::MeshTopic;
+use phalanx_proto::topology::{SubnetBucket, TransportClass};
 use tokio::sync::mpsc;
 
 use super::wire::{read_frame, write_frame, QuicError, QuicWireMessage};
@@ -24,6 +25,20 @@ use super::{translate_response, QuicCommand};
 pub(super) fn backoff_delay(attempt: u32, base_secs: u64, max_secs: u64) -> Duration {
     let delay = base_secs.saturating_mul(1u64 << attempt.min(6));
     Duration::from_secs(delay.min(max_secs))
+}
+
+/// Extract a `SubnetBucket` from a `SocketAddr`.
+fn subnet_bucket_from_addr(addr: SocketAddr) -> SubnetBucket {
+    match addr {
+        SocketAddr::V4(v4) => {
+            let octets = v4.ip().octets();
+            SubnetBucket::from_ipv4_prefix(octets[0], octets[1])
+        }
+        SocketAddr::V6(v6) => {
+            let octets = v6.ip().octets();
+            SubnetBucket::from_ipv6_prefix(&octets[..6])
+        }
+    }
 }
 
 // ── Client Actor ─────────────────────────────────────────────────────────
@@ -150,10 +165,17 @@ pub(super) async fn client_actor(
         }
 
         // ── Emit PeerDiscovered ──────────────────────────────────────
+        let bucket = connection
+            .remote_addr()
+            .ok()
+            .map(subnet_bucket_from_addr)
+            .unwrap_or_else(|| subnet_bucket_from_addr(server_address));
         let _ = event_tx
             .send(NetworkEvent::PeerDiscovered {
                 peer: server_network_id.clone(),
                 source: DiscoverySource::Quic,
+                bucket,
+                transport: TransportClass::from_discovery_source(DiscoverySource::Quic),
             })
             .await;
 

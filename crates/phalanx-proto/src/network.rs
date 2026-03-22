@@ -3,6 +3,7 @@ use crate::identity::RecordingId;
 use crate::prelude::{MeshTopic, NetworkId};
 use crate::retrieval::RecordingRequest;
 use crate::telemetry::DiscoverySource;
+use crate::topology::{SubnetBucket, TransportClass};
 
 pub const RETRIEVAL_PROTOCOL_ID: &str = "/phalanx/retrieval/1.0.0";
 pub const DISCOVERY_TOPIC_ID: &str = "/phalanx/discovery/1.0.0";
@@ -16,10 +17,14 @@ pub enum NetworkEvent {
     },
     /// A new peer was discovered on the mesh.
     /// `source` indicates HOW it was discovered — mDNS (local) vs Kademlia/Bootstrap (internet).
-    /// The MeshSentinel uses this to track internet connectivity.
+    /// `bucket` is the /16 subnet bucket (populated from Multiaddr by the Hands).
+    /// `transport` classifies the discovery source as Internet or LocalMesh.
+    /// The MeshSentinel uses this to enforce topology-aware admission via TopologyGate.
     PeerDiscovered {
         peer: NetworkId,
         source: DiscoverySource,
+        bucket: SubnetBucket,
+        transport: TransportClass,
     },
     RecordingRequested {
         origin: NetworkId,

@@ -25,9 +25,16 @@ impl TrustArbiter {
         recovery_step: i64,
     ) {
         const MAX_REPUTATION: i64 = 100; // The ceiling of trust
+        const RECOVERY_COOLDOWN_SECS: u64 = 60; // No recovery for 60s after last offense
 
         for record in peers.values_mut() {
             if record.reputation.is_blacklisted {
+                continue;
+            }
+
+            // Cooldown: no recovery within 60 seconds of last offense
+            let since_offense = now.elapsed_since(record.reputation.last_offense_secs);
+            if since_offense < RECOVERY_COOLDOWN_SECS {
                 continue;
             }
 
@@ -35,14 +42,15 @@ impl TrustArbiter {
             let intervals = elapsed / interval_secs;
 
             if intervals > 0 {
-                // Linear recovery allows penalized peers to regain full trust too quickly.
-                // Scale recovery by the ratio of current score to MAX, with a minimum of 10%.
-                // A peer at score 50 recovers at 50% rate; at score 10, at 10% rate.
-                let recovery_factor = if record.reputation.score <= 0 {
-                    0.1_f64 // Minimum recovery rate for deeply penalized peers
+                // Quadratic recovery: slower at low scores, faster near ceiling.
+                // At score 20: (20/100)^2 = 4% speed. At score 80: (80/100)^2 = 64% speed.
+                // Floor of 5% prevents permanent stalling.
+                let normalized = if record.reputation.score <= 0 {
+                    0.0_f64
                 } else {
-                    (record.reputation.score as f64 / MAX_REPUTATION as f64).max(0.1)
+                    (record.reputation.score as f64 / MAX_REPUTATION as f64).max(0.0)
                 };
+                let recovery_factor = (normalized * normalized).max(0.05);
                 let scaled_step = ((recovery_step as f64) * recovery_factor) as i64;
                 let effective_step = scaled_step.max(1); // At least 1 per interval
                 let total_recovery = (intervals as i64) * effective_step;
@@ -280,27 +288,28 @@ mod tests {
         );
 
         // Advance time past the full interval
-        // E7 FIX: Diminishing recovery — at score 50, factor = 0.5, step = 5
-        // Recovery: 50 -> 55
+        // Quadratic recovery: at score 50, factor = (50/100)^2 = 0.25, step = max(1, 2) = 2
+        // Recovery: 50 -> 52
         clock.tick(31); // Total 61s elapsed
         TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 60, 10);
         assert_eq!(
-            peers[&peer_did].reputation.score, 55,
-            "Reputation should have increased by scaled recovery_step (diminishing returns)"
+            peers[&peer_did].reputation.score, 52,
+            "Reputation should have increased by quadratic recovery_step"
         );
 
         // Advance time by multiple intervals
-        // E7 FIX: At score 55, factor = 0.55, step = 5 (truncated), 2 intervals = +10
-        // Recovery: 55 -> 65
+        // At score 52, factor = (52/100)^2 = 0.2704, step = max(1, 2) = 2, 2 intervals = +4
+        // Recovery: 52 -> 56
         clock.tick(120); // 2 more intervals
         TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 60, 10);
         assert_eq!(
-            peers[&peer_did].reputation.score, 65,
-            "Reputation should follow diminishing multi-cycle recovery"
+            peers[&peer_did].reputation.score, 56,
+            "Reputation should follow quadratic multi-cycle recovery"
         );
 
-        // Ensure it caps at the baseline (100)
-        clock.tick(600);
+        // Ensure it caps at the baseline (100) — quadratic recovery is slower, so
+        // allow enough time for score to climb from 56 to the ceiling.
+        clock.tick(6000);
         TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 60, 10);
         assert_eq!(
             peers[&peer_did].reputation.score, 100,

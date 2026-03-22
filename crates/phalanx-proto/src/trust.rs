@@ -15,6 +15,7 @@ pub enum Offense {
     ProtocolViolation,
     TemporalSkew,
     SpectralAnomaly,
+    EclipseAttempt,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -36,6 +37,8 @@ pub struct PeerReputation {
     pub is_blacklisted: bool,
     pub score: i64,
     pub last_update_secs: MonotonicClock,
+    /// Timestamp of last recorded offense. Used for recovery cooldown (§6 eclipse remediation).
+    pub last_offense_secs: MonotonicClock,
 }
 
 impl Default for PeerReputation {
@@ -49,6 +52,7 @@ impl Default for PeerReputation {
             is_blacklisted: false,
             score: 100,
             last_update_secs: MonotonicClock::default(),
+            last_offense_secs: MonotonicClock::default(),
         }
     }
 }

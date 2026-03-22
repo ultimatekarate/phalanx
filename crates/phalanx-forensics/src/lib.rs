@@ -2,6 +2,7 @@
 pub mod c2pa_ext;
 pub mod crucible;
 pub mod cryptography;
+pub mod eclipse;
 pub mod errors;
 pub mod gate;
 pub mod identity;
@@ -10,6 +11,7 @@ pub mod kademlia;
 pub mod policy;
 pub mod reassembler;
 pub mod test_utils;
+pub mod topology_gate;
 pub mod trust;
 pub mod witness;
 pub mod storage {
@@ -35,4 +37,10 @@ pub mod prelude {
     pub use crate::reassembler::{Reassembler, ShardMold};
     pub use crate::storage::journal::TransientJournal;
     pub use crate::trust::PeerEvaluator;
+
+    // Eclipse & Topology
+    pub use crate::eclipse::{EclipseProbe, MeshFingerprint};
+    pub use crate::topology_gate::{
+        AdmissionDenied, AdmissionTicket, AnchorEligible, TopologyGate, TransportBalance,
+    };
 }
