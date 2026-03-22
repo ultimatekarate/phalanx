@@ -120,6 +120,18 @@ pub trait EgressPort: Send + Sync + Clone {
         target: &NetworkId,
         request: RecordingRequest,
     ) -> Result<(), String>;
+
+    /// Disconnect a specific peer (eclipse remediation).
+    /// Default: delegates to ban_peer (existing mechanism).
+    async fn disconnect_peer(&self, peer: &NetworkId) {
+        self.ban_peer(peer).await;
+    }
+
+    /// Re-dial bootstrap peers and trigger a Kademlia random walk.
+    /// Default: no-op (transports that don't support this ignore the request).
+    async fn rebootstrap(&self, _peers: &[String]) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 // THE LOCAL MESH PORT (Ad-Hoc Mesh Forward Infrastructure)
@@ -203,6 +215,8 @@ mod merged_ingress_tests {
         tx_b.send(NetworkEvent::PeerDiscovered {
             peer: peer_b.clone(),
             source: phalanx_proto::telemetry::DiscoverySource::Quic,
+            bucket: phalanx_proto::topology::SubnetBucket::from_ipv4_prefix(127, 0),
+            transport: phalanx_proto::topology::TransportClass::Internet,
         })
         .await
         .unwrap();

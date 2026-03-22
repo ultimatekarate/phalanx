@@ -10,13 +10,16 @@ use crate::actors::trust_actor::{TrustActor, TrustCommand};
 use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
 
+use crate::trust::ReputationProjection;
 use crate::vitals::{HealthTracker, Homeostasis, LifecycleEvent, SystemGovernor};
 use crate::Guardian;
 use crate::{trust::TrustRegistry, StorageActor};
 
+use phalanx_forensics::eclipse::{self, EclipseProbe, MeshFingerprint};
 use phalanx_forensics::policy::{IngressGovernor, TrafficGovernor};
 use phalanx_forensics::prelude::*;
 use phalanx_proto::prelude::*;
+use phalanx_proto::trust::Offense;
 use phalanx_transport::identity_ext::Libp2pExt;
 use phalanx_transport::{EgressPort, IngressPort, LocalMeshPort};
 use std::sync::Arc;
@@ -97,6 +100,11 @@ pub struct MeshSentinel<I: IngressPort> {
     // Desktop sentinel ignores these; the FFI handle clones them for phalanx_push_video_frame().
     pub video_tx: mpsc::Sender<VideoShard>,
     pub audio_tx: mpsc::Sender<AudioShard>,
+
+    // Eclipse remediation: topology-aware peer admission gate.
+    topology_gate: TopologyGate,
+    eclipse_probe: EclipseProbe,
+    reputation: ReputationProjection,
 }
 
 impl<I: IngressPort> MeshSentinel<I> {
@@ -292,10 +300,21 @@ impl<I: IngressPort> MeshSentinel<I> {
             trust_tx: sentinel_trust_tx,
             video_tx,
             audio_tx,
+            topology_gate: TopologyGate::new(
+                192, // total_capacity — matches libp2p connection limit
+                SubnetQuota::DEFAULT,
+                4, // max_anchors
+            ),
+            eclipse_probe: EclipseProbe::new(6), // 6 snapshots × 5min = 30min window
+            reputation: reputation_projection.clone(),
         })
     }
 
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
+        // Eclipse remediation: 5-minute tick for anchor promotion, eclipse detection, re-bootstrap.
+        let mut topology_tick = tokio::time::interval(Duration::from_secs(300));
+        topology_tick.tick().await; // Consume the immediate first tick
+
         loop {
             let should_shutdown = tokio::select! {
                 Some(event) = self.ingress.next_event() => {
@@ -359,6 +378,12 @@ impl<I: IngressPort> MeshSentinel<I> {
                         }
                     }
                     false // Never shutdown from lifecycle events
+                }
+
+                // Eclipse remediation tick: anchor promotion, eclipse fingerprint, re-bootstrap check.
+                _ = topology_tick.tick() => {
+                    self.topology_maintenance_tick().await;
+                    false
                 }
             };
 
@@ -457,17 +482,52 @@ impl<I: IngressPort> MeshSentinel<I> {
             // Internet peers (Kademlia, Bootstrap) immediately mark internet as available.
             // mDNS peers increment local count. The 30s grace period in SystemGovernor
             // handles the transition to offline when only local peers remain.
-            NetworkEvent::PeerDiscovered { peer, source } => {
-                tracing::debug!(
-                    event = "peer_discovered",
-                    peer = %peer,
-                    source = ?source,
-                    "Peer discovered via {:?}",
-                    source
-                );
-                self.system_governor.record_peer_discovery(source);
-                // P12 FIX: Feed connection count into c_integral.
-                self.system_governor.record_connection_gauge();
+            NetworkEvent::PeerDiscovered {
+                peer,
+                source,
+                bucket,
+                transport,
+            } => {
+                // Topology-aware admission: check subnet diversity, transport quotas, IWFQ.
+                let balance = self.compute_transport_balance();
+                match self.topology_gate.try_admit(
+                    peer.clone(),
+                    TrustLevel::default(), // Unknown peers start as Ignored
+                    bucket,
+                    transport,
+                    balance,
+                ) {
+                    Ok((_ticket, evicted)) => {
+                        // Admission succeeded — preserve existing behavior.
+                        self.system_governor.record_peer_discovery(source);
+                        self.system_governor.record_connection_gauge();
+
+                        if let Some(evicted_peer) = evicted {
+                            tracing::debug!(
+                                event = "topology_eviction",
+                                evicted = %evicted_peer,
+                                newcomer = %peer,
+                                "IWFQ: Evicted lower-trust peer to admit newcomer"
+                            );
+                            let _ = self
+                                .egress_tx
+                                .send(EgressCommand::DisconnectPeer(evicted_peer))
+                                .await;
+                        }
+                    }
+                    Err(reason) => {
+                        tracing::debug!(
+                            event = "topology_rejected",
+                            peer = %peer,
+                            reason = %reason,
+                            "TopologyGate rejected peer"
+                        );
+                        let _ = self
+                            .egress_tx
+                            .send(EgressCommand::DisconnectPeer(peer))
+                            .await;
+                    }
+                }
                 false
             }
 
@@ -534,6 +594,9 @@ impl<I: IngressPort> MeshSentinel<I> {
                     peer = %peer,
                     "Peer disconnected"
                 );
+                // Eclipse remediation: release topology slot (no-op if anchored — must demote first).
+                self.topology_gate.demote_anchor(&peer);
+                self.topology_gate.release(&peer);
                 // Shield Wall: clean up spectral observation state for departed peer.
                 self.health_tracker.spectral.remove_peer(&peer);
                 // QUIC disconnects are always internet peers (not mDNS-local).
@@ -595,5 +658,108 @@ impl<I: IngressPort> MeshSentinel<I> {
                 tracing::error!("Playback Coordinator terminated with error: {:?}", e);
             }
         })
+    }
+
+    // ── Eclipse Remediation ────────────────────────────────────────
+
+    /// Derive dynamic transport balance from existing SystemGovernor signals.
+    fn compute_transport_balance(&self) -> TransportBalance {
+        if self.local_mesh.is_none() {
+            return TransportBalance::new(0.1); // Minimum — no local mesh hardware
+        }
+        if !self.system_governor.internet_available() {
+            return TransportBalance::new(0.4); // Shift toward local mesh when internet is down
+        }
+        TransportBalance::DEFAULT // 0.25 when both transports healthy
+    }
+
+    /// Periodic tick: anchor promotion, eclipse fingerprinting, re-bootstrap check.
+    async fn topology_maintenance_tick(&mut self) {
+        // 1. Anchor promotion: promote long-lived high-reputation peers.
+        let peer_ids: Vec<NetworkId> = self.topology_gate.peer_ids().cloned().collect();
+        for peer_id in &peer_ids {
+            if self.topology_gate.is_anchored(peer_id) {
+                continue;
+            }
+            let score = self.reputation.evaluate_reputation(peer_id);
+            if let Some(proof) = AnchorEligible::try_from_score(score) {
+                if self.topology_gate.promote_to_anchor(peer_id, proof) {
+                    tracing::debug!(
+                        event = "anchor_promoted",
+                        peer = %peer_id,
+                        score = score,
+                        "Promoted peer to anchor status"
+                    );
+                }
+            }
+        }
+
+        // 2. Eclipse fingerprinting: snapshot the current peer set topology.
+        let mut peer_ids: Vec<&NetworkId> = self.health_tracker.heartbeats.keys().collect();
+        let peer_set_hash = eclipse::hash_peer_set(&mut peer_ids);
+        let peer_count = peer_ids.len();
+        let subnet_distribution = self.topology_gate.subnet_counts().clone();
+
+        let fingerprint = MeshFingerprint {
+            peer_set_hash,
+            peer_count,
+            subnet_distribution,
+            timestamp: MonotonicClock(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            ),
+        };
+
+        self.eclipse_probe.record(fingerprint);
+        let risk = self.eclipse_probe.evaluate();
+
+        match risk {
+            EclipseRisk::Elevated => {
+                tracing::warn!(
+                    target: "phalanx::shield_wall",
+                    event = "eclipse_risk_elevated",
+                    peer_count = peer_count,
+                    "Eclipse probe: ELEVATED risk — peer set stagnation or subnet concentration"
+                );
+            }
+            EclipseRisk::Critical => {
+                tracing::warn!(
+                    target: "phalanx::shield_wall",
+                    event = "eclipse_risk_critical",
+                    peer_count = peer_count,
+                    "Eclipse probe: CRITICAL risk — triggering re-bootstrap"
+                );
+
+                // Record EclipseAttempt offense against concentrated-subnet peers.
+                let _ = self
+                    .trust_tx
+                    .send(TrustCommand::RecordOffense {
+                        did: self.identity.did.clone(), // Self-report — TrustActor handles routing
+                        offense: Offense::EclipseAttempt,
+                    })
+                    .await;
+
+                // Trigger re-bootstrap if peer count is below half capacity.
+                if self.topology_gate.peer_count() < 96 {
+                    let bootstrap_peers: Vec<String> = self
+                        .config
+                        .network
+                        .bootstrap_peers
+                        .iter()
+                        .take(3)
+                        .cloned()
+                        .collect();
+                    if !bootstrap_peers.is_empty() {
+                        let _ = self
+                            .egress_tx
+                            .send(EgressCommand::ReBootstrap(bootstrap_peers))
+                            .await;
+                    }
+                }
+            }
+            _ => {} // EclipseRisk::None — all clear
+        }
     }
 }

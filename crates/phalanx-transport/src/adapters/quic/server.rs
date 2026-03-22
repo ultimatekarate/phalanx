@@ -3,12 +3,14 @@
 // Server actor: accepts QUIC connections from phones, routes commands to clients.
 // Runs as a detached tokio task in Stronghold mode.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use phalanx_proto::identity::NetworkId;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::telemetry::DiscoverySource;
 use phalanx_proto::topic::MeshTopic;
+use phalanx_proto::topology::{SubnetBucket, TransportClass};
 use tokio::sync::{mpsc, RwLock};
 
 use super::wire::{read_frame, write_frame, QuicWireMessage};
@@ -167,6 +169,20 @@ pub(super) fn extract_network_id_from_channel(channel_id: &str) -> String {
     }
 }
 
+/// Extract a `SubnetBucket` from a `SocketAddr`.
+fn subnet_bucket_from_addr(addr: SocketAddr) -> SubnetBucket {
+    match addr {
+        SocketAddr::V4(v4) => {
+            let octets = v4.ip().octets();
+            SubnetBucket::from_ipv4_prefix(octets[0], octets[1])
+        }
+        SocketAddr::V6(v6) => {
+            let octets = v6.ip().octets();
+            SubnetBucket::from_ipv6_prefix(&octets[..6])
+        }
+    }
+}
+
 // ── Server Connection Handler ────────────────────────────────────────────
 
 /// Handles a single client connection on the server side.
@@ -245,10 +261,17 @@ async fn server_connection_handler(
     );
 
     // Emit PeerDiscovered event
+    let bucket = connection
+        .remote_addr()
+        .ok()
+        .map(subnet_bucket_from_addr)
+        .unwrap_or_else(|| SubnetBucket::from_ipv4_prefix(0, 0));
     let _ = event_tx
         .send(NetworkEvent::PeerDiscovered {
             peer: network_id.clone(),
             source: DiscoverySource::Quic,
+            bucket,
+            transport: TransportClass::from_discovery_source(DiscoverySource::Quic),
         })
         .await;
 

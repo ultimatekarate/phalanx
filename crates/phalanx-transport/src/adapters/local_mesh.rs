@@ -144,6 +144,7 @@ impl LocalMeshPort for LocalMeshAdapter {
 mod tests {
     use super::*;
     use phalanx_proto::telemetry::DiscoverySource;
+    use phalanx_proto::topology::{SubnetBucket, TransportClass};
 
     #[tokio::test]
     async fn test_noop_local_mesh_unavailable() {
@@ -187,6 +188,8 @@ mod tests {
         tx.send(NetworkEvent::PeerDiscovered {
             peer: peer.clone(),
             source: DiscoverySource::LocalMesh,
+            bucket: SubnetBucket::local_mesh(),
+            transport: TransportClass::LocalMesh,
         })
         .await
         .unwrap();
@@ -208,6 +211,8 @@ mod tests {
         tx.send(NetworkEvent::PeerDiscovered {
             peer: peer_a.clone(),
             source: DiscoverySource::LocalMesh,
+            bucket: SubnetBucket::local_mesh(),
+            transport: TransportClass::LocalMesh,
         })
         .await
         .unwrap();
@@ -216,6 +221,8 @@ mod tests {
         tx.send(NetworkEvent::PeerDiscovered {
             peer: peer_b.clone(),
             source: DiscoverySource::LocalMesh,
+            bucket: SubnetBucket::local_mesh(),
+            transport: TransportClass::LocalMesh,
         })
         .await
         .unwrap();
@@ -278,6 +285,8 @@ mod tests {
             tx.send(NetworkEvent::PeerDiscovered {
                 peer: peer.clone(),
                 source: DiscoverySource::LocalMesh,
+                bucket: SubnetBucket::local_mesh(),
+                transport: TransportClass::LocalMesh,
             })
             .await
             .unwrap();

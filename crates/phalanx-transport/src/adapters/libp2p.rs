@@ -13,6 +13,7 @@ use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::retrieval::RecordingResponse;
 use phalanx_proto::telemetry::DiscoverySource;
 use phalanx_proto::topic::MeshTopic;
+use phalanx_proto::topology::{SubnetBucket, TransportClass};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -31,6 +32,30 @@ pub struct Libp2pAdapter {
     command_tx: mpsc::Sender<TransportCommand>,
     // Arc<Mutex<>> ensures the Receiver can be extracted safely across threads
     event_rx_factory: Arc<Mutex<Option<mpsc::Receiver<NetworkEvent>>>>,
+}
+
+/// Extract a `SubnetBucket` from a libp2p `Multiaddr`.
+///
+/// IPv4: uses first two octets as a /16 prefix bucket.
+/// IPv6: hashes the first 6 bytes of the address into a two-byte bucket.
+/// Fallback: hashes the raw Multiaddr bytes.
+fn extract_subnet_bucket(addr: &libp2p::Multiaddr) -> SubnetBucket {
+    use libp2p::multiaddr::Protocol;
+    for proto in addr.iter() {
+        match proto {
+            Protocol::Ip4(ipv4) => {
+                let octets = ipv4.octets();
+                return SubnetBucket::from_ipv4_prefix(octets[0], octets[1]);
+            }
+            Protocol::Ip6(ipv6) => {
+                let octets = ipv6.octets();
+                return SubnetBucket::from_ipv6_prefix(&octets[..6]);
+            }
+            _ => continue,
+        }
+    }
+    // Fallback: hash the raw Multiaddr bytes
+    SubnetBucket::from_ipv6_prefix(addr.to_vec().as_slice())
 }
 
 pub fn translate_swarm_event(event: SwarmEvent<PhalanxEvent>) -> Option<NetworkEvent> {
@@ -63,9 +88,11 @@ pub fn translate_swarm_event(event: SwarmEvent<PhalanxEvent>) -> Option<NetworkE
         // mDNS discovery → PeerDiscovered (vitals tracking)
         SwarmEvent::Behaviour(PhalanxEvent::Mdns(libp2p::mdns::Event::Discovered(peers))) => peers
             .first()
-            .map(|(peer_id, _)| NetworkEvent::PeerDiscovered {
+            .map(|(peer_id, addr)| NetworkEvent::PeerDiscovered {
                 peer: PeerMapper::to_network_id(peer_id),
                 source: DiscoverySource::Mdns,
+                bucket: extract_subnet_bucket(addr),
+                transport: TransportClass::from_discovery_source(DiscoverySource::Mdns),
             }),
         // DHT: Kademlia provider discovery results → ProvidersDiscovered
         SwarmEvent::Behaviour(PhalanxEvent::Kademlia(kad::Event::OutboundQueryProgressed {
