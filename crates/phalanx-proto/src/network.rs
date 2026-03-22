@@ -48,6 +48,18 @@ pub enum NetworkEvent {
     PeerDisconnected {
         peer: NetworkId,
     },
+    /// BLE mutual auth: challenge received from a LocalMesh peer.
+    /// MeshSentinel should verify and respond, or drop the connection.
+    BleAuthChallengeReceived {
+        peer: NetworkId,
+        challenge: BleChallenge,
+    },
+    /// BLE mutual auth: response received from a LocalMesh peer.
+    /// MeshSentinel should verify against the pending challenge nonce.
+    BleAuthResponseReceived {
+        peer: NetworkId,
+        response: BleResponse,
+    },
     Shutdown,
 }
 

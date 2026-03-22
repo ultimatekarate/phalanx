@@ -187,7 +187,33 @@ impl TrustRegistry {
             tracing::warn!(target: "trust", "Failed to load trust registry (starting fresh): {}", e);
         }
 
+        // Belt-and-suspenders: dissolve expired communities on boot before any operations.
+        registry.dissolve_expired_communities();
+
         registry
+    }
+
+    /// Dissolve all expired communities. Zeroes membership data and removes from HashMap.
+    /// Called on boot, on maintenance tick, and checked on every effective_trust() access.
+    pub fn dissolve_expired_communities(&mut self) {
+        let now = phalanx_proto::time::PhalanxTimestamp::now();
+        let expired_ids: Vec<_> = self
+            .communities
+            .iter()
+            .filter(|(_, c)| c.is_expired(now))
+            .map(|(id, _)| *id)
+            .collect();
+
+        for id in expired_ids {
+            if let Some(community) = self.communities.remove(&id) {
+                tracing::info!(
+                    target: "trust",
+                    community = %community.name,
+                    "Community expired — dissolving and zeroizing"
+                );
+                community.dissolve(); // Consumes and zeroizes
+            }
+        }
     }
 
     #[allow(clippy::missing_errors_doc)]

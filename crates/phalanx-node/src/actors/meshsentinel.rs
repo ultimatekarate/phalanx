@@ -109,6 +109,8 @@ pub struct MeshSentinel<I: IngressPort> {
     /// Active recording ID, if any. Set by FFI when recording starts, cleared on stop.
     /// Used to capture ProximityWitness entries when LocalMesh peers are discovered.
     pub active_recording_id: Option<RecordingId>,
+    /// Recording key for the active recording (for auto-sealing grants to Stronghold).
+    pub active_recording_key: Option<[u8; 32]>,
     /// Proximity witnesses captured during the current recording.
     /// Flushed to the evidence pipeline when the recording ends.
     pub proximity_witnesses: Vec<phalanx_proto::corroboration::ProximityWitness>,
@@ -316,6 +318,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             eclipse_probe: EclipseProbe::new(6), // 6 snapshots × 5min = 30min window
             reputation: reputation_projection.clone(),
             active_recording_id: None,
+            active_recording_key: None,
             proximity_witnesses: Vec::new(),
         })
     }
@@ -631,6 +634,19 @@ impl<I: IngressPort> MeshSentinel<I> {
                 self.system_governor.record_peer_departure(false);
                 // P12 FIX: Update c_integral on disconnect.
                 self.system_governor.record_connection_gauge();
+                false
+            }
+
+            // BLE auth events: Flutter drives the handshake. These variants exist
+            // in NetworkEvent for completeness but MeshSentinel doesn't process them
+            // directly. Flutter calls phalanx_sign_ble_challenge (to respond to remote
+            // challenges) and phalanx_verify_ble_peer (to verify remote responses)
+            // via FFI. Verified peers arrive as normal PeerDiscovered events.
+            NetworkEvent::BleAuthChallengeReceived { .. }
+            | NetworkEvent::BleAuthResponseReceived { .. } => {
+                tracing::debug!(
+                    "BLE auth event received — handled by Flutter FFI, not MeshSentinel"
+                );
                 false
             }
 
