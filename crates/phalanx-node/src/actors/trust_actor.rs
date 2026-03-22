@@ -49,6 +49,13 @@ pub enum TrustCommand {
         did: Did,
         reply_to: oneshot::Sender<Result<(), TrustError>>,
     },
+    // --- Community management ---
+    ImportCommunity {
+        community: phalanx_proto::community::Community,
+    },
+    DissolveCommunity {
+        community_id: phalanx_proto::community::CommunityId,
+    },
 }
 
 pub struct TrustActor {
@@ -148,6 +155,57 @@ impl TrustActor {
             TrustCommand::RemovePeer { did, reply_to } => {
                 let result = self.registry.remove_peer(&did).await;
                 let _ = reply_to.send(result);
+            }
+            TrustCommand::ImportCommunity { community } => {
+                tracing::info!(
+                    target: "phalanx::trust",
+                    community = %community.name,
+                    members = community.members.len(),
+                    "Importing community into TrustRegistry"
+                );
+                // Sync community data to ReputationProjection for lock-free effective_trust reads
+                let community_data: Vec<_> = std::iter::once((
+                    community.baseline_trust,
+                    community.members.iter().map(|m| m.did().clone()).collect(),
+                ))
+                .chain(self.registry.communities.values().map(|c| {
+                    (
+                        c.baseline_trust,
+                        c.members.iter().map(|m| m.did().clone()).collect(),
+                    )
+                }))
+                .collect();
+                self.registry
+                    .communities
+                    .insert(community.fingerprint, community);
+                self.registry
+                    .live_projection
+                    .sync_communities(community_data);
+            }
+            TrustCommand::DissolveCommunity { community_id } => {
+                if let Some(community) = self.registry.communities.remove(&community_id) {
+                    tracing::info!(
+                        target: "phalanx::trust",
+                        community = %community.name,
+                        "Dissolving community — zeroizing membership data"
+                    );
+                    community.dissolve(); // Consumes and zeroizes
+                                          // Re-sync projection without the dissolved community
+                    let community_data: Vec<_> = self
+                        .registry
+                        .communities
+                        .values()
+                        .map(|c| {
+                            (
+                                c.baseline_trust,
+                                c.members.iter().map(|m| m.did().clone()).collect(),
+                            )
+                        })
+                        .collect();
+                    self.registry
+                        .live_projection
+                        .sync_communities(community_data);
+                }
             }
         }
         true
