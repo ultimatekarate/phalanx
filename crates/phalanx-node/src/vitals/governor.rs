@@ -441,6 +441,12 @@ impl Homeostasis for SystemGovernor {
         self.with_state_mut(|s| s.e.record(1.0, self.config.lambda_entry));
     }
 
+    /// Eclipse remediation: inject a scaled impulse into the Sybil integral.
+    /// Eclipse is a topological Sybil signal — same integral, different input.
+    fn record_eclipse_impulse(&self, magnitude: f64) {
+        self.with_state_mut(|s| s.e.record(magnitude, self.config.lambda_entry));
+    }
+
     fn temporal_tolerance(&self) -> Duration {
         self.with_state(|s| {
             let base = self.config.base_temporal_drift;
