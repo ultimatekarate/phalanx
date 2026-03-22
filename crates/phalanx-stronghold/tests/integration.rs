@@ -6,6 +6,7 @@ use phalanx_proto::community::{
 use phalanx_proto::corroboration::{
     CorroborationProof, DeviceAttestation, EventWindow, PrnuProfile, SensorDivergence,
 };
+use phalanx_proto::crypto::{GrantPermissions, SealedLocator, SymmetricKey};
 use phalanx_proto::evidence::{
     DataPayload, Evidence, ForensicMetrics, StorageSequence, VideoShard, WitnessEnvelope,
 };
@@ -13,6 +14,12 @@ use phalanx_proto::identity::{Did, NetworkId, PhalanxIdentity, RecordingId};
 use phalanx_proto::time::PhalanxTimestamp;
 use phalanx_proto::trust::TrustLevel;
 
+use phalanx_forensics::cryptography::grant::GrantAuthority;
+use phalanx_forensics::judge::{JudgeExt, PayloadCipher};
+use phalanx_forensics::witness::WitnessAuthority;
+
+use phalanx_stronghold::config::CorroborationConfig;
+use phalanx_stronghold::ops::corroborate::run_corroboration;
 use phalanx_stronghold::persistence::evidence_store::EvidenceStore;
 use phalanx_stronghold::persistence::proof_store::ProofStore;
 
@@ -389,4 +396,245 @@ async fn community_isolation() {
     let recording_b = store.read_recording(&community_b, &rec_b).await.unwrap();
     assert_eq!(recording_a.artifacts.len(), 3);
     assert_eq!(recording_b.artifacts.len(), 2);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Test 6: End-to-end corroboration pipeline
+//
+// Exercises: signed+encrypted envelopes → EvidenceStore → grant-based
+// decryption → Corroboration Gate → signed proof verification.
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Build a signed, encrypted WitnessEnvelope for a single video frame.
+fn make_signed_encrypted_envelope(
+    seq: u32,
+    recording_id: &RecordingId,
+    identity: &PhalanxIdentity,
+    recording_key: &SymmetricKey,
+    base_prnu: f32,
+    base_timestamp_ms: u64,
+) -> WitnessEnvelope {
+    // 1. Build a VideoShard with cleartext payload
+    let mut shard = VideoShard {
+        timestamp: PhalanxTimestamp(base_timestamp_ms + seq as u64 * 33),
+        sequence_id: StorageSequence(seq),
+        fps: phalanx_proto::types::Fps::new(30),
+        recording_id: recording_id.clone(),
+        payload: DataPayload::Clear(vec![0xCAu8; 100]),
+        lens_metrics: ForensicMetrics {
+            prnu_var: base_prnu + (seq as f32 * 0.1),
+            h_energy: 5.0,
+            v_energy: 3.0,
+            mean_luminance: 128.0,
+        },
+    };
+
+    // 2. Encrypt the payload BEFORE signing (phone capture flow)
+    shard
+        .payload
+        .apply_encryption(recording_key)
+        .expect("payload encryption failed");
+
+    // 3. Sign the encrypted evidence
+    let prev_hash = None;
+    let peer_id = identity.network_id.clone();
+    WitnessEnvelope::sign_envelope(Evidence::Video(shard), identity, peer_id, prev_hash)
+        .expect("envelope signing failed")
+}
+
+#[tokio::test]
+async fn end_to_end_corroboration() {
+    // ── 1. Create identities ─────────────────────────────────────────
+    let alice_id = PhalanxIdentity::new_ephemeral();
+    let bob_id = PhalanxIdentity::new_ephemeral();
+    let stronghold_id = PhalanxIdentity::new_ephemeral();
+
+    // ── 2. Create a community with real vouch signatures ─────────────
+    let community = make_community_with_real_vouches(
+        42,
+        &[&alice_id, &bob_id],
+        &[&alice_id, &bob_id],
+        "Corroboration Test Community",
+    );
+    let community_id = community.fingerprint;
+
+    // ── 3. Create signed, encrypted video envelopes ──────────────────
+    let alice_key = SymmetricKey([0x11u8; 32]);
+    let bob_key = SymmetricKey([0x22u8; 32]);
+
+    let alice_rec_id = RecordingId::new("rec-alice-e2e");
+    let bob_rec_id = RecordingId::new("rec-bob-e2e");
+
+    let frame_count = 30u32;
+    // Alice: prnu_var baseline 150.0, starts at 1000ms
+    // Bob:   prnu_var baseline 220.0, starts at 1100ms — overlapping timestamps
+    let alice_envelopes: Vec<WitnessEnvelope> = (0..frame_count)
+        .map(|seq| {
+            make_signed_encrypted_envelope(seq, &alice_rec_id, &alice_id, &alice_key, 150.0, 1000)
+        })
+        .collect();
+
+    let bob_envelopes: Vec<WitnessEnvelope> = (0..frame_count)
+        .map(|seq| make_signed_encrypted_envelope(seq, &bob_rec_id, &bob_id, &bob_key, 220.0, 1100))
+        .collect();
+
+    // Verify that payloads are actually encrypted
+    match &alice_envelopes[0].evidence {
+        Evidence::Video(s) => assert!(
+            matches!(s.payload, DataPayload::Encrypted { .. }),
+            "Alice's payload should be encrypted"
+        ),
+        _ => panic!("Expected Video evidence"),
+    }
+
+    // ── 4. Store envelopes in EvidenceStore ──────────────────────────
+    let dir = tempdir().unwrap();
+    let evidence_store = EvidenceStore::new(dir.path().to_path_buf());
+    let proof_store = ProofStore::new(dir.path().join("proofs"));
+
+    for env in &alice_envelopes {
+        evidence_store
+            .append_envelope(&community_id, &alice_rec_id, env)
+            .await
+            .unwrap();
+    }
+    for env in &bob_envelopes {
+        evidence_store
+            .append_envelope(&community_id, &bob_rec_id, env)
+            .await
+            .unwrap();
+    }
+
+    // Confirm both recordings are stored
+    let stored = evidence_store.list_recordings(&community_id).await.unwrap();
+    assert_eq!(stored.len(), 2, "Both recordings should be listed");
+
+    // ── 5. Create grant files ────────────────────────────────────────
+    //
+    // Each device seals its recording key for the Stronghold.
+    let alice_locator = SealedLocator::seal(
+        alice_rec_id.clone(),
+        alice_key.as_bytes(),
+        &alice_id,
+        stronghold_id.did.clone(),
+        GrantPermissions {
+            export: true,
+            playback: false,
+        },
+    )
+    .expect("Alice grant seal failed");
+
+    let bob_locator = SealedLocator::seal(
+        bob_rec_id.clone(),
+        bob_key.as_bytes(),
+        &bob_id,
+        stronghold_id.did.clone(),
+        GrantPermissions {
+            export: true,
+            playback: false,
+        },
+    )
+    .expect("Bob grant seal failed");
+
+    // Serialize grants with postcard and write to temp files
+    let grants_dir = dir.path().join("grants");
+    tokio::fs::create_dir_all(&grants_dir).await.unwrap();
+
+    let alice_grant_path = grants_dir.join("alice.grant");
+    let bob_grant_path = grants_dir.join("bob.grant");
+
+    let alice_grant_bytes =
+        postcard::to_allocvec(&alice_locator).expect("Alice grant serialization failed");
+    let bob_grant_bytes =
+        postcard::to_allocvec(&bob_locator).expect("Bob grant serialization failed");
+
+    tokio::fs::write(&alice_grant_path, &alice_grant_bytes)
+        .await
+        .unwrap();
+    tokio::fs::write(&bob_grant_path, &bob_grant_bytes)
+        .await
+        .unwrap();
+
+    // ── 6. Run corroboration ─────────────────────────────────────────
+    let config = CorroborationConfig {
+        min_overlap_ms: 100,
+        divergence_alpha: 0.05,
+        c2pa_cert_path: None,
+        c2pa_key_path: None,
+    };
+
+    let grant_paths = vec![alice_grant_path.clone(), bob_grant_path.clone()];
+    let recording_ids = vec![alice_rec_id.clone(), bob_rec_id.clone()];
+
+    let proof = run_corroboration(
+        &stronghold_id,
+        &evidence_store,
+        &proof_store,
+        &config,
+        &community_id,
+        &grant_paths,
+        &recording_ids,
+    )
+    .await
+    .expect("run_corroboration should succeed");
+
+    // ── 7. Verify the proof ──────────────────────────────────────────
+
+    // 7a. Attestation count: one per device
+    assert_eq!(
+        proof.attestations.len(),
+        2,
+        "Expected 2 attestations (Alice + Bob)"
+    );
+
+    // 7b. Divergence count: one pairwise comparison for 2 devices
+    assert_eq!(proof.divergences.len(), 1, "Expected 1 pairwise divergence");
+
+    // 7c. KS p-value < 0.05 (different sensors → statistically distinct PRNU)
+    assert!(
+        proof.divergences[0].p_value < 0.05,
+        "Different sensors should produce p < 0.05, got {}",
+        proof.divergences[0].p_value
+    );
+
+    // 7d. Producer DID matches the Stronghold identity
+    assert_eq!(
+        proof.producer_did, stronghold_id.did,
+        "Proof producer should be the Stronghold"
+    );
+
+    // 7e. Verify the proof signature with Ed25519
+    let stronghold_pubkey = stronghold_id.keypair.verifying_key().to_bytes();
+    let sig_valid = PhalanxIdentity::verify(
+        &stronghold_pubkey,
+        &proof.proof_hash,
+        &proof.producer_signature,
+    );
+    assert!(
+        sig_valid,
+        "Proof signature must verify against the Stronghold's public key"
+    );
+
+    // 7f. Verify proof_hash matches blake3 of the serialized proof body
+    let proof_body = (
+        &proof.event_window,
+        &proof.attestations,
+        &proof.divergences,
+        &proof.proximity_evidence,
+    );
+    let body_bytes = postcard::to_allocvec(&proof_body).expect("proof body serialization failed");
+    let expected_hash: [u8; 32] = blake3::hash(&body_bytes).into();
+    assert_eq!(
+        proof.proof_hash, expected_hash,
+        "proof_hash should match blake3 of the serialized proof body"
+    );
+
+    // 7g. Proof should be persisted — load it back from the ProofStore
+    let loaded = proof_store
+        .load_proof(&community_id, &proof.proof_hash)
+        .await
+        .expect("Proof should be loadable from ProofStore");
+    assert_eq!(loaded.proof_hash, proof.proof_hash);
+    assert_eq!(loaded.attestations.len(), 2);
+    assert_eq!(loaded.producer_did, stronghold_id.did);
 }

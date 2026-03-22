@@ -23,6 +23,7 @@ pub mod persistence {
     pub mod proof_store;
 }
 pub mod sentinel;
+pub mod swarm;
 
 pub use config::StrongholdConfig;
 pub use error::StrongholdError;

@@ -1,11 +1,25 @@
 // crates/phalanx-stronghold/src/bin/stronghold.rs
 //
-// Stronghold CLI entry point.
-//
-// Scaffolding: parses args and prints placeholders.
-// Real wiring comes after integration tests validate the core ops.
+// Stronghold CLI. Wires clap subcommands to the ops and persistence layers.
+// Identity is loaded from disk (argon2-encrypted) or generated on first run.
+
+use std::path::{Path, PathBuf};
+use std::process;
 
 use clap::{Parser, Subcommand};
+use tracing_subscriber::EnvFilter;
+
+use phalanx_proto::community::{Community, CommunityId};
+use phalanx_proto::identity::{PhalanxIdentity, RecordingId};
+use phalanx_stronghold::config::StrongholdConfig;
+use phalanx_stronghold::persistence::evidence_store::EvidenceStore;
+use phalanx_stronghold::persistence::proof_store::ProofStore;
+use phalanx_stronghold::sentinel::StrongholdDependencies;
+use phalanx_stronghold::swarm::{setup_stronghold_swarm, StrongholdIngress};
+use phalanx_transport::identity_ext::Libp2pExt;
+use phalanx_transport::prelude::Libp2pAdapter;
+
+// ── CLI Definition ──────────────────────────────────────────────────────
 
 #[derive(Parser)]
 #[command(
@@ -24,19 +38,19 @@ struct Cli {
 enum Commands {
     /// Start the Stronghold daemon (passive evidence collection).
     Run,
-    /// Import a community roster.
+    /// Import a community roster from a postcard file.
     ImportCommunity {
         #[arg(short, long)]
         file: String,
     },
-    /// List known communities.
+    /// List known communities (reads stored community files).
     Communities,
     /// List collected recordings for a community.
     Recordings {
         #[arg(short, long)]
         community: String,
     },
-    /// Run the Corroboration Gate.
+    /// Run the Corroboration Gate on a set of recordings.
     Corroborate {
         #[arg(short, long)]
         community: String,
@@ -45,7 +59,7 @@ enum Commands {
         #[arg(short, long, num_args = 2..)]
         recordings: Vec<String>,
     },
-    /// Export a proof as evidence files.
+    /// Export a proof and its evidence to disk.
     Export {
         #[arg(long)]
         community: String,
@@ -58,57 +72,59 @@ enum Commands {
     },
 }
 
+// ── Main ────────────────────────────────────────────────────────────────
+
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
     let cli = Cli::parse();
 
-    println!("Phalanx Stronghold — config: {}", cli.config);
+    if let Err(e) = run(cli).await {
+        eprintln!("Error: {e}");
+        process::exit(1);
+    }
+}
+
+async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config(&cli.config)?;
+    let vault_path = PathBuf::from(&config.storage.vault_path);
 
     match cli.command {
         Commands::Run => {
-            println!("Stronghold daemon starting...");
-            // TODO: Load config, initialize identity, wire up
-            // StrongholdSentinel, and run the aggregation loop.
-            println!("  (placeholder — daemon not yet wired)");
+            cmd_run(&config, &vault_path).await?;
         }
         Commands::ImportCommunity { file } => {
-            println!("Importing community roster from: {file}");
-            // TODO: Parse roster file, validate signatures, store in
-            // community manager.
+            cmd_import_community(&vault_path, &file).await?;
         }
         Commands::Communities => {
-            println!("Listing known communities...");
-            // TODO: Load community manager, list all communities.
+            cmd_list_communities(&vault_path).await?;
         }
         Commands::Recordings { community } => {
-            println!("Listing recordings for community: {community}");
-            // TODO: Load evidence store, list recordings for the
-            // specified community.
+            let cid = parse_community_id(&community)?;
+            cmd_list_recordings(&vault_path, &cid).await?;
         }
         Commands::Corroborate {
             community,
             grants,
             recordings,
         } => {
-            println!("Running Corroboration Gate:");
-            println!("  community: {community}");
-            println!("  grants:    {grants:?}");
-            println!("  recordings: {recordings:?}");
-            // TODO: Wire up run_corroboration() from ops::corroborate.
-            //
-            //   let config = load_config(&cli.config);
-            //   let identity = PhalanxIdentity::init(...)?;
-            //   let evidence_store = EvidenceStore::new(...);
-            //   let proof_store = ProofStore::new(...);
-            //   let community_id = parse_community_id(&community)?;
-            //   let grant_paths: Vec<PathBuf> = grants.iter().map(PathBuf::from).collect();
-            //   let recording_ids = parse_recording_ids(&recordings)?;
-            //   let proof = phalanx_stronghold::ops::corroborate::run_corroboration(
-            //       &identity, &evidence_store, &proof_store,
-            //       &config.corroboration, &community_id,
-            //       &grant_paths, &recording_ids,
-            //   ).await?;
-            //   println!("Proof hash: {:?}", proof.proof_hash);
+            let identity = load_identity(&vault_path)?;
+            let cid = parse_community_id(&community)?;
+            let grant_paths: Vec<PathBuf> = grants.iter().map(PathBuf::from).collect();
+            let recording_ids: Vec<RecordingId> =
+                recordings.iter().map(RecordingId::new).collect();
+            cmd_corroborate(
+                &identity,
+                &vault_path,
+                &config,
+                &cid,
+                &grant_paths,
+                &recording_ids,
+            )
+            .await?;
         }
         Commands::Export {
             community,
@@ -116,27 +132,376 @@ async fn main() {
             grants,
             output,
         } => {
-            println!("Exporting proof as evidence files:");
-            println!("  community: {community}");
-            println!("  proof:     {proof}");
-            println!("  grants:    {grants:?}");
-            println!("  output:    {output}");
-            // TODO: Wire up run_export() from ops::export.
-            //
-            //   let config = load_config(&cli.config);
-            //   let identity = PhalanxIdentity::init(...)?;
-            //   let evidence_store = EvidenceStore::new(...);
-            //   let proof_store = ProofStore::new(...);
-            //   let community_id = parse_community_id(&community)?;
-            //   let proof_hash = parse_hex_hash(&proof)?;
-            //   let grant_paths: Vec<PathBuf> = grants.iter().map(PathBuf::from).collect();
-            //   let output_dir = PathBuf::from(&output);
-            //   let files = phalanx_stronghold::ops::export::run_export(
-            //       &identity, &evidence_store, &proof_store,
-            //       &config.corroboration, &community_id,
-            //       &proof_hash, &grant_paths, &output_dir,
-            //   ).await?;
-            //   println!("Exported {} files to {}", files.len(), output);
+            let identity = load_identity(&vault_path)?;
+            let cid = parse_community_id(&community)?;
+            let proof_hash = parse_hex_hash(&proof)?;
+            let grant_paths: Vec<PathBuf> = grants.iter().map(PathBuf::from).collect();
+            let output_dir = PathBuf::from(&output);
+            cmd_export(
+                &identity,
+                &vault_path,
+                &config,
+                &cid,
+                &proof_hash,
+                &grant_paths,
+                &output_dir,
+            )
+            .await?;
         }
     }
+
+    Ok(())
+}
+
+// ── Command Implementations ─────────────────────────────────────────────
+
+async fn cmd_run(
+    config: &StrongholdConfig,
+    vault_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let identity = load_identity(vault_path)?;
+    let network_keypair = identity.to_libp2p_keypair();
+
+    eprintln!("Stronghold daemon starting...");
+    eprintln!("  DID: {}", identity.did);
+
+    // Set up the libp2p swarm with MemoryStore DHT
+    let swarm = setup_stronghold_swarm(network_keypair, &config.network)?;
+
+    // Wrap in Libp2pAdapter → extract ingress
+    let adapter = Libp2pAdapter::new(swarm);
+    let ingress = StrongholdIngress::from_adapter(&adapter);
+
+    // Construct stores
+    let evidence_store = EvidenceStore::new(vault_path.to_path_buf());
+
+    // Build and run the sentinel
+    let deps = StrongholdDependencies {
+        config: config.clone(),
+        identity,
+        ingress,
+        evidence_store,
+    };
+
+    let mut sentinel = phalanx_stronghold::StrongholdSentinel::new(deps);
+
+    // Shutdown handler
+    ctrlc::set_handler(move || {
+        eprintln!("\nStronghold: shutdown initiated...");
+        std::process::exit(0);
+    })
+    .map_err(|e| format!("Failed to set Ctrl-C handler: {e}"))?;
+
+    eprintln!("Stronghold daemon online — listening for shards");
+    sentinel.run().await;
+
+    Ok(())
+}
+
+async fn cmd_import_community(
+    vault_path: &Path,
+    file: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = tokio::fs::read(file).await?;
+    let community: Community = postcard::from_bytes(&bytes)
+        .map_err(|e| format!("Failed to deserialize community file: {e}"))?;
+
+    let community_id = community.fingerprint;
+
+    // Store the community roster to disk for later use
+    let communities_dir = vault_path.join("communities");
+    tokio::fs::create_dir_all(&communities_dir).await?;
+    let out_path = communities_dir.join(format!("{}.community.bin", hex_encode(&community_id.0)));
+    tokio::fs::write(&out_path, &bytes).await?;
+
+    println!("Imported community: {}", community.name);
+    println!("  ID:      {}", hex_encode(&community_id.0));
+    println!("  Members: {}", community.members.len());
+    println!("  Stored:  {}", out_path.display());
+    Ok(())
+}
+
+async fn cmd_list_communities(vault_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let communities_dir = vault_path.join("communities");
+    if !communities_dir.exists() {
+        println!("No communities imported yet.");
+        return Ok(());
+    }
+
+    let mut entries = tokio::fs::read_dir(&communities_dir).await?;
+    let mut count = 0u32;
+
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("bin") {
+            continue;
+        }
+
+        let bytes = tokio::fs::read(&path).await?;
+        if let Ok(community) = postcard::from_bytes::<Community>(&bytes) {
+            println!(
+                "  {} — {} ({} members)",
+                hex_encode(&community.fingerprint.0),
+                community.name,
+                community.members.len(),
+            );
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        println!("No communities imported yet.");
+    } else {
+        println!("{count} community(ies) found.");
+    }
+    Ok(())
+}
+
+async fn cmd_list_recordings(
+    vault_path: &Path,
+    community_id: &CommunityId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let evidence_store = EvidenceStore::new(vault_path.to_path_buf());
+    let recordings = evidence_store.list_recordings(community_id).await?;
+
+    if recordings.is_empty() {
+        println!(
+            "No recordings for community {}.",
+            hex_encode(&community_id.0)
+        );
+        return Ok(());
+    }
+
+    for rid in &recordings {
+        let rec = evidence_store.read_recording(community_id, rid).await?;
+        let status = if rec.is_complete { "complete" } else { "gaps" };
+        println!(
+            "  {} — {} artifacts, {}",
+            rid.as_str(),
+            rec.artifacts.len(),
+            status,
+        );
+    }
+
+    println!("{} recording(s) found.", recordings.len());
+    Ok(())
+}
+
+async fn cmd_corroborate(
+    identity: &PhalanxIdentity,
+    vault_path: &Path,
+    config: &StrongholdConfig,
+    community_id: &CommunityId,
+    grant_paths: &[PathBuf],
+    recording_ids: &[RecordingId],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let evidence_store = EvidenceStore::new(vault_path.to_path_buf());
+    let proof_store = ProofStore::new(vault_path.to_path_buf());
+
+    let proof = phalanx_stronghold::ops::corroborate::run_corroboration(
+        identity,
+        &evidence_store,
+        &proof_store,
+        &config.corroboration,
+        community_id,
+        grant_paths,
+        recording_ids,
+    )
+    .await
+    .map_err(|e| format!("Corroboration failed: {e}"))?;
+
+    println!("Corroboration proof produced:");
+    println!("  Proof hash:    {}", hex_encode(&proof.proof_hash));
+    println!("  Attestations:  {}", proof.attestations.len());
+    println!("  Divergences:   {}", proof.divergences.len());
+    println!("  Proximity:     {}", proof.proximity_evidence.len());
+    println!("  Producer DID:  {}", proof.producer_did);
+    Ok(())
+}
+
+async fn cmd_export(
+    identity: &PhalanxIdentity,
+    vault_path: &Path,
+    config: &StrongholdConfig,
+    community_id: &CommunityId,
+    proof_hash: &[u8; 32],
+    grant_paths: &[PathBuf],
+    output_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let evidence_store = EvidenceStore::new(vault_path.to_path_buf());
+    let proof_store = ProofStore::new(vault_path.to_path_buf());
+
+    let files = phalanx_stronghold::ops::export::run_export(
+        identity,
+        &evidence_store,
+        &proof_store,
+        &config.corroboration,
+        community_id,
+        proof_hash,
+        grant_paths,
+        output_dir,
+    )
+    .await
+    .map_err(|e| format!("Export failed: {e}"))?;
+
+    println!(
+        "Exported {} file(s) to {}:",
+        files.len(),
+        output_dir.display()
+    );
+    for f in &files {
+        println!("  {}", f.display());
+    }
+    Ok(())
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────
+
+fn load_config(path: &str) -> Result<StrongholdConfig, Box<dyn std::error::Error>> {
+    if !Path::new(path).exists() {
+        eprintln!("Config file {path} not found, using defaults.");
+        return Ok(StrongholdConfig::default());
+    }
+
+    let text = std::fs::read_to_string(path)?;
+    let config: StrongholdConfig =
+        toml::from_str(&text).map_err(|e| format!("Failed to parse config {path}: {e}"))?;
+    Ok(config)
+}
+
+/// Load or generate the Stronghold's identity.
+///
+/// Uses argon2 key derivation + XChaCha20-Poly1305 encryption for disk persistence.
+/// Passphrase from PHALANX_IDENTITY_PASSPHRASE env var.
+fn load_identity(vault_path: &Path) -> Result<PhalanxIdentity, Box<dyn std::error::Error>> {
+    use argon2::Argon2;
+    use ed25519_dalek::SigningKey;
+    use phalanx_proto::identity::{Did, NetworkId};
+    use rand_core::{OsRng, RngCore};
+    use zeroize::Zeroize;
+
+    let passphrase = std::env::var("PHALANX_IDENTITY_PASSPHRASE")
+        .map_err(|_| "PHALANX_IDENTITY_PASSPHRASE not set. Export it before running.")?;
+
+    let identity_path = vault_path.join("stronghold_identity.bin");
+
+    if identity_path.exists() {
+        // Load existing identity
+        let file_bytes = std::fs::read(&identity_path)?;
+        if file_bytes.len() < 40 {
+            return Err("Identity file corrupted: too short".into());
+        }
+
+        let (salt, rest) = file_bytes.split_at(16);
+        let (_nonce, ciphertext) = rest.split_at(24);
+
+        let mut key_bytes = [0u8; 32];
+        Argon2::default()
+            .hash_password_into(passphrase.as_bytes(), salt, &mut key_bytes)
+            .map_err(|e| format!("Argon2 failed: {e}"))?;
+
+        let key = phalanx_proto::crypto::SymmetricKey(key_bytes);
+        let nonce_arr: [u8; 24] = rest[..24].try_into().map_err(|_| "bad nonce")?;
+        let plaintext =
+            phalanx_forensics::cryptography::decrypt_bytes(&key, &nonce_arr, ciphertext)
+                .map_err(|_| "Failed to decrypt identity. Wrong passphrase?")?;
+
+        key_bytes.zeroize();
+
+        // Deserialize: [32-byte keypair_bytes][rest is DID string]
+        if plaintext.len() < 32 {
+            return Err("Decrypted identity too short".into());
+        }
+        let keypair_bytes: [u8; 32] = plaintext[..32].try_into().map_err(|_| "bad key")?;
+        let signing_key = SigningKey::from_bytes(&keypair_bytes);
+        let public_key_bytes = signing_key.verifying_key().to_bytes();
+
+        let identity = PhalanxIdentity {
+            version: 1,
+            did: Did::derive_did_key(&public_key_bytes),
+            network_id: NetworkId::random(),
+            keypair: signing_key,
+        };
+
+        eprintln!("Identity loaded: {}", identity.did);
+        Ok(identity)
+    } else {
+        // Generate new identity
+        let identity = PhalanxIdentity::new_ephemeral();
+
+        // Serialize: just the 32-byte secret key
+        let plaintext = identity.keypair.to_bytes().to_vec();
+
+        let mut salt = [0u8; 16];
+        OsRng.fill_bytes(&mut salt);
+
+        let mut key_bytes = [0u8; 32];
+        Argon2::default()
+            .hash_password_into(passphrase.as_bytes(), &salt, &mut key_bytes)
+            .map_err(|e| format!("Argon2 failed: {e}"))?;
+
+        let key = phalanx_proto::crypto::SymmetricKey(key_bytes);
+        let encrypted = phalanx_forensics::cryptography::encrypt_bytes(&key, &plaintext)
+            .map_err(|e| format!("Encryption failed: {e}"))?;
+
+        key_bytes.zeroize();
+
+        // File format: [16-byte salt][24-byte nonce][ciphertext]
+        let mut file_bytes = Vec::with_capacity(16 + encrypted.0.len());
+        file_bytes.extend_from_slice(&salt);
+        file_bytes.extend_from_slice(&encrypted.0);
+
+        std::fs::create_dir_all(vault_path)?;
+        std::fs::write(&identity_path, &file_bytes)?;
+
+        eprintln!("New identity generated: {}", identity.did);
+        eprintln!("Saved to: {}", identity_path.display());
+        Ok(identity)
+    }
+}
+
+/// Parse a 64-char hex string into CommunityId.
+fn parse_community_id(hex: &str) -> Result<CommunityId, Box<dyn std::error::Error>> {
+    let bytes = parse_hex_bytes(hex)?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "Community ID must be 32 bytes (64 hex chars), got {}",
+            bytes.len()
+        )
+        .into());
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(CommunityId(arr))
+}
+
+/// Parse a 64-char hex string into [u8; 32].
+fn parse_hex_hash(hex: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    let bytes = parse_hex_bytes(hex)?;
+    if bytes.len() != 32 {
+        return Err(format!("Hash must be 32 bytes (64 hex chars), got {}", bytes.len()).into());
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
+fn parse_hex_bytes(hex: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if !hex.len().is_multiple_of(2) {
+        return Err("Hex string must have even length".into());
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for i in (0..hex.len()).step_by(2) {
+        let byte_str = hex.get(i..i + 2).ok_or("Invalid hex")?;
+        bytes.push(u8::from_str_radix(byte_str, 16)?);
+    }
+    Ok(bytes)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }

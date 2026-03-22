@@ -13,6 +13,7 @@ use std::time::Duration;
 use phalanx_forensics::bloom::RotatingBloomFilter;
 use phalanx_forensics::crucible::{Crucible, RecordingAmalgam};
 use phalanx_forensics::reassembler::ShardMold;
+use phalanx_forensics::witness::WitnessAuthority;
 use phalanx_proto::community::CommunityId;
 use phalanx_proto::corroboration::ProximityWitness;
 use phalanx_proto::evidence::{Evidence, Recording, WitnessEnvelope};
@@ -221,14 +222,16 @@ impl AggregationActor {
             .sum();
         self.governor.record_memory_pressure(buffer_bytes);
 
-        // 6. Signature verification placeholder.
-        // Full verification requires public key derivation from DID which is
-        // complex — log intent and proceed. The Crucible's deserialization gate
-        // already validates structural integrity.
-        debug!(
-            did = %envelope.did,
-            "AggregationActor: envelope decoded, signature verification deferred"
-        );
+        // 6. Signature verification via WitnessAuthority::verify_envelope().
+        // DID → Ed25519 public key → verify_strict over serialized evidence.
+        // This is the verify-don't-trust principle from the design (Q3).
+        if !envelope.verify_envelope() {
+            warn!(
+                did = %envelope.did,
+                "AggregationActor: envelope signature verification failed, dropping"
+            );
+            return;
+        }
 
         // 7. Feed into recording_crucible.
         let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(envelope.clone());
