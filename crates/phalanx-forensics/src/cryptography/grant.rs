@@ -4,7 +4,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
-use phalanx_proto::crypto::{CryptoError, SealedLocator};
+use phalanx_proto::crypto::{CryptoError, GrantPermissions, SealedLocator};
 use phalanx_proto::prelude::*;
 use rand_core::OsRng;
 use rand_core::RngCore;
@@ -19,6 +19,7 @@ pub trait GrantAuthority {
         key: &[u8; 32],
         sender: &PhalanxIdentity,
         recipient_did: Did,
+        permissions: GrantPermissions,
     ) -> Result<SealedLocator, CryptoError>;
 
     /// Attempts to recover the symmetric key using the local node's identity.
@@ -31,6 +32,7 @@ impl GrantAuthority for SealedLocator {
         key: &[u8; 32],
         sender: &PhalanxIdentity,
         recipient_did: Did,
+        permissions: GrantPermissions,
     ) -> Result<Self, CryptoError> {
         // Resolve Recipient Public Key and convert to X25519 for encryption
         let recipient_ed = resolve_did_pk(&recipient_did)?;
@@ -49,13 +51,19 @@ impl GrantAuthority for SealedLocator {
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = XNonce::from_slice(&nonce_bytes);
 
-        // Include Sender DID in Authenticated Associated Data (AAD) to prevent spoofing
+        // Build AAD: sender DID + serialized permissions.
+        // Including permissions in AAD prevents MITM from flipping export:false to export:true.
+        let permissions_bytes =
+            postcard::to_allocvec(&permissions).map_err(|_| CryptoError::EncryptionFailure)?;
+        let mut aad = sender.did.as_ref().as_bytes().to_vec();
+        aad.extend_from_slice(&permissions_bytes);
+
         let ciphertext = cipher
             .encrypt(
                 nonce,
                 Payload {
                     msg: key,
-                    aad: sender.did.as_ref().as_bytes(),
+                    aad: &aad,
                 },
             )
             .map_err(|_| CryptoError::EncryptionFailure)?;
@@ -66,6 +74,7 @@ impl GrantAuthority for SealedLocator {
             sender: sender.did.clone(),
             sealed_key: ciphertext,
             nonce: nonce_bytes.to_vec(),
+            permissions,
         })
     }
 
@@ -86,7 +95,13 @@ impl GrantAuthority for SealedLocator {
         // Re-derive the identical Shared Secret (ECDH)
         let shared_secret = my_x.diffie_hellman(&sender_pub);
 
-        // Decrypt and Verify Integrity
+        // Rebuild AAD: sender DID + serialized permissions (must match seal).
+        let permissions_bytes =
+            postcard::to_allocvec(&self.permissions).map_err(|_| CryptoError::DecryptionFailure)?;
+        let mut aad = self.sender.as_ref().as_bytes().to_vec();
+        aad.extend_from_slice(&permissions_bytes);
+
+        // Decrypt and Verify Integrity (AAD mismatch = tampered permissions)
         let cipher = XChaCha20Poly1305::new(shared_secret.as_bytes().into());
         let nonce = XNonce::from_slice(&self.nonce);
 
@@ -95,7 +110,7 @@ impl GrantAuthority for SealedLocator {
                 nonce,
                 Payload {
                     msg: &self.sealed_key,
-                    aad: self.sender.as_ref().as_bytes(),
+                    aad: &aad,
                 },
             )
             .map_err(|_| CryptoError::DecryptionFailure)?;
@@ -133,6 +148,7 @@ mod tests {
             &recording_key,
             &sender,
             recipient.did.clone(),
+            GrantPermissions::default(),
         )
         .expect("Failed to create sealed locator");
 
@@ -158,6 +174,7 @@ mod tests {
             &[0xAA; 32],
             &sender,
             recipient.did.clone(),
+            GrantPermissions::default(),
         )
         .unwrap();
 
@@ -176,6 +193,7 @@ mod tests {
             &[0xBB; 32],
             &sender,
             recipient.did.clone(),
+            GrantPermissions::default(),
         )
         .unwrap();
 
@@ -200,6 +218,7 @@ mod tests {
             &[0u8; 32],
             &sender,
             recipient.did.clone(),
+            GrantPermissions::default(),
         )
         .unwrap();
 

@@ -105,6 +105,13 @@ pub struct MeshSentinel<I: IngressPort> {
     topology_gate: TopologyGate,
     eclipse_probe: EclipseProbe,
     reputation: ReputationProjection,
+
+    /// Active recording ID, if any. Set by FFI when recording starts, cleared on stop.
+    /// Used to capture ProximityWitness entries when LocalMesh peers are discovered.
+    pub active_recording_id: Option<RecordingId>,
+    /// Proximity witnesses captured during the current recording.
+    /// Flushed to the evidence pipeline when the recording ends.
+    pub proximity_witnesses: Vec<phalanx_proto::corroboration::ProximityWitness>,
 }
 
 impl<I: IngressPort> MeshSentinel<I> {
@@ -308,6 +315,8 @@ impl<I: IngressPort> MeshSentinel<I> {
             ),
             eclipse_probe: EclipseProbe::new(6), // 6 snapshots × 5min = 30min window
             reputation: reputation_projection.clone(),
+            active_recording_id: None,
+            proximity_witnesses: Vec::new(),
         })
     }
 
@@ -502,6 +511,24 @@ impl<I: IngressPort> MeshSentinel<I> {
                         // Admission succeeded — preserve existing behavior.
                         self.system_governor.record_peer_discovery(source);
                         self.system_governor.record_connection_gauge();
+
+                        // ProximityWitness capture: if we're recording and this is LocalMesh,
+                        // log the co-location event for the Corroboration Gate.
+                        if transport == TransportClass::LocalMesh {
+                            if let Some(ref rec_id) = self.active_recording_id {
+                                self.proximity_witnesses.push(
+                                    phalanx_proto::corroboration::ProximityWitness {
+                                        local_did: self.identity.did.clone(),
+                                        remote_did: phalanx_proto::identity::Did::new(
+                                            peer.0.clone(),
+                                        ),
+                                        recording_id: rec_id.clone(),
+                                        observed_at: phalanx_proto::time::PhalanxTimestamp::now(),
+                                        transport,
+                                    },
+                                );
+                            }
+                        }
 
                         if let Some(evicted_peer) = evicted {
                             tracing::debug!(

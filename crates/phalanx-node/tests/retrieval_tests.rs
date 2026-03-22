@@ -65,6 +65,7 @@ fn make_fake_request() -> RecordingRequest {
             sender: Did::new("did:key:z6MkSender"),
             sealed_key: vec![0u8; 48],
             nonce: vec![0u8; 24],
+            permissions: phalanx_proto::crypto::GrantPermissions::default(),
         },
         signature: vec![0u8; 64], // Invalid signature
     }

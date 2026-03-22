@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
+
 use crate::evidence::WitnessEnvelope;
-use crate::identity::RecordingId;
+use crate::identity::{Did, RecordingId};
 use crate::prelude::{MeshTopic, NetworkId};
 use crate::retrieval::RecordingRequest;
 use crate::telemetry::DiscoverySource;
@@ -47,4 +49,25 @@ pub enum NetworkEvent {
         peer: NetworkId,
     },
     Shutdown,
+}
+
+// ── BLE Mutual Authentication ───────────────────────────────────────────
+
+/// BLE challenge: "I am A, prove you're B."
+/// Sent as the first message in the 4-message handshake.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BleChallenge {
+    pub sender_did: Did,
+    /// 32-byte random nonce for replay protection.
+    pub nonce: [u8; 32],
+}
+
+/// BLE response: "I am B, here's proof."
+/// Ed25519 signature over (responder_did || challenger_did || challenge_nonce).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BleResponse {
+    pub responder_did: Did,
+    /// Ed25519 signature proving DID ownership.
+    /// Covers: (responder_did || challenger_did || challenge_nonce).
+    pub signature: Vec<u8>,
 }
