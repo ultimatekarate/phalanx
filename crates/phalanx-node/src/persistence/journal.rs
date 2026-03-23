@@ -58,7 +58,10 @@ impl TransientJournal for FileJournal {
     }
 
     async fn sync(&mut self) -> Result<(), ShardError> {
-        Ok(self.handle.sync_all().await?)
+        self.handle
+            .sync_all()
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))
     }
 
     async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {

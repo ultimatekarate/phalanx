@@ -19,17 +19,15 @@ use phalanx_node::actors::trust_actor::TrustCommand;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::network::bridge::Libp2pBridge;
-use phalanx_node::network::orchestrator::setup_phalanx_swarm;
+use phalanx_node::network::orchestrator::setup_transport;
 use phalanx_node::persistence::vault::{derive_vault_key, load_or_create_vault_salt};
 use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::{HomeostaticConfig, SystemGovernor, ThermalThresholds};
 use phalanx_node::{FileJournal, MeshSentinel};
 use phalanx_proto::evidence::{AudioShard, VideoShard};
 use phalanx_proto::network::NetworkEvent;
-use phalanx_proto::prelude::{PhalanxIdentity, PhalanxPhysics};
+use phalanx_proto::prelude::PhalanxIdentity;
 use phalanx_transport::adapters::local_mesh::{LocalMeshAdapter, OutboundLocalPacket};
-use phalanx_transport::identity_ext::Libp2pExt;
-use phalanx_transport::prelude::Libp2pAdapter;
 
 use std::ffi::CStr;
 use std::os::raw::c_char;
@@ -174,8 +172,6 @@ async fn bootstrap(
     storage_path: &str,
     passphrase: &str,
 ) -> Result<PhalanxHandle, PhalanxError> {
-    let physics = PhalanxPhysics::default_wan();
-
     // Identity
     let identity_path = Path::new(storage_path).join("identity.bin");
     let identity =
@@ -208,18 +204,15 @@ async fn bootstrap(
     ));
 
     // Network
-    let network_keypair = identity.to_libp2p_keypair();
-    let swarm = setup_phalanx_swarm(
-        network_keypair,
+    let (adapter, receiver) = setup_transport(
+        &identity,
         &config,
-        &physics,
         None, // PSK: None for public swarm on mobile (can be extended later)
         Arc::new(reputation_projection) as Arc<dyn PeerEvaluator>,
     )
     .map_err(|_| PhalanxError::BootFailed)?;
 
-    let adapter = Libp2pAdapter::new(swarm);
-    let bridge = Libp2pBridge::new(adapter);
+    let bridge = Libp2pBridge::new(adapter, receiver);
     let (ingress, egress) = bridge.split();
 
     // Local mesh adapter — channel bridge for BLE/WiFi Direct via Flutter FFI

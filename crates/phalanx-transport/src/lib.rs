@@ -21,7 +21,10 @@ pub mod adapters {
 pub mod behaviour;
 pub mod builder;
 pub mod codec;
+pub mod config;
+pub mod dht;
 pub mod events;
+pub mod factory;
 pub mod identity_ext;
 pub mod io;
 pub mod kademlia;
@@ -259,6 +262,8 @@ pub mod prelude {
     pub use crate::adapters::quic::{
         QuicAdapter, QuicClientConfig, QuicEgress, QuicIngress, QuicServerConfig,
     };
+    pub use crate::config::MeshTransportConfig;
+    pub use crate::factory::{build_mesh_transport, build_mesh_transport_with_store};
     pub use crate::identity_ext::Libp2pExt;
     pub use crate::EgressPort;
     pub use crate::IngressPort;

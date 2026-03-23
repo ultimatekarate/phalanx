@@ -1,10 +1,11 @@
-use libp2p::kad::store::{Error, RecordStore, Result};
-use libp2p::kad::{ProviderRecord, Record, RecordKey};
-use libp2p::PeerId;
 use phalanx_forensics::kademlia::*;
 use phalanx_forensics::trust::PeerEvaluator;
 use phalanx_proto::kademlia::DhtProviderSet;
 use phalanx_proto::prelude::*;
+use phalanx_transport::dht::{
+    PeerId, ProviderRecord, Record, RecordKey, RecordStore, StoreError as Error,
+    StoreResult as Result,
+};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use std::borrow::Cow;
 use std::path::Path;
@@ -20,7 +21,7 @@ const DHT_PROVIDERS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new(
 pub struct DhtRecordKey(Vec<u8>);
 
 impl DhtRecordKey {
-    pub fn new(key: &libp2p::kad::RecordKey) -> Self {
+    pub fn new(key: &RecordKey) -> Self {
         Self(key.as_ref().to_vec())
     }
 

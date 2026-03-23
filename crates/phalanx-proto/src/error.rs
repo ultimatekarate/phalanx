@@ -23,12 +23,6 @@ pub enum ShardError {
     InvalidSize(String),
 }
 
-impl From<std::io::Error> for ShardError {
-    fn from(e: std::io::Error) -> Self {
-        ShardError::Io(e.to_string())
-    }
-}
-
 impl From<postcard::Error> for ShardError {
     fn from(e: postcard::Error) -> Self {
         ShardError::SerializationError(e.to_string())

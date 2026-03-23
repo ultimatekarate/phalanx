@@ -1,15 +1,17 @@
-use libp2p::pnet::PreSharedKey;
 use std::fs;
 use std::path::Path;
 
-/// Reads and validates a libp2p Pre-Shared Key (PSK) from the filesystem.
-pub fn load_swarm_key(path: &Path) -> Option<PreSharedKey> {
+/// Reads and validates a Pre-Shared Key (PSK) from the filesystem.
+///
+/// Returns raw 32-byte key. The transport factory wraps it in the
+/// wire-level PreSharedKey type internally.
+pub fn load_swarm_key(path: &Path) -> Option<[u8; 32]> {
     match fs::read(path) {
         Ok(bytes) => {
             if bytes.len() == 32 {
                 let mut psk_bytes = [0u8; 32];
                 psk_bytes.copy_from_slice(&bytes);
-                Some(PreSharedKey::new(psk_bytes))
+                Some(psk_bytes)
             } else {
                 tracing::error!(
                     target: "phalanx_node::security",
