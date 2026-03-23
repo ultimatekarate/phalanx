@@ -22,7 +22,18 @@ impl PhalanxTimestamp {
         Self(millis)
     }
 
-    pub fn now() -> Self {
+    /// Returns the current wall-clock timestamp.
+    ///
+    /// # Visibility: `pub(crate)`
+    ///
+    /// If the OS clock is catastrophically broken (goes backward), this panics.
+    /// Phalanx cannot solve a broken OS clock. All security-critical paths go
+    /// through `TrustedClockTrait`, which is enforced at compile time by this
+    /// visibility restriction. Code outside proto must use `SystemClock` (for
+    /// non-critical timestamps) or a `TrustedClockTrait` implementor (for
+    /// security-critical timestamps, e.g., the NTP-corrected `TrustedClock`
+    /// in phalanx-node).
+    pub(crate) fn now() -> Self {
         let millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("System clock went backwards")

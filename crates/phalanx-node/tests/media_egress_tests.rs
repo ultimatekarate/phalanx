@@ -4,6 +4,7 @@
 // topic routing, hash chain continuity, WAL retry, storage pressure feedback.
 
 use phalanx_node::actors::media_egress::{MediaEgressActor, MediaEgressConfig};
+use phalanx_node::clock::TrustedClock;
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{AudioShard, VideoShard};
@@ -103,6 +104,7 @@ async fn build_media_egress<E: EgressPort + 'static>(
         system_governor: gov,
         max_storage_bytes: 100_000_000,
         vault_key: SymmetricKey([0u8; 32]),
+        clock: Arc::new(TrustedClock::new()),
     };
 
     let actor = MediaEgressActor::new(egress, identity, local_id, config)
@@ -119,7 +121,7 @@ async fn build_media_egress<E: EgressPort + 'static>(
 fn make_video_shard(payload_bytes: usize) -> VideoShard {
     VideoShard {
         payload: DataPayload::Clear(vec![0xAB; payload_bytes]),
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: PhalanxTimestamp::from_millis(1_700_000_000_000),
         ..Default::default()
     }
 }
@@ -127,7 +129,7 @@ fn make_video_shard(payload_bytes: usize) -> VideoShard {
 fn make_audio_shard(payload_bytes: usize) -> AudioShard {
     AudioShard {
         payload: DataPayload::Clear(vec![0xCD; payload_bytes]),
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: PhalanxTimestamp::from_millis(1_700_000_000_000),
         ..Default::default()
     }
 }

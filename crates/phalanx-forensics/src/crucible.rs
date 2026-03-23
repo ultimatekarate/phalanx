@@ -46,7 +46,7 @@ impl EnvelopeHashExt for WitnessEnvelope {
 pub trait EvidenceExt {
     fn recording_id(&self) -> &RecordingId;
     fn sequence_id(&self) -> StorageSequence;
-    fn timestamp(&self) -> PhalanxTimestamp;
+    fn timestamp(&self, fallback: PhalanxTimestamp) -> PhalanxTimestamp;
 }
 
 impl EvidenceExt for Evidence {
@@ -68,12 +68,14 @@ impl EvidenceExt for Evidence {
             Evidence::Proximity(_) => StorageSequence(u32::MAX), // metadata, not a frame
         }
     }
-    fn timestamp(&self) -> PhalanxTimestamp {
+    fn timestamp(&self, fallback: PhalanxTimestamp) -> PhalanxTimestamp {
         match self {
             Evidence::Video(s) => s.timestamp,
             Evidence::Audio(s) => s.timestamp,
-            // Handover doesn't have a time in the struct, so we default to now or add it to proto later
-            _ => PhalanxTimestamp::now(),
+            // Non-timed evidence types use the caller-provided fallback.
+            // The Laboratory does not reach for system time — the Hands layer
+            // provides the timestamp via TrustedClock.
+            _ => fallback,
         }
     }
 }
@@ -476,7 +478,10 @@ impl Mold for RecordingAmalgam {
 
         let mut sorted_envelopes: Vec<WitnessEnvelope> = Vec::with_capacity(acc.artifacts.len());
         let mut gaps = Vec::new();
-        let now = PhalanxTimestamp::now();
+        // Gap detection timestamps are metadata, not security-critical.
+        // The Laboratory does not reach for system time — the Hands layer
+        // can overwrite detected_at if precision matters.
+        let gap_detected_at = PhalanxTimestamp::default();
 
         let mut expected_seq: Option<StorageSequence> = None;
         let mut last_signature_hash: Option<SignatureHash> = None;
@@ -490,7 +495,7 @@ impl Mold for RecordingAmalgam {
                         recording_id: key.clone(),
                         start_seq: expected,
                         end_seq: current_seq - 1,
-                        detected_at: now,
+                        detected_at: gap_detected_at,
                     });
                     last_signature_hash = None;
                 }

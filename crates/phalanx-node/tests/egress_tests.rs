@@ -4,6 +4,7 @@
 // dedup window, queue shedding, and dispatch behavior.
 
 use phalanx_node::actors::egress::{EgressActor, EgressCommand};
+use phalanx_node::clock::TrustedClock;
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::identity::{NetworkId, RecordingId};
 use phalanx_proto::prelude::{MeshTopic, PhalanxTimestamp, RecordingResponse};
@@ -120,6 +121,7 @@ async fn test_dispatch_success_no_retry() {
         rx,
         vec![],
         gov,
+        Arc::new(TrustedClock::new()),
     );
     let handle = tokio::spawn(actor.run());
 
@@ -152,7 +154,13 @@ async fn test_dispatch_failure_queues_for_retry() {
     let (tx, rx) = mpsc::channel(32);
     let gov = Arc::new(SystemGovernor::new());
 
-    let actor = EgressActor::new(FailingEgress, rx, vec![], gov);
+    let actor = EgressActor::new(
+        FailingEgress,
+        rx,
+        vec![],
+        gov,
+        Arc::new(TrustedClock::new()),
+    );
     let handle = tokio::spawn(actor.run());
 
     // Send a dispatch that will fail
@@ -223,7 +231,13 @@ async fn test_dht_announce_dedup() {
         }
     }
 
-    let actor = EgressActor::new(AnnounceCounter(counter.clone()), rx, vec![], gov);
+    let actor = EgressActor::new(
+        AnnounceCounter(counter.clone()),
+        rx,
+        vec![],
+        gov,
+        Arc::new(TrustedClock::new()),
+    );
     let handle = tokio::spawn(actor.run());
 
     let recording = RecordingId::new("rec-1");
@@ -259,10 +273,16 @@ async fn test_salvaged_items_restored() {
         channel_id: "salvaged-ch".to_string(),
         response: RecordingResponse::Unauthorized,
         attempt_count: 2,
-        next_attempt: PhalanxTimestamp::now(),
+        next_attempt: PhalanxTimestamp::from_millis(0),
     }];
 
-    let actor = EgressActor::new(SuccessEgress, rx, salvaged, gov);
+    let actor = EgressActor::new(
+        SuccessEgress,
+        rx,
+        salvaged,
+        gov,
+        Arc::new(TrustedClock::new()),
+    );
     let handle = tokio::spawn(actor.run());
 
     let (drain_tx, drain_rx) = oneshot::channel();

@@ -7,6 +7,7 @@ use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::AudioShard;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::prelude::*;
+use phalanx_proto::time::PhalanxTimestamp;
 use phalanx_proto::types::{ChannelCount, SampleRate};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -133,12 +134,19 @@ impl PhalanxAudioThread {
                     let chunk = byte_buffer.split_off(0);
 
                     let recording_id = RecordingId::new(recording_id.clone());
+                    let now = PhalanxTimestamp::from_millis(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or(Duration::from_secs(0))
+                            .as_millis() as u64,
+                    );
                     let shard_result = create_audio_shard(
                         chunk,
                         sequence_id,
                         hw_config.audio_sample_rate,
                         hw_config.audio_channels,
                         recording_id,
+                        now,
                     );
 
                     match shard_result {

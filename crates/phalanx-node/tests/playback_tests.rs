@@ -16,7 +16,7 @@ use phalanx_proto::evidence::{
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId};
 use phalanx_proto::playback::PlaybackSink;
-use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
+use phalanx_proto::time::{PhalanxTimestamp, SystemClock, TrustedClock};
 use phalanx_proto::types::Fps;
 use std::sync::Arc;
 use std::time::Duration;
@@ -88,7 +88,7 @@ async fn test_exodus_resurrection_logic() {
     );
 
     let shard_1 = VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: SystemClock.now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
         recording_id: recording_id.clone(),
@@ -130,7 +130,7 @@ async fn test_exodus_resurrection_logic() {
     assert_eq!(missing_id, StorageSequence(2));
 
     let shard_2 = VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: SystemClock.now(),
         sequence_id: StorageSequence(2),
         fps: Fps::new(30),
         recording_id: recording_id.clone(),
@@ -224,7 +224,7 @@ async fn test_playback_resurrection_with_mesh_gap() {
     );
 
     let shard_1 = VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: SystemClock.now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
         recording_id: recording_id.clone(),
@@ -266,7 +266,7 @@ async fn test_playback_resurrection_with_mesh_gap() {
     assert_eq!(missing_seq, StorageSequence(2));
 
     let shard_2 = VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: SystemClock.now(),
         sequence_id: StorageSequence(2),
         fps: Fps::new(30),
         recording_id: _v_id,
@@ -348,7 +348,7 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
 
     for i in 1..=10 {
         let shard = VideoShard {
-            timestamp: PhalanxTimestamp::now(),
+            timestamp: SystemClock.now(),
             sequence_id: StorageSequence(i),
             fps: Fps::new(30),
             recording_id: recording_id.clone(),

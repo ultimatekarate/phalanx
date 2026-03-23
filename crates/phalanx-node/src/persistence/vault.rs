@@ -946,7 +946,7 @@ mod tests {
     use phalanx_proto::evidence::Evidence;
     use phalanx_proto::evidence::ForensicMetrics;
     use phalanx_proto::evidence::VideoShard;
-    use phalanx_proto::time::SystemClock;
+    use phalanx_proto::time::{SystemClock, TrustedClock};
     use phalanx_proto::types::Fps;
     use tempfile::tempdir;
 
@@ -971,7 +971,7 @@ mod tests {
         let vid = RecordingId::new("v1");
 
         let shard = VideoShard {
-            timestamp: PhalanxTimestamp::now(),
+            timestamp: SystemClock.now(),
             sequence_id: StorageSequence(1),
             fps: Fps::new(30),
             recording_id: vid.clone(), // Use the RecordingId here
@@ -1025,7 +1025,7 @@ mod tests {
         );
 
         let shard = VideoShard {
-            timestamp: PhalanxTimestamp::now(),
+            timestamp: SystemClock.now(),
             sequence_id: StorageSequence(1),
             fps: Fps::new(30),
             recording_id: RecordingId::new("v1"),

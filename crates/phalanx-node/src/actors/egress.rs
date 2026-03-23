@@ -1,3 +1,4 @@
+use crate::clock::TrustedClock;
 use crate::vitals::{Homeostasis, SystemGovernor};
 use phalanx_proto::identity::{NetworkId, RecordingId};
 use phalanx_proto::prelude::*;
@@ -39,6 +40,8 @@ pub struct EgressActor<E: EgressPort> {
     /// Recordings announced in the current window are skipped. Window clears every 30s.
     announced: HashSet<RecordingId>,
     last_announce_clear: Instant,
+    /// Trusted clock for forensic timestamps.
+    clock: Arc<TrustedClock>,
 }
 
 /// DHT announce dedup window duration.
@@ -54,6 +57,7 @@ impl<E: EgressPort> EgressActor<E> {
         rx: mpsc::Receiver<EgressCommand>,
         salvaged: Vec<PendingEgress>,
         system_governor: Arc<SystemGovernor>,
+        clock: Arc<TrustedClock>,
     ) -> Self {
         Self {
             port,
@@ -62,6 +66,7 @@ impl<E: EgressPort> EgressActor<E> {
             system_governor,
             announced: HashSet::new(),
             last_announce_clear: Instant::now(),
+            clock,
         }
     }
 
@@ -167,13 +172,15 @@ impl<E: EgressPort> EgressActor<E> {
                 channel_id,
                 response,
                 attempt_count: 1,
-                next_attempt: PhalanxTimestamp::from_millis(PhalanxTimestamp::now().0 + 1000),
+                next_attempt: PhalanxTimestamp::from_millis(
+                    self.clock.now().unwrap_or_default().0 + 1000,
+                ),
             });
         }
     }
 
     async fn process_pending(&mut self) {
-        let now = PhalanxTimestamp::now();
+        let now = self.clock.now().unwrap_or_default();
         let mut retry_queue = VecDeque::new();
 
         while let Some(mut pending) = self.pending.pop_front() {

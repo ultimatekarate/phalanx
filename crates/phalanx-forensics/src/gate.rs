@@ -145,7 +145,11 @@ impl IntegrityGate for WitnessEnvelope {
         // Without this, an attacker who knows a valid prev_hash can inject
         // evidence with timestamps years in the future, corrupting timelines.
         let now = clock.now();
-        if let Err(e) = self.evidence.timestamp().verify_freshness(now, tolerance) {
+        if let Err(e) = self
+            .evidence
+            .timestamp(now)
+            .verify_freshness(now, tolerance)
+        {
             error!(
                 event = "temporal_failure",
                 node = %node_id,

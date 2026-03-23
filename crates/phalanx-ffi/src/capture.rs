@@ -21,12 +21,13 @@ use phalanx_lens::ForensicLens;
 use phalanx_node::hardware::camera::target_fps;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::prelude::RecordingId;
+use phalanx_proto::time::PhalanxTimestamp;
 use phalanx_proto::types::{BlackLevel, ChannelCount, Fps, SampleRate};
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::atomic::Ordering;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Default analog black level offset for 8-bit CMOS sensors.
 const DEFAULT_BLACK_LEVEL: f32 = 16.0;
@@ -218,12 +219,19 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
     let sequence = StorageSequence(SEQUENCE.fetch_add(1, Ordering::Relaxed));
     let current_fps = target_fps(Fps::new(30), h.governor.current_power_state());
 
+    let now = PhalanxTimestamp::from_millis(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64,
+    );
     let shard = match create_video_shard(
         vec![compressed],
         sequence,
         current_fps,
         rec_id,
         lens_metrics,
+        now,
     ) {
         Ok(s) => s,
         Err(_) => return PhalanxError::InvalidState.code(),
@@ -300,12 +308,19 @@ pub unsafe extern "C" fn phalanx_push_audio_frame(
 
     // Create audio shard (LZ4 compressed internally)
     let sequence = StorageSequence(AUDIO_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+    let now = PhalanxTimestamp::from_millis(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0))
+            .as_millis() as u64,
+    );
     let shard = match create_audio_shard(
         pcm,
         sequence,
         SampleRate::new(sample_rate),
         ChannelCount::new(channels),
         rec_id,
+        now,
     ) {
         Ok(s) => s,
         Err(_) => return PhalanxError::InvalidState.code(),

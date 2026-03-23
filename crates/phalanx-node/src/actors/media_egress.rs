@@ -1,3 +1,4 @@
+use crate::clock::TrustedClock;
 use crate::persistence::outbound::OutboundQueue;
 use crate::vitals::{Homeostasis, SystemGovernor};
 use phalanx_forensics::crucible::EnvelopeHashExt;
@@ -8,7 +9,6 @@ use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{AudioShard, ChunkType, Evidence, SignatureHash, VideoShard};
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId};
 use phalanx_proto::prelude::*;
-use phalanx_proto::time::PhalanxTimestamp;
 use phalanx_transport::EgressPort;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -40,6 +40,8 @@ pub struct MediaEgressConfig {
     /// Cleartext in the in-process mpsc channel is not a threat model concern: an
     /// attacker with process memory access already has the key.
     pub vault_key: SymmetricKey, // Phalanx is for the people.
+    /// Trusted clock for forensic timestamps.
+    pub clock: Arc<TrustedClock>,
 }
 
 pub struct MediaEgressActor<E: EgressPort> {
@@ -66,6 +68,8 @@ pub struct MediaEgressActor<E: EgressPort> {
     system_governor: Arc<SystemGovernor>,
     /// Denominator for the storage pressure ratio reported to the governor.
     max_storage_bytes: u64,
+    /// Trusted clock for forensic timestamps.
+    clock: Arc<TrustedClock>,
 }
 
 impl<E: EgressPort> MediaEgressActor<E> {
@@ -93,6 +97,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
             outbound_queue,
             system_governor: config.system_governor,
             max_storage_bytes: config.max_storage_bytes,
+            clock: config.clock,
         })
     }
 
@@ -184,12 +189,14 @@ impl<E: EgressPort> MediaEgressActor<E> {
         let shard_id = ShardId(self.next_shard_id);
         self.next_shard_id += 1;
 
+        let now = self.clock.now().unwrap_or_default();
         let chunks = match envelope_bytes.fountain_chunkify(
             shard_id,
             self.identity.did.clone(),
             self.symbol_size,
             ChunkType::Witnessed,
             self.repair_ratio,
+            now,
         ) {
             Ok(chunks) => chunks,
             Err(e) => {
@@ -219,7 +226,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
                         );
                         if let Err(wal_err) = self
                             .outbound_queue
-                            .enqueue(topic.clone(), data, PhalanxTimestamp::now())
+                            .enqueue(topic.clone(), data, self.clock.now().unwrap_or_default())
                             .await
                         {
                             tracing::error!(
@@ -251,7 +258,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
             return;
         }
 
-        let now = PhalanxTimestamp::now();
+        let now = self.clock.now().unwrap_or_default();
         let batch = self.outbound_queue.drain_batch(10);
 
         for entry in batch {

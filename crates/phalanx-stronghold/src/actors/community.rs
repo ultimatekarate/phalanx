@@ -6,6 +6,7 @@
 // expiration sweep, dissolution with zeroize, and DID-to-community routing.
 
 use std::collections::{HashMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use phalanx_forensics::identity::verify_vouch;
 use phalanx_proto::community::{Community, CommunityId};
@@ -118,7 +119,12 @@ impl CommunityActor {
     // ── Command Handlers ────────────────────────────────────────────────
 
     fn import(&mut self, community: Community) -> Result<CommunityId, StrongholdError> {
-        let now = PhalanxTimestamp::now();
+        let now = PhalanxTimestamp::from_millis(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        );
 
         // Reject expired communities
         if community.is_expired(now) {
@@ -199,7 +205,12 @@ impl CommunityActor {
     // ── Maintenance ─────────────────────────────────────────────────────
 
     fn sweep_expired(&mut self) {
-        let now = PhalanxTimestamp::now();
+        let now = PhalanxTimestamp::from_millis(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        );
         let expired: Vec<CommunityId> = self
             .communities
             .iter()
