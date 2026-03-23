@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use phalanx_forensics::PeerEvaluator;
 use phalanx_proto::network::NetworkEvent;
-use phalanx_proto::prelude::{NetworkId, PhalanxIdentity};
+use phalanx_proto::prelude::PhalanxIdentity;
 use phalanx_transport::prelude::*;
 use tokio::sync::mpsc;
 
