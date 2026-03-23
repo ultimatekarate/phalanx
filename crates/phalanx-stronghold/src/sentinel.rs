@@ -198,4 +198,29 @@ impl<I: IngressPort> StrongholdSentinel<I> {
     pub fn governor(&self) -> &Arc<StrongholdGovernor> {
         &self.governor
     }
+
+    /// Expose the config for external callers.
+    pub fn config(&self) -> &Arc<StrongholdConfig> {
+        &self.config
+    }
+
+    /// Expose the identity for external callers (e.g., proof signing).
+    pub fn identity(&self) -> &Arc<PhalanxIdentity> {
+        &self.identity
+    }
+
+    /// Graceful shutdown: drop actor channels and await task completion.
+    pub async fn shutdown(self) {
+        info!("StrongholdSentinel: shutting down actors");
+
+        // Drop senders to close actor channels, triggering their exit.
+        drop(self.aggregation_tx);
+        drop(self.community_tx);
+
+        // Await actor tasks to ensure clean exit.
+        let _ = self.aggregation_handle.await;
+        let _ = self.community_handle.await;
+
+        info!("StrongholdSentinel: all actors stopped");
+    }
 }
