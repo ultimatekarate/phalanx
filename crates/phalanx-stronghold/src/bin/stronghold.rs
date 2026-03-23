@@ -364,14 +364,10 @@ fn load_config(path: &str) -> Result<StrongholdConfig, Box<dyn std::error::Error
 
 /// Load or generate the Stronghold's identity.
 ///
-/// Uses argon2 key derivation + XChaCha20-Poly1305 encryption for disk persistence.
-/// Passphrase from PHALANX_IDENTITY_PASSPHRASE env var.
+/// Uses shared seal/unseal functions (Laboratory) for Argon2 + XChaCha20-Poly1305.
+/// Handles only file IO (Hands). Passphrase from PHALANX_IDENTITY_PASSPHRASE env var.
 fn load_identity(vault_path: &Path) -> Result<PhalanxIdentity, Box<dyn std::error::Error>> {
-    use argon2::Argon2;
-    use ed25519_dalek::SigningKey;
-    use phalanx_proto::identity::{Did, NetworkId};
-    use rand_core::{OsRng, RngCore};
-    use zeroize::Zeroize;
+    use phalanx_forensics::cryptography::identity::{seal_identity, unseal_identity};
 
     let passphrase = std::env::var("PHALANX_IDENTITY_PASSPHRASE")
         .map_err(|_| "PHALANX_IDENTITY_PASSPHRASE not set. Export it before running.")?;
@@ -379,70 +375,16 @@ fn load_identity(vault_path: &Path) -> Result<PhalanxIdentity, Box<dyn std::erro
     let identity_path = vault_path.join("stronghold_identity.bin");
 
     if identity_path.exists() {
-        // Load existing identity
         let file_bytes = std::fs::read(&identity_path)?;
-        if file_bytes.len() < 40 {
-            return Err("Identity file corrupted: too short".into());
-        }
-
-        let (salt, rest) = file_bytes.split_at(16);
-        let (_nonce, ciphertext) = rest.split_at(24);
-
-        let mut key_bytes = [0u8; 32];
-        Argon2::default()
-            .hash_password_into(passphrase.as_bytes(), salt, &mut key_bytes)
-            .map_err(|e| format!("Argon2 failed: {e}"))?;
-
-        let key = phalanx_proto::crypto::SymmetricKey(key_bytes);
-        let nonce_arr: [u8; 24] = rest[..24].try_into().map_err(|_| "bad nonce")?;
-        let plaintext =
-            phalanx_forensics::cryptography::decrypt_bytes(&key, &nonce_arr, ciphertext)
-                .map_err(|_| "Failed to decrypt identity. Wrong passphrase?")?;
-
-        key_bytes.zeroize();
-
-        // Deserialize: [32-byte keypair_bytes][rest is DID string]
-        if plaintext.len() < 32 {
-            return Err("Decrypted identity too short".into());
-        }
-        let keypair_bytes: [u8; 32] = plaintext[..32].try_into().map_err(|_| "bad key")?;
-        let signing_key = SigningKey::from_bytes(&keypair_bytes);
-        let public_key_bytes = signing_key.verifying_key().to_bytes();
-
-        let identity = PhalanxIdentity {
-            version: 1,
-            did: Did::derive_did_key(&public_key_bytes),
-            network_id: NetworkId::random(),
-            keypair: signing_key,
-        };
+        let identity = unseal_identity(&file_bytes, &passphrase)
+            .map_err(|e| format!("Failed to decrypt identity: {e}"))?;
 
         eprintln!("Identity loaded: {}", identity.did);
         Ok(identity)
     } else {
-        // Generate new identity
         let identity = PhalanxIdentity::new_ephemeral();
-
-        // Serialize: just the 32-byte secret key
-        let plaintext = identity.keypair.to_bytes().to_vec();
-
-        let mut salt = [0u8; 16];
-        OsRng.fill_bytes(&mut salt);
-
-        let mut key_bytes = [0u8; 32];
-        Argon2::default()
-            .hash_password_into(passphrase.as_bytes(), &salt, &mut key_bytes)
-            .map_err(|e| format!("Argon2 failed: {e}"))?;
-
-        let key = phalanx_proto::crypto::SymmetricKey(key_bytes);
-        let encrypted = phalanx_forensics::cryptography::encrypt_bytes(&key, &plaintext)
-            .map_err(|e| format!("Encryption failed: {e}"))?;
-
-        key_bytes.zeroize();
-
-        // File format: [16-byte salt][24-byte nonce][ciphertext]
-        let mut file_bytes = Vec::with_capacity(16 + encrypted.0.len());
-        file_bytes.extend_from_slice(&salt);
-        file_bytes.extend_from_slice(&encrypted.0);
+        let file_bytes = seal_identity(&identity, &passphrase)
+            .map_err(|e| format!("Failed to encrypt identity: {e}"))?;
 
         std::fs::create_dir_all(vault_path)?;
         std::fs::write(&identity_path, &file_bytes)?;

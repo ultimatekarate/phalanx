@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod grant;
+pub mod identity;
 
 use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit, OsRng},

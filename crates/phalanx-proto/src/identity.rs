@@ -258,6 +258,46 @@ impl Default for PhalanxIdentity {
     }
 }
 
+// ── Identity Disk Format ────────────────────────────────────────────────
+
+/// Encrypted disk persistence format for PhalanxIdentity.
+///
+/// Used by both phone (phalanx-node) and Stronghold (phalanx-stronghold).
+/// This is the ONLY path through which private keypair bytes are serialized,
+/// and it is always encrypted with Argon2-derived AEAD before touching disk.
+///
+/// M6 FIX: PhalanxIdentity itself has no Serialize/Deserialize.
+/// All persistence flows through this explicit format.
+#[derive(Serialize, Deserialize)]
+pub struct IdentityDiskFormat {
+    pub version: u32,
+    pub did: Did,
+    pub network_id: NetworkId,
+    pub keypair_bytes: [u8; 32],
+}
+
+impl IdentityDiskFormat {
+    /// Convert a runtime identity to the disk format.
+    pub fn from_identity(identity: &PhalanxIdentity) -> Self {
+        Self {
+            version: identity.version,
+            did: identity.did.clone(),
+            network_id: identity.network_id.clone(),
+            keypair_bytes: identity.keypair.to_bytes(),
+        }
+    }
+
+    /// Restore a runtime identity from the disk format.
+    pub fn into_identity(self) -> PhalanxIdentity {
+        PhalanxIdentity {
+            version: self.version,
+            did: self.did,
+            network_id: self.network_id,
+            keypair: SigningKey::from_bytes(&self.keypair_bytes),
+        }
+    }
+}
+
 /// Generate a unique 32-byte nonce from DID + peer + current time.
 /// Uses SHA-256 for uniform distribution. No external RNG needed.
 pub fn generate_nonce(did: &Did, peer: &NetworkId) -> [u8; 32] {

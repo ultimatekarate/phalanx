@@ -1,65 +1,13 @@
 use bip39::Mnemonic;
 use ed25519_dalek::SigningKey;
-
-use anyhow::Result;
-use argon2::{self, Algorithm, Argon2, Params, Version};
-use phalanx_forensics::cryptography::{decrypt_bytes, encrypt_bytes};
-use phalanx_proto::crypto::SymmetricKey;
-use rand_core::OsRng;
-use rand_core::RngCore;
-use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
-
+use phalanx_forensics::cryptography::identity::{seal_identity, unseal_identity};
 use phalanx_proto::identity::PhalanxLocator;
-use phalanx_proto::prelude::Did;
-use phalanx_proto::prelude::IdentityError;
-use phalanx_proto::prelude::NetworkId;
-use phalanx_proto::prelude::PhalanxIdentity;
+use phalanx_proto::prelude::{Did, IdentityError, PhalanxIdentity};
 use phalanx_proto::RecordingRequest;
 use rand::Rng;
 use std::fs;
 use std::path::Path;
 pub const IDENTITY_VERSION: u32 = 1;
-
-/// P14 FIX: Explicit Argon2id parameters pinned to prevent silent changes
-/// on dependency updates. Mobile-appropriate: m=19 MiB, t=2 iterations, p=1.
-fn identity_argon2() -> Argon2<'static> {
-    // SAFETY: These are the argon2 0.5 defaults. Using `expect` here is acceptable
-    // because the parameters are compile-time constants that are always valid.
-    let params = Params::new(19 * 1024, 2, 1, Some(32)).expect("hardcoded Argon2 params are valid");
-    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-}
-
-/// M6 FIX: Private struct used exclusively for encrypted disk persistence.
-/// This is the only path through which private keypair bytes are serialized,
-/// and it is always encrypted with Argon2-derived AEAD before touching disk.
-#[derive(Serialize, Deserialize)]
-struct IdentityDiskFormat {
-    version: u32,
-    did: Did,
-    network_id: NetworkId,
-    keypair_bytes: [u8; 32],
-}
-
-impl IdentityDiskFormat {
-    fn from_identity(identity: &PhalanxIdentity) -> Self {
-        Self {
-            version: identity.version,
-            did: identity.did.clone(),
-            network_id: identity.network_id.clone(),
-            keypair_bytes: identity.keypair.to_bytes(),
-        }
-    }
-
-    fn into_identity(self) -> PhalanxIdentity {
-        PhalanxIdentity {
-            version: self.version,
-            did: self.did,
-            network_id: self.network_id,
-            keypair: SigningKey::from_bytes(&self.keypair_bytes),
-        }
-    }
-}
 
 pub trait PhalanxNodeIdentityExt: Sized {
     fn generate() -> Result<(Self, String), IdentityError>;
@@ -89,11 +37,14 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         let verifying_key = signing_key.verifying_key();
         let public_key_bytes = verifying_key.to_bytes();
 
+        let did = Did::derive_did_key(&public_key_bytes);
+        let network_id = did.to_network_id();
+
         Ok((
             PhalanxIdentity {
-                network_id: NetworkId::random(),
+                network_id,
                 version: IDENTITY_VERSION,
-                did: Did::derive_did_key(&public_key_bytes),
+                did,
                 keypair: signing_key,
             },
             phrase,
@@ -112,75 +63,39 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         let verifying_key = signing_key.verifying_key();
         let public_key_bytes = verifying_key.to_bytes();
 
+        let did = Did::derive_did_key(&public_key_bytes);
+        let network_id = did.to_network_id();
+
         Ok(PhalanxIdentity {
-            network_id: NetworkId::random(),
+            network_id,
             version: IDENTITY_VERSION,
-            did: Did::derive_did_key(&public_key_bytes),
+            did,
             keypair: signing_key,
         })
     }
 
     /// Saves the identity to disk, encrypted with a passphrase.
     ///
-    /// The on-disk format is:
-    /// - 16-byte Argon2 salt
-    /// - 24-byte AEAD nonce (for a cipher like XChaCha20-Poly1305)
-    /// - Encrypted postcard-serialized identity data
+    /// Delegates to shared `seal_identity()` for crypto (Laboratory),
+    /// handles only the file write (Hands).
     fn save_to_disk<P: AsRef<Path>>(&self, path: P, passphrase: &str) -> Result<(), IdentityError> {
-        // M6 FIX: Serialize via IdentityDiskFormat, not PhalanxIdentity directly.
-        let disk_format = IdentityDiskFormat::from_identity(self);
-        let plaintext = postcard::to_allocvec(&disk_format)
-            .map_err(|e| IdentityError::SerializationError(e.to_string()))?;
+        let file_bytes = seal_identity(self, passphrase)
+            .map_err(|e| IdentityError::CryptoError(format!("Seal failed: {}", e)))?;
 
-        // Generate a random 16-byte salt for Argon2.
-        // A new salt is generated for each save to prevent rainbow table attacks.
-        let mut salt = [0u8; 16];
-        OsRng.fill_bytes(&mut salt);
-
-        // Derive a 32-byte encryption key from the passphrase and salt using Argon2.
-        let argon2 = identity_argon2();
-        let mut key_bytes = [0u8; 32];
-        argon2
-            .hash_password_into(passphrase.as_bytes(), &salt, &mut key_bytes)
-            .map_err(|e| {
-                IdentityError::CryptoError(format!("Argon2 key derivation failed: {}", e))
-            })?;
-        let key = SymmetricKey(key_bytes);
-
-        // Generate a random 24-byte nonce for the AEAD cipher.
-        let mut nonce = [0u8; 24];
-        OsRng.fill_bytes(&mut nonce);
-
-        // Encrypt the serialized data using the derived key and nonce.
-        // This assumes `encrypt_bytes` is an AEAD function like XChaCha20-Poly1305.
-        let ciphertext_wrapper = encrypt_bytes(&key, &plaintext)
-            .map_err(|e| IdentityError::CryptoError(format!("Encryption failed: {}", e)))?;
-
-        // Assemble the final file content: [salt][nonce][ciphertext]
-        let mut file_bytes =
-            Vec::with_capacity(salt.len() + nonce.len() + ciphertext_wrapper.0.len());
-        file_bytes.extend_from_slice(&salt);
-        file_bytes.extend_from_slice(&nonce);
-        file_bytes.extend_from_slice(&ciphertext_wrapper.0);
-
-        // Write the encrypted bundle to disk.
         fs::write(path.as_ref(), file_bytes).map_err(|e| {
             IdentityError::Corruption(format!(
                 "Failed to write encrypted identity to {:?}: {}",
                 path.as_ref(),
                 e
             ))
-        })?;
-
-        // Securely erase the derived key from memory.
-        key_bytes.zeroize();
-
-        Ok(())
+        })
     }
 
     /// Loads an identity from an encrypted file on disk using a passphrase.
+    ///
+    /// Delegates to shared `unseal_identity()` for crypto (Laboratory),
+    /// handles only the file read (Hands).
     fn load_from_disk<P: AsRef<Path>>(path: P, passphrase: &str) -> Result<Self, IdentityError> {
-        // Read the entire encrypted file.
         let file_bytes = fs::read(path.as_ref()).map_err(|e| {
             IdentityError::Corruption(format!(
                 "Failed to read encrypted identity from {:?}: {}",
@@ -189,48 +104,11 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
             ))
         })?;
 
-        // Deconstruct the file content: [salt][nonce][ciphertext]
-        if file_bytes.len() < (16 + 24) {
-            return Err(IdentityError::Corruption(
-                "Invalid or corrupt identity file: too short".to_string(),
-            ));
-        }
-        let (salt_slice, rest) = file_bytes.split_at(16);
-        let (nonce_slice, ciphertext) = rest.split_at(24);
-
-        let salt: [u8; 16] = salt_slice.try_into().unwrap(); // Should not fail
-        let nonce: [u8; 24] = nonce_slice.try_into().unwrap(); // Should not fail
-
-        // Re-derive the same encryption key using the passphrase and the extracted salt.
-        let argon2 = identity_argon2();
-        let mut key_bytes = [0u8; 32];
-        argon2
-            .hash_password_into(passphrase.as_bytes(), &salt, &mut key_bytes)
-            .map_err(|e| {
-                IdentityError::CryptoError(format!("Argon2 key derivation failed: {}", e))
-            })?;
-        let key = SymmetricKey(key_bytes);
-
-        // Decrypt the ciphertext. If the passphrase is wrong or the file is corrupt,
-        // the AEAD authentication tag will not match, and this will fail.
-        let plaintext = decrypt_bytes(&key, &nonce, ciphertext).map_err(|_| {
+        unseal_identity(&file_bytes, passphrase).map_err(|_| {
             IdentityError::CryptoError(
                 "Failed to decrypt identity. Incorrect passphrase or corrupt file.".to_string(),
             )
-        })?;
-
-        // M6 FIX: Deserialize via IdentityDiskFormat, not PhalanxIdentity directly.
-        let disk_format: IdentityDiskFormat = postcard::from_bytes(&plaintext).map_err(|e| {
-            IdentityError::SerializationError(format!(
-                "Failed to deserialize decrypted identity. File may be corrupt: {}",
-                e
-            ))
-        })?;
-
-        // Securely erase the derived key from memory.
-        key_bytes.zeroize();
-
-        Ok(disk_format.into_identity())
+        })
     }
 
     fn verify_retrieval_auth(&self, request: &RecordingRequest) -> Result<(), IdentityError> {
