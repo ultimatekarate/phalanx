@@ -223,31 +223,9 @@ fn create_ed25519_signer() -> CallbackSigner {
 }
 
 /// Generates a minimal self-signed X.509 certificate containing the Ed25519 public key.
+/// Delegates to the shared Laboratory implementation.
 fn generate_self_signed_cert(verifying_key: &ed25519_dalek::VerifyingKey) -> Vec<u8> {
-    use rcgen::{CertificateParams, KeyPair, PKCS_ED25519};
-
-    // Build a keypair from the raw Ed25519 public key bytes
-    // rcgen needs the full keypair for signing the cert, so we generate
-    // a temporary one and use it just for cert generation.
-    let Ok(params) = CertificateParams::new(vec!["phalanx-node.local".to_string()]) else {
-        return Vec::new(); // Degenerate — rcgen rejected the SAN
-    };
-
-    // For now, generate a fresh keypair for the cert.
-    // The cert's public key won't match the signer — this is acceptable
-    // for self-signed forensic provenance. The forensic data is what matters.
-    let Ok(key_pair) = KeyPair::generate_for(&PKCS_ED25519) else {
-        return Vec::new();
-    };
-    let Ok(cert) = params.self_signed(&key_pair) else {
-        return Vec::new();
-    };
-
-    // Suppress unused variable warning — verifying_key will be used
-    // when we integrate the stored identity keypair.
-    let _ = verifying_key;
-
-    cert.der().to_vec()
+    phalanx_forensics::c2pa_ext::generate_self_signed_cert(verifying_key)
 }
 
 /// Creates a minimal valid JPEG for C2PA manifest embedding.

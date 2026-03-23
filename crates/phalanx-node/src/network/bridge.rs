@@ -138,6 +138,13 @@ impl EgressPort for BridgeEgress {
             .await
             .map_err(|e| e.to_string())
     }
+
+    async fn rebootstrap(&self, peers: &[String]) -> Result<(), String> {
+        self.adapter
+            .rebootstrap(peers)
+            .await
+            .map_err(|e| e.to_string())
+    }
 }
 
 impl Libp2pBridge {

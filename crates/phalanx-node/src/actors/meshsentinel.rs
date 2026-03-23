@@ -106,6 +106,11 @@ pub struct MeshSentinel<I: IngressPort> {
     eclipse_probe: EclipseProbe,
     reputation: ReputationProjection,
 
+    // E6: Peer discovery rate limiter — prevents CPU exhaustion from
+    // burst PeerDiscovered floods. Resets each second.
+    peer_discovery_count: u32,
+    peer_discovery_window: std::time::Instant,
+
     /// Active recording ID, if any. Set by FFI when recording starts, cleared on stop.
     /// Used to capture ProximityWitness entries when LocalMesh peers are discovered.
     pub active_recording_id: Option<RecordingId>,
@@ -317,6 +322,8 @@ impl<I: IngressPort> MeshSentinel<I> {
             ),
             eclipse_probe: EclipseProbe::new(6), // 6 snapshots × 5min = 30min window
             reputation: reputation_projection.clone(),
+            peer_discovery_count: 0,
+            peer_discovery_window: std::time::Instant::now(),
             active_recording_id: None,
             active_recording_key: None,
             proximity_witnesses: Vec::new(),
@@ -501,6 +508,26 @@ impl<I: IngressPort> MeshSentinel<I> {
                 bucket,
                 transport,
             } => {
+                // E6: Per-second rate limit on peer discovery processing.
+                // Prevents CPU exhaustion from burst PeerDiscovered floods.
+                // The TopologyGate handles admission; this gate prevents the
+                // cost of evaluating admission on thousands of events per second.
+                const MAX_DISCOVERIES_PER_SECOND: u32 = 10;
+                let now = std::time::Instant::now();
+                if now.duration_since(self.peer_discovery_window) >= Duration::from_secs(1) {
+                    self.peer_discovery_count = 0;
+                    self.peer_discovery_window = now;
+                }
+                self.peer_discovery_count += 1;
+                if self.peer_discovery_count > MAX_DISCOVERIES_PER_SECOND {
+                    tracing::debug!(
+                        event = "e6_rate_limit",
+                        peer = %peer,
+                        "E6: Peer discovery rate exceeded, dropping"
+                    );
+                    return false;
+                }
+
                 // Topology-aware admission: check subnet diversity, transport quotas, IWFQ.
                 let balance = self.compute_transport_balance();
                 match self.topology_gate.try_admit(

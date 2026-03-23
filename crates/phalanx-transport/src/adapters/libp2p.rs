@@ -25,6 +25,8 @@ pub enum TransportCommand {
     Ban(NetworkId),
     AnnounceRecording(phalanx_proto::identity::RecordingId),
     FindRecordingProviders(phalanx_proto::identity::RecordingId),
+    /// Eclipse remediation: re-dial bootstrap peers and trigger Kademlia random walk.
+    ReBootstrap(Vec<String>),
 }
 
 #[derive(Clone)]
@@ -266,6 +268,27 @@ impl Libp2pAdapter {
                             Some(TransportCommand::FindRecordingProviders(recording_id)) => {
                                 swarm.behaviour_mut().find_recording_providers(&recording_id);
                             }
+                            Some(TransportCommand::ReBootstrap(peers)) => {
+                                // Eclipse remediation: re-dial bootstrap peers and
+                                // trigger a Kademlia random walk to discover fresh peers.
+                                for addr_str in &peers {
+                                    if let Ok(addr) = addr_str.parse::<libp2p::Multiaddr>() {
+                                        if let Err(e) = swarm.dial(addr.clone()) {
+                                            tracing::warn!(
+                                                addr = %addr_str,
+                                                error = %e,
+                                                "ReBootstrap: failed to dial bootstrap peer"
+                                            );
+                                        } else {
+                                            tracing::debug!(addr = %addr_str, "ReBootstrap: dialing bootstrap peer");
+                                        }
+                                    }
+                                }
+                                // Trigger Kademlia random walk to populate routing table.
+                                let random_peer = libp2p::PeerId::random();
+                                swarm.behaviour_mut().kademlia.get_closest_peers(random_peer);
+                                tracing::info!(bootstrap_count = peers.len(), "ReBootstrap: initiated");
+                            }
                             None => break, // Channel dropped; initiate actor shutdown
                         }
                     },
@@ -416,6 +439,14 @@ impl Libp2pAdapter {
             .send(TransportCommand::FindRecordingProviders(
                 recording_id.clone(),
             ))
+            .await
+            .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
+    }
+
+    /// Eclipse remediation: re-dial bootstrap peers and trigger Kademlia random walk.
+    pub async fn rebootstrap(&self, peers: &[String]) -> Result<(), TransportError> {
+        self.command_tx
+            .send(TransportCommand::ReBootstrap(peers.to_vec()))
             .await
             .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
     }

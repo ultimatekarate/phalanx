@@ -50,6 +50,7 @@ oneshot = { version = "0.2.1", features = ["async"] }
 
 # Export
 c2pa = { version = "0.78.0", default-features = false, features = ["rust_native_crypto", "file_io"] }
+serde_json = "1"
 
 # System
 ctrlc = "3.5.2"
