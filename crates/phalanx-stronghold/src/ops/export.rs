@@ -21,12 +21,13 @@ use phalanx_proto::crypto::{SealedLocator, SymmetricKey};
 use phalanx_proto::evidence::Evidence;
 use phalanx_proto::identity::{PhalanxIdentity, RecordingId};
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::config::CorroborationConfig;
 use crate::error::StrongholdError;
 use crate::persistence::evidence_store::EvidenceStore;
 use crate::persistence::proof_store::ProofStore;
+use crate::signing::create_stronghold_signer;
 
 /// One-shot export operation.
 ///
@@ -39,7 +40,7 @@ pub async fn run_export(
     identity: &PhalanxIdentity,
     evidence_store: &EvidenceStore,
     proof_store: &ProofStore,
-    _config: &CorroborationConfig,
+    config: &CorroborationConfig,
     community_id: &CommunityId,
     proof_hash: &[u8; 32],
     grant_paths: &[PathBuf],
@@ -198,6 +199,23 @@ pub async fn run_export(
 
     written_paths.push(proof_path);
 
+    // ── 7. Build and sign C2PA sidecar manifest ─────────────────────
+    //
+    // The C2PA sidecar is the court-facing artifact. Readable by any
+    // C2PA-compatible verification tool (Adobe CAI, Truepic, etc.).
+
+    match build_c2pa_sidecar(identity, config, &proof, output_dir).await {
+        Ok(c2pa_path) => {
+            info!(path = %c2pa_path.display(), "C2PA sidecar manifest written");
+            written_paths.push(c2pa_path);
+        }
+        Err(e) => {
+            // C2PA sidecar is supplementary — don't fail the entire export.
+            // The binary evidence and proof files are the primary output.
+            warn!(error = %e, "C2PA sidecar generation failed — binary export is still valid");
+        }
+    }
+
     info!(
         files = written_paths.len(),
         output = %output_dir.display(),
@@ -206,6 +224,57 @@ pub async fn run_export(
 
     // Keys in key_map are dropped here → ZeroizeOnDrop wipes memory.
     Ok(written_paths)
+}
+
+/// Build and sign a C2PA sidecar manifest for the corroboration proof.
+///
+/// The sidecar embeds the proof's forensic assertions (event window, device
+/// attestations, sensor divergences, proximity count) as structured C2PA claims.
+/// Readable by any C2PA-compatible verification tool.
+async fn build_c2pa_sidecar(
+    identity: &PhalanxIdentity,
+    config: &CorroborationConfig,
+    proof: &phalanx_proto::corroboration::CorroborationProof,
+    output_dir: &Path,
+) -> Result<PathBuf, StrongholdError> {
+    use phalanx_forensics::c2pa_ext::C2paOrchestrator;
+    use std::io::Cursor;
+
+    // Build the manifest with corroboration assertions (Laboratory — pure logic).
+    let mut builder = C2paOrchestrator::build_corroboration_manifest(identity.did.as_ref(), proof)
+        .map_err(|e| StrongholdError::Export(format!("C2PA manifest build failed: {e}")))?;
+
+    // Create the signer (Hands — wiring).
+    let signer = create_stronghold_signer(identity, config)?;
+
+    // Create a JSON summary as the "source" asset for the sidecar.
+    let proof_summary = serde_json::json!({
+        "type": "PhalanxCorroborationProof",
+        "version": 1,
+        "proof_hash": hex_hash(&proof.proof_hash),
+        "producer": identity.did.as_ref(),
+        "device_count": proof.attestations.len(),
+        "overlap_duration_ms": proof.event_window.overlap_duration().as_millis() as u64,
+    });
+    let source_bytes = serde_json::to_vec_pretty(&proof_summary).map_err(|e| {
+        StrongholdError::Serialization(format!("Failed to serialize proof summary: {e}"))
+    })?;
+
+    // Sign the manifest, producing the C2PA sidecar bytes.
+    let mut source = Cursor::new(&source_bytes);
+    let mut dest = Cursor::new(Vec::new());
+
+    builder
+        .sign(signer.as_ref(), "application/json", &mut source, &mut dest)
+        .map_err(|e| StrongholdError::Export(format!("C2PA signing failed: {e}")))?;
+
+    // Write the sidecar to disk.
+    let c2pa_path = output_dir.join("proof.c2pa");
+    tokio::fs::write(&c2pa_path, dest.into_inner())
+        .await
+        .map_err(|e| StrongholdError::Export(format!("Failed to write C2PA sidecar: {e}")))?;
+
+    Ok(c2pa_path)
 }
 
 /// Format a 32-byte hash as a hex string for logging.
