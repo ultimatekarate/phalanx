@@ -756,25 +756,43 @@ impl TransientJournal for FileJournal {
 
         // Frame: [4-byte LE len][24-byte nonce][ciphertext]
         let frame_len = (nonce.len() + ciphertext.len()) as u32;
-        self.handle.write_all(&frame_len.to_le_bytes()).await?;
-        self.handle.write_all(&nonce).await?;
-        self.handle.write_all(&ciphertext).await?;
+        self.handle
+            .write_all(&frame_len.to_le_bytes())
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
+        self.handle
+            .write_all(&nonce)
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
+        self.handle
+            .write_all(&ciphertext)
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
 
         // Flush data to disk
-        self.handle.sync_data().await?;
+        self.handle
+            .sync_data()
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
 
         Ok(())
     }
 
     async fn sync(&mut self) -> Result<(), ShardError> {
-        Ok(self.handle.sync_all().await?)
+        self.handle
+            .sync_all()
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))
     }
 
     async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError> {
         let mut chunks = Vec::new();
 
         // Rewind the file pointer to the beginning for boot-time recovery
-        self.handle.seek(SeekFrom::Start(0)).await?;
+        self.handle
+            .seek(SeekFrom::Start(0))
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
 
         // Stream chunks sequentially using the 4-byte length prefix
         loop {
@@ -782,7 +800,7 @@ impl TransientJournal for FileJournal {
             match self.handle.read_exact(&mut len_buf).await {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(ShardError::Io(e.to_string())),
             }
 
             let frame_len = u32::from_le_bytes(len_buf);
@@ -818,7 +836,7 @@ impl TransientJournal for FileJournal {
                     tracing::warn!("WAL corruption: incomplete frame, truncating");
                     break;
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(ShardError::Io(e.to_string())),
             }
 
             // Split frame into [nonce][ciphertext]
@@ -842,7 +860,10 @@ impl TransientJournal for FileJournal {
         }
 
         // Reset the file pointer to the end to resume appending
-        self.handle.seek(SeekFrom::End(0)).await?;
+        self.handle
+            .seek(SeekFrom::End(0))
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
 
         Ok(chunks)
     }
@@ -852,7 +873,8 @@ impl TransientJournal for FileJournal {
             .write(true)
             .truncate(true)
             .open(&self.file_path)
-            .await?;
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
         Ok(())
     }
 
@@ -871,8 +893,12 @@ impl TransientJournal for FileJournal {
 
         // Atomic write: tmp → rename
         let tmp_path = salvage_path.with_extension("tmp");
-        tokio::fs::write(&tmp_path, &sealed).await?;
-        tokio::fs::rename(&tmp_path, &salvage_path).await?;
+        tokio::fs::write(&tmp_path, &sealed)
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
+        tokio::fs::rename(&tmp_path, &salvage_path)
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
 
         info!(path = ?salvage_path, "Egress Salvage: State persisted to journal");
         Ok(())
@@ -884,7 +910,9 @@ impl TransientJournal for FileJournal {
             return Ok(vec![]);
         }
 
-        let sealed = tokio::fs::read(&salvage_path).await?;
+        let sealed = tokio::fs::read(&salvage_path)
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
 
         // Bounds check
         if sealed.len() as u64 > MAX_EGRESS_SALVAGE_BYTES {

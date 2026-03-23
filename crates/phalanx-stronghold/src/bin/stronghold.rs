@@ -16,8 +16,6 @@ use phalanx_stronghold::persistence::evidence_store::EvidenceStore;
 use phalanx_stronghold::persistence::proof_store::ProofStore;
 use phalanx_stronghold::sentinel::StrongholdDependencies;
 use phalanx_stronghold::swarm::{setup_stronghold_swarm, StrongholdIngress};
-use phalanx_transport::identity_ext::Libp2pExt;
-use phalanx_transport::prelude::Libp2pAdapter;
 
 // ── CLI Definition ──────────────────────────────────────────────────────
 
@@ -114,8 +112,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let identity = load_identity(&vault_path)?;
             let cid = parse_community_id(&community)?;
             let grant_paths: Vec<PathBuf> = grants.iter().map(PathBuf::from).collect();
-            let recording_ids: Vec<RecordingId> =
-                recordings.iter().map(RecordingId::new).collect();
+            let recording_ids: Vec<RecordingId> = recordings.iter().map(RecordingId::new).collect();
             cmd_corroborate(
                 &identity,
                 &vault_path,
@@ -160,17 +157,13 @@ async fn cmd_run(
     vault_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let identity = load_identity(vault_path)?;
-    let network_keypair = identity.to_libp2p_keypair();
 
     eprintln!("Stronghold daemon starting...");
     eprintln!("  DID: {}", identity.did);
 
-    // Set up the libp2p swarm with MemoryStore DHT
-    let swarm = setup_stronghold_swarm(network_keypair, &config.network)?;
-
-    // Wrap in Libp2pAdapter → extract ingress
-    let adapter = Libp2pAdapter::new(swarm);
-    let ingress = StrongholdIngress::from_adapter(&adapter);
+    // Set up the mesh transport with ephemeral DHT
+    let (_adapter, receiver) = setup_stronghold_swarm(&identity, &config.network)?;
+    let ingress = StrongholdIngress::new(receiver);
 
     // Construct stores
     let evidence_store = EvidenceStore::new(vault_path.to_path_buf());

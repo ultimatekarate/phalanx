@@ -9,16 +9,14 @@ use phalanx_node::actors::meshsentinel::SentinelDependencies;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::network::bridge::Libp2pBridge;
-use phalanx_node::network::orchestrator::setup_phalanx_swarm;
+use phalanx_node::network::orchestrator::setup_transport;
 use phalanx_node::persistence::vault::{derive_vault_key, load_or_create_vault_salt};
 use phalanx_node::psk::load_swarm_key;
 use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::init_observability;
 use phalanx_node::FileJournal;
 use phalanx_node::MeshSentinel;
-use phalanx_proto::prelude::{PhalanxIdentity, PhalanxPhysics};
-use phalanx_transport::identity_ext::Libp2pExt;
-use phalanx_transport::prelude::Libp2pAdapter;
+use phalanx_proto::prelude::PhalanxIdentity;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -28,7 +26,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Configuration Loading
     let config = NodeConfig::load_from_env();
-    let physics = PhalanxPhysics::default_wan();
 
     // TODO: Hard coded for now, this will come from the UI once it is built.
     let identity_passphrase = std::env::var("PHALANX_IDENTITY_PASSPHRASE")
@@ -57,17 +54,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let reputation_projection = trust_registry.projection_handle();
 
     // Production Network Adapter Setup (Hexagonal Port Injection)
-    let network_keypair = my_identity.to_libp2p_keypair();
-    let swarm = setup_phalanx_swarm(
-        network_keypair,
+    let (adapter, receiver) = setup_transport(
+        &my_identity,
         &config,
-        &physics,
         psk,
         Arc::new(reputation_projection) as Arc<dyn PeerEvaluator>,
     )?;
 
-    let adapter = Libp2pAdapter::new(swarm);
-    let bridge = Libp2pBridge::new(adapter);
+    let bridge = Libp2pBridge::new(adapter, receiver);
     let (ingress, egress) = bridge.split();
 
     // Engine Initialization via Parameter Object

@@ -145,6 +145,7 @@ pub fn translate_swarm_event(event: SwarmEvent<PhalanxEvent>) -> Option<NetworkE
 }
 
 /// H3 FIX: Configurable event channel capacity and per-peer rate limits.
+#[derive(Clone)]
 pub struct AdapterConfig {
     /// Event channel capacity (default: 2048)
     pub event_channel_capacity: usize,
@@ -342,6 +343,25 @@ impl Libp2pAdapter {
             command_tx,
             event_rx_factory: Arc::new(Mutex::new(Some(event_rx))),
         }
+    }
+
+    /// Factory constructor: returns `(Adapter, Receiver)` directly,
+    /// avoiding the Mutex one-shot pattern.
+    pub fn from_swarm<S>(
+        swarm: Swarm<PhalanxBehaviour<S>>,
+        config: AdapterConfig,
+    ) -> (Self, mpsc::Receiver<NetworkEvent>)
+    where
+        S: RecordStore + Send + Sync + 'static,
+    {
+        let adapter = Self::with_config(swarm, config);
+        let receiver = adapter
+            .event_rx_factory
+            .lock()
+            .expect("Mutex poisoned in Libp2pAdapter::from_swarm")
+            .take()
+            .expect("Receiver already consumed");
+        (adapter, receiver)
     }
 }
 

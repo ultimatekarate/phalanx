@@ -23,9 +23,11 @@ pub struct Libp2pBridge {
 }
 
 impl Libp2pBridge {
-    /// Consumes the adapter's one-shot ingress stream and stores it for polling.
-    pub fn new(adapter: Libp2pAdapter) -> Self {
-        let ingress_rx = adapter.ingress_stream();
+    /// Constructs a bridge from a pre-split adapter and ingress receiver.
+    ///
+    /// The factory returns `(Libp2pAdapter, Receiver<NetworkEvent>)` — pass
+    /// both here. This avoids the one-shot Mutex extraction pattern.
+    pub fn new(adapter: Libp2pAdapter, ingress_rx: mpsc::Receiver<NetworkEvent>) -> Self {
         Self {
             adapter,
             ingress_rx,
