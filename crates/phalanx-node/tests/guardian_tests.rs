@@ -12,7 +12,7 @@ use phalanx_proto::evidence::{
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId, ShardId};
 use phalanx_proto::prelude::{EncodingSymbolId, ShardChunk};
-use phalanx_proto::time::{PhalanxTimestamp, SystemClock, TrustedClock};
+use phalanx_proto::time::{SystemClock, TrustedClock};
 use phalanx_proto::types::Fps;
 use phalanx_transport::identity_ext::Libp2pExt;
 use std::sync::Arc;
