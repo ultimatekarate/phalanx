@@ -3863,6 +3863,7 @@ dependencies = [
 name = "phalanx-forensics"
 version = "0.1.0"
 dependencies = [
+ "argon2",
  "async-trait",
  "base64",
  "blake3",
@@ -3888,6 +3889,7 @@ dependencies = [
  "tracing",
  "turbojpeg",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
