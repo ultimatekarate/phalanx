@@ -36,6 +36,7 @@ use crate::signing::create_stronghold_signer;
 /// postcard-serialized evidence files to `output_dir`.
 ///
 /// Returns the paths of all files written.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_export(
     identity: &PhalanxIdentity,
     evidence_store: &EvidenceStore,

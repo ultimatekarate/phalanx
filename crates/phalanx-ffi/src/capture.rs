@@ -219,11 +219,14 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
     let sequence = StorageSequence(SEQUENCE.fetch_add(1, Ordering::Relaxed));
     let current_fps = target_fps(Fps::new(30), h.governor.current_power_state());
 
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::from_secs(0));
     let now = PhalanxTimestamp::from_millis(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::from_secs(0))
-            .as_millis() as u64,
+        elapsed
+            .as_secs()
+            .saturating_mul(1000)
+            .saturating_add(u64::from(elapsed.subsec_millis())),
     );
     let shard = match create_video_shard(
         vec![compressed],
@@ -308,11 +311,14 @@ pub unsafe extern "C" fn phalanx_push_audio_frame(
 
     // Create audio shard (LZ4 compressed internally)
     let sequence = StorageSequence(AUDIO_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::from_secs(0));
     let now = PhalanxTimestamp::from_millis(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::from_secs(0))
-            .as_millis() as u64,
+        elapsed
+            .as_secs()
+            .saturating_mul(1000)
+            .saturating_add(u64::from(elapsed.subsec_millis())),
     );
     let shard = match create_audio_shard(
         pcm,
