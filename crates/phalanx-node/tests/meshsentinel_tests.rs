@@ -19,7 +19,7 @@ use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId, ShardId};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::{EncodingSymbolId, RecordingResponse, ShardChunk};
 use phalanx_proto::storage::GuardianError;
-use phalanx_proto::time::{PhalanxTimestamp, SystemClock, TrustedClock};
+use phalanx_proto::time::{SystemClock, TrustedClock};
 use phalanx_proto::topic::MeshTopic;
 use phalanx_proto::trust::TrustLevel;
 use phalanx_proto::types::{ForensicUnit, Fps, SystemStress, Verified};

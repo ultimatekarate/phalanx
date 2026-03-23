@@ -16,7 +16,7 @@ use phalanx_proto::evidence::{
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId};
 use phalanx_proto::playback::PlaybackSink;
-use phalanx_proto::time::{PhalanxTimestamp, SystemClock, TrustedClock};
+use phalanx_proto::time::{SystemClock, TrustedClock};
 use phalanx_proto::types::Fps;
 use std::sync::Arc;
 use std::time::Duration;

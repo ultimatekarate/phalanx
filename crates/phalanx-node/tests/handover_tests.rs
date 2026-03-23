@@ -8,7 +8,7 @@ use phalanx_proto::evidence::{
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId};
 use phalanx_proto::prelude::GuardianError;
 use phalanx_proto::storage::HandoverProof;
-use phalanx_proto::time::{PhalanxTimestamp, SystemClock, TrustedClock};
+use phalanx_proto::time::{SystemClock, TrustedClock};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
