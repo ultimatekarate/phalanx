@@ -8,6 +8,7 @@ use phalanx_forensics::reassembler::create_video_shard;
 use phalanx_lens::ForensicLens;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{ForensicMetrics, StorageSequence, VideoShard};
+use phalanx_proto::time::PhalanxTimestamp;
 use phalanx_proto::types::{BlackLevel, Fps, PowerState};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -357,12 +358,19 @@ impl PhalanxCameraThread {
                     let chunk = frame_buffer.split_off(0); // Take all
                     let recording_id = RecordingId::new(recording_id.clone());
 
+                    let now = PhalanxTimestamp::from_millis(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or(Duration::from_secs(0))
+                            .as_millis() as u64,
+                    );
                     let shard_result = create_video_shard(
                         chunk,
                         sequence_id,
                         effective_fps,
                         recording_id,
                         latest_metrics,
+                        now,
                     );
 
                     match shard_result {

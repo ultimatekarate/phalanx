@@ -9,7 +9,7 @@ use phalanx_proto::evidence::{
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId};
 use phalanx_proto::storage::GuardianError;
-use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
+use phalanx_proto::time::{PhalanxTimestamp, SystemClock, TrustedClock};
 use phalanx_proto::types::Fps;
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,7 +36,7 @@ async fn test_reliability_timeline_integrity() {
 
     // 1. ANCHOR: Establish the legitimate start of the timeline
     let anchor_shard = VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: SystemClock.now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
         recording_id: recording_id.clone(),
@@ -61,7 +61,7 @@ async fn test_reliability_timeline_integrity() {
         .expect("Anchor should be accepted");
 
     let valid_shard = VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: SystemClock.now(),
         sequence_id: StorageSequence(2),
         fps: Fps::new(30),
         recording_id: recording_id.clone(),
@@ -86,7 +86,7 @@ async fn test_reliability_timeline_integrity() {
 
     // THE ATTACK: Attempt a "Hash Link Collision" on Sequence 3
     let bogus_shard = VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: SystemClock.now(),
         sequence_id: StorageSequence(3),
         fps: Fps::new(30),
         recording_id: recording_id.clone(),

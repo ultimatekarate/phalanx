@@ -8,7 +8,7 @@ use phalanx_proto::evidence::{
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId};
 use phalanx_proto::prelude::GuardianError;
 use phalanx_proto::storage::HandoverProof;
-use phalanx_proto::time::SystemClock;
+use phalanx_proto::time::{PhalanxTimestamp, SystemClock, TrustedClock};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
@@ -50,6 +50,7 @@ async fn test_legal_identity_handover() {
         Fps::new(30),
         vid.clone(),
         ForensicMetrics::default(),
+        SystemClock.now(),
     )
     .unwrap();
     let env_1 = WitnessEnvelope::sign_envelope(
@@ -87,6 +88,7 @@ async fn test_legal_identity_handover() {
         Fps::new(30),
         vid.clone(),
         ForensicMetrics::default(),
+        SystemClock.now(),
     )
     .unwrap();
     let env_3 = WitnessEnvelope::sign_envelope(
@@ -165,6 +167,7 @@ async fn test_illegal_identity_swap_rejected() {
         Fps::new(30),
         vid.clone(),
         ForensicMetrics::default(),
+        SystemClock.now(),
     )
     .unwrap();
     let env_1 = WitnessEnvelope::sign_envelope(
@@ -183,6 +186,7 @@ async fn test_illegal_identity_swap_rejected() {
         Fps::new(30),
         vid.clone(),
         ForensicMetrics::default(),
+        SystemClock.now(),
     )
     .unwrap();
     let env_2 = WitnessEnvelope::sign_envelope(

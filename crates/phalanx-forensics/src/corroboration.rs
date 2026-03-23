@@ -72,7 +72,7 @@ fn extract_prnu_profile(
     let mut v_energies: Vec<f64> = Vec::new();
 
     for env in &recording.artifacts {
-        let ts = env.evidence.timestamp().0;
+        let ts = env.evidence.timestamp(PhalanxTimestamp::default()).0;
         if ts < overlap_start || ts > overlap_end {
             continue;
         }
@@ -171,7 +171,7 @@ fn recording_time_bounds(recording: &Recording) -> (u64, u64) {
     let mut start = u64::MAX;
     let mut end = 0u64;
     for env in &recording.artifacts {
-        let ts = env.evidence.timestamp().0;
+        let ts = env.evidence.timestamp(PhalanxTimestamp::default()).0;
         if ts < start {
             start = ts;
         }

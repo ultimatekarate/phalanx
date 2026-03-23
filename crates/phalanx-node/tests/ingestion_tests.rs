@@ -76,7 +76,12 @@ fn make_chunk(owner_did: &Did, payload_size: usize) -> Vec<u8> {
         is_terminal: true,
         data: vec![0xAB; payload_size],
         owner_did: owner_did.clone(),
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: PhalanxTimestamp::from_millis(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+        ),
     };
     postcard::to_allocvec(&chunk).unwrap_or_default()
 }
@@ -254,7 +259,11 @@ async fn test_stale_shard_dropped() {
         data: vec![0xAB; 128],
         owner_did,
         timestamp: PhalanxTimestamp::from_millis(
-            PhalanxTimestamp::now().0.saturating_sub(3_600_000),
+            (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64)
+                .saturating_sub(3_600_000),
         ),
     };
     let data = postcard::to_allocvec(&stale_chunk).unwrap_or_default();

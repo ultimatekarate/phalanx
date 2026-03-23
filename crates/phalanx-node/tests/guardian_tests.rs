@@ -12,7 +12,7 @@ use phalanx_proto::evidence::{
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId, ShardId};
 use phalanx_proto::prelude::{EncodingSymbolId, ShardChunk};
-use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
+use phalanx_proto::time::{PhalanxTimestamp, SystemClock, TrustedClock};
 use phalanx_proto::types::Fps;
 use phalanx_transport::identity_ext::Libp2pExt;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use tempfile::tempdir;
 
 fn create_test_shard(seq: u32, recording_id: RecordingId) -> VideoShard {
     VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: SystemClock.now(),
         sequence_id: StorageSequence(seq),
         fps: Fps::new(30),
         recording_id,
@@ -112,6 +112,7 @@ async fn test_stronghold_crash_recovery() {
         Fps::new(30),
         vid.clone(),
         ForensicMetrics::default(),
+        SystemClock.now(),
     )
     .expect("Failed to generate shard");
 
@@ -163,7 +164,7 @@ async fn test_leaf_mode_isolation() {
 
     // 1. GENERATE VALID BYTES: Postcard needs a real WitnessEnvelope to succeed
     let evidence = Evidence::Video(VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: SystemClock.now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
         recording_id: RecordingId::new("v_leaf"),
@@ -178,7 +179,7 @@ async fn test_leaf_mode_isolation() {
     )
     .unwrap();
     let valid_bytes = postcard::to_allocvec(&env).unwrap();
-    let now = PhalanxTimestamp::now();
+    let now = SystemClock.now();
 
     let foreign_chunk = ShardChunk {
         shard_id: ShardId(1),

@@ -188,15 +188,16 @@ impl TrustRegistry {
         }
 
         // Belt-and-suspenders: dissolve expired communities on boot before any operations.
-        registry.dissolve_expired_communities();
+        let boot_clock = TrustedClock::new();
+        let boot_now = boot_clock.now().unwrap_or_default();
+        registry.dissolve_expired_communities(boot_now);
 
         registry
     }
 
     /// Dissolve all expired communities. Zeroes membership data and removes from HashMap.
     /// Called on boot, on maintenance tick, and checked on every effective_trust() access.
-    pub fn dissolve_expired_communities(&mut self) {
-        let now = phalanx_proto::time::PhalanxTimestamp::now();
+    pub fn dissolve_expired_communities(&mut self, now: phalanx_proto::time::PhalanxTimestamp) {
         let expired_ids: Vec<_> = self
             .communities
             .iter()

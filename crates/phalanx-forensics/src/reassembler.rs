@@ -108,12 +108,13 @@ pub fn create_video_shard(
     fps: Fps,
     recording: RecordingId,
     lens_metrics: ForensicMetrics,
+    now: PhalanxTimestamp,
 ) -> Result<VideoShard, ShardError> {
     let raw_bytes = postcard::to_allocvec(&frames)
         .map_err(|e| ShardError::InvalidSize(format!("Serialization fail: {}", e)))?;
 
     Ok(VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: now,
         sequence_id: sequence,
         // Automatically applies the new LZ4 block compression
         payload: DataPayload::Compressed(compress_payload(&raw_bytes)),
@@ -130,6 +131,7 @@ pub fn create_audio_shard(
     rate: SampleRate,
     channels: ChannelCount,
     recording: RecordingId,
+    now: PhalanxTimestamp,
 ) -> Result<AudioShard, ShardError> {
     Ok(AudioShard {
         payload: DataPayload::Compressed(compress_payload(&data)),
@@ -137,7 +139,7 @@ pub fn create_audio_shard(
         sample_rate: rate,
         channels,
         recording_id: recording,
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: now,
     })
 }
 
@@ -471,6 +473,7 @@ pub trait AudioWeaver {
         rate: SampleRate,
         channels: ChannelCount,
         recording: RecordingId,
+        now: PhalanxTimestamp,
     ) -> AudioShard;
 }
 
@@ -481,6 +484,7 @@ impl AudioWeaver for Vec<u8> {
         rate: SampleRate,
         channels: ChannelCount,
         recording: RecordingId,
+        now: PhalanxTimestamp,
     ) -> AudioShard {
         AudioShard {
             payload: DataPayload::Compressed(compress_payload(self)),
@@ -488,7 +492,7 @@ impl AudioWeaver for Vec<u8> {
             sample_rate: rate,
             channels,
             recording_id: recording,
-            timestamp: PhalanxTimestamp::now(),
+            timestamp: now,
         }
     }
 }
@@ -500,6 +504,7 @@ pub trait VideoWeaver {
         sequence: StorageSequence,
         fps: Fps,
         recording: RecordingId,
+        now: PhalanxTimestamp,
     ) -> VideoShard;
 }
 
@@ -510,10 +515,11 @@ impl VideoWeaver for Vec<u8> {
         sequence: StorageSequence,
         fps: Fps,
         recording: RecordingId,
+        now: PhalanxTimestamp,
     ) -> VideoShard {
         let raw_bytes = postcard::to_allocvec(&frames).unwrap_or_default();
         VideoShard {
-            timestamp: PhalanxTimestamp::now(),
+            timestamp: now,
             sequence_id: sequence,
             payload: DataPayload::Compressed(compress_payload(&raw_bytes)),
             fps,
@@ -537,6 +543,7 @@ pub trait FountainChunkifier {
         symbol_size: SymbolSize,
         chunk_type: ChunkType,
         repair_ratio: RepairRatio,
+        now: PhalanxTimestamp,
     ) -> Result<Vec<ShardChunk>, ShardError>;
 }
 
@@ -548,6 +555,7 @@ impl FountainChunkifier for Vec<u8> {
         symbol_size: SymbolSize,
         chunk_type: ChunkType,
         repair_ratio: RepairRatio,
+        now: PhalanxTimestamp,
     ) -> Result<Vec<ShardChunk>, ShardError> {
         if self.is_empty() {
             return Ok(Vec::new());
@@ -571,7 +579,7 @@ impl FountainChunkifier for Vec<u8> {
         let packets = encoder.get_encoded_packets(repair_count);
         let total = packets.len();
         let last_index = total.saturating_sub(1);
-        let timestamp = PhalanxTimestamp::now();
+        let timestamp = now;
 
         // Build ShardChunks with OTI prefix on each symbol
         let chunks = packets
@@ -620,6 +628,7 @@ pub fn make_test_fountain_chunks(
             symbol_size,
             ChunkType::Witnessed,
             RepairRatio::default(), // 1.5× repair
+            PhalanxTimestamp::from_millis(1_700_000_000_000),
         )
         .expect("Test fountain encoding should not fail")
 }
@@ -677,6 +686,7 @@ mod tests {
             Fps::new(30),
             "recording_1".into(),
             ForensicMetrics::default(),
+            PhalanxTimestamp::from_millis(1_700_000_000_000),
         )?;
 
         // create_video_shard produces Compressed payload
@@ -718,6 +728,7 @@ mod tests {
             SampleRate::new(44100),
             ChannelCount::new(2),
             "recording_2".into(),
+            PhalanxTimestamp::from_millis(1_700_000_000_000),
         )?;
 
         let key = get_test_key();
@@ -740,6 +751,7 @@ mod tests {
             Fps::new(30),
             "v1".into(),
             ForensicMetrics::default(),
+            PhalanxTimestamp::from_millis(1_700_000_000_000),
         )?;
         let key = get_test_key();
 
@@ -776,6 +788,7 @@ mod tests {
             Fps::new(60),
             "v_net".into(),
             ForensicMetrics::default(),
+            PhalanxTimestamp::from_millis(1_700_000_000_000),
         )?;
         let key = get_test_key();
 
@@ -802,7 +815,7 @@ mod tests {
         // Create a real WitnessEnvelope
         let identity = PhalanxIdentity::new_ephemeral();
         let evidence = Evidence::Video(VideoShard {
-            timestamp: PhalanxTimestamp::now(),
+            timestamp: PhalanxTimestamp::from_millis(1_700_000_000_000),
             sequence_id: StorageSequence(1),
             fps: Fps::new(30),
             recording_id: RecordingId::new("fountain_test"),
@@ -851,7 +864,7 @@ mod tests {
         // Create and serialize envelope
         let identity = PhalanxIdentity::new_ephemeral();
         let evidence = Evidence::Video(VideoShard {
-            timestamp: PhalanxTimestamp::now(),
+            timestamp: PhalanxTimestamp::from_millis(1_700_000_000_000),
             sequence_id: StorageSequence(1),
             fps: Fps::new(30),
             recording_id: RecordingId::new("loss_test"),
@@ -915,7 +928,7 @@ mod tests {
 
         // Create and serialize a real WitnessEnvelope
         let evidence = Evidence::Video(VideoShard {
-            timestamp: PhalanxTimestamp::now(),
+            timestamp: PhalanxTimestamp::from_millis(1_700_000_000_000),
             sequence_id: StorageSequence(1),
             fps: Fps::new(30),
             recording_id: RecordingId::new("reassembler_test"),
@@ -973,6 +986,7 @@ mod tests {
             SymbolSize(256),
             ChunkType::Witnessed,
             RepairRatio::default(),
+            PhalanxTimestamp::from_millis(1_700_000_000_000),
         );
         assert!(result.unwrap().is_empty());
     }
@@ -985,6 +999,7 @@ mod tests {
             SymbolSize(0),
             ChunkType::Witnessed,
             RepairRatio::default(),
+            PhalanxTimestamp::from_millis(1_700_000_000_000),
         );
         assert!(result.is_err());
     }
@@ -999,6 +1014,7 @@ mod tests {
                 SymbolSize(256),
                 ChunkType::Witnessed,
                 RepairRatio::new(1.0), // source only, minimum symbols
+                PhalanxTimestamp::from_millis(1_700_000_000_000),
             )
             .unwrap();
 

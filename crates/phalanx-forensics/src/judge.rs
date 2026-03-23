@@ -193,7 +193,7 @@ mod tests {
         DataPayload, Evidence, ForensicMetrics, StorageSequence, VideoShard, WitnessEnvelope,
     };
     use phalanx_proto::identity::{PhalanxIdentity, RecordingId};
-    use phalanx_proto::time::SystemClock;
+    use phalanx_proto::time::{SystemClock, TrustedClock};
     use phalanx_proto::trust::TrustLevel;
     use phalanx_proto::types::{ForensicUnit, Fps, SystemStress, Verified};
 
@@ -206,7 +206,7 @@ mod tests {
         let witness_peer_id = witness_identity.clone().network_id;
         let vid = RecordingId::new("test_stream_01");
         let clock = SystemClock;
-        let now = PhalanxTimestamp::now();
+        let now = clock.now();
 
         // Properly initialize a valid VideoShard
         let original_shard = VideoShard {

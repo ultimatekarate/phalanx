@@ -6,6 +6,7 @@
 // Hands layer — owns IO. Imports Dictionary nouns unchanged.
 
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use phalanx_proto::community::CommunityId;
 use phalanx_proto::corroboration::ProximityWitness;
@@ -143,7 +144,12 @@ impl EvidenceStore {
 
         let mut envelopes: Vec<WitnessEnvelope> = Vec::with_capacity(shard_files.len());
         let mut gaps: Vec<ForensicGap> = Vec::new();
-        let now = PhalanxTimestamp::now();
+        let now = PhalanxTimestamp::from_millis(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        );
         let mut expected_seq: Option<StorageSequence> = None;
         let mut owner_did = phalanx_proto::identity::Did::default();
 

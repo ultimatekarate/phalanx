@@ -19,7 +19,7 @@ use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId, ShardId};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::{EncodingSymbolId, RecordingResponse, ShardChunk};
 use phalanx_proto::storage::GuardianError;
-use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
+use phalanx_proto::time::{PhalanxTimestamp, SystemClock, TrustedClock};
 use phalanx_proto::topic::MeshTopic;
 use phalanx_proto::trust::TrustLevel;
 use phalanx_proto::types::{ForensicUnit, Fps, SystemStress, Verified};
@@ -162,7 +162,7 @@ async fn setup_mock_storage() -> (
 fn mock_valid_envelope() -> WitnessEnvelope {
     let (identity, _) = PhalanxIdentity::generate().unwrap();
     let evidence = Evidence::Video(VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: SystemClock.now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
         recording_id: RecordingId::new("mock"),
@@ -198,7 +198,7 @@ async fn test_ingress_valid_chunk_forwarded_to_storage() {
     let topic = sentinel.config.network.video_topic.clone();
 
     let evidence = Evidence::Video(VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: SystemClock.now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
         recording_id: RecordingId::new("v_ingress"),
@@ -208,7 +208,7 @@ async fn test_ingress_valid_chunk_forwarded_to_storage() {
     let envelope = evidence
         .seal(&identity, identity.network_id.clone(), None)
         .unwrap();
-    let now = PhalanxTimestamp::now();
+    let now = SystemClock.now();
     let chunk = ShardChunk {
         shard_id: ShardId(1),
         encoding_symbol_id: EncodingSymbolId(0),
@@ -242,7 +242,7 @@ async fn test_ingress_rejected_in_leaf_mode() {
     let topic = sentinel.config.network.video_topic.clone();
 
     let evidence = Evidence::Video(VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: SystemClock.now(),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
         recording_id: RecordingId::new("v_leaf"),
@@ -252,7 +252,7 @@ async fn test_ingress_rejected_in_leaf_mode() {
     let envelope = evidence
         .seal(&identity, identity.network_id.clone(), None)
         .unwrap();
-    let timestamp = PhalanxTimestamp::now();
+    let timestamp = SystemClock.now();
     let chunk = ShardChunk {
         shard_id: ShardId(1),
         encoding_symbol_id: EncodingSymbolId(0),

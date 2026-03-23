@@ -22,7 +22,12 @@ pub trait WitnessAuthority {
     fn calculate_anchor(&self) -> SignatureHash;
 
     /// The Verb "To Chunkify": Slices the envelope for physical transmission.
-    fn into_chunks(self, shard_id: ShardId, mtu: usize) -> Result<Vec<ShardChunk>, ShardError>;
+    fn into_chunks(
+        self,
+        shard_id: ShardId,
+        mtu: usize,
+        now: PhalanxTimestamp,
+    ) -> Result<Vec<ShardChunk>, ShardError>;
 }
 
 impl WitnessAuthority for WitnessEnvelope {
@@ -83,12 +88,17 @@ impl WitnessAuthority for WitnessEnvelope {
         SignatureHash(hash)
     }
 
-    fn into_chunks(self, shard_id: ShardId, mtu: usize) -> Result<Vec<ShardChunk>, ShardError> {
+    fn into_chunks(
+        self,
+        shard_id: ShardId,
+        mtu: usize,
+        now: PhalanxTimestamp,
+    ) -> Result<Vec<ShardChunk>, ShardError> {
         let owner_did = self.did.clone();
 
         // Serialize the entire signed envelope
         let full_data = postcard::to_allocvec(&self)?;
-        let timestamp = PhalanxTimestamp::now();
+        let timestamp = now;
 
         // Slice into physical MTU-sized chunks
         let slices: Vec<&[u8]> = full_data.chunks(mtu).collect();

@@ -119,6 +119,8 @@ pub struct MeshSentinel<I: IngressPort> {
     /// Proximity witnesses captured during the current recording.
     /// Flushed to the evidence pipeline when the recording ends.
     pub proximity_witnesses: Vec<phalanx_proto::corroboration::ProximityWitness>,
+    /// Trusted clock for forensic timestamps.
+    pub clock: Arc<TrustedClock>,
 }
 
 impl<I: IngressPort> MeshSentinel<I> {
@@ -190,6 +192,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             egress_rx,
             salvaged_queue,
             deps.system_governor.clone(),
+            clock_handle.clone(),
         );
 
         tokio::spawn(async move {
@@ -257,6 +260,7 @@ impl<I: IngressPort> MeshSentinel<I> {
                 system_governor: deps.system_governor.clone(),
                 max_storage_bytes: deps.config.storage.max_storage_bytes.as_u64(),
                 vault_key: deps.vault_key.clone(),
+                clock: clock_handle.clone(),
             },
         )
         .await
@@ -327,6 +331,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             active_recording_id: None,
             active_recording_key: None,
             proximity_witnesses: Vec::new(),
+            clock: clock_handle.clone(),
         })
     }
 
@@ -553,7 +558,7 @@ impl<I: IngressPort> MeshSentinel<I> {
                                             peer.0.clone(),
                                         ),
                                         recording_id: rec_id.clone(),
-                                        observed_at: phalanx_proto::time::PhalanxTimestamp::now(),
+                                        observed_at: self.clock.now().unwrap_or_default(),
                                         transport,
                                     },
                                 );

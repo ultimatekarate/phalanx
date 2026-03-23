@@ -29,7 +29,7 @@ fn make_test_chunk(owner_did: &Did, payload_size: usize) -> Vec<u8> {
         is_terminal: true,
         data: vec![0xAB; payload_size],
         owner_did: owner_did.clone(),
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: PhalanxTimestamp::from_millis(1_700_000_000_000),
     };
     postcard::to_allocvec(&chunk).unwrap_or_default()
 }

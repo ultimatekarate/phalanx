@@ -290,7 +290,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut queue = OutboundQueue::new(dir.path().to_path_buf()).await.unwrap();
 
-        let now = PhalanxTimestamp::now();
+        let now = PhalanxTimestamp::from_millis(1_700_000_000_000);
         let topic = MeshTopic::new("test/video");
 
         // Enqueue 3 entries
@@ -335,7 +335,7 @@ mod tests {
     #[tokio::test]
     async fn test_outbound_crash_recovery() {
         let dir = tempdir().unwrap();
-        let now = PhalanxTimestamp::now();
+        let now = PhalanxTimestamp::from_millis(1_700_000_000_000);
         let topic = MeshTopic::new("test/audio");
 
         // Enqueue entries, then drop the queue (simulating crash)
@@ -373,7 +373,7 @@ mod tests {
     async fn test_outbound_requeue_and_abandon() {
         let dir = tempdir().unwrap();
         let mut queue = OutboundQueue::new(dir.path().to_path_buf()).await.unwrap();
-        let now = PhalanxTimestamp::now();
+        let now = PhalanxTimestamp::from_millis(1_700_000_000_000);
         let topic = MeshTopic::new("test/evidence");
 
         queue.enqueue(topic, vec![0xFF; 50], now).await.unwrap();

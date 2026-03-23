@@ -116,7 +116,7 @@ async fn test_pillar_salvage_under_disk_pressure() {
 
     // 2. Prepare Real Forensic Evidence via WitnessGate
     let video_shard = VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: PhalanxTimestamp::from_millis(1_700_000_000_000),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
         recording_id: RecordingId::new("v1"),
@@ -148,7 +148,7 @@ async fn test_pillar_salvage_under_disk_pressure() {
         channel_id: "ch_broken_pillar".into(),
         response: RecordingResponse::Success(vec![unit]),
         attempt_count: 0,
-        next_attempt: PhalanxTimestamp::now(),
+        next_attempt: PhalanxTimestamp::from_millis(1_700_000_000_000),
     }];
 
     storage_tx
@@ -181,7 +181,7 @@ async fn test_reputation_gate_signature_mismatch() {
 
     // 2. Create "Poisoned" Evidence
     let video_shard = VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: PhalanxTimestamp::from_millis(1_700_000_000_000),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
         recording_id: RecordingId::new("v1"),
@@ -208,6 +208,7 @@ async fn test_reputation_gate_signature_mismatch() {
             SymbolSize(128),
             ChunkType::Witnessed,
             RepairRatio::new(1.0), // Source only — all symbols needed to trigger decode
+            PhalanxTimestamp::from_millis(1_700_000_000_000),
         )
         .unwrap();
 
@@ -306,7 +307,7 @@ async fn test_salvage_on_node_death() {
 
     // 1. Create a valid envelope and chunkify it into 4 pieces
     let real_shard = VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: PhalanxTimestamp::from_millis(1_700_000_000_000),
         sequence_id: StorageSequence(999),
         fps: Fps::new(30),
         recording_id: RecordingId::new("salvage_recording_01"),
@@ -328,6 +329,7 @@ async fn test_salvage_on_node_death() {
             SymbolSize(128),
             ChunkType::Witnessed,
             RepairRatio::new(1.0), // Source only — every symbol is needed
+            PhalanxTimestamp::from_millis(1_700_000_000_000),
         )
         .unwrap();
     let total_chunks = chunks.len();
@@ -461,6 +463,7 @@ async fn test_stronghold_ingestion_and_persistence() {
         Fps::new(30),
         RecordingId::new("v1"),
         ForensicMetrics::default(),
+        PhalanxTimestamp::from_millis(1_700_000_000_000),
     )
     .expect("Failed to create video shard");
 
@@ -477,6 +480,7 @@ async fn test_stronghold_ingestion_and_persistence() {
             SymbolSize(128),
             ChunkType::Witnessed,
             RepairRatio::new(1.0),
+            PhalanxTimestamp::from_millis(1_700_000_000_000),
         )
         .unwrap();
 
@@ -610,7 +614,7 @@ async fn test_storage_actor_metric_pipeline() {
 
     // 4. Generate and Sign Test Evidence
     let video_shard = VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: PhalanxTimestamp::from_millis(1_700_000_000_000),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
         recording_id: RecordingId::new("v1"),
@@ -625,7 +629,7 @@ async fn test_storage_actor_metric_pipeline() {
 
     let valid_data = postcard::to_allocvec(&envelope).expect("Serialization failed");
 
-    let timestamp = PhalanxTimestamp::now();
+    let timestamp = PhalanxTimestamp::from_millis(1_700_000_000_000);
     let chunk = ShardChunk {
         shard_id: ShardId(101),
         encoding_symbol_id: EncodingSymbolId(0),
@@ -710,7 +714,7 @@ async fn test_pure_vault_ingest_contract() {
     // 1. Prepare REAL evidence so the reassembler doesn't choke on raw [0x00]
     let (identity, _) = PhalanxIdentity::generate().unwrap();
     let video_shard = VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: PhalanxTimestamp::from_millis(1_700_000_000_000),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
         recording_id: RecordingId::new("v_pure_ingest"),
@@ -725,7 +729,7 @@ async fn test_pure_vault_ingest_contract() {
     let valid_envelope_data = postcard::to_allocvec(&envelope).expect("Serialization failed");
 
     // 2. Wrap that data in a ShardChunk
-    let timestamp = PhalanxTimestamp::now();
+    let timestamp = PhalanxTimestamp::from_millis(1_700_000_000_000);
     let chunk = ShardChunk {
         shard_id: ShardId(1),
         encoding_symbol_id: EncodingSymbolId(0),
@@ -780,7 +784,7 @@ mod ingress_boundary_tests {
         // 1. Create a valid Forensic Payload
         let (identity, _) = PhalanxIdentity::generate().unwrap();
         let video_shard = VideoShard {
-            timestamp: PhalanxTimestamp::now(),
+            timestamp: PhalanxTimestamp::from_millis(1_700_000_000_000),
             sequence_id: StorageSequence(1),
             fps: Fps::new(30),
             recording_id: RecordingId::new("v_secure_ingress"),
@@ -799,7 +803,7 @@ mod ingress_boundary_tests {
         let valid_data = postcard::to_allocvec(&envelope).expect("Serialization failed");
 
         // 2. The Raw Data off the wire
-        let timestamp = PhalanxTimestamp::now();
+        let timestamp = PhalanxTimestamp::from_millis(1_700_000_000_000);
         let raw_chunk = ShardChunk {
             shard_id: ShardId(1),
             encoding_symbol_id: EncodingSymbolId(0),

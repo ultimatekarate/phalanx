@@ -15,7 +15,7 @@ use phalanx_proto::types::Fps;
 fn create_mock_fountain_chunks(identity: &PhalanxIdentity, shard_id: ShardId) -> Vec<ShardChunk> {
     // 1. Create a REAL WitnessEnvelope
     let evidence = Evidence::Video(VideoShard {
-        timestamp: PhalanxTimestamp::now(),
+        timestamp: PhalanxTimestamp::from_millis(1_700_000_000_000),
         sequence_id: StorageSequence(1),
         fps: Fps::new(30),
         recording_id: RecordingId::new("test_recording"),
@@ -38,6 +38,7 @@ fn create_mock_fountain_chunks(identity: &PhalanxIdentity, shard_id: ShardId) ->
             SymbolSize(64), // Small symbols → many symbols → good for partial tests
             ChunkType::Witnessed,
             RepairRatio::new(1.5), // 50% redundancy
+            PhalanxTimestamp::from_millis(1_700_000_000_000),
         )
         .expect("Fountain encoding should succeed")
 }
