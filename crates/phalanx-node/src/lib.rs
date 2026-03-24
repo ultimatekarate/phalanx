@@ -11,7 +11,6 @@ pub mod actors {
     pub mod trust_actor;
 }
 
-pub mod artifacts;
 pub mod clock;
 pub mod config;
 

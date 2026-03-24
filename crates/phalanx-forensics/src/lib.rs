@@ -14,6 +14,7 @@ pub mod policy;
 pub mod reassembler;
 pub mod test_utils;
 pub mod topology_gate;
+pub mod transcode;
 pub mod trust;
 pub mod witness;
 pub mod storage {

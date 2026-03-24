@@ -24,6 +24,7 @@ use phalanx_node::persistence::vault::{derive_vault_key, load_or_create_vault_sa
 use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::{HomeostaticConfig, SystemGovernor, ThermalThresholds};
 use phalanx_node::{FileJournal, MeshSentinel};
+use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{AudioShard, VideoShard};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::PhalanxIdentity;
@@ -92,6 +93,15 @@ pub struct PhalanxHandle {
     pub(crate) local_mesh_outbound_rx: Mutex<Option<mpsc::Receiver<OutboundLocalPacket>>>,
     /// Local mesh availability flag — shared with LocalMeshAdapter.
     pub(crate) local_mesh_available: Arc<AtomicBool>,
+    /// Vault key — retained for export decryption. The key also lives inside
+    /// MeshSentinel's actors (Guardian, MediaEgressActor), but those are behind
+    /// the actor boundary and inaccessible from FFI. This clone allows the
+    /// export path to decrypt shards directly. ZeroizeOnDrop ensures cleanup.
+    pub(crate) vault_key: Arc<SymmetricKey>,
+    /// Node identity — retained for C2PA signing with the node's real DID.
+    /// The ephemeral signer pattern (random key per export) was defeated by
+    /// red team review — provenance requires the actual node identity.
+    pub(crate) identity: Arc<PhalanxIdentity>,
 }
 
 /// Type-erased reference to the running MeshSentinel.
@@ -219,6 +229,12 @@ async fn bootstrap(
     let (local_mesh_adapter, local_mesh_tx, local_mesh_outbound_rx, local_mesh_available) =
         LocalMeshAdapter::new(64);
 
+    // Retain clones for FFI export path before deps consumes the originals.
+    // vault_key: needed for shard decryption during C2PA export.
+    // identity: needed for C2PA signing with the node's real DID.
+    let handle_vault_key = Arc::new(vault_key.clone());
+    let handle_identity = Arc::new(identity.clone());
+
     // Build SentinelDependencies (mirrors sentinel.rs lines 74-84)
     let deps = SentinelDependencies {
         config,
@@ -262,6 +278,8 @@ async fn bootstrap(
         local_mesh_tx: Some(local_mesh_tx),
         local_mesh_outbound_rx: Mutex::new(Some(local_mesh_outbound_rx)),
         local_mesh_available,
+        vault_key: handle_vault_key,
+        identity: handle_identity,
     })
 }
 
