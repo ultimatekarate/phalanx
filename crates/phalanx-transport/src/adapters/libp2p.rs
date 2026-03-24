@@ -34,6 +34,10 @@ pub struct Libp2pAdapter {
     command_tx: mpsc::Sender<TransportCommand>,
     // Arc<Mutex<>> ensures the Receiver can be extracted safely across threads
     event_rx_factory: Arc<Mutex<Option<mpsc::Receiver<NetworkEvent>>>>,
+    /// Monotonically increasing count of dropped transport events.
+    /// Read by MeshSentinel on maintenance ticks to feed connection pressure
+    /// into the Volterra homeostasis integral.
+    pub dropped_event_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Extract a `SubnetBucket` from a libp2p `Multiaddr`.
@@ -181,6 +185,8 @@ impl Libp2pAdapter {
         let (command_tx, mut command_rx) = mpsc::channel::<TransportCommand>(128);
         let (_event_tx, event_rx) = mpsc::channel::<NetworkEvent>(config.event_channel_capacity);
         let max_per_sec = config.max_events_per_peer_per_sec;
+        let dropped_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let dropped_counter_task = dropped_counter.clone();
 
         tokio::spawn(async move {
             // H3 FIX: Per-peer rate limiting state
@@ -337,6 +343,7 @@ impl Libp2pAdapter {
                             if let Some(network_event) = translate_swarm_event(swarm_event) {
                                 if _event_tx.try_send(network_event).is_err() {
                                     dropped_events += 1;
+                                    dropped_counter_task.store(dropped_events, std::sync::atomic::Ordering::Relaxed);
                                     if dropped_events % 100 == 1 {
                                         tracing::warn!(
                                             target: "phalanx::transport",
@@ -348,6 +355,7 @@ impl Libp2pAdapter {
                             }
                         } else if let Some(peer) = source_peer {
                             dropped_events += 1;
+                            dropped_counter_task.store(dropped_events, std::sync::atomic::Ordering::Relaxed);
                             if dropped_events % 100 == 1 {
                                 tracing::warn!(
                                     target: "phalanx::transport",
@@ -365,6 +373,7 @@ impl Libp2pAdapter {
         Self {
             command_tx,
             event_rx_factory: Arc::new(Mutex::new(Some(event_rx))),
+            dropped_event_count: dropped_counter,
         }
     }
 

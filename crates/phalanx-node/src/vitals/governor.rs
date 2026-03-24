@@ -417,6 +417,21 @@ impl SystemGovernor {
     /// Uses a default max of 64 connections (matching QUIC server default).
     const MAX_EXPECTED_CONNECTIONS: usize = 64;
 
+    /// Record transport event drop pressure.
+    /// Called from MeshSentinel on maintenance ticks with the delta of dropped
+    /// transport events since the last read. Feeds into the connection integral
+    /// because event drops indicate the processing pipeline can't keep up with
+    /// the connection load.
+    pub fn record_transport_drop_pressure(&self, dropped_delta: u64) {
+        if dropped_delta > 0 {
+            self.with_state_mut(|s| {
+                // Normalize: 100 drops in a tick = full pressure (1.0)
+                let ratio = (dropped_delta as f64 / 100.0).min(1.0);
+                s.c.record(ratio, self.config.lambda_conn);
+            });
+        }
+    }
+
     pub fn record_connection_gauge(&self) {
         let (local, internet) = self.with_state(|s| (s.local_peer_count, s.internet_peer_count));
         let total = local.saturating_add(internet);

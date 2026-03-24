@@ -75,6 +75,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         system_governor: Arc::new(phalanx_node::vitals::SystemGovernor::new()),
         vault_key,
         local_mesh: None, // NoOp — BLE/WiFi Direct injected during mobile integration
+        transport_drop_counter: None,
     };
 
     let mut engine = MeshSentinel::new(deps).await?;
