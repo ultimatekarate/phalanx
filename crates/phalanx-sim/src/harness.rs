@@ -469,6 +469,8 @@ pub struct SimulationHarness {
     /// Keep temp dirs alive for the duration of the simulation.
     /// Each node gets a unique vault_path via `tempfile::tempdir()`.
     node_temps: Vec<tempfile::TempDir>,
+    /// Per-node governor references for scenario observation and direct injection.
+    governors: HashMap<Did, Arc<SystemGovernor>>,
 }
 
 impl SimulationHarness {
@@ -494,6 +496,7 @@ impl SimulationHarness {
             world: Arc::new(RwLock::new(SimulationWorld::new())),
             telemetry_tx,
             node_temps: Vec::new(),
+            governors: HashMap::new(),
         };
 
         (harness, collector)
@@ -550,6 +553,9 @@ impl SimulationHarness {
         let vault_key = derive_vault_key(&identity, &[0u8; 32]);
         let trust_registry = TrustRegistry::build(&node_config).await;
 
+        let governor = Arc::new(SystemGovernor::new());
+        self.governors.insert(node_did.clone(), governor.clone());
+
         let deps = SentinelDependencies {
             config: node_config,
             identity,
@@ -557,7 +563,7 @@ impl SimulationHarness {
             egress: sim_egress,
             journal: RecoveryJournal::new(vec![]),
             trust_registry,
-            system_governor: Arc::new(SystemGovernor::new()),
+            system_governor: governor,
             vault_key,
             local_mesh: None,
             transport_drop_counter: None,
@@ -720,6 +726,9 @@ impl SimulationHarness {
         let vault_key = derive_vault_key(&identity, &[0u8; 32]);
         let trust_registry = TrustRegistry::build(&node_config).await;
 
+        let governor = Arc::new(SystemGovernor::new());
+        self.governors.insert(node_did.clone(), governor.clone());
+
         let deps = SentinelDependencies {
             config: node_config,
             identity,
@@ -727,7 +736,7 @@ impl SimulationHarness {
             egress: sim_egress,
             journal: RecoveryJournal::new(vec![]),
             trust_registry,
-            system_governor: Arc::new(SystemGovernor::new()),
+            system_governor: governor,
             vault_key,
             local_mesh: Some(Box::new(local_mesh_adapter)),
             transport_drop_counter: None,
@@ -757,5 +766,14 @@ impl SimulationHarness {
             .await;
 
         Ok((node_did, local_mesh_tx))
+    }
+
+    /// Retrieve the `SystemGovernor` for a spawned node.
+    ///
+    /// Returns `None` if the DID doesn't correspond to a node spawned by this harness.
+    /// Used by scenario tests to observe integral state and inject pressure via the
+    /// `Homeostasis` trait.
+    pub fn governor_for(&self, did: &Did) -> Option<Arc<SystemGovernor>> {
+        self.governors.get(did).cloned()
     }
 }

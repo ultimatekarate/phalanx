@@ -63,8 +63,12 @@ impl Default for IntegralState {
 
 impl IntegralState {
     pub fn new() -> Self {
+        Self::from_config(&phalanx_forensics::policy::HomeostaticConfig::default())
+    }
+
+    pub fn from_config(config: &phalanx_forensics::policy::HomeostaticConfig) -> Self {
         Self {
-            integrals: RI::new(),
+            integrals: RI::from_config(config),
             conserving_trigger_count: 0,
             leaf_trigger_count: 0,
             normal_trigger_count: 0,

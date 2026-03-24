@@ -25,8 +25,9 @@ impl StrongholdGovernor {
     }
 
     pub fn with_config(config: HomeostaticConfig) -> Self {
+        let integrals = ResourceIntegrals::from_config(&config);
         Self {
-            integrals: RwLock::new(ResourceIntegrals::new()),
+            integrals: RwLock::new(integrals),
             config,
         }
     }
@@ -75,7 +76,7 @@ impl StrongholdGovernor {
         self.with_state(|s| {
             s.r_integrals
                 .get(&key)
-                .is_none_or(|r| r.value < self.config.psi_max)
+                .is_none_or(|r| r.current_value() < self.config.psi_max)
         })
     }
 
@@ -85,8 +86,8 @@ impl StrongholdGovernor {
         self.with_state_mut(|s| {
             s.r_integrals
                 .entry(key)
-                .or_insert_with(DecayingIntegral::new)
-                .record(1.0, self.config.lambda_rep);
+                .or_insert_with(|| DecayingIntegral::new(self.config.lambda_rep))
+                .record(1.0);
         });
     }
 
@@ -95,11 +96,11 @@ impl StrongholdGovernor {
     pub fn composite_stress(&self) -> f64 {
         self.with_state(|s| {
             let terms = [
-                (0.25, s.s.value / self.config.s_crit),
-                (0.20, s.d.value / self.config.d_crit),
-                (0.20, s.m.value / self.config.m_crit),
-                (0.15, s.w.value / self.config.w_crit),
-                (0.20, s.b.value / self.config.b_crit),
+                (0.25, s.s.current_value() / self.config.s_crit),
+                (0.20, s.d.current_value() / self.config.d_crit),
+                (0.20, s.m.current_value() / self.config.m_crit),
+                (0.15, s.w.current_value() / self.config.w_crit),
+                (0.20, s.b.current_value() / self.config.b_crit),
             ];
             terms.iter().map(|(w, n)| w * n.min(1.0)).sum()
         })
@@ -116,50 +117,54 @@ impl Homeostasis for StrongholdGovernor {
     fn temporal_tolerance(&self) -> Duration {
         self.with_state(|s| {
             let base = self.config.base_temporal_drift;
-            let expansion = Duration::from_secs_f64(s.l.value);
+            let expansion = Duration::from_secs_f64(s.l.current_value());
             let total = base + expansion;
             total.min(self.config.max_temporal_tolerance)
         })
     }
 
     fn record_metabolic_pressure(&self, duration: Duration) {
-        self.with_state_mut(|s| s.s.record(duration.as_secs_f64(), self.config.lambda_sys));
+        self.with_state_mut(|s| s.s.record(duration.as_secs_f64()));
     }
 
     fn record_latency_pressure(&self, duration: Duration) {
-        self.with_state_mut(|s| s.l.record(duration.as_secs_f64(), self.config.lambda_lat));
+        self.with_state_mut(|s| s.l.record(duration.as_secs_f64()));
     }
 
     fn record_io_pressure(&self, duration: Duration) {
-        self.with_state_mut(|s| s.d.record(duration.as_secs_f64(), self.config.lambda_io));
+        self.with_state_mut(|s| s.d.record(duration.as_secs_f64()));
     }
 
     fn record_entry_pressure(&self) {
-        self.with_state_mut(|s| s.e.record(1.0, self.config.lambda_entry));
+        self.with_state_mut(|s| s.e.record(1.0));
     }
 
     fn record_eclipse_impulse(&self, magnitude: f64) {
-        self.with_state_mut(|s| s.e.record(magnitude, self.config.lambda_entry));
+        self.with_state_mut(|s| s.e.record(magnitude));
     }
 
     fn ingestion_scaler(&self) -> IngestionScale {
-        self.with_state(|s| IngestionScale((1.0 - (s.s.value / self.config.s_crit)).max(0.0)))
+        self.with_state(|s| {
+            IngestionScale((1.0 - (s.s.current_value() / self.config.s_crit)).max(0.0))
+        })
     }
 
     fn finalization_scaler(&self) -> FinalizationScale {
-        self.with_state(|s| FinalizationScale((1.0 - (s.d.value / self.config.d_crit)).max(0.0)))
+        self.with_state(|s| {
+            FinalizationScale((1.0 - (s.d.current_value() / self.config.d_crit)).max(0.0))
+        })
     }
 
     fn sybil_endowment(&self) -> SybilEndowment {
         self.with_state(|s| {
-            SybilEndowment(self.config.psi_max / (1.0 + self.config.k_sybil * s.e.value))
+            SybilEndowment(self.config.psi_max / (1.0 + self.config.k_sybil * s.e.current_value()))
         })
     }
 
     fn record_memory_pressure(&self, bytes_held: usize) {
         self.with_state_mut(|s| {
             let mib = bytes_held as f64 / 1_048_576.0;
-            s.m.record(mib, self.config.lambda_mem);
+            s.m.record(mib);
         });
     }
 
@@ -170,14 +175,14 @@ impl Homeostasis for StrongholdGovernor {
             } else {
                 1.0
             };
-            s.w.record(ratio, self.config.lambda_wal);
+            s.w.record(ratio);
         });
     }
 
     fn record_bandwidth_pressure(&self, bytes: usize) {
         self.with_state_mut(|s| {
             let mib = bytes as f64 / 1_048_576.0;
-            s.b.record(mib, self.config.lambda_bw);
+            s.b.record(mib);
         });
     }
 
@@ -188,24 +193,32 @@ impl Homeostasis for StrongholdGovernor {
             } else {
                 1.0
             };
-            s.c.record(ratio, self.config.lambda_conn);
+            s.c.record(ratio);
         });
     }
 
     fn memory_scaler(&self) -> MemoryScale {
-        self.with_state(|s| MemoryScale((1.0 - (s.m.value / self.config.m_crit)).max(0.0)))
+        self.with_state(|s| {
+            MemoryScale((1.0 - (s.m.current_value() / self.config.m_crit)).max(0.0))
+        })
     }
 
     fn storage_scaler(&self) -> StorageScale {
-        self.with_state(|s| StorageScale((1.0 - (s.w.value / self.config.w_crit)).max(0.0)))
+        self.with_state(|s| {
+            StorageScale((1.0 - (s.w.current_value() / self.config.w_crit)).max(0.0))
+        })
     }
 
     fn bandwidth_scaler(&self) -> BandwidthScale {
-        self.with_state(|s| BandwidthScale((1.0 - (s.b.value / self.config.b_crit)).max(0.0)))
+        self.with_state(|s| {
+            BandwidthScale((1.0 - (s.b.current_value() / self.config.b_crit)).max(0.0))
+        })
     }
 
     fn connection_scaler(&self) -> ConnectionScale {
-        self.with_state(|s| ConnectionScale((1.0 - (s.c.value / self.config.c_crit)).max(0.0)))
+        self.with_state(|s| {
+            ConnectionScale((1.0 - (s.c.current_value() / self.config.c_crit)).max(0.0))
+        })
     }
 }
 
