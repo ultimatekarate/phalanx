@@ -1,7 +1,6 @@
 // crates/phalanx-forensics/src/reassembler.rs
 
 use crate::crucible::{Crucible, Mold};
-use crate::prelude::TransientJournal;
 use phalanx_proto::evidence::{
     AudioShard, ChunkType, EnvelopeState, ForensicMetrics, StorageSequence, VideoShard,
     WitnessEnvelope,
@@ -11,6 +10,7 @@ use phalanx_proto::prelude::{
     DataPayload, EncodingSymbolId, PhalanxTimestamp, RecordingId, RepairRatio, ShardChunk,
     ShardError, SymbolSize,
 };
+use phalanx_proto::storage::TransientJournal;
 use phalanx_proto::types::{ChannelCount, Fps, PowerState, SampleRate};
 use raptorq::{Decoder, Encoder, EncodingPacket, ObjectTransmissionInformation, PayloadId};
 use serde::{Deserialize, Serialize};
@@ -641,8 +641,8 @@ mod tests {
     use phalanx_proto::crypto::SymmetricKey;
     use phalanx_proto::evidence::{Evidence, SignatureHash};
     use phalanx_proto::identity::PhalanxIdentity;
-    use phalanx_proto::prelude::PendingEgress;
     use phalanx_proto::storage::HandoverProof;
+    use phalanx_proto::storage::PendingEgress;
 
     fn get_test_key() -> SymmetricKey {
         SymmetricKey([0x42; 32])
@@ -671,6 +671,12 @@ mod tests {
             Ok(())
         }
         async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError> {
+            Ok(vec![])
+        }
+        async fn record_workbench_state(&mut self, _: &[u8]) -> Result<(), ShardError> {
+            Ok(())
+        }
+        async fn read_workbench_state(&mut self) -> Result<Vec<u8>, ShardError> {
             Ok(vec![])
         }
     }

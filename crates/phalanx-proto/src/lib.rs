@@ -46,13 +46,15 @@ pub mod prelude {
     // Error Nouns
     pub use crate::error::*;
     pub use crate::retrieval::RecordingResponse;
-    pub use crate::storage::{GuardianError, PendingEgress};
+    pub use crate::storage::GuardianError;
+    // PendingEgress removed from prelude — import via phalanx_proto::storage::PendingEgress
 
     // Trust & Networking Nouns
     pub use crate::kademlia::{DhtPayload, PayloadKind};
     pub use crate::network::{NetworkEvent, DISCOVERY_TOPIC_ID, RETRIEVAL_PROTOCOL_ID};
+    pub use crate::time::MonotonicClock;
     pub use crate::topology::{EclipseRisk, SubnetBucket, SubnetQuota, TransportClass};
-    pub use crate::trust::{MonotonicClock, PetName, TrustLevel};
+    pub use crate::trust::{PetName, TrustLevel};
     pub use crate::vitals::ControlMessage;
 
     // Playback Nouns

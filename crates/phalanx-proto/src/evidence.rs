@@ -57,6 +57,10 @@ pub struct ShardChunk {
 }
 
 /// The Witness Envelope: The primary "Noun" of the Phalanx Forensic Timeline.
+///
+/// To create a signed envelope, import [`phalanx_forensics::witness::WitnessAuthority`]
+/// and call `WitnessEnvelope::sign_envelope(evidence, identity, peer_id, prev_hash)`.
+/// Signing is a Verb — it lives in the Laboratory (forensics), not the Dictionary (proto).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WitnessEnvelope {
     pub evidence: Evidence,

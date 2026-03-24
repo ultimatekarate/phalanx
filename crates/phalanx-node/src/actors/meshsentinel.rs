@@ -19,6 +19,7 @@ use phalanx_forensics::eclipse::{self, EclipseProbe, MeshFingerprint};
 use phalanx_forensics::policy::{IngressGovernor, TrafficGovernor};
 use phalanx_forensics::prelude::*;
 use phalanx_proto::prelude::*;
+use phalanx_proto::storage::TransientJournal;
 use phalanx_proto::trust::Offense;
 use phalanx_transport::identity_ext::Libp2pExt;
 use phalanx_transport::{EgressPort, IngressPort, LocalMeshPort};

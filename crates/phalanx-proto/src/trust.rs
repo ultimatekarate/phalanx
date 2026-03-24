@@ -129,22 +129,5 @@ pub enum TrustError {
     TimeSource(#[from] TimeError),
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Default,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub struct MonotonicClock(pub u64);
-
-impl MonotonicClock {
-    pub fn elapsed_since(&self, earlier: Self) -> u64 {
-        self.0.saturating_sub(earlier.0)
-    }
-}
+// MonotonicClock moved to time.rs (Tense, not Trust)
+pub use crate::time::MonotonicClock;

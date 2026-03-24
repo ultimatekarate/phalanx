@@ -269,7 +269,7 @@ async fn test_salvaged_items_restored() {
     let (tx, rx) = mpsc::channel(32);
     let gov = Arc::new(SystemGovernor::new());
 
-    let salvaged = vec![phalanx_proto::prelude::PendingEgress {
+    let salvaged = vec![phalanx_proto::storage::PendingEgress {
         channel_id: "salvaged-ch".to_string(),
         response: RecordingResponse::Unauthorized,
         attempt_count: 2,

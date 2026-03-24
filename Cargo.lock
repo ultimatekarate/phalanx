@@ -3956,6 +3956,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "futures-channel",
+ "phalanx-forensics",
  "postcard",
  "proptest",
  "rand 0.9.2",

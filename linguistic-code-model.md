@@ -55,7 +55,40 @@ This document establishes the "Linguistic Model" of Phalanx. All code must be pa
 1. **NEVER** allow libp2p types to leak into the Lab or the Dictionary. Map them to `NetworkId` in the Adapter.
 2. **NEVER** allow `std::io` or `tokio::fs` into the Lab. Use the `TransientJournal` trait.
 3. **ALWAYS** define reassembly strategies as `Mold` implementations in the Lab.
-4. **ALWAYS** use the `prelude` for cross-crate imports to maintain namespace sanity.
+4. **PREFER** the `prelude` for cross-crate imports of first-class Nouns. Import persistence contracts, scheduling types, and operational state directly from their defining module.
 5. **NEVER** use mutex or RwLock unless it is absolutely necessary. Treat network deadlocks as a conflict of tense.  
 6. **ALWAYS** ensure subject-verb agreement: a Noun constructed for consumption by a Verb must satisfy that Verb's preconditions. Temporal Nouns must agree with temporal Verbs. Cryptographic Nouns must agree with verification Verbs.
 7. **NEVER** construct test Nouns with fixed values when the consumption path includes a Verb that validates against live state. Use the same source the Verb uses.
+
+---
+
+## VI. CONSTRUCTOR NAMING
+
+Constructors carry semantic weight. The name documents the construction invariant — what the caller must understand about the object being created.
+
+- **`new()`** means simple construction with minimal or no validation. The caller gets a value with no implied preconditions beyond the type signature.
+- **`new_<qualifier>()`** means the qualifier is a precondition, mode, or invariant that distinguishes this construction from other possible constructions. The suffix is documentation — it tells the caller *what kind* of value they are getting. Do not rename qualified constructors to bare `new()`.
+- **`from_<source>()`** means type conversion from a different representation. The source name documents what is being converted.
+
+When a type has only one constructor and it carries a semantic qualifier, the qualifier takes precedence over the convention of `new()`. A constructor named for its invariant is more valuable than one named for convention.
+
+---
+
+## VII. TYPE PLACEMENT
+
+Types belong where the linguistic model places them, not where they are consumed most heavily.
+
+- **Temporal primitives are Tenses.** A monotonic clock, a timestamp, or a duration belongs with other time concepts, not in the module that uses it for bookkeeping.
+- **Capability contracts are Nouns.** A trait that defines what a component *can do* (persist state, provide a clock, enforce wire bounds) is a contract — a shape of interaction. Contracts belong in the Dictionary alongside the types they operate on.
+- **Operational state is not a first-class Noun.** Retry queues, scheduling metadata, and actor-internal bookkeeping serve the implementation, not the domain model. They belong in their implementing crate, not in shared contracts.
+- **Consumer gravity is a drift pattern.** When a type is used heavily in one module, the temptation is to move it closer. Resist this — check the model first. If the type is a Tense, it stays with the Tenses regardless of who reads it most.
+
+---
+
+## VIII. PRELUDE DISCIPLINE
+
+The prelude is the public vocabulary of a crate — the set of names that every consumer gets by default.
+
+- Only types that most consumers need belong in the prelude. Core evidence types, identity types, and error types qualify. Persistence contracts, scheduling types, and operational state do not.
+- Adding a type to the prelude is a deliberate act. It increases the default cognitive load for every consumer of the crate.
+- When in doubt, require direct import. A consumer who needs a specialized type can import it from the defining module. A consumer who doesn't need it should never see it.

@@ -7,7 +7,6 @@
 use crate::clock::VirtualClock;
 use crate::world::SimulationWorld;
 
-use phalanx_forensics::prelude::TransientJournal;
 use phalanx_node::actors::meshsentinel::{MeshSentinel, SentinelDependencies};
 use phalanx_node::config::NodeConfig;
 use phalanx_node::persistence::vault::derive_vault_key;
@@ -16,6 +15,7 @@ use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::identity::{NetworkId, NodeRole, PhalanxIdentity, RecordingId};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::*;
+use phalanx_proto::storage::{PendingEgress, TransientJournal};
 use phalanx_proto::telemetry::{ChaosMode, DiscoverySource, SimEvent};
 use phalanx_transport::adapters::local_mesh::LocalMeshAdapter;
 use phalanx_transport::{EgressPort, IngressPort};
@@ -416,6 +416,14 @@ impl TransientJournal for RecoveryJournal {
 
     async fn clear(&mut self) -> Result<(), ShardError> {
         Ok(())
+    }
+
+    async fn record_workbench_state(&mut self, _: &[u8]) -> Result<(), ShardError> {
+        Ok(())
+    }
+
+    async fn read_workbench_state(&mut self) -> Result<Vec<u8>, ShardError> {
+        Ok(vec![])
     }
 }
 
