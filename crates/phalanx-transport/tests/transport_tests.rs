@@ -7,12 +7,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use phalanx_proto::identity::NetworkId;
+use phalanx_proto::network::EgressPort;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::topic::MeshTopic;
 
 use phalanx_transport::adapters::mock::MockAdapter;
 use phalanx_transport::routing::MeshRoutingTable;
-use phalanx_transport::{PeerMapper, TransportAdapter};
+use phalanx_transport::PeerMapper;
 
 use tokio::sync::{mpsc, RwLock};
 
@@ -66,7 +67,7 @@ async fn mesh_publish_subscribe_roundtrip() {
 
     // Peer A publishes
     adapters[0]
-        .publish(topic.clone(), data.clone())
+        .publish(&topic, data.clone())
         .await
         .expect("publish should not fail");
 

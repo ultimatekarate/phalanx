@@ -8,7 +8,6 @@ use phalanx_forensics::PeerEvaluator;
 use phalanx_node::actors::meshsentinel::SentinelDependencies;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
-use phalanx_node::network::bridge::Libp2pBridge;
 use phalanx_node::network::orchestrator::setup_transport;
 use phalanx_node::persistence::vault::{derive_vault_key, load_or_create_vault_salt};
 use phalanx_node::psk::load_swarm_key;
@@ -54,15 +53,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let reputation_projection = trust_registry.projection_handle();
 
     // Production Network Adapter Setup (Hexagonal Port Injection)
-    let (adapter, receiver) = setup_transport(
+    let (ingress, egress) = setup_transport(
         &my_identity,
         &config,
         psk,
         Arc::new(reputation_projection) as Arc<dyn PeerEvaluator>,
     )?;
-
-    let bridge = Libp2pBridge::new(adapter, receiver);
-    let (ingress, egress) = bridge.split();
 
     // Engine Initialization via Parameter Object
     let deps = SentinelDependencies {

@@ -363,6 +363,7 @@ fn mux_mp4(
     _channels: Option<ChannelCount>,
 ) -> Result<Vec<u8>, TranscodeError> {
     use mp4::{Mp4Config, Mp4Writer, TrackConfig};
+    // Governance: Cursor<Vec<u8>> is in-memory byte assembly, permitted per Command #2.
     use std::io::Cursor;
 
     let mut buf = Vec::new();

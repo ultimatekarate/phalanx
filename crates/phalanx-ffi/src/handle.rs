@@ -18,7 +18,6 @@ use phalanx_node::actors::meshsentinel::SentinelDependencies;
 use phalanx_node::actors::trust_actor::TrustCommand;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
-use phalanx_node::network::bridge::Libp2pBridge;
 use phalanx_node::network::orchestrator::setup_transport;
 use phalanx_node::persistence::vault::{derive_vault_key, load_or_create_vault_salt};
 use phalanx_node::trust::TrustRegistry;
@@ -29,6 +28,7 @@ use phalanx_proto::evidence::{AudioShard, VideoShard};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::PhalanxIdentity;
 use phalanx_transport::adapters::local_mesh::{LocalMeshAdapter, OutboundLocalPacket};
+use phalanx_transport::prelude::Libp2pIngress;
 
 use std::ffi::CStr;
 use std::os::raw::c_char;
@@ -106,8 +106,7 @@ pub struct PhalanxHandle {
 
 /// Type-erased reference to the running MeshSentinel.
 /// We need this to call `spawn_playback()`.
-type SentinelRef =
-    Arc<tokio::sync::Mutex<MeshSentinel<phalanx_node::network::bridge::BridgeIngress>>>;
+type SentinelRef = Arc<tokio::sync::Mutex<MeshSentinel<Libp2pIngress>>>;
 
 // =====================================================================
 // FFI LIFECYCLE FUNCTIONS
@@ -214,7 +213,7 @@ async fn bootstrap(
     ));
 
     // Network
-    let (adapter, receiver) = setup_transport(
+    let (ingress, egress) = setup_transport(
         &identity,
         &config,
         None, // PSK: None for public swarm on mobile (can be extended later)
@@ -222,13 +221,9 @@ async fn bootstrap(
     )
     .map_err(|_| PhalanxError::BootFailed)?;
 
-    // Extract transport drop counter before bridge consumes the adapter.
-    // MeshSentinel reads this on maintenance ticks to feed pressure into
-    // the Volterra connection integral.
-    let transport_drop_counter = adapter.dropped_event_count.clone();
-
-    let bridge = Libp2pBridge::new(adapter, receiver);
-    let (ingress, egress) = bridge.split();
+    // Extract transport drop counter for MeshSentinel maintenance ticks
+    // to feed pressure into the Volterra connection integral.
+    let transport_drop_counter = egress.dropped_event_count();
 
     // Local mesh adapter — channel bridge for BLE/WiFi Direct via Flutter FFI
     let (local_mesh_adapter, local_mesh_tx, local_mesh_outbound_rx, local_mesh_available) =

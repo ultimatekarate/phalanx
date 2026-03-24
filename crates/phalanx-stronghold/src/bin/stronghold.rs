@@ -15,7 +15,7 @@ use phalanx_stronghold::config::StrongholdConfig;
 use phalanx_stronghold::persistence::evidence_store::EvidenceStore;
 use phalanx_stronghold::persistence::proof_store::ProofStore;
 use phalanx_stronghold::sentinel::StrongholdDependencies;
-use phalanx_stronghold::swarm::{setup_stronghold_swarm, StrongholdIngress};
+use phalanx_stronghold::swarm::setup_stronghold_swarm;
 
 // ── CLI Definition ──────────────────────────────────────────────────────
 
@@ -162,8 +162,7 @@ async fn cmd_run(
     eprintln!("  DID: {}", identity.did);
 
     // Set up the mesh transport with ephemeral DHT
-    let (_adapter, receiver) = setup_stronghold_swarm(&identity, &config.network)?;
-    let ingress = StrongholdIngress::new(receiver);
+    let (ingress, _egress) = setup_stronghold_swarm(&identity, &config.network)?;
 
     // Construct stores
     let evidence_store = EvidenceStore::new(vault_path.to_path_buf());

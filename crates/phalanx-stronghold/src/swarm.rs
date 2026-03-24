@@ -8,6 +8,7 @@
 use async_trait::async_trait;
 use phalanx_proto::identity::PhalanxIdentity;
 use phalanx_proto::network::NetworkEvent;
+use phalanx_proto::network::{IngressPort, TransportError};
 use phalanx_transport::prelude::*;
 use tokio::sync::mpsc;
 
@@ -17,7 +18,7 @@ use crate::config::NetworkConfig;
 pub fn setup_stronghold_swarm(
     identity: &PhalanxIdentity,
     network_config: &NetworkConfig,
-) -> Result<(Libp2pAdapter, mpsc::Receiver<NetworkEvent>), TransportError> {
+) -> Result<(Libp2pIngress, Libp2pEgress), TransportError> {
     let transport_config = MeshTransportConfig {
         listen_addresses: network_config.listen_addresses.clone(),
         bootstrap_peers: network_config.bootstrap_peers.clone(),
