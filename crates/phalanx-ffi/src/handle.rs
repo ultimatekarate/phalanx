@@ -222,6 +222,11 @@ async fn bootstrap(
     )
     .map_err(|_| PhalanxError::BootFailed)?;
 
+    // Extract transport drop counter before bridge consumes the adapter.
+    // MeshSentinel reads this on maintenance ticks to feed pressure into
+    // the Volterra connection integral.
+    let transport_drop_counter = adapter.dropped_event_count.clone();
+
     let bridge = Libp2pBridge::new(adapter, receiver);
     let (ingress, egress) = bridge.split();
 
@@ -246,6 +251,7 @@ async fn bootstrap(
         system_governor: governor.clone(),
         vault_key,
         local_mesh: Some(Box::new(local_mesh_adapter)),
+        transport_drop_counter: Some(transport_drop_counter),
     };
 
     let engine = MeshSentinel::new(deps)

@@ -45,6 +45,10 @@ pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJourn
     /// Default: `None` (desktop/non-BLE platforms).
     /// When `Some`, MeshSentinel polls for local mesh events alongside network ingress.
     pub local_mesh: Option<Box<dyn LocalMeshPort>>,
+    /// Transport event drop counter from the Libp2pAdapter.
+    /// Read on maintenance ticks to feed pressure into the Volterra connection integral.
+    /// `None` for test/sim environments without a real transport.
+    pub transport_drop_counter: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 pub struct MeshSentinel<I: IngressPort> {
@@ -121,6 +125,11 @@ pub struct MeshSentinel<I: IngressPort> {
     pub proximity_witnesses: Vec<phalanx_proto::corroboration::ProximityWitness>,
     /// Trusted clock for forensic timestamps.
     pub clock: Arc<TrustedClock>,
+    /// Transport event drop counter — shared with Libp2pAdapter.
+    /// Read on topology ticks to compute delta and feed connection pressure.
+    transport_drop_counter: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Last read value of transport drop counter, for delta computation.
+    last_transport_drops: u64,
 }
 
 impl<I: IngressPort> MeshSentinel<I> {
@@ -334,6 +343,8 @@ impl<I: IngressPort> MeshSentinel<I> {
             active_recording_key: None,
             proximity_witnesses: Vec::new(),
             clock: clock_handle.clone(),
+            transport_drop_counter: deps.transport_drop_counter,
+            last_transport_drops: 0,
         })
     }
 
@@ -363,17 +374,23 @@ impl<I: IngressPort> MeshSentinel<I> {
 
                 // DHT: StorageActor persisted a shard — announce as provider.
                 Some(recording_id) = self.commit_notify_rx.recv() => {
-                    let _ = self.egress_tx
+                    if let Err(e) = self.egress_tx
                         .send(EgressCommand::AnnounceRecording(recording_id))
-                        .await;
+                        .await
+                    {
+                        tracing::warn!("Failed to announce recording on DHT — egress channel closed: {e}");
+                    }
                     false
                 }
 
                 // DHT: PlaybackCoordinator needs a missing shard — find providers.
                 Some((recording_id, _sequence_id)) = self.discovery_rx.recv() => {
-                    let _ = self.egress_tx
+                    if let Err(e) = self.egress_tx
                         .send(EgressCommand::FindProviders(recording_id))
-                        .await;
+                        .await
+                    {
+                        tracing::warn!("Failed to find providers — egress channel closed: {e}");
+                    }
                     false
                 }
 
@@ -641,14 +658,28 @@ impl<I: IngressPort> MeshSentinel<I> {
                     "DHT: Shard response received"
                 );
                 for envelope in envelopes {
-                    let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
-                    let _ = self
+                    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                    if let Err(e) = self
                         .storage_tx
                         .send(StorageCommand::WriteShard {
                             envelope,
                             reply_to: reply_tx,
                         })
-                        .await;
+                        .await
+                    {
+                        tracing::warn!("DHT shard write: storage channel closed: {e}");
+                        continue;
+                    }
+                    // Await confirmation — don't fire-and-forget evidence writes.
+                    match reply_rx.await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            tracing::warn!("DHT shard write failed: {e}");
+                        }
+                        Err(_) => {
+                            tracing::warn!("DHT shard write: storage actor dropped reply channel");
+                        }
+                    }
                 }
                 false
             }
@@ -840,6 +871,25 @@ impl<I: IngressPort> MeshSentinel<I> {
                 }
             }
             _ => {} // EclipseRisk::None — all clear
+        }
+
+        // 4. Transport event drop pressure: read the shared counter from the
+        // Libp2pAdapter, compute delta since last tick, feed into the Volterra
+        // connection integral. Sustained drops indicate the pipeline can't keep
+        // up with connection load.
+        if let Some(ref counter) = self.transport_drop_counter {
+            let current = counter.load(std::sync::atomic::Ordering::Relaxed);
+            let delta = current.saturating_sub(self.last_transport_drops);
+            self.last_transport_drops = current;
+            if delta > 0 {
+                self.system_governor.record_transport_drop_pressure(delta);
+                tracing::debug!(
+                    target: "phalanx::transport",
+                    delta = delta,
+                    total = current,
+                    "Transport event drops fed into connection pressure integral"
+                );
+            }
         }
     }
 }
