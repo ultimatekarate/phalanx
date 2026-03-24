@@ -3852,6 +3852,7 @@ dependencies = [
  "phalanx-node",
  "phalanx-proto",
  "phalanx-transport",
+ "postcard",
  "rand 0.8.5",
  "rcgen",
  "serde_json",

@@ -10,11 +10,12 @@
 //   - Recording ID, timestamp, author DID
 //
 // This module:
-//   1. Retrieves all shards for a recording from storage
+//   1. Retrieves all envelopes for a recording from storage
 //   2. Decrypts and decompresses each shard
-//   3. Encodes video (H.264) and audio (AAC) tracks via phalanx-forensics
+//   3. Transcodes video (H.264) and audio (AAC) tracks via phalanx-forensics
 //   4. Muxes into an MP4 container
-//   5. Embeds a C2PA manifest signed with the node's Ed25519 key
+//   5. Embeds a C2PA manifest with aggregated forensic metrics
+//   6. Signs with the node's real Ed25519 identity — NOT ephemeral key
 //
 // Self-signed with the node's Ed25519 key — no third-party CA required.
 // The PRNU fingerprint doesn't need Adobe's permission to be valid.
@@ -26,7 +27,18 @@ use std::ffi::{CStr, CString};
 use std::io::Cursor;
 use std::os::raw::c_char;
 
-use c2pa::{Builder, CallbackSigner, SigningAlg};
+use c2pa::{CallbackSigner, SigningAlg};
+use phalanx_forensics::c2pa_ext::{generate_self_signed_cert, C2paOrchestrator};
+use phalanx_forensics::judge::PayloadCipher;
+use phalanx_forensics::reassembler::decompress_payload;
+use phalanx_forensics::transcode::{transcode_to_mp4, DecodedAudioShard, DecodedVideoShard};
+use phalanx_node::actors::storage::StorageCommand;
+use phalanx_proto::evidence::{Evidence, MediaType};
+use phalanx_proto::identity::RecordingId;
+use phalanx_proto::prelude::PhalanxIdentity;
+use phalanx_proto::types::Fps;
+
+use tokio::sync::oneshot;
 
 /// Exports a recording as a C2PA-compliant MP4 with embedded forensic metadata.
 ///
@@ -69,9 +81,43 @@ pub unsafe extern "C" fn phalanx_export_c2pa(
         Err(_) => return PhalanxError::InvalidUtf8.code(),
     };
 
-    match build_c2pa_export(h, rec_str, path_str) {
-        Ok(()) => PhalanxError::Ok.code(),
-        Err(e) => e.code(),
+    // Spawn the async pipeline on the runtime and block for the result.
+    // Using spawn + oneshot + blocking_recv avoids re-entrant block_on panics.
+    let vault_key = h.vault_key.clone();
+    let identity = h.identity.clone();
+    let node_did = h.node_did.clone();
+    let rec_id = rec_str.to_string();
+    let out = path_str.to_string();
+
+    // Extract storage_tx from the sentinel
+    let storage_tx = {
+        let Ok(sentinel_guard) = h.sentinel.lock() else {
+            return PhalanxError::InvalidState.code();
+        };
+        let Some(sentinel_ref) = sentinel_guard.as_ref() else {
+            return PhalanxError::InvalidState.code();
+        };
+        // We need to get storage_tx from MeshSentinel. Since it's behind a
+        // tokio::sync::Mutex, we must do a try_lock or spawn on the runtime.
+        // Clone the Arc so we can move it into the async block.
+        sentinel_ref.clone()
+    };
+
+    let (result_tx, result_rx) = oneshot::channel();
+
+    h.runtime.spawn(async move {
+        let engine = storage_tx.lock().await;
+        let stx = engine.storage_tx.clone();
+        drop(engine); // Release the sentinel lock immediately
+
+        let res = build_c2pa_export(&stx, &vault_key, &identity, &node_did, &rec_id, &out).await;
+        let _ = result_tx.send(res);
+    });
+
+    match result_rx.blocking_recv() {
+        Ok(Ok(())) => PhalanxError::Ok.code(),
+        Ok(Err(e)) => e.code(),
+        Err(_) => PhalanxError::ChannelClosed.code(),
     }
 }
 
@@ -114,104 +160,133 @@ pub unsafe extern "C" fn phalanx_get_c2pa_export_path(
     }
 }
 
-/// Internal: builds, signs, and writes a C2PA manifest for a recording.
+/// Internal: retrieves envelopes, decrypts, transcodes to MP4, embeds C2PA manifest,
+/// and writes the signed file to disk.
 ///
-/// TODO (D3): Full implementation will:
-///   1. Iterate StorageActor for all shards of recording_id
-///   2. Decrypt + decompress each shard
-///   3. Demux Video/Audio evidence
-///   4. Encode H.264 via openh264 (video frames)
-///   5. Encode AAC via fdk-aac (audio samples)
-///   6. Mux into MP4 container
-///   7. Embed C2PA manifest with aggregated forensic metrics
-///   8. Sign with real Ed25519 key
-///
-/// Current implementation: signs a placeholder JPEG with real Ed25519 key
-/// as a stepping stone. Frame retrieval + encoding will be wired in
-/// once StorageActor query API is integrated.
-fn build_c2pa_export(
-    h: &PhalanxHandle,
-    _recording_id: &str,
+/// Async because it communicates with StorageActor via channels and awaits replies.
+async fn build_c2pa_export(
+    storage_tx: &tokio::sync::mpsc::Sender<StorageCommand>,
+    vault_key: &phalanx_proto::crypto::SymmetricKey,
+    identity: &PhalanxIdentity,
+    node_did: &str,
+    recording_id: &str,
     out_path: &str,
 ) -> Result<(), PhalanxError> {
-    // Build C2PA manifest with Phalanx forensic assertions
-    let mut builder = Builder::new();
+    // ── 1. Retrieve all envelopes for this recording ─────────────────
+    let rec_id = RecordingId::new(recording_id);
 
-    // TODO: switch to "video/mp4" once MP4 encoding is wired
-    builder.set_format("image/jpeg");
+    let (reply_tx, reply_rx) = oneshot::channel();
+    storage_tx
+        .send(StorageCommand::Retrieval {
+            recording_id: rec_id,
+            owner_did: None,
+            reply_to: reply_tx,
+        })
+        .await
+        .map_err(|_| PhalanxError::ChannelClosed)?;
 
-    // Add custom Phalanx forensic assertion
-    let forensic_assertion = serde_json::json!({
-        "version": "0.1.0",
-        "author_did": h.node_did,
-        "analysis_pipeline": "ForensicLens/ScalarLens",
-        "crop_size": "256x256",
-        "metrics_description": {
-            "prnu_var": "Photo Response Non-Uniformity variance — sensor fingerprint",
-            "h_energy": "Horizontal Moiré energy via Laplacian convolution",
-            "v_energy": "Vertical Moiré energy via Laplacian convolution",
-            "mean_luminance": "Mean luminance of the analysis crop (0-255)"
-        },
-        "note": "Self-signed. The PRNU fingerprint doesn't need a CA to be valid."
-    });
+    let envelopes = reply_rx.await.map_err(|_| PhalanxError::ChannelClosed)?;
 
-    builder
-        .add_assertion("phalanx.forensic_provenance", &forensic_assertion)
+    if envelopes.is_empty() {
+        return Err(PhalanxError::InvalidState);
+    }
+
+    // ── 2. Decrypt + decompress + deserialize by evidence type ───────
+    let mut video_shards: Vec<DecodedVideoShard> = Vec::new();
+    let mut audio_shards: Vec<DecodedAudioShard> = Vec::new();
+
+    for envelope in &envelopes {
+        match &envelope.evidence {
+            Evidence::Video(v) => {
+                // Decrypt payload
+                let decrypted = v
+                    .payload
+                    .reveal(vault_key)
+                    .map_err(|_| PhalanxError::InvalidState)?;
+
+                // Decompress LZ4
+                let decompressed =
+                    decompress_payload(&decrypted).map_err(|_| PhalanxError::InvalidState)?;
+
+                // Deserialize postcard → Vec<Vec<u8>> (JPEG frames)
+                let jpeg_frames: Vec<Vec<u8>> =
+                    postcard::from_bytes(&decompressed).map_err(|_| PhalanxError::InvalidState)?;
+
+                video_shards.push(DecodedVideoShard {
+                    jpeg_frames,
+                    metrics: v.lens_metrics,
+                });
+            }
+            Evidence::Audio(a) => {
+                // Decrypt payload
+                let decrypted = a
+                    .payload
+                    .reveal(vault_key)
+                    .map_err(|_| PhalanxError::InvalidState)?;
+
+                // Decompress LZ4 → raw PCM bytes (no postcard wrapper for audio)
+                let pcm_bytes =
+                    decompress_payload(&decrypted).map_err(|_| PhalanxError::InvalidState)?;
+
+                audio_shards.push(DecodedAudioShard {
+                    pcm_bytes,
+                    sample_rate: a.sample_rate,
+                    channels: a.channels,
+                });
+            }
+            // Gap, Handover, Proximity — no media payload to transcode.
+            _ => {}
+        }
+    }
+
+    // ── 3. Transcode to MP4 ──────────────────────────────────────────
+    let fps = Fps::default(); // 30fps — reasonable for MP4 timing
+    let transcoded = transcode_to_mp4(video_shards, audio_shards, fps)
         .map_err(|_| PhalanxError::InvalidState)?;
 
-    // Add creative work assertion (author identity)
-    let creative_work = serde_json::json!({
-        "@type": "CreativeWork",
-        "author": [{
-            "@type": "Person",
-            "identifier": h.node_did,
-            "credential": [{
-                "@type": "VerifiableCredential",
-                "credentialSubject": {
-                    "id": h.node_did,
-                    "type": "did:key"
-                }
-            }]
-        }]
-    });
+    // ── 4. Build C2PA manifest with aggregate forensic metrics ───────
+    //
+    // Use the aggregate metrics from the transcode output — they represent
+    // the mean/min/max PRNU, Moiré energy across all shards.
+    let aggregate = &transcoded.aggregate_metrics;
+    let summary_metrics = phalanx_proto::evidence::ForensicMetrics {
+        h_energy: aggregate.mean_h_energy,
+        v_energy: aggregate.mean_v_energy,
+        prnu_var: aggregate.mean_prnu_var,
+        mean_luminance: 0.0, // Not aggregated across shards
+    };
 
-    builder
-        .add_assertion("stds.schema-org.CreativeWork", &creative_work)
-        .map_err(|_| PhalanxError::InvalidState)?;
+    let mut builder =
+        C2paOrchestrator::build_manifest_with_lens(node_did, MediaType::VideoMp4, &summary_metrics)
+            .map_err(|_| PhalanxError::InvalidState)?;
 
-    // TODO: replace with actual MP4 from recording data
-    let placeholder_jpeg = create_minimal_jpeg();
+    // ── 5. Sign with the node's real identity ────────────────────────
+    let signer = create_identity_signer(identity);
 
-    // Sign with real Ed25519 key
-    let signer = create_ed25519_signer();
-
-    let mut source = Cursor::new(&placeholder_jpeg);
+    let mut source = Cursor::new(&transcoded.mp4_bytes);
     let mut dest = Cursor::new(Vec::new());
 
     builder
-        .sign(&signer, "image/jpeg", &mut source, &mut dest)
+        .sign(&signer, "video/mp4", &mut source, &mut dest)
         .map_err(|_| PhalanxError::InvalidState)?;
 
-    // Write the signed output to disk
+    // ── 6. Write signed MP4 to disk ──────────────────────────────────
     std::fs::write(out_path, dest.into_inner()).map_err(|_| PhalanxError::InvalidState)?;
 
     Ok(())
 }
 
-/// Creates an Ed25519 callback signer for C2PA manifests.
+/// Creates a C2PA callback signer backed by the node's actual PhalanxIdentity.
 ///
-/// Generates an ephemeral Ed25519 keypair and self-signed X.509 certificate.
-/// In production, this should use the node's stored identity keypair
-/// for consistent provenance chains across exports.
-fn create_ed25519_signer() -> CallbackSigner {
-    use ed25519_dalek::{Signer, SigningKey};
+/// Uses the real Ed25519 keypair — NOT an ephemeral key. Red team review
+/// correctly identified that ephemeral signers break provenance chains.
+/// The self-signed cert wraps the node's verifying key so C2PA validators
+/// can verify the signature even without a trusted CA.
+fn create_identity_signer(identity: &PhalanxIdentity) -> CallbackSigner {
+    use ed25519_dalek::Signer;
 
-    // Generate ephemeral key for now — will use h.signing_keypair once stored
-    let mut csprng = rand::rngs::OsRng;
-    let signing_key = SigningKey::generate(&mut csprng);
+    let signing_key = identity.keypair.clone();
     let verifying_key = signing_key.verifying_key();
-
-    // Generate self-signed X.509 certificate wrapping the Ed25519 public key
     let cert_der = generate_self_signed_cert(&verifying_key);
 
     let callback = move |_context: *const (), data: &[u8]| -> c2pa::Result<Vec<u8>> {
@@ -220,57 +295,6 @@ fn create_ed25519_signer() -> CallbackSigner {
     };
 
     CallbackSigner::new(callback, SigningAlg::Ed25519, cert_der)
-}
-
-/// Generates a minimal self-signed X.509 certificate containing the Ed25519 public key.
-/// Delegates to the shared Laboratory implementation.
-fn generate_self_signed_cert(verifying_key: &ed25519_dalek::VerifyingKey) -> Vec<u8> {
-    phalanx_forensics::c2pa_ext::generate_self_signed_cert(verifying_key)
-}
-
-/// Creates a minimal valid JPEG for C2PA manifest embedding.
-///
-/// Placeholder — will be replaced by actual MP4 from recording data
-/// once StorageActor query API and H.264/AAC encoding are integrated.
-fn create_minimal_jpeg() -> Vec<u8> {
-    let mut jpeg = Vec::with_capacity(256);
-
-    // SOI marker
-    jpeg.extend_from_slice(&[0xFF, 0xD8]);
-
-    // APP0 JFIF marker
-    jpeg.extend_from_slice(&[
-        0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00,
-        0x01, 0x00, 0x00,
-    ]);
-
-    // DQT
-    jpeg.push(0xFF);
-    jpeg.push(0xDB);
-    jpeg.extend_from_slice(&[0x00, 0x43]);
-    jpeg.push(0x00);
-    jpeg.extend_from_slice(&[16u8; 64]);
-
-    // SOF0 — 1x1 pixel, 1 component
-    jpeg.extend_from_slice(&[
-        0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
-    ]);
-
-    // DHT — minimal DC table
-    jpeg.extend_from_slice(&[0xFF, 0xC4, 0x00, 0x1F, 0x00]);
-    jpeg.extend_from_slice(&[0x00; 16]);
-    jpeg.extend_from_slice(&[0x00; 12]);
-
-    // SOS
-    jpeg.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]);
-
-    // Scan data
-    jpeg.push(0x00);
-
-    // EOI
-    jpeg.extend_from_slice(&[0xFF, 0xD9]);
-
-    jpeg
 }
 
 #[cfg(test)]
@@ -301,17 +325,6 @@ mod tests {
     }
 
     #[test]
-    fn minimal_jpeg_is_valid() {
-        let jpeg = create_minimal_jpeg();
-        assert_eq!(jpeg[0], 0xFF);
-        assert_eq!(jpeg[1], 0xD8);
-        assert_eq!(jpeg[jpeg.len() - 2], 0xFF);
-        assert_eq!(jpeg[jpeg.len() - 1], 0xD9);
-        assert!(jpeg.len() > 20, "JPEG too small: {} bytes", jpeg.len());
-        assert!(jpeg.len() < 1024, "JPEG too large: {} bytes", jpeg.len());
-    }
-
-    #[test]
     fn get_export_path_returns_mp4() {
         unsafe {
             let rec = CString::new("test-rec").expect("valid");
@@ -326,10 +339,9 @@ mod tests {
     }
 
     #[test]
-    fn ed25519_signer_produces_valid_signature() {
-        let signer = create_ed25519_signer();
-        // Construction without panic + correct algorithm is validation
-        // (we can't call the callback directly due to c2pa's opaque API)
+    fn identity_signer_uses_correct_algorithm() {
+        let identity = PhalanxIdentity::new_ephemeral();
+        let signer = create_identity_signer(&identity);
         assert_eq!(signer.alg, SigningAlg::Ed25519);
     }
 }

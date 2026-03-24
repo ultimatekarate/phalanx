@@ -207,7 +207,9 @@ impl<I: IngressPort> MeshSentinel<I> {
         let trust_actor = TrustActor::new(trust_registry, trust_rx);
         tokio::spawn(trust_actor.run());
 
-        let network_key = Arc::new(SymmetricKey([0x42; 32]));
+        // Use the real vault_key — shards are encrypted with this key by MediaEgressActor.
+        // The previous [0x42; 32] was a placeholder that caused silent decryption failures.
+        let network_key = Arc::new(deps.vault_key.clone());
 
         let retrieval_actor = RetrievalActor::new(
             arc_identity.clone(),
