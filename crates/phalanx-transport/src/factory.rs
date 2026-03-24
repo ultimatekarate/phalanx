@@ -11,14 +11,12 @@ use libp2p::{
     SwarmBuilder, Transport,
 };
 use phalanx_proto::identity::PhalanxIdentity;
-use phalanx_proto::network::NetworkEvent;
-use tokio::sync::mpsc;
 
-use crate::adapters::libp2p::Libp2pAdapter;
+use crate::adapters::libp2p::{Libp2pAdapter, Libp2pEgress, Libp2pIngress};
 use crate::builder::{build_behaviour, build_quic_transport, build_tcp_fallback};
 use crate::config::MeshTransportConfig;
 use crate::identity_ext::Libp2pExt;
-use crate::TransportError;
+use phalanx_proto::network::TransportError;
 
 /// Build a complete mesh transport with an ephemeral (in-memory) DHT store.
 ///
@@ -26,7 +24,7 @@ use crate::TransportError;
 pub fn build_mesh_transport(
     identity: &PhalanxIdentity,
     config: &MeshTransportConfig,
-) -> Result<(Libp2pAdapter, mpsc::Receiver<NetworkEvent>), TransportError> {
+) -> Result<(Libp2pIngress, Libp2pEgress), TransportError> {
     let local_key = identity.to_libp2p_keypair();
     let local_peer_id = local_key.public().to_peer_id();
 
@@ -41,7 +39,7 @@ pub fn build_mesh_transport_with_store<S>(
     identity: &PhalanxIdentity,
     store: S,
     config: &MeshTransportConfig,
-) -> Result<(Libp2pAdapter, mpsc::Receiver<NetworkEvent>), TransportError>
+) -> Result<(Libp2pIngress, Libp2pEgress), TransportError>
 where
     S: RecordStore + Send + Sync + 'static,
 {
@@ -53,7 +51,7 @@ fn build_mesh_transport_inner<S>(
     local_key: libp2p::identity::Keypair,
     store: S,
     config: &MeshTransportConfig,
-) -> Result<(Libp2pAdapter, mpsc::Receiver<NetworkEvent>), TransportError>
+) -> Result<(Libp2pIngress, Libp2pEgress), TransportError>
 where
     S: RecordStore + Send + Sync + 'static,
 {
@@ -174,7 +172,7 @@ where
     }
 
     // ── Adapter creation ─────────────────────────────────────
-    let (adapter, receiver) = Libp2pAdapter::from_swarm(swarm, config.adapter.clone());
+    let (ingress, egress) = Libp2pAdapter::from_swarm(swarm, config.adapter.clone());
 
-    Ok((adapter, receiver))
+    Ok((ingress, egress))
 }

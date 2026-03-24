@@ -53,7 +53,7 @@ This document establishes the "Linguistic Model" of Phalanx. All code must be pa
 ## V. GOVERNANCE COMMANDS
 
 1. **NEVER** allow libp2p types to leak into the Lab or the Dictionary. Map them to `NetworkId` in the Adapter.
-2. **NEVER** allow `std::io` or `tokio::fs` into the Lab. Use the `TransientJournal` trait.
+2. **NEVER** allow filesystem IO (`std::fs`, `tokio::fs`) or network IO (`std::net`, `tokio::net`) into the Lab. In-memory byte assembly (`std::io::Cursor`, `std::io::Write` on `Vec<u8>`) is permitted when required by codec dependencies. For persistence, use the `TransientJournal` trait.
 3. **ALWAYS** define reassembly strategies as `Mold` implementations in the Lab.
 4. **PREFER** the `prelude` for cross-crate imports of first-class Nouns. Import persistence contracts, scheduling types, and operational state directly from their defining module.
 5. **NEVER** use mutex or RwLock unless it is absolutely necessary. Treat network deadlocks as a conflict of tense.  
@@ -82,6 +82,7 @@ Types belong where the linguistic model places them, not where they are consumed
 - **Capability contracts are Nouns.** A trait that defines what a component *can do* (persist state, provide a clock, enforce wire bounds) is a contract — a shape of interaction. Contracts belong in the Dictionary alongside the types they operate on.
 - **Operational state is not a first-class Noun.** Retry queues, scheduling metadata, and actor-internal bookkeeping serve the implementation, not the domain model. They belong in their implementing crate, not in shared contracts.
 - **Consumer gravity is a drift pattern.** When a type is used heavily in one module, the temptation is to move it closer. Resist this — check the model first. If the type is a Tense, it stays with the Tenses regardless of who reads it most.
+- **Trait signatures in the Dictionary should reference domain types, not runtime-specific types.** If a trait requires a runtime type in its signature, refactor the signature to use domain-shaped abstractions rather than exempting the trait from placement rules.
 
 ---
 

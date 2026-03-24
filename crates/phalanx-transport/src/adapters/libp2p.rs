@@ -1,6 +1,6 @@
 use crate::behaviour::{recording_id_from_key, PhalanxBehaviour};
 use crate::events::PhalanxEvent;
-use crate::{PeerMapper, TransportAdapter, TransportError};
+use crate::PeerMapper;
 use async_trait::async_trait;
 use futures::StreamExt; // Required to bring StreamExt::select_next_some into scope
 use libp2p::kad;
@@ -9,7 +9,8 @@ use libp2p::swarm::Swarm;
 use libp2p::swarm::SwarmEvent;
 use libp2p::PeerId;
 use phalanx_proto::identity::NetworkId;
-use phalanx_proto::network::NetworkEvent;
+use phalanx_proto::network::TransportError;
+use phalanx_proto::network::{EgressPort, IngressPort, NetworkEvent};
 use phalanx_proto::retrieval::RecordingResponse;
 use phalanx_proto::telemetry::DiscoverySource;
 use phalanx_proto::topic::MeshTopic;
@@ -377,12 +378,12 @@ impl Libp2pAdapter {
         }
     }
 
-    /// Factory constructor: returns `(Adapter, Receiver)` directly,
+    /// Factory constructor: returns `(Libp2pIngress, Libp2pEgress)` port objects directly,
     /// avoiding the Mutex one-shot pattern.
     pub fn from_swarm<S>(
         swarm: Swarm<PhalanxBehaviour<S>>,
         config: AdapterConfig,
-    ) -> (Self, mpsc::Receiver<NetworkEvent>)
+    ) -> (Libp2pIngress, Libp2pEgress)
     where
         S: RecordStore + Send + Sync + 'static,
     {
@@ -393,43 +394,41 @@ impl Libp2pAdapter {
             .expect("Mutex poisoned in Libp2pAdapter::from_swarm")
             .take()
             .expect("Receiver already consumed");
-        (adapter, receiver)
+        (
+            Libp2pIngress {
+                ingress_rx: receiver,
+            },
+            Libp2pEgress { adapter },
+        )
     }
 }
 
-#[async_trait]
-impl TransportAdapter for Libp2pAdapter {
-    async fn publish(&self, topic: MeshTopic, data: Vec<u8>) -> Result<(), TransportError> {
+impl Libp2pAdapter {
+    pub async fn publish(&self, topic: MeshTopic, data: Vec<u8>) -> Result<(), TransportError> {
         self.command_tx
             .send(TransportCommand::Publish(topic, data))
             .await
             .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
     }
 
-    async fn send_direct(&self, target: &NetworkId, data: Vec<u8>) -> Result<(), TransportError> {
+    pub async fn send_direct(
+        &self,
+        target: &NetworkId,
+        data: Vec<u8>,
+    ) -> Result<(), TransportError> {
         self.command_tx
             .send(TransportCommand::SendDirect(target.clone(), data))
             .await
             .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
     }
 
-    fn ingress_stream(&self) -> mpsc::Receiver<NetworkEvent> {
-        self.event_rx_factory
-            .lock()
-            .expect("Mutex poisoned in Libp2pAdapter")
-            .take()
-            .expect("Ingress stream has already been consumed by the Sentinel")
-    }
-
-    async fn ban_peer(&self, peer: &NetworkId) -> Result<(), TransportError> {
+    pub async fn ban_peer(&self, peer: &NetworkId) -> Result<(), TransportError> {
         self.command_tx
             .send(TransportCommand::Ban(peer.clone()))
             .await
             .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
     }
-}
 
-impl Libp2pAdapter {
     pub async fn announce_recording(
         &self,
         recording_id: &phalanx_proto::identity::RecordingId,
@@ -458,6 +457,93 @@ impl Libp2pAdapter {
             .send(TransportCommand::ReBootstrap(peers.to_vec()))
             .await
             .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
+    }
+}
+
+// --- Port Objects ---
+
+pub struct Libp2pIngress {
+    ingress_rx: mpsc::Receiver<NetworkEvent>,
+}
+
+#[async_trait]
+impl IngressPort for Libp2pIngress {
+    async fn next_event(&mut self) -> Option<NetworkEvent> {
+        self.ingress_rx.recv().await
+    }
+}
+
+#[derive(Clone)]
+pub struct Libp2pEgress {
+    adapter: Libp2pAdapter,
+}
+
+impl Libp2pEgress {
+    pub fn dropped_event_count(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        self.adapter.dropped_event_count.clone()
+    }
+}
+
+#[async_trait]
+impl EgressPort for Libp2pEgress {
+    async fn publish(&self, topic: &MeshTopic, data: Vec<u8>) -> Result<(), String> {
+        self.adapter
+            .publish(topic.clone(), data)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn ban_peer(&self, peer: &NetworkId) {
+        if let Err(e) = self.adapter.ban_peer(peer).await {
+            tracing::error!(target: "phalanx::transport", "Failed to ban peer {}: {}", peer.0, e);
+        }
+    }
+
+    async fn send_response(
+        &self,
+        _channel_id: &str,
+        _response: RecordingResponse,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn announce_recording(
+        &self,
+        recording_id: &phalanx_proto::identity::RecordingId,
+    ) -> Result<(), String> {
+        self.adapter
+            .announce_recording(recording_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn find_providers(
+        &self,
+        recording_id: &phalanx_proto::identity::RecordingId,
+    ) -> Result<(), String> {
+        self.adapter
+            .find_providers(recording_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn send_request(
+        &self,
+        target: &NetworkId,
+        request: phalanx_proto::retrieval::RecordingRequest,
+    ) -> Result<(), String> {
+        let data = postcard::to_allocvec(&request).map_err(|e| e.to_string())?;
+        self.adapter
+            .send_direct(target, data)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn rebootstrap(&self, peers: &[String]) -> Result<(), String> {
+        self.adapter
+            .rebootstrap(peers)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 

@@ -34,7 +34,7 @@ use phalanx_proto::retrieval::{RecordingRequest, RecordingResponse};
 use phalanx_proto::topic::MeshTopic;
 use tokio::sync::{mpsc, RwLock};
 
-use crate::{EgressPort, IngressPort};
+use phalanx_proto::network::{EgressPort, IngressPort};
 
 use wire::QuicWireMessage;
 

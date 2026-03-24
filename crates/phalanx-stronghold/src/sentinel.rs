@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use phalanx_forensics::gate;
 use phalanx_proto::identity::PhalanxIdentity;
+use phalanx_proto::network::IngressPort;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::ShardChunk;
-use phalanx_transport::IngressPort;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 

@@ -16,6 +16,7 @@ use phalanx_proto::evidence::{
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId, ShardId};
 use phalanx_proto::network::NetworkEvent;
+use phalanx_proto::network::{EgressPort, IngressPort};
 use phalanx_proto::prelude::{EncodingSymbolId, RecordingResponse, ShardChunk};
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::storage::TransientJournal;
@@ -23,7 +24,6 @@ use phalanx_proto::time::{SystemClock, TrustedClock};
 use phalanx_proto::topic::MeshTopic;
 use phalanx_proto::trust::TrustLevel;
 use phalanx_proto::types::{ForensicUnit, Fps, SystemStress, Verified};
-use phalanx_transport::{EgressPort, IngressPort};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::Duration;

@@ -2,10 +2,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use phalanx_forensics::PeerEvaluator;
-use phalanx_proto::network::NetworkEvent;
+use phalanx_proto::network::TransportError;
 use phalanx_proto::prelude::PhalanxIdentity;
 use phalanx_transport::prelude::*;
-use tokio::sync::mpsc;
 
 use crate::config::NodeConfig;
 use crate::persistence::kademlia::RedbStore;
@@ -13,13 +12,13 @@ use crate::persistence::kademlia::RedbStore;
 /// Build the complete transport stack for a Phalanx node.
 ///
 /// All libp2p internals are encapsulated by the transport factory.
-/// Returns a ready-to-use `(Libp2pAdapter, Receiver<NetworkEvent>)` pair.
+/// Returns a ready-to-use `(Libp2pIngress, Libp2pEgress)` pair.
 pub fn setup_transport(
     identity: &PhalanxIdentity,
     config: &NodeConfig,
     psk: Option<[u8; 32]>,
     evaluator: Arc<dyn PeerEvaluator>,
-) -> Result<(Libp2pAdapter, mpsc::Receiver<NetworkEvent>), TransportError> {
+) -> Result<(Libp2pIngress, Libp2pEgress), TransportError> {
     // Persistent Kademlia Store Construction
     let dht_db_path = Path::new(&config.storage.vault_path).join("dht_store.redb");
     let local_network_id = identity.to_network_id();

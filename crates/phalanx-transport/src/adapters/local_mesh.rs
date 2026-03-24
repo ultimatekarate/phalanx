@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::{LocalMeshPort, TransportError};
+use phalanx_proto::network::{LocalMeshPort, TransportError};
 
 /// Default local mesh for desktop/non-BLE platforms.
 /// Always reports unavailable — no local transport exists.

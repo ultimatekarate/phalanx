@@ -1,36 +1,31 @@
 use crate::routing::MeshRoutingTable;
 use async_trait::async_trait;
 
-use crate::TransportAdapter;
-use crate::TransportError;
-use phalanx_proto::network::NetworkEvent;
+use phalanx_proto::network::EgressPort;
+use phalanx_proto::network::{IngressPort, NetworkEvent};
 use phalanx_proto::prelude::*;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, RwLock};
 
+#[derive(Clone)]
 pub struct MockAdapter {
     id: NetworkId,
-    ingress_rx: Mutex<Option<mpsc::Receiver<NetworkEvent>>>,
     mesh_bus: Arc<RwLock<MeshRoutingTable>>,
 }
 
 impl MockAdapter {
     pub fn new(
         id: NetworkId,
-        ingress_rx: mpsc::Receiver<NetworkEvent>,
+        _ingress_rx: mpsc::Receiver<NetworkEvent>,
         mesh_bus: Arc<RwLock<MeshRoutingTable>>,
     ) -> Self {
-        Self {
-            id,
-            ingress_rx: Mutex::new(Some(ingress_rx)),
-            mesh_bus,
-        }
+        Self { id, mesh_bus }
     }
 }
 
 #[async_trait]
-impl TransportAdapter for MockAdapter {
-    async fn publish(&self, topic: MeshTopic, data: Vec<u8>) -> Result<(), TransportError> {
+impl EgressPort for MockAdapter {
+    async fn publish(&self, topic: &MeshTopic, data: Vec<u8>) -> Result<(), String> {
         let table = self.mesh_bus.read().await;
         for sender in table.routes.values() {
             let event = NetworkEvent::DataReceived {
@@ -43,31 +38,54 @@ impl TransportAdapter for MockAdapter {
         Ok(())
     }
 
-    async fn send_direct(&self, target: &NetworkId, data: Vec<u8>) -> Result<(), TransportError> {
-        let table = self.mesh_bus.read().await;
-        if let Some(sender) = table.routes.get(target) {
-            let event = NetworkEvent::DataReceived {
-                origin: self.id.clone(),
-                topic: MeshTopic::default(),
-                data,
-            };
-            sender
-                .send(event)
-                .await
-                .map_err(|_| TransportError::Network("Peer channel closed".into()))?;
-        }
-        Ok(())
-    }
-
-    fn ingress_stream(&self) -> mpsc::Receiver<NetworkEvent> {
-        self.ingress_rx
-            .blocking_lock()
-            .take()
-            .expect("Ingress stream has already been consumed")
-    }
-
-    async fn ban_peer(&self, _peer: &NetworkId) -> Result<(), TransportError> {
+    async fn ban_peer(&self, _peer: &NetworkId) {
         // No-op in simulation mock
+    }
+
+    async fn send_response(
+        &self,
+        _channel_id: &str,
+        _response: RecordingResponse,
+    ) -> Result<(), String> {
         Ok(())
+    }
+
+    async fn announce_recording(
+        &self,
+        _recording_id: &phalanx_proto::identity::RecordingId,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn find_providers(
+        &self,
+        _recording_id: &phalanx_proto::identity::RecordingId,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn send_request(
+        &self,
+        _target: &NetworkId,
+        _request: phalanx_proto::retrieval::RecordingRequest,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+pub struct MockIngress {
+    rx: mpsc::Receiver<NetworkEvent>,
+}
+
+impl MockIngress {
+    pub fn new(rx: mpsc::Receiver<NetworkEvent>) -> Self {
+        Self { rx }
+    }
+}
+
+#[async_trait]
+impl IngressPort for MockIngress {
+    async fn next_event(&mut self) -> Option<NetworkEvent> {
+        self.rx.recv().await
     }
 }

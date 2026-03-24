@@ -24,7 +24,6 @@ pub mod hardware {
 pub mod identity;
 
 pub mod network {
-    pub mod bridge;
     pub mod orchestrator;
 }
 pub mod psk;
@@ -80,7 +79,6 @@ pub use actors::meshsentinel::MeshSentinel;
 pub use actors::storage::StorageActor;
 pub use clock::TrustedClock;
 pub use config::NodeConfig;
-pub use network::bridge::Libp2pBridge;
 pub use persistence::journal::FileJournal;
 pub use persistence::vault::Guardian;
 
@@ -92,7 +90,6 @@ pub mod prelude {
     pub use crate::actors::meshsentinel::MeshSentinel;
     pub use crate::clock::TrustedClock;
     pub use crate::config::NodeConfig;
-    pub use crate::network::bridge::Libp2pBridge;
     pub use crate::persistence::journal::FileJournal;
     pub use crate::persistence::vault::Guardian;
     pub use crate::NodeResult;

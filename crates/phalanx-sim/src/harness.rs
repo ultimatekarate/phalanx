@@ -14,11 +14,11 @@ use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::identity::{NetworkId, NodeRole, PhalanxIdentity, RecordingId};
 use phalanx_proto::network::NetworkEvent;
+use phalanx_proto::network::{EgressPort, IngressPort};
 use phalanx_proto::prelude::*;
 use phalanx_proto::storage::{PendingEgress, TransientJournal};
 use phalanx_proto::telemetry::{ChaosMode, DiscoverySource, SimEvent};
 use phalanx_transport::adapters::local_mesh::LocalMeshAdapter;
-use phalanx_transport::{EgressPort, IngressPort};
 
 use std::collections::HashMap;
 use std::sync::Arc;
