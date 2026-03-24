@@ -147,12 +147,15 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
         recording_id: &RecordingId,
         providers: Vec<NetworkId>,
     ) {
-        // 1. Construct SealedLocator with real crypto
-        let key_bytes: &[u8; 32] = self
-            .decryption_key
-            .as_ref()
-            .map(|k| k.as_bytes())
-            .unwrap_or(&[0u8; 32]); // fallback for unencrypted recordings
+        // 1. Construct SealedLocator with real crypto.
+        // A null key produces a grant that anyone can unseal — never allow this.
+        let key_bytes: &[u8; 32] = match self.decryption_key.as_ref() {
+            Some(k) => k.as_bytes(),
+            None => {
+                tracing::error!("Cannot request shards: no decryption key available");
+                return;
+            }
+        };
 
         let locator = match SealedLocator::seal(
             recording_id.clone(),
