@@ -241,17 +241,18 @@ pub fn corroborate(
             ));
         }
 
-        // Chain integrity: head and tail evidence hashes
+        // Chain integrity: head and tail evidence hashes.
+        // A recording with no artifacts cannot produce a valid attestation.
         let chain_head = rec
             .artifacts
             .first()
             .map(|e| e.evidence_hash)
-            .unwrap_or([0u8; 32]);
+            .ok_or_else(|| CorroborationError::ChainIntegrityFailure(rec.owner_did.clone()))?;
         let chain_tail = rec
             .artifacts
             .last()
             .map(|e| e.evidence_hash)
-            .unwrap_or([0u8; 32]);
+            .ok_or_else(|| CorroborationError::ChainIntegrityFailure(rec.owner_did.clone()))?;
 
         attestations.push(DeviceAttestation {
             did: rec.owner_did.clone(),

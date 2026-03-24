@@ -143,12 +143,19 @@ impl<E: EgressPort> MediaEgressActor<E> {
         };
 
         // Encrypt payload on the async worker thread (not the FFI capture thread).
+        // Encryption failure is fatal — plaintext evidence MUST NOT reach the mesh.
         match &mut evidence {
             Evidence::Video(v) => {
-                let _ = v.payload.apply_encryption(&self.vault_key);
+                if let Err(e) = v.payload.apply_encryption(&self.vault_key) {
+                    tracing::error!("Video encryption failed — dropping shard to prevent plaintext broadcast: {e}");
+                    return;
+                }
             }
             Evidence::Audio(a) => {
-                let _ = a.payload.apply_encryption(&self.vault_key);
+                if let Err(e) = a.payload.apply_encryption(&self.vault_key) {
+                    tracing::error!("Audio encryption failed — dropping shard to prevent plaintext broadcast: {e}");
+                    return;
+                }
             }
             _ => {}
         }
