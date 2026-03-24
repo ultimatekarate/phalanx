@@ -19,7 +19,6 @@ pub mod trust;
 pub mod witness;
 pub mod storage {
     pub mod handover;
-    pub mod journal;
 }
 
 // Re-export primary structures for ergonomic use
@@ -43,7 +42,8 @@ pub mod prelude {
     pub use crate::judge::{Decryptor, HandoverJudge, PayloadCipher};
     pub use crate::policy::TrafficGovernor;
     pub use crate::reassembler::{Reassembler, ShardMold};
-    pub use crate::storage::journal::TransientJournal;
+    // TransientJournal is now in phalanx_proto::storage (canonical location).
+    // Import directly: `use phalanx_proto::storage::TransientJournal;`
     pub use crate::trust::PeerEvaluator;
 
     // Eclipse & Topology

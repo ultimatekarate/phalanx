@@ -1,11 +1,12 @@
 use crate::RecordingResponse;
 // crates/phalanx-proto/src/storage.rs
-use crate::evidence::{SignatureHash, StorageSequence};
+use crate::evidence::{ShardChunk, SignatureHash, StorageSequence};
 use crate::identity::{Did, RecordingId};
 use crate::prelude::NetworkId;
 use crate::prelude::PhalanxTimestamp;
 use crate::prelude::ShardError;
 use crate::types::ByteCapacity;
+use async_trait::async_trait;
 use ed25519_dalek::Signature;
 use serde::{Deserialize, Serialize};
 
@@ -71,4 +72,27 @@ pub struct PendingEgress {
 pub enum StorageAck {
     Success(RecordingId, NetworkId),
     Failure(ShardError, NetworkId),
+}
+
+/// The Transient Journal: A high-speed, volatile storage contract.
+/// Defines the shape of persistence for WAL (Write-Ahead Log) chunks,
+/// egress salvage, and Crucible workbench state recovery.
+///
+/// This is a Noun (capability contract) — implementations live in
+/// `phalanx-node` (FileJournal) and test doubles.
+#[async_trait]
+pub trait TransientJournal: Send + Sync + 'static {
+    // --- WAL (Write-Ahead Log) Verbs ---
+    async fn record_chunk(&mut self, chunk: &ShardChunk) -> Result<(), ShardError>;
+    async fn sync(&mut self) -> Result<(), ShardError>;
+    async fn read_all_chunks(&mut self) -> Result<Vec<ShardChunk>, ShardError>;
+    async fn clear(&mut self) -> Result<(), ShardError>;
+
+    // --- Egress Salvage Verbs ---
+    async fn record_pending_egress(&mut self, pending: &[PendingEgress]) -> Result<(), ShardError>;
+    async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError>;
+
+    // --- Workbench State Recovery ---
+    async fn record_workbench_state(&mut self, state_bytes: &[u8]) -> Result<(), ShardError>;
+    async fn read_workbench_state(&mut self) -> Result<Vec<u8>, ShardError>;
 }

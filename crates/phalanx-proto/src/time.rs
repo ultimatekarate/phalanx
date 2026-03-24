@@ -128,3 +128,15 @@ pub enum TimeError {
         found: Option<SignatureHash>,
     },
 }
+
+/// Monotonic elapsed-time counter (seconds since arbitrary reference point).
+/// Unlike `PhalanxTimestamp` (wall-clock millis since UNIX_EPOCH), this counter
+/// never goes backward — used for trust recovery cooldowns and eclipse detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+pub struct MonotonicClock(pub u64);
+
+impl MonotonicClock {
+    pub fn elapsed_since(&self, earlier: Self) -> u64 {
+        self.0.saturating_sub(earlier.0)
+    }
+}

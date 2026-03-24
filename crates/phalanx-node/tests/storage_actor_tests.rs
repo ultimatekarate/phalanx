@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use phalanx_forensics::gate::WitnessGate;
-use phalanx_forensics::prelude::TransientJournal;
 use phalanx_forensics::reassembler::FountainChunkifier;
 use phalanx_forensics::Reassembler;
 use phalanx_node::actors::storage::{NoOpJournal, StorageActor, StorageCommand};
@@ -16,11 +15,11 @@ use phalanx_proto::evidence::{
     ChunkType, DataPayload, Evidence, ForensicMetrics, StorageSequence, VideoShard,
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId, ShardId};
-use phalanx_proto::prelude::{
-    EncodingSymbolId, PendingEgress, RepairRatio, ShardChunk, ShardError, SymbolSize,
-};
+use phalanx_proto::prelude::{EncodingSymbolId, RepairRatio, ShardChunk, ShardError, SymbolSize};
 use phalanx_proto::retrieval::RecordingResponse;
 use phalanx_proto::storage::GuardianError;
+use phalanx_proto::storage::PendingEgress;
+use phalanx_proto::storage::TransientJournal;
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
 use phalanx_proto::types::{ForensicUnit, Fps, Verified};
 use phalanx_transport::identity_ext::Libp2pExt;
@@ -106,6 +105,12 @@ async fn test_pillar_salvage_under_disk_pressure() {
         }
         async fn clear(&mut self) -> Result<(), ShardError> {
             Ok(())
+        }
+        async fn record_workbench_state(&mut self, _: &[u8]) -> Result<(), ShardError> {
+            Ok(())
+        }
+        async fn read_workbench_state(&mut self) -> Result<Vec<u8>, ShardError> {
+            Ok(vec![])
         }
     }
 
@@ -575,6 +580,12 @@ async fn test_storage_actor_metric_pipeline() {
         }
         async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError> {
             self.inner.read_all_pending_egress().await
+        }
+        async fn record_workbench_state(&mut self, state: &[u8]) -> Result<(), ShardError> {
+            self.inner.record_workbench_state(state).await
+        }
+        async fn read_workbench_state(&mut self) -> Result<Vec<u8>, ShardError> {
+            self.inner.read_workbench_state().await
         }
     }
 

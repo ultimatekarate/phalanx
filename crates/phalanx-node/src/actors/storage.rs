@@ -4,15 +4,16 @@ use crate::persistence::vault::Guardian;
 use crate::vitals::{Homeostasis, SystemGovernor};
 use phalanx_forensics::bloom::RotatingBloomFilter;
 use phalanx_forensics::crucible::EvidenceExt;
-use phalanx_forensics::prelude::TransientJournal;
 use phalanx_forensics::prelude::*;
 use phalanx_proto::evidence::EnvelopeState;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::PhalanxIdentity;
 use phalanx_proto::identity::RecordingId;
-use phalanx_proto::prelude::{PendingEgress, ShardChunk, ShardError};
+use phalanx_proto::prelude::{ShardChunk, ShardError};
 use phalanx_proto::storage::GuardianError;
+use phalanx_proto::storage::PendingEgress;
+use phalanx_proto::storage::TransientJournal;
 use phalanx_proto::types::ForensicUnit;
 use phalanx_proto::types::Verified;
 use std::sync::Arc;
@@ -370,6 +371,12 @@ impl TransientJournal for NoOpJournal {
         Ok(())
     }
     async fn read_all_pending_egress(&mut self) -> Result<Vec<PendingEgress>, ShardError> {
+        Ok(vec![])
+    }
+    async fn record_workbench_state(&mut self, _: &[u8]) -> Result<(), ShardError> {
+        Ok(())
+    }
+    async fn read_workbench_state(&mut self) -> Result<Vec<u8>, ShardError> {
         Ok(vec![])
     }
 }

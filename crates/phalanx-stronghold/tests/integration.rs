@@ -638,3 +638,119 @@ async fn end_to_end_corroboration() {
     assert_eq!(loaded.attestations.len(), 2);
     assert_eq!(loaded.producer_did, stronghold_id.did);
 }
+
+// ─── Additional Integration Tests ─────────────────────────────────────────
+
+#[tokio::test]
+async fn evidence_store_persistence_across_reopen() {
+    let temp = tempdir().expect("create temp dir");
+    let community_id = make_community_id(0xAA);
+    let rid = RecordingId::new("reopen_test");
+
+    // Write 10 envelopes
+    {
+        let store = EvidenceStore::new(temp.path().to_path_buf());
+        for seq in 0..10u32 {
+            let env = make_envelope(seq, "reopen_test", "did:key:zReopen");
+            store
+                .append_envelope(&community_id, &rid, &env)
+                .await
+                .expect("append should succeed");
+        }
+    }
+    // Store dropped — simulates process exit
+
+    // Reopen from same path
+    let store = EvidenceStore::new(temp.path().to_path_buf());
+    let recording = store
+        .read_recording(&community_id, &rid)
+        .await
+        .expect("read should succeed after reopen");
+
+    assert_eq!(
+        recording.artifacts.len(),
+        10,
+        "All 10 envelopes should survive reopen"
+    );
+}
+
+#[tokio::test]
+async fn proof_store_duplicate_is_idempotent() {
+    let temp = tempdir().expect("create temp dir");
+    let community_id = make_community_id(0xBB);
+    let proof_store = ProofStore::new(temp.path().to_path_buf());
+
+    let proof = make_corroboration_proof([0x42; 32]);
+
+    // Write twice
+    proof_store
+        .store_proof(&community_id, &proof)
+        .await
+        .expect("first store should succeed");
+    proof_store
+        .store_proof(&community_id, &proof)
+        .await
+        .expect("second store should also succeed (idempotent)");
+
+    // Should only have one proof on disk
+    let proofs = proof_store
+        .list_proofs(&community_id)
+        .await
+        .expect("list should succeed");
+    assert_eq!(
+        proofs.len(),
+        1,
+        "Duplicate proof should not create extra entry"
+    );
+}
+
+#[tokio::test]
+async fn community_concurrent_imports() {
+    let temp = tempdir().expect("create temp dir");
+    let _store_path = temp.path().to_path_buf();
+
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(32);
+    let actor = CommunityActor::new(cmd_rx);
+    let handle = tokio::spawn(actor.run());
+
+    // Import 5 communities concurrently
+    let mut import_handles = Vec::new();
+    for i in 0..5u32 {
+        let tx = cmd_tx.clone();
+        // Each community needs its own identity pair for real vouches
+        let member_id = PhalanxIdentity::new_ephemeral();
+        let voucher_id = PhalanxIdentity::new_ephemeral();
+        let community = make_community_with_real_vouches(
+            i as u8,
+            &[&member_id],
+            &[&voucher_id],
+            &format!("concurrent_community_{i}"),
+        );
+
+        let h = tokio::spawn(async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            tx.send(CommunityCommand::Import {
+                community,
+                reply_to: reply_tx,
+            })
+            .await
+            .expect("send import command");
+            reply_rx.await.expect("receive reply")
+        });
+        import_handles.push(h);
+    }
+
+    // Wait for all imports to complete
+    let mut errors = 0;
+    for h in import_handles {
+        match h.await.expect("join handle") {
+            Ok(_community_id) => {}
+            Err(_) => errors += 1,
+        }
+    }
+
+    drop(cmd_tx);
+    let _ = handle.await;
+
+    assert_eq!(errors, 0, "All concurrent imports should succeed");
+}

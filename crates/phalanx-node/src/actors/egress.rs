@@ -3,6 +3,7 @@ use crate::vitals::{Homeostasis, SystemGovernor};
 use phalanx_proto::identity::{NetworkId, RecordingId};
 use phalanx_proto::prelude::*;
 use phalanx_proto::retrieval::RecordingRequest;
+use phalanx_proto::storage::PendingEgress;
 use phalanx_transport::EgressPort;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;

@@ -6,7 +6,6 @@ use phalanx_forensics::crucible::RecordingAmalgam;
 use phalanx_forensics::crucible::{EnvelopeHashExt, EvidenceExt};
 use phalanx_forensics::cryptography::{decrypt_bytes, encrypt_bytes};
 use phalanx_forensics::gate::PromotionGate;
-use phalanx_forensics::prelude::TransientJournal;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::Recording;
 use phalanx_proto::evidence::StorageSequence;
@@ -14,6 +13,8 @@ use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::RecordingId;
 use phalanx_proto::prelude::*;
 use phalanx_proto::storage::GuardianError;
+use phalanx_proto::storage::PendingEgress;
+use phalanx_proto::storage::TransientJournal;
 use phalanx_proto::time::TrustedClock;
 use phalanx_proto::types::ByteCapacity;
 use phalanx_proto::types::ForensicUnit;
@@ -936,6 +937,58 @@ impl TransientJournal for FileJournal {
         let _ = tokio::fs::remove_file(salvage_path).await;
 
         Ok(pending)
+    }
+
+    async fn record_workbench_state(&mut self, state_bytes: &[u8]) -> Result<(), ShardError> {
+        let (nonce, ciphertext) = encrypt_bytes(&self.vault_key, state_bytes)?;
+
+        // Frame: [8-byte BE len][24-byte nonce][ciphertext]
+        let frame_len = (nonce.len() + ciphertext.len()) as u64;
+        self.handle
+            .write_u64(frame_len)
+            .await
+            .map_err(|e| ShardError::Io(format!("Failed to write state length: {}", e)))?;
+        self.handle
+            .write_all(&nonce)
+            .await
+            .map_err(|e| ShardError::Io(format!("Failed to write state nonce: {}", e)))?;
+        self.handle
+            .write_all(&ciphertext)
+            .await
+            .map_err(|e| ShardError::Io(format!("Failed to write state payload: {}", e)))?;
+
+        self.sync().await
+    }
+
+    async fn read_workbench_state(&mut self) -> Result<Vec<u8>, ShardError> {
+        const MAX_WORKBENCH_STATE_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
+
+        let length = self
+            .handle
+            .read_u64()
+            .await
+            .map_err(|e| ShardError::Io(format!("Failed to read state length: {}", e)))?;
+
+        if length > MAX_WORKBENCH_STATE_BYTES {
+            return Err(ShardError::SerializationError(
+                "Workbench state exceeds 256 MiB limit".to_string(),
+            ));
+        }
+
+        if (length as usize) < AEAD_NONCE_LEN {
+            return Err(ShardError::SerializationError(
+                "Workbench state too small for AEAD frame".to_string(),
+            ));
+        }
+
+        let mut buffer = vec![0u8; length as usize];
+        self.handle
+            .read_exact(&mut buffer)
+            .await
+            .map_err(|e| ShardError::Io(format!("Failed to read state payload: {}", e)))?;
+
+        let (nonce, ciphertext) = buffer.split_at(AEAD_NONCE_LEN);
+        Ok(decrypt_bytes(&self.vault_key, nonce, ciphertext)?)
     }
 }
 
