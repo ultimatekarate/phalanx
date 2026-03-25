@@ -2,7 +2,6 @@ use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::trust::TrustRegistry;
 
 use phalanx_forensics::gate::IntegrityGate;
-use phalanx_forensics::gate::WitnessGate;
 use phalanx_forensics::policy::EgressGovernor;
 use phalanx_forensics::Reassembler;
 use phalanx_node::actors::meshsentinel::{MeshSentinel, SentinelDependencies};
@@ -11,19 +10,17 @@ use phalanx_node::config::NodeConfig;
 use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::crypto::SymmetricKey;
-use phalanx_proto::evidence::{
-    ChunkType, DataPayload, Evidence, ForensicMetrics, StorageSequence, VideoShard, WitnessEnvelope,
-};
+use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId, ShardId};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::network::{EgressPort, IngressPort};
-use phalanx_proto::prelude::{EncodingSymbolId, RecordingResponse, ShardChunk};
+use phalanx_proto::prelude::RecordingResponse;
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::storage::TransientJournal;
-use phalanx_proto::time::{SystemClock, TrustedClock};
+use phalanx_proto::time::SystemClock;
 use phalanx_proto::topic::MeshTopic;
 use phalanx_proto::trust::TrustLevel;
-use phalanx_proto::types::{ForensicUnit, Fps, SystemStress, Verified};
+use phalanx_proto::types::{ForensicUnit, SystemStress, Verified};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
@@ -160,18 +157,8 @@ async fn setup_mock_storage() -> (
 }
 
 fn mock_valid_envelope() -> WitnessEnvelope {
-    let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let evidence = Evidence::Video(VideoShard {
-        timestamp: SystemClock.now(),
-        sequence_id: StorageSequence(1),
-        fps: Fps::new(30),
-        recording_id: RecordingId::new("mock"),
-        payload: DataPayload::Clear(vec![]),
-        lens_metrics: ForensicMetrics::default(),
-    });
-    evidence
-        .seal(&identity, identity.network_id.clone(), None)
-        .unwrap()
+    let (env, _identity) = phalanx_test_fixtures::envelope::witness_envelope_synthetic();
+    env
 }
 
 // ============================================================================
@@ -196,28 +183,15 @@ async fn test_ingress_valid_chunk_forwarded_to_storage() {
 
     let identity = PhalanxIdentity::new_ephemeral();
     let topic = sentinel.config.network.video_topic.clone();
+    let rid = RecordingId::new("v_ingress");
 
-    let evidence = Evidence::Video(VideoShard {
-        timestamp: SystemClock.now(),
-        sequence_id: StorageSequence(1),
-        fps: Fps::new(30),
-        recording_id: RecordingId::new("v_ingress"),
-        payload: DataPayload::Clear(vec![0xAB; 4]),
-        lens_metrics: ForensicMetrics::default(),
-    });
-    let envelope = evidence
-        .seal(&identity, identity.network_id.clone(), None)
-        .unwrap();
-    let now = SystemClock.now();
-    let chunk = ShardChunk {
-        shard_id: ShardId(1),
-        encoding_symbol_id: EncodingSymbolId(0),
-        chunk_type: ChunkType::Witnessed,
-        is_terminal: true,
-        data: postcard::to_allocvec(&envelope).unwrap(),
-        owner_did: identity.did.clone(),
-        timestamp: now,
-    };
+    let envelope =
+        phalanx_test_fixtures::envelope::witness_envelope_for_recording(&identity, &rid, 1, None);
+    let chunk = phalanx_test_fixtures::chunks::shard_chunk_from_envelope(
+        &envelope,
+        ShardId(1),
+        &identity.did,
+    );
     let chunk_bytes = postcard::to_allocvec(&chunk).unwrap();
 
     ingress_tx
@@ -240,28 +214,15 @@ async fn test_ingress_rejected_in_leaf_mode() {
 
     let identity = PhalanxIdentity::new_ephemeral();
     let topic = sentinel.config.network.video_topic.clone();
+    let rid = RecordingId::new("v_leaf");
 
-    let evidence = Evidence::Video(VideoShard {
-        timestamp: SystemClock.now(),
-        sequence_id: StorageSequence(1),
-        fps: Fps::new(30),
-        recording_id: RecordingId::new("v_leaf"),
-        payload: DataPayload::Clear(vec![0x00; 4]),
-        lens_metrics: ForensicMetrics::default(),
-    });
-    let envelope = evidence
-        .seal(&identity, identity.network_id.clone(), None)
-        .unwrap();
-    let timestamp = SystemClock.now();
-    let chunk = ShardChunk {
-        shard_id: ShardId(1),
-        encoding_symbol_id: EncodingSymbolId(0),
-        chunk_type: ChunkType::Witnessed,
-        is_terminal: true,
-        data: postcard::to_allocvec(&envelope).unwrap(),
-        owner_did: identity.did.clone(),
-        timestamp,
-    };
+    let envelope =
+        phalanx_test_fixtures::envelope::witness_envelope_for_recording(&identity, &rid, 1, None);
+    let chunk = phalanx_test_fixtures::chunks::shard_chunk_from_envelope(
+        &envelope,
+        ShardId(1),
+        &identity.did,
+    );
     let chunk_bytes = postcard::to_allocvec(&chunk).unwrap();
 
     ingress_tx

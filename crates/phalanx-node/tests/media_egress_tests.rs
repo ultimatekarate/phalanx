@@ -120,27 +120,11 @@ async fn build_media_egress<E: EgressPort + 'static>(
 }
 
 fn make_video_shard(payload_bytes: usize) -> VideoShard {
-    VideoShard {
-        payload: DataPayload::Clear(vec![0xAB; payload_bytes]),
-        timestamp: PhalanxTimestamp::from_millis(1_700_000_000_000),
-        // ForensicMetrics must be non-zero to pass LensGate's all-zero bypass check,
-        // and PRNU must be above floor × luminance to pass the PRNU floor check.
-        lens_metrics: phalanx_proto::evidence::ForensicMetrics {
-            h_energy: 10.0,
-            v_energy: 10.0,
-            prnu_var: 200.0,
-            mean_luminance: 128.0,
-        },
-        ..Default::default()
-    }
+    phalanx_test_fixtures::shards::video_shard_synthetic(payload_bytes)
 }
 
 fn make_audio_shard(payload_bytes: usize) -> AudioShard {
-    AudioShard {
-        payload: DataPayload::Clear(vec![0xCD; payload_bytes]),
-        timestamp: PhalanxTimestamp::from_millis(1_700_000_000_000),
-        ..Default::default()
-    }
+    phalanx_test_fixtures::shards::audio_shard_synthetic(payload_bytes)
 }
 
 // =====================================================================

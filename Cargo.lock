@@ -3882,6 +3882,7 @@ dependencies = [
  "openh264",
  "phalanx-lens",
  "phalanx-proto",
+ "phalanx-test-fixtures",
  "postcard",
  "rand_core 0.6.4",
  "raptorq",
@@ -3927,6 +3928,7 @@ dependencies = [
  "phalanx-forensics",
  "phalanx-lens",
  "phalanx-proto",
+ "phalanx-test-fixtures",
  "phalanx-transport",
  "postcard",
  "rand 0.10.0",
@@ -4008,6 +4010,7 @@ dependencies = [
  "oneshot",
  "phalanx-forensics",
  "phalanx-proto",
+ "phalanx-test-fixtures",
  "phalanx-transport",
  "postcard",
  "rand 0.10.0",
@@ -4022,6 +4025,15 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zeroize",
+]
+
+[[package]]
+name = "phalanx-test-fixtures"
+version = "0.1.0"
+dependencies = [
+ "phalanx-forensics",
+ "phalanx-proto",
+ "postcard",
 ]
 
 [[package]]

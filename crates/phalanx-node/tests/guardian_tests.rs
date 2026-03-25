@@ -7,27 +7,17 @@ use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
 use phalanx_proto::evidence::{
-    ChunkType, DataPayload, EnvelopeState, Evidence, ForensicMetrics, StorageSequence, VideoShard,
-    WitnessEnvelope,
+    EnvelopeState, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
 };
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId, ShardId};
-use phalanx_proto::prelude::{EncodingSymbolId, ShardChunk};
 use phalanx_proto::time::{SystemClock, TrustedClock};
 use phalanx_proto::types::Fps;
-use phalanx_transport::identity_ext::Libp2pExt;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
 
 fn create_test_shard(seq: u32, recording_id: RecordingId) -> VideoShard {
-    VideoShard {
-        timestamp: SystemClock.now(),
-        sequence_id: StorageSequence(seq),
-        fps: Fps::new(30),
-        recording_id,
-        payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
-        lens_metrics: ForensicMetrics::default(),
-    }
+    phalanx_test_fixtures::shards::video_shard_for_recording(&recording_id, seq, SystemClock.now())
 }
 
 #[tokio::test]
@@ -111,7 +101,7 @@ async fn test_stronghold_crash_recovery() {
         seq,
         Fps::new(30),
         vid.clone(),
-        ForensicMetrics::default(),
+        phalanx_test_fixtures::metrics::forensic_metrics_synthetic(),
         SystemClock.now(),
     )
     .expect("Failed to generate shard");
@@ -163,33 +153,18 @@ async fn test_leaf_mode_isolation() {
     let mut journal = NoOpJournal;
 
     // 1. GENERATE VALID BYTES: Postcard needs a real WitnessEnvelope to succeed
-    let evidence = Evidence::Video(VideoShard {
-        timestamp: SystemClock.now(),
-        sequence_id: StorageSequence(1),
-        fps: Fps::new(30),
-        recording_id: RecordingId::new("v_leaf"),
-        payload: DataPayload::Clear(vec![0x00; 4]),
-        lens_metrics: ForensicMetrics::default(),
-    });
-    let env = WitnessEnvelope::sign_envelope(
-        evidence,
+    let rid = RecordingId::new("v_leaf");
+    let env = phalanx_test_fixtures::envelope::witness_envelope_for_recording(
         &foreign_identity,
-        foreign_identity.to_network_id(),
+        &rid,
+        1,
         None,
-    )
-    .unwrap();
-    let valid_bytes = postcard::to_allocvec(&env).unwrap();
-    let now = SystemClock.now();
-
-    let foreign_chunk = ShardChunk {
-        shard_id: ShardId(1),
-        encoding_symbol_id: EncodingSymbolId(0),
-        chunk_type: ChunkType::Witnessed,
-        is_terminal: true,
-        data: valid_bytes,
-        owner_did: foreign_identity.did.clone(),
-        timestamp: now,
-    };
+    );
+    let foreign_chunk = phalanx_test_fixtures::chunks::shard_chunk_from_envelope(
+        &env,
+        ShardId(1),
+        &foreign_identity.did,
+    );
 
     // 2. THE POLICY CHECK: Logic from StorageActor
     let is_leaf_mode = true;

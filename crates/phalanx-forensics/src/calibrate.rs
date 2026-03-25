@@ -97,14 +97,10 @@ pub fn calibrate_prnu(metrics: &[ForensicMetrics]) -> Result<SensorCalibration, 
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use phalanx_test_fixtures::metrics::forensic_metrics_with_prnu;
 
     fn make_metrics(prnu_var: f32, mean_luminance: f32) -> ForensicMetrics {
-        ForensicMetrics {
-            h_energy: 10.0,
-            v_energy: 10.0,
-            prnu_var,
-            mean_luminance,
-        }
+        forensic_metrics_with_prnu(prnu_var, mean_luminance)
     }
 
     #[test]
