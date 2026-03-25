@@ -188,7 +188,7 @@ pub fn transcode_to_mp4(
 
 // ── JPEG Decoding ───────────────────────────────────────────────────────
 
-fn decode_jpeg_to_yuv420(
+pub(crate) fn decode_jpeg_to_yuv420(
     jpeg_bytes: &[u8],
     frame_idx: usize,
 ) -> Result<(Vec<u8>, u32, u32), TranscodeError> {

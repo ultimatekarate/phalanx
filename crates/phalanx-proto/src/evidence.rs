@@ -113,6 +113,24 @@ pub struct ForensicMetrics {
     pub mean_luminance: f32,
 }
 
+/// Per-device sensor calibration result.
+///
+/// Produced by the PRNU calibration pipeline during explicit device setup.
+/// Binds the PRNU detection threshold to the physical sensor — a stolen
+/// identity cannot replicate the noise profile of a different camera.
+///
+/// Stored in `NodeConfig::hardware.sensor_calibration`. If absent,
+/// LensGate falls back to conservative default thresholds.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct SensorCalibration {
+    /// Calibrated PRNU floor: `mean(prnu_var/luminance) − 3σ`, clamped
+    /// above `PRNU_FLOOR_MINIMUM` (0.1). Lower values from degenerate
+    /// calibration are rejected.
+    pub prnu_floor: f32,
+    /// Number of valid frames used in calibration (after dark-frame filtering).
+    pub frame_count: u16,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct VideoShard {
     pub timestamp: PhalanxTimestamp,

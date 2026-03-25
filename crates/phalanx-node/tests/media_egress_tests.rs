@@ -105,6 +105,7 @@ async fn build_media_egress<E: EgressPort + 'static>(
         max_storage_bytes: 100_000_000,
         vault_key: SymmetricKey([0u8; 32]),
         clock: Arc::new(TrustedClock::new()),
+        lens_thresholds: phalanx_forensics::gate::LensThresholds::default(),
     };
 
     let actor = MediaEgressActor::new(egress, identity, local_id, config)
@@ -122,6 +123,14 @@ fn make_video_shard(payload_bytes: usize) -> VideoShard {
     VideoShard {
         payload: DataPayload::Clear(vec![0xAB; payload_bytes]),
         timestamp: PhalanxTimestamp::from_millis(1_700_000_000_000),
+        // ForensicMetrics must be non-zero to pass LensGate's all-zero bypass check,
+        // and PRNU must be above floor × luminance to pass the PRNU floor check.
+        lens_metrics: phalanx_proto::evidence::ForensicMetrics {
+            h_energy: 10.0,
+            v_energy: 10.0,
+            prnu_var: 200.0,
+            mean_luminance: 128.0,
+        },
         ..Default::default()
     }
 }

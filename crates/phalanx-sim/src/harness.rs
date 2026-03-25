@@ -567,7 +567,6 @@ impl SimulationHarness {
             system_governor: governor,
             vault_key,
             local_mesh: None,
-            transport_drop_counter: None,
         };
 
         let mut sentinel = MeshSentinel::new(deps).await.map_err(
@@ -749,7 +748,6 @@ impl SimulationHarness {
             system_governor: governor,
             vault_key,
             local_mesh: Some(Box::new(local_mesh_adapter)),
-            transport_drop_counter: None,
         };
 
         let mut sentinel = MeshSentinel::new(deps).await.map_err(

@@ -14,6 +14,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 
 pub mod ble_auth;
+pub mod calibrate;
 pub mod capture;
 pub mod community;
 pub mod error;

@@ -2,7 +2,7 @@ use crate::clock::TrustedClock;
 use crate::persistence::outbound::OutboundQueue;
 use crate::vitals::{Homeostasis, SystemGovernor};
 use phalanx_forensics::crucible::EnvelopeHashExt;
-use phalanx_forensics::gate::WitnessGate;
+use phalanx_forensics::gate::{LensGate, LensThresholds, WitnessGate};
 use phalanx_forensics::judge::PayloadCipher;
 use phalanx_forensics::reassembler::FountainChunkifier;
 use phalanx_proto::crypto::SymmetricKey;
@@ -42,6 +42,8 @@ pub struct MediaEgressConfig {
     pub vault_key: SymmetricKey, // Phalanx is for the people.
     /// Trusted clock for forensic timestamps.
     pub clock: Arc<TrustedClock>,
+    /// LensGate thresholds — calibrated if sensor setup was performed, defaults otherwise.
+    pub lens_thresholds: LensThresholds,
 }
 
 pub struct MediaEgressActor<E: EgressPort> {
@@ -70,6 +72,8 @@ pub struct MediaEgressActor<E: EgressPort> {
     max_storage_bytes: u64,
     /// Trusted clock for forensic timestamps.
     clock: Arc<TrustedClock>,
+    /// LensGate thresholds for capture-time provenance verification.
+    lens_thresholds: LensThresholds,
 }
 
 impl<E: EgressPort> MediaEgressActor<E> {
@@ -98,6 +102,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
             system_governor: config.system_governor,
             max_storage_bytes: config.max_storage_bytes,
             clock: config.clock,
+            lens_thresholds: config.lens_thresholds,
         })
     }
 
@@ -141,6 +146,15 @@ impl<E: EgressPort> MediaEgressActor<E> {
                 return;
             }
         };
+
+        // LensGate: verify sensor provenance BEFORE encryption.
+        // Rejects synthetic/deepfake frames at the source.
+        if let Evidence::Video(ref v) = evidence {
+            if let Err(e) = v.lens_metrics.check_provenance(&self.lens_thresholds) {
+                tracing::error!(event = "lens_gate_local_rejection", error = %e);
+                return;
+            }
+        }
 
         // Encrypt payload on the async worker thread (not the FFI capture thread).
         // Encryption failure is fatal — plaintext evidence MUST NOT reach the mesh.

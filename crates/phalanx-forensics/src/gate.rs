@@ -4,7 +4,9 @@
 // Each gate is a trait that can be chained in a Result pipeline.
 
 use phalanx_proto::crypto::SymmetricKey;
-use phalanx_proto::evidence::{Evidence, ForensicMetrics, SignatureHash, WitnessEnvelope};
+use phalanx_proto::evidence::{
+    Evidence, ForensicMetrics, SensorCalibration, SignatureHash, WitnessEnvelope,
+};
 use phalanx_proto::prelude::*;
 use phalanx_proto::time::TrustedClock;
 use std::collections::HashMap;
@@ -189,6 +191,18 @@ impl PrivacyGate for Evidence {
     }
 }
 
+/// Upper bound of Moiré energy per unit luminance for natural scenes.
+/// Natural textures have 1/f spectral falloff; Laplacian emphasizes high
+/// frequencies but natural content is low-energy there. Measured range: 5–40.
+pub(crate) const MOIRE_NATURAL_UPPER_BOUND: f32 = 40.0;
+
+/// Moiré ceiling safety factor above natural upper bound.
+/// 2.5× provides margin for highly textured scenes and color filter array
+/// aliasing, while staying 400× below recapture floor (40000).
+/// Tight threshold maximizes detection — accepting a deepfake is unrecoverable;
+/// rejecting a legitimate frame just means the next frame passes.
+pub(crate) const MOIRE_SAFETY_FACTOR: f32 = 2.5;
+
 /// Per-device calibrated thresholds for the LensGate.
 ///
 /// Established during device setup by running ForensicLens on N test frames
@@ -208,18 +222,72 @@ pub struct LensThresholds {
     pub prnu_floor: f32,
     /// Maximum expected Moiré energy per unit luminance.
     /// Above `moire_ceiling × mean_luminance` → possible screen recapture.
-    /// Typical calibrated value: 50.0–200.0.
+    /// Derived: `MOIRE_NATURAL_UPPER_BOUND × MOIRE_SAFETY_FACTOR`.
     pub moire_ceiling: f32,
 }
 
 impl Default for LensThresholds {
-    /// Conservative defaults. Per-device calibration should override these.
+    /// Conservative defaults. Per-device PRNU calibration should override `prnu_floor`.
+    /// Moiré ceiling is physics-derived — the 3-order-of-magnitude gap between
+    /// natural scenes (5–40) and screen recapture (40000–50000) makes a derived
+    /// constant sufficient.
     fn default() -> Self {
         Self {
             prnu_floor: 1.0,
-            moire_ceiling: 100.0,
+            moire_ceiling: MOIRE_NATURAL_UPPER_BOUND * MOIRE_SAFETY_FACTOR,
         }
     }
+}
+
+impl LensThresholds {
+    /// Construct thresholds from a per-device PRNU calibration.
+    /// Uses the calibrated `prnu_floor` and physics-derived Moiré ceiling.
+    pub fn new_calibrated(calibration: &SensorCalibration) -> Self {
+        Self {
+            prnu_floor: calibration.prnu_floor,
+            moire_ceiling: MOIRE_NATURAL_UPPER_BOUND * MOIRE_SAFETY_FACTOR,
+        }
+    }
+}
+
+/// Re-verify sensor provenance from a decoded JPEG frame.
+///
+/// Decodes the JPEG to YUV420, extracts the Y-plane, re-runs ForensicLens,
+/// and checks the re-computed metrics against LensGate thresholds.
+///
+/// **Easy to be honest, expensive to be dishonest.** Honest evidence passes
+/// automatically — metrics re-computed from real camera pixels always pass.
+/// A dishonest node that spoofed ForensicMetrics at capture time is caught
+/// when the actual pixels are analyzed at consumption time.
+pub fn verify_provenance_from_jpeg(
+    jpeg_frame: &[u8],
+    thresholds: &LensThresholds,
+) -> Result<(), ShardError> {
+    use crate::transcode::decode_jpeg_to_yuv420;
+    use phalanx_lens::scalar::ScalarLens;
+    use phalanx_lens::ForensicLens;
+    use phalanx_proto::types::BlackLevel;
+
+    // Decode JPEG → YUV420 → extract Y-plane
+    let (yuv, width, height) = decode_jpeg_to_yuv420(jpeg_frame, 0).map_err(|e| {
+        ShardError::InvalidConfiguration(format!("Failed to decode JPEG for re-verification: {e}"))
+    })?;
+
+    // Y-plane is the first (width × height) bytes of the YUV420 buffer
+    let y_len = (width * height) as usize;
+    let y_plane = &yuv[..y_len.min(yuv.len())];
+
+    // Re-compute ForensicMetrics from the actual pixels
+    let lens = ScalarLens;
+    let recomputed = lens.analyze(
+        y_plane,
+        width as usize,
+        height as usize,
+        BlackLevel::default(),
+    );
+
+    // Check the re-computed metrics against LensGate thresholds
+    recomputed.check_provenance(thresholds)
 }
 
 /// Gate 3: The Lens Gate (Sensor Provenance)
@@ -257,8 +325,10 @@ impl LensGate for ForensicMetrics {
         }
 
         // Scale calibrated thresholds by mean luminance for auto-exposure resilience.
-        // Guard: if mean_luminance is near-zero, the frame is too dark for reliable
-        // fingerprinting. Accept it with a warning — the all-zero check above
+        // Guard: if mean_luminance is near-zero, the threshold formula
+        // `T × mean_luminance` degenerates to ~0, making every frame pass.
+        // This is a mathematical guard, not a forensic threshold.
+        // Accept dark frames with a warning — the all-zero check above
         // catches the true bypass case.
         if self.mean_luminance < 1.0 {
             warn!(

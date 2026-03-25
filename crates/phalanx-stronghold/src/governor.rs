@@ -32,25 +32,20 @@ impl StrongholdGovernor {
         }
     }
 
-    /// Server-tuned thresholds. Higher ceilings than phone.
+    /// Server safety margins (tighter than phone — more resources available).
+    const SERVER_STORAGE_SAFETY_MARGIN: f64 = 0.10;
+    const SERVER_CONNECTION_SAFETY_MARGIN: f64 = 0.05;
+
+    /// Server-tuned thresholds. Expressed as ratios of the phone reference.
     fn server_config() -> HomeostaticConfig {
+        let phone = HomeostaticConfig::default();
         HomeostaticConfig {
-            // Memory: 4GB ceiling (vs phone's 512MB)
-            lambda_mem: 0.3,
-            m_crit: 4096.0,
-            // Storage: 90% critical (vs phone's 80%)
-            lambda_wal: 0.05,
-            w_crit: 0.9,
-            // Bandwidth: 500MB ceiling (vs phone's 50MB)
-            lambda_bw: 0.5,
-            b_crit: 500.0,
-            // Sybil: higher per-peer ceiling (server handles more peers)
-            psi_max: 200.0,
-            k_sybil: 2.0,
-            // Connection: higher capacity
-            lambda_conn: 0.2,
-            c_crit: 0.95,
-            ..HomeostaticConfig::default()
+            m_crit: 8.0 * phone.m_crit,   // 8× phone (server has 8× RAM)
+            b_crit: 5.0 * phone.b_crit,   // 5× phone (server has 5× bandwidth)
+            psi_max: 4.0 * phone.psi_max, // 4× phone (server handles more peers)
+            w_crit: 1.0 - Self::SERVER_STORAGE_SAFETY_MARGIN, // 10% margin (vs phone's 20%)
+            c_crit: 1.0 - Self::SERVER_CONNECTION_SAFETY_MARGIN, // 5% margin (vs phone's 10%)
+            ..phone
         }
     }
 
@@ -94,15 +89,19 @@ impl StrongholdGovernor {
     /// Weighted composite of all integral pressures.
     /// Returns 0.0 (idle) to 1.0+ (saturated).
     pub fn composite_stress(&self) -> f64 {
+        let w = &self.config.stress_weights;
         self.with_state(|s| {
-            let terms = [
-                (0.25, s.s.current_value() / self.config.s_crit),
-                (0.20, s.d.current_value() / self.config.d_crit),
-                (0.20, s.m.current_value() / self.config.m_crit),
-                (0.15, s.w.current_value() / self.config.w_crit),
-                (0.20, s.b.current_value() / self.config.b_crit),
+            let normalized = [
+                s.s.current_value() / self.config.s_crit,
+                s.d.current_value() / self.config.d_crit,
+                s.m.current_value() / self.config.m_crit,
+                s.w.current_value() / self.config.w_crit,
+                s.b.current_value() / self.config.b_crit,
             ];
-            terms.iter().map(|(w, n)| w * n.min(1.0)).sum()
+            w.iter()
+                .zip(normalized.iter())
+                .map(|(wi, ni)| wi * ni.min(1.0))
+                .sum()
         })
     }
 }

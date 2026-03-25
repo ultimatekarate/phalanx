@@ -14,6 +14,10 @@ use phalanx_proto::types::BlackLevel;
 /// The crop window size for forensic analysis.
 /// Center crop of the Y-plane: highest lens fidelity, no edge effects,
 /// representative of global PRNU/Moiré patterns.
+///
+/// Derivation: `sqrt(L1_CACHE_SIZE)` = `sqrt(65536)` = 256.
+/// The entire crop fits in L1 cache (256×256 = 65536 bytes for u8 Y-plane),
+/// ensuring the Laplacian and PRNU kernels operate without cache misses.
 pub const ANALYSIS_CROP_SIZE: usize = 256;
 
 /// The core trait for forensic sensor fingerprinting.

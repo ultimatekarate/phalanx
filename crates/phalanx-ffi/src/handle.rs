@@ -24,7 +24,7 @@ use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::{HomeostaticConfig, SystemGovernor, ThermalThresholds};
 use phalanx_node::{FileJournal, MeshSentinel};
 use phalanx_proto::crypto::SymmetricKey;
-use phalanx_proto::evidence::{AudioShard, VideoShard};
+use phalanx_proto::evidence::{AudioShard, ForensicMetrics, VideoShard};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::PhalanxIdentity;
 use phalanx_transport::adapters::local_mesh::{LocalMeshAdapter, OutboundLocalPacket};
@@ -102,6 +102,10 @@ pub struct PhalanxHandle {
     /// The ephemeral signer pattern (random key per export) was defeated by
     /// red team review — provenance requires the actual node identity.
     pub(crate) identity: Arc<PhalanxIdentity>,
+    /// PRNU calibration frame buffer. `Some` = calibration in progress,
+    /// `None` = idle. Capped at `MAX_CALIBRATION_FRAMES` to prevent
+    /// unbounded allocation from rogue FFI calls.
+    pub(crate) calibration_metrics: Mutex<Option<Vec<ForensicMetrics>>>,
 }
 
 /// Type-erased reference to the running MeshSentinel.
@@ -205,8 +209,10 @@ async fn bootstrap(
     let trust_registry = TrustRegistry::build(&config).await;
     let reputation_projection = trust_registry.projection_handle();
 
-    // Mobile hardware probe (atomics-based)
-    let probe = Arc::new(MobileProbe::new(ThermalThresholds::default()));
+    // Mobile hardware probe (atomics-based).
+    // RAM=0: falls back to reference device default (4GB).
+    // TODO: Pass actual device RAM from Flutter via phalanx_create parameter.
+    let probe = Arc::new(MobileProbe::new(ThermalThresholds::default(), 0));
 
     // Network
     let (ingress, egress) = setup_transport(
@@ -217,8 +223,9 @@ async fn bootstrap(
     )
     .map_err(|_| PhalanxError::BootFailed)?;
 
-    // Wire socket-level I/O counters and transport drop counter from the
-    // egress port into the governor for Volterra integral sampling.
+    // Wire socket-level I/O counters from the egress port into the governor
+    // for Volterra integral sampling. Drops and ops are sampled together so
+    // the governor can compute drops/ops as a self-normalizing ratio.
     let governor = Arc::new(
         SystemGovernor::with_probe(
             HomeostaticConfig::default(),
@@ -228,9 +235,9 @@ async fn bootstrap(
             egress.socket_bytes_sent(),
             egress.socket_bytes_received(),
             egress.socket_io_ops(),
+            egress.dropped_event_count(),
         ),
     );
-    let transport_drop_counter = egress.dropped_event_count();
 
     // Local mesh adapter — channel bridge for BLE/WiFi Direct via Flutter FFI
     let (local_mesh_adapter, local_mesh_tx, local_mesh_outbound_rx, local_mesh_available) =
@@ -253,7 +260,6 @@ async fn bootstrap(
         system_governor: governor.clone(),
         vault_key,
         local_mesh: Some(Box::new(local_mesh_adapter)),
-        transport_drop_counter: Some(transport_drop_counter),
     };
 
     let engine = MeshSentinel::new(deps)
@@ -288,6 +294,7 @@ async fn bootstrap(
         local_mesh_available,
         vault_key: handle_vault_key,
         identity: handle_identity,
+        calibration_metrics: Mutex::new(None),
     })
 }
 

@@ -95,7 +95,6 @@ async fn build_test_sentinel(
         system_governor: Arc::new(SystemGovernor::new()),
         vault_key,
         local_mesh: None, // No local transport in tests
-        transport_drop_counter: None,
     };
 
     (
