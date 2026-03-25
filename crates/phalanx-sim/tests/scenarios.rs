@@ -329,7 +329,7 @@ async fn scenario_3d_storage_pressure_isolation() {
 async fn scenario_3e_bandwidth_pressure_isolation() {
     let (_harness, _did, governor) = spawn_single_node().await;
 
-    println!("--- Scenario 3e: Bandwidth Pressure Isolation (weight=0.20, b_crit=50.0 MiB) ---");
+    println!("--- Scenario 3e: Bandwidth Pressure Isolation (weight=0.20, b_crit=100.0 MiB) ---");
 
     // Inject bandwidth pressure at critical level (50 MiB)
     governor.record_bandwidth_pressure(50 * 1024 * 1024);
@@ -418,14 +418,14 @@ async fn scenario_5_multi_vector_stress() {
     // First, measure individual contributions in isolation (fresh governor for each would
     // be ideal, but we'll note the additive nature from known weights instead).
     // We inject into bandwidth, memory, and system simultaneously.
-    governor.record_bandwidth_pressure(50 * 1024 * 1024); // ~50 MiB (b_crit = 50)
+    governor.record_bandwidth_pressure(50 * 1024 * 1024); // ~50 MiB (b_crit = 100)
     governor.record_memory_pressure(512 * 1024 * 1024); // ~512 MiB (m_crit = 512)
     governor.record_metabolic_pressure(Duration::from_secs(10)); // 10s (s_crit = 10)
 
     let combined_stress = governor.composite_stress();
     println!("Combined (b+m+s) composite_stress = {:.4}", combined_stress);
 
-    // Expected: ~0.20 (bw) + ~0.20 (mem) + ~0.25 (sys) = ~0.65
+    // Expected: ~0.10 (bw) + ~0.20 (mem) + ~0.25 (sys) = ~0.55
     // The actual value depends on DecayingIntegral timing, but it should be
     // significantly larger than any single contribution.
     assert!(

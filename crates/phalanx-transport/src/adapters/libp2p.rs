@@ -410,9 +410,8 @@ impl Libp2pAdapter {
                 }};
             }
 
-            if poll_cadence.is_some() {
+            if let Some(cadence) = poll_cadence {
                 // ── Cadenced polling: drain pending events, then sleep ──
-                let cadence = poll_cadence.unwrap();
                 loop {
                     // Drain phase: process all pending events with a short timeout
                     loop {

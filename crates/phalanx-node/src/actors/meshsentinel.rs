@@ -461,9 +461,6 @@ impl<I: IngressPort> MeshSentinel<I> {
                     return false;
                 }
 
-                // Record bandwidth pressure for every received message
-                self.system_governor.record_bandwidth_pressure(data.len());
-
                 if topic.as_str() == self.config.network.control_topic.as_str() {
                     if let Ok(msg) = phalanx_forensics::gate::unmarshal::<ControlMessage>(
                         &data,

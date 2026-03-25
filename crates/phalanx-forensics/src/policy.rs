@@ -393,7 +393,7 @@ impl Default for HomeostaticConfig {
             lambda_wal: 0.05,
             w_crit: 0.8,
             lambda_bw: 0.5,
-            b_crit: 50.0,
+            b_crit: 100.0,
             lambda_conn: 0.2,
             c_crit: 0.9,
             lambda_lat: 1.0,

@@ -2,6 +2,7 @@
 //
 // The System Governor: core homeostasis engine and power state management.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -21,6 +22,14 @@ pub struct SystemGovernor {
     pub config: HomeostaticConfig,
     pub integrals: RwLock<IntegralState>,
     pub recommended_state: RwLock<PowerState>,
+    // Socket-level I/O counters from the transport layer.
+    // Sampled on the vitals tick to feed Volterra integrals.
+    io_bytes_sent: Option<Arc<AtomicU64>>,
+    io_bytes_received: Option<Arc<AtomicU64>>,
+    io_ops: Option<Arc<AtomicU64>>,
+    last_io_bytes_sent: AtomicU64,
+    last_io_bytes_received: AtomicU64,
+    last_io_ops: AtomicU64,
 }
 
 impl Default for SystemGovernor {
@@ -43,6 +52,12 @@ impl SystemGovernor {
             integrals: RwLock::new(integrals),
             config,
             recommended_state: RwLock::new(PowerState::Normal),
+            io_bytes_sent: None,
+            io_bytes_received: None,
+            io_ops: None,
+            last_io_bytes_sent: AtomicU64::new(0),
+            last_io_bytes_received: AtomicU64::new(0),
+            last_io_ops: AtomicU64::new(0),
         }
     }
 
@@ -71,7 +86,31 @@ impl SystemGovernor {
             integrals: RwLock::new(integrals),
             config,
             recommended_state: RwLock::new(PowerState::Normal),
+            io_bytes_sent: None,
+            io_bytes_received: None,
+            io_ops: None,
+            last_io_bytes_sent: AtomicU64::new(0),
+            last_io_bytes_received: AtomicU64::new(0),
+            last_io_ops: AtomicU64::new(0),
         }
+    }
+
+    /// Attach socket-level I/O counters from the transport layer.
+    /// Seeds last-values from the current counter state so the first
+    /// vitals tick sees delta=0 (no spike from connection setup traffic).
+    pub fn with_io_counters(
+        mut self,
+        sent: Arc<AtomicU64>,
+        received: Arc<AtomicU64>,
+        ops: Arc<AtomicU64>,
+    ) -> Self {
+        self.last_io_bytes_sent = AtomicU64::new(sent.load(Ordering::Relaxed));
+        self.last_io_bytes_received = AtomicU64::new(received.load(Ordering::Relaxed));
+        self.last_io_ops = AtomicU64::new(ops.load(Ordering::Relaxed));
+        self.io_bytes_sent = Some(sent);
+        self.io_bytes_received = Some(received);
+        self.io_ops = Some(ops);
+        self
     }
 
     pub fn current_stress(&self) -> SystemStress {
@@ -114,6 +153,9 @@ impl SystemGovernor {
             self.with_state_mut(|s| s.s.record(heat_penalty));
         }
 
+        // Sample socket-level I/O counters from the transport layer.
+        self.sample_io_counters();
+
         let mut state = self
             .current_state
             .write()
@@ -127,6 +169,39 @@ impl SystemGovernor {
             .write()
             .unwrap_or_else(|e| e.into_inner());
         *power = new_power;
+    }
+
+    /// Sample socket-level I/O counters and feed deltas into Volterra integrals.
+    /// Bandwidth (bytes sent+received) → b integral, I/O ops → c integral.
+    fn sample_io_counters(&self) {
+        // Bandwidth: bidirectional wire bytes → b integral
+        if let (Some(ref sent), Some(ref recv)) = (&self.io_bytes_sent, &self.io_bytes_received) {
+            let cur_sent = sent.load(Ordering::Relaxed);
+            let cur_recv = recv.load(Ordering::Relaxed);
+            let prev_sent = self.last_io_bytes_sent.swap(cur_sent, Ordering::Relaxed);
+            let prev_recv = self
+                .last_io_bytes_received
+                .swap(cur_recv, Ordering::Relaxed);
+            let delta = cur_sent.saturating_sub(prev_sent) + cur_recv.saturating_sub(prev_recv);
+            if delta > 0 {
+                self.record_bandwidth_pressure(delta as usize);
+            }
+        }
+
+        // Connection activity: I/O ops → c integral.
+        // Same normalization pattern as record_transport_drop_pressure.
+        if let Some(ref ops) = self.io_ops {
+            let cur = ops.load(Ordering::Relaxed);
+            let prev = self.last_io_ops.swap(cur, Ordering::Relaxed);
+            let delta = cur.saturating_sub(prev);
+            if delta > 0 {
+                self.with_state_mut(|s| {
+                    // Normalize: 1000 ops in a tick = full pressure (1.0)
+                    let ratio = (delta as f64 / 1000.0).min(1.0);
+                    s.c.record(ratio);
+                });
+            }
+        }
     }
 
     // --- Immune Integral (Reputation) ---
@@ -592,7 +667,7 @@ mod tests {
     use phalanx_proto::types::{PowerState, SystemStress, TaskCost};
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::tempdir;
@@ -1320,6 +1395,94 @@ mod tests {
             "Memory scaler should be near 1.0 (1/512 MiB), got {}. \
              If this fails, integrals may still be coupled via a shared clock.",
             mem.0
+        );
+    }
+
+    // --- IoCounter → Volterra Integral Wiring Tests ---
+
+    #[test]
+    fn test_io_bandwidth_delta_feeds_b_integral() {
+        let bytes_sent = Arc::new(AtomicU64::new(0));
+        let bytes_received = Arc::new(AtomicU64::new(0));
+        let io_ops = Arc::new(AtomicU64::new(0));
+
+        let gov = SystemGovernor::new().with_io_counters(
+            bytes_sent.clone(),
+            bytes_received.clone(),
+            io_ops.clone(),
+        );
+
+        // Simulate 10 MiB of wire traffic
+        bytes_sent.fetch_add(5 * 1024 * 1024, Ordering::Relaxed);
+        bytes_received.fetch_add(5 * 1024 * 1024, Ordering::Relaxed);
+
+        gov.update_vitals();
+
+        let b_value = gov.with_state(|s| s.b.current_value());
+        assert!(
+            b_value > 0.0,
+            "Bandwidth integral should reflect wire bytes, got {}",
+            b_value
+        );
+
+        // Second tick with no new traffic → delta = 0, no additional pressure
+        let b_before = gov.with_state(|s| s.b.current_value());
+        gov.update_vitals();
+        let b_after = gov.with_state(|s| s.b.current_value());
+        assert!(
+            b_after <= b_before,
+            "Bandwidth integral should not increase without new traffic (before={}, after={})",
+            b_before,
+            b_after
+        );
+    }
+
+    #[test]
+    fn test_io_counters_first_tick_seeding() {
+        // Simulate counters that already have connection setup traffic
+        let bytes_sent = Arc::new(AtomicU64::new(5000));
+        let bytes_received = Arc::new(AtomicU64::new(5000));
+        let io_ops = Arc::new(AtomicU64::new(100));
+
+        let gov = SystemGovernor::new().with_io_counters(
+            bytes_sent.clone(),
+            bytes_received.clone(),
+            io_ops.clone(),
+        );
+
+        // First tick: last-values were seeded, so delta should be 0
+        gov.update_vitals();
+
+        let b_value = gov.with_state(|s| s.b.current_value());
+        assert!(
+            b_value < 0.001,
+            "First tick should see zero bandwidth delta (seeded), got {}",
+            b_value
+        );
+    }
+
+    #[test]
+    fn test_io_ops_feeds_connection_integral() {
+        let bytes_sent = Arc::new(AtomicU64::new(0));
+        let bytes_received = Arc::new(AtomicU64::new(0));
+        let io_ops = Arc::new(AtomicU64::new(0));
+
+        let gov = SystemGovernor::new().with_io_counters(
+            bytes_sent.clone(),
+            bytes_received.clone(),
+            io_ops.clone(),
+        );
+
+        // Simulate 500 I/O operations (half of normalization constant)
+        io_ops.fetch_add(500, Ordering::Relaxed);
+
+        gov.update_vitals();
+
+        let c_value = gov.with_state(|s| s.c.current_value());
+        assert!(
+            c_value > 0.0,
+            "Connection integral should reflect I/O ops, got {}",
+            c_value
         );
     }
 }

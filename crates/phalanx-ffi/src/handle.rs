@@ -207,10 +207,6 @@ async fn bootstrap(
 
     // Mobile hardware probe (atomics-based)
     let probe = Arc::new(MobileProbe::new(ThermalThresholds::default()));
-    let governor = Arc::new(SystemGovernor::with_probe(
-        HomeostaticConfig::default(),
-        probe.clone() as Arc<dyn phalanx_node::vitals::HardwareProbe>,
-    ));
 
     // Network
     let (ingress, egress) = setup_transport(
@@ -221,8 +217,19 @@ async fn bootstrap(
     )
     .map_err(|_| PhalanxError::BootFailed)?;
 
-    // Extract transport drop counter for MeshSentinel maintenance ticks
-    // to feed pressure into the Volterra connection integral.
+    // Wire socket-level I/O counters and transport drop counter from the
+    // egress port into the governor for Volterra integral sampling.
+    let governor = Arc::new(
+        SystemGovernor::with_probe(
+            HomeostaticConfig::default(),
+            probe.clone() as Arc<dyn phalanx_node::vitals::HardwareProbe>,
+        )
+        .with_io_counters(
+            egress.socket_bytes_sent(),
+            egress.socket_bytes_received(),
+            egress.socket_io_ops(),
+        ),
+    );
     let transport_drop_counter = egress.dropped_event_count();
 
     // Local mesh adapter — channel bridge for BLE/WiFi Direct via Flutter FFI
