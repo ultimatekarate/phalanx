@@ -1,0 +1,14 @@
+[package]
+name = "phalanx-test-fixtures"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Phrasebook: pre-composed test Nouns for cross-crate testing. Dev-dependency only."
+
+[dependencies]
+phalanx-proto = { workspace = true }
+phalanx-forensics = { workspace = true }
+postcard = { workspace = true }
+
+[lints]
+workspace = true

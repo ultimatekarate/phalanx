@@ -247,15 +247,12 @@ impl AudioDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phalanx_proto::types::Fps;
-
     #[tokio::test]
     async fn test_audio_drift_compensation() {
         let config = HardwareConfig {
-            camera_fps: Fps::new(30),
             audio_sample_rate: SampleRate::new(44100),
             audio_channels: ChannelCount::new(2),
-            sensor_calibration: None,
+            ..Default::default()
         };
         let audio = PhalanxAudioThread::new(&config);
         let mut rx = audio.subscribe();
@@ -279,10 +276,9 @@ mod tests {
     #[tokio::test]
     async fn test_audio_data_generation() {
         let config = HardwareConfig {
-            camera_fps: Fps::new(30),
             audio_sample_rate: SampleRate::new(44100),
             audio_channels: ChannelCount::new(1),
-            sensor_calibration: None,
+            ..Default::default()
         };
         let audio = PhalanxAudioThread::new(&config);
         let mut rx = audio.subscribe();
