@@ -35,7 +35,7 @@ pub struct EgressActor<E: EgressPort> {
     port: E,
     pending: VecDeque<PendingEgress>,
     rx: mpsc::Receiver<EgressCommand>,
-    /// P10 FIX: SystemGovernor reference for feeding egress failures back into vitals.
+    /// Connection pressure: queue depth feeds the c integral via record_connection_pressure.
     system_governor: Arc<SystemGovernor>,
     /// P7 FIX: Dedup window for DHT announces to prevent post-partition spam.
     /// Recordings announced in the current window are skipped. Window clears every 30s.
@@ -154,10 +154,6 @@ impl<E: EgressPort> EgressActor<E> {
             .is_err()
         {
             tracing::warn!(channel = %channel_id, "Response dispatch failed, queuing for retry");
-            // P10 FIX: Feed dispatch failure into bandwidth pressure so the system
-            // reduces ingestion when the outbound transport is failing.
-            self.system_governor.record_bandwidth_pressure(64 * 1024); // ~64 KiB phantom pressure per failure
-
             // P11 FIX: Shed oldest entries when queue exceeds cap.
             while self.pending.len() >= MAX_PENDING_RETRIES {
                 if let Some(shed) = self.pending.pop_front() {
@@ -206,16 +202,18 @@ impl<E: EgressPort> EgressActor<E> {
                         PhalanxTimestamp::from_millis(now.0 + delay.as_millis() as u64);
                     retry_queue.push_back(pending);
                 } else {
-                    // P10 FIX: Abandoned responses signal sustained transport failure.
                     tracing::error!(
                         channel = %pending.channel_id,
                         attempts = pending.attempt_count,
                         "Egress response abandoned after max retries"
                     );
-                    self.system_governor.record_bandwidth_pressure(128 * 1024); // Heavier pressure for data loss
                 }
             }
         }
         self.pending = retry_queue;
+
+        // Connection pressure: queue depth reflects sustained dispatch failures.
+        self.system_governor
+            .record_connection_pressure(self.pending.len(), MAX_PENDING_RETRIES);
     }
 }
