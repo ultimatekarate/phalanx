@@ -65,5 +65,8 @@ nalgebra = { version = "0.33", optional = true }
 [dev-dependencies]
 phalanx-test-fixtures = { workspace = true }
 
+[lints]
+workspace = true
+
 [features]
 stability-analysis = ["dep:nalgebra"]

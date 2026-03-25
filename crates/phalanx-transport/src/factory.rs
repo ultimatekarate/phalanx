@@ -73,10 +73,13 @@ where
     let kad_protocol = StreamProtocol::try_from_owned(protocol_str)
         .map_err(|e| TransportError::Protocol(e.to_string()))?;
     let mut kad_config = kad::Config::new(kad_protocol);
-    kad_config.set_replication_factor(
-        std::num::NonZeroUsize::new(config.kademlia_replication_factor)
-            .unwrap_or(std::num::NonZeroUsize::new(20).unwrap()),
-    );
+    // 20 is non-zero — if config provides 0, fall back to the default.
+    let replication = std::num::NonZeroUsize::new(config.kademlia_replication_factor)
+        .or_else(|| std::num::NonZeroUsize::new(20))
+        .ok_or_else(|| {
+            TransportError::Protocol("default replication factor is zero".to_string())
+        })?;
+    kad_config.set_replication_factor(replication);
     kad_config.set_query_timeout(Duration::from_secs(config.kademlia_query_timeout_secs));
     kad_config.set_record_ttl(Some(Duration::from_secs(config.kademlia_record_ttl_secs)));
     kad_config.set_provider_record_ttl(Some(Duration::from_secs(config.kademlia_record_ttl_secs)));

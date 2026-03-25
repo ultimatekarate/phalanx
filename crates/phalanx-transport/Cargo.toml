@@ -35,3 +35,6 @@ zeroize = "1.8.2"
 tokio-test = "0.4"
 rcgen = "0.13"
 tempfile = "3.26.0"
+
+[lints]
+workspace = true

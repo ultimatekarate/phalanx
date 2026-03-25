@@ -385,7 +385,11 @@ impl Guardian {
             );
         }
 
-        let log = self.recording_logs.get_mut(&recording_id).unwrap();
+        let Some(log) = self.recording_logs.get_mut(&recording_id) else {
+            return Err(GuardianError::StorageFailure(
+                "recording log missing after insert".to_string(),
+            ));
+        };
 
         // Record current file position as the index offset
         let offset = log
@@ -470,7 +474,12 @@ impl Guardian {
             .await
             .map_err(|e| GuardianError::StorageFailure(e.to_string()))?;
 
-        let payload_len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+        let payload_len = u32::from_le_bytes(
+            header
+                .get(4..8)
+                .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                .ok_or_else(|| GuardianError::StorageFailure("corrupt frame header".to_string()))?,
+        ) as usize;
 
         // Read encrypted payload
         if payload_len < AEAD_NONCE_LEN {
@@ -519,7 +528,14 @@ impl Guardian {
                 Err(e) => return Err(GuardianError::StorageFailure(e.to_string())),
             }
 
-            let payload_len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+            let payload_len = u32::from_le_bytes(
+                header
+                    .get(4..8)
+                    .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                    .ok_or_else(|| {
+                        GuardianError::StorageFailure("corrupt frame header".to_string())
+                    })?,
+            ) as usize;
 
             if payload_len < AEAD_NONCE_LEN || payload_len > MAX_WAL_CHUNK_BYTES as usize {
                 tracing::warn!(payload_len, "Recording log: corrupt frame, skipping");

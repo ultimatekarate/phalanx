@@ -166,7 +166,7 @@ impl ProviderAuthority for DhtProviderSet {
             .providers
             .iter()
             .enumerate()
-            .min_by(|(_, a), (_, b)| a.reputation_score.partial_cmp(&b.reputation_score).unwrap())
+            .min_by(|(_, a), (_, b)| a.reputation_score.total_cmp(&b.reputation_score))
             .map(|(idx, _)| idx);
 
         if let Some(idx) = min_idx {

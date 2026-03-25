@@ -46,7 +46,9 @@ fn build_test_actor<J: TransientJournal + Send + 'static>(
         current_tolerance: Duration::from_millis(1000),
         system_governor: Arc::new(SystemGovernor::new()),
         commit_notify_tx: None,
-        replay_filter: phalanx_forensics::bloom::RotatingBloomFilter::new(1_000_000),
+        replay_filter: phalanx_forensics::bloom::RotatingBloomFilter::new(
+            phalanx_forensics::bloom::RotatingBloomFilter::DEFAULT_CAPACITY,
+        ),
     };
 
     (actor, storage_rx, storage_tx)
