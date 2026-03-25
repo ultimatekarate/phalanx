@@ -65,13 +65,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         config,
         identity: my_identity,
         ingress,
-        egress,
         journal,
         trust_registry,
-        system_governor: Arc::new(phalanx_node::vitals::SystemGovernor::new()),
+        system_governor: Arc::new(
+            phalanx_node::vitals::SystemGovernor::new().with_io_counters(
+                egress.socket_bytes_sent(),
+                egress.socket_bytes_received(),
+                egress.socket_io_ops(),
+            ),
+        ),
         vault_key,
         local_mesh: None, // NoOp — BLE/WiFi Direct injected during mobile integration
-        transport_drop_counter: None,
+        transport_drop_counter: Some(egress.dropped_event_count()),
+        egress,
     };
 
     let mut engine = MeshSentinel::new(deps).await?;

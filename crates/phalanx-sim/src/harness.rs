@@ -7,6 +7,7 @@
 use crate::clock::VirtualClock;
 use crate::world::SimulationWorld;
 
+use phalanx_forensics::policy::Homeostasis;
 use phalanx_node::actors::meshsentinel::{MeshSentinel, SentinelDependencies};
 use phalanx_node::config::NodeConfig;
 use phalanx_node::persistence::vault::derive_vault_key;
@@ -650,6 +651,15 @@ impl SimulationHarness {
         did: &Did,
         event: NetworkEvent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Model transport-layer bandwidth measurement for DataReceived events.
+        // In production, IoCounters on the vitals tick capture wire bytes.
+        // In simulation, we measure payload size directly.
+        if let NetworkEvent::DataReceived { ref data, .. } = event {
+            if let Some(governor) = self.governors.get(did) {
+                governor.record_bandwidth_pressure(data.len());
+            }
+        }
+
         let world = self.world.read().await;
         let tx = world
             .ingress_routes
