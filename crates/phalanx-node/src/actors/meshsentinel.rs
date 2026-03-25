@@ -46,10 +46,6 @@ pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJourn
     /// Default: `None` (desktop/non-BLE platforms).
     /// When `Some`, MeshSentinel polls for local mesh events alongside network ingress.
     pub local_mesh: Option<Box<dyn LocalMeshPort>>,
-    /// Transport event drop counter from the Libp2pAdapter.
-    /// Read on maintenance ticks to feed pressure into the Volterra connection integral.
-    /// `None` for test/sim environments without a real transport.
-    pub transport_drop_counter: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 pub struct MeshSentinel<I: IngressPort> {
@@ -126,11 +122,6 @@ pub struct MeshSentinel<I: IngressPort> {
     pub proximity_witnesses: Vec<phalanx_proto::corroboration::ProximityWitness>,
     /// Trusted clock for forensic timestamps.
     pub clock: Arc<TrustedClock>,
-    /// Transport event drop counter — shared with Libp2pAdapter.
-    /// Read on topology ticks to compute delta and feed connection pressure.
-    transport_drop_counter: Option<Arc<std::sync::atomic::AtomicU64>>,
-    /// Last read value of transport drop counter, for delta computation.
-    last_transport_drops: u64,
 }
 
 impl<I: IngressPort> MeshSentinel<I> {
@@ -273,6 +264,13 @@ impl<I: IngressPort> MeshSentinel<I> {
                 max_storage_bytes: deps.config.storage.max_storage_bytes.as_u64(),
                 vault_key: deps.vault_key.clone(),
                 clock: clock_handle.clone(),
+                lens_thresholds: deps
+                    .config
+                    .hardware
+                    .sensor_calibration
+                    .as_ref()
+                    .map(phalanx_forensics::gate::LensThresholds::new_calibrated)
+                    .unwrap_or_default(),
             },
         )
         .await
@@ -344,8 +342,6 @@ impl<I: IngressPort> MeshSentinel<I> {
             active_recording_key: None,
             proximity_witnesses: Vec::new(),
             clock: clock_handle.clone(),
-            transport_drop_counter: deps.transport_drop_counter,
-            last_transport_drops: 0,
         })
     }
 
@@ -869,25 +865,6 @@ impl<I: IngressPort> MeshSentinel<I> {
                 }
             }
             _ => {} // EclipseRisk::None — all clear
-        }
-
-        // 4. Transport event drop pressure: read the shared counter from the
-        // Libp2pAdapter, compute delta since last tick, feed into the Volterra
-        // connection integral. Sustained drops indicate the pipeline can't keep
-        // up with connection load.
-        if let Some(ref counter) = self.transport_drop_counter {
-            let current = counter.load(std::sync::atomic::Ordering::Relaxed);
-            let delta = current.saturating_sub(self.last_transport_drops);
-            self.last_transport_drops = current;
-            if delta > 0 {
-                self.system_governor.record_transport_drop_pressure(delta);
-                tracing::debug!(
-                    target: "phalanx::transport",
-                    delta = delta,
-                    total = current,
-                    "Transport event drops fed into connection pressure integral"
-                );
-            }
         }
     }
 }

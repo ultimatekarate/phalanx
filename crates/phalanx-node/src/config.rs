@@ -1,5 +1,6 @@
 // crates/phalanx-node/src/config.rs
 
+use phalanx_proto::evidence::SensorCalibration;
 use phalanx_proto::prelude::{Did, MeshTopic};
 use phalanx_proto::types::{ByteCapacity, ChannelCount, Fps, RepairRatio, SampleRate, SymbolSize};
 use serde::Deserialize;
@@ -119,6 +120,11 @@ pub struct HardwareConfig {
     pub camera_fps: Fps,
     pub audio_sample_rate: SampleRate,
     pub audio_channels: ChannelCount,
+    /// Per-device PRNU calibration result from the sensor setup pipeline.
+    /// When `None`, LensGate uses conservative default thresholds.
+    /// When `Some`, the calibrated `prnu_floor` is bound to the physical sensor.
+    #[serde(default)]
+    pub sensor_calibration: Option<SensorCalibration>,
 }
 
 impl HardwareConfig {
@@ -131,6 +137,7 @@ impl HardwareConfig {
             camera_fps: Fps::new(self.camera_fps.get()),
             audio_sample_rate: SampleRate::new(self.audio_sample_rate.get()),
             audio_channels: ChannelCount::new(self.audio_channels.get()),
+            sensor_calibration: self.sensor_calibration,
         }
     }
 }
@@ -210,6 +217,7 @@ impl Default for HardwareConfig {
             camera_fps: Fps::new(10),
             audio_sample_rate: SampleRate::new(16_000),
             audio_channels: ChannelCount::new(1),
+            sensor_calibration: None,
         }
     }
 }

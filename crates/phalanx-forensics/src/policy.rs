@@ -261,6 +261,61 @@ impl HeartbeatGovernor {
 // Laboratory owns the mathematical primitives.  The Sentence (phalanx-node)
 // re-exports them for backward compatibility.
 
+// --- Physical Constants & Derivation Anchors ---
+
+const LN_2: f64 = core::f64::consts::LN_2;
+
+/// Normal-state vitals tick interval (seconds). Anchors time-based thresholds.
+/// s_crit and lambda_sys are both coupled to this interval.
+pub const NORMAL_TICK_SECS: f64 = 5.0;
+
+/// Fraction of device RAM that constitutes critical memory pressure.
+/// At 4GB reference device: 0.125 × 4096 MiB = 512 MiB.
+pub const MEMORY_CRITICAL_FRACTION: f64 = 0.125;
+
+/// Reference device RAM (MiB) used when HardwareProbe doesn't provide actual RAM.
+/// Fallback for tests, sim, and desktop without probe.
+pub const REFERENCE_RAM_MIB: f64 = 4096.0;
+
+/// Safety margin on storage before critical (20% headroom for phone).
+pub const STORAGE_SAFETY_MARGIN: f64 = 0.20;
+
+/// Safety margin on connections before critical (10% for phone).
+pub const CONNECTION_SAFETY_MARGIN: f64 = 0.10;
+
+/// Sustained bandwidth rate that constitutes full pressure (MiB/s).
+/// At NORMAL_TICK_SECS=5: 20 × 5 = 100 MiB per tick cycle.
+pub const BANDWIDTH_BUDGET_MIB_PER_SEC: f64 = 20.0;
+
+/// Pipeline capacity multiplier. The ingestion pipeline can buffer
+/// PIPELINE_CAPACITY_FACTOR × s_crit concurrent stress units.
+/// At s_crit=10, this yields 200 — enough to absorb a 200-chunk
+/// burst without backpressure at normal operating stress.
+const PIPELINE_CAPACITY_FACTOR: f64 = 20.0;
+
+// --- Half-lives (seconds) ---
+// Each half-life is the physical time for an integral to forget half
+// of a past impulse. lambda = ln(2) / half_life.
+
+/// CPU contention resolves within ~170ms (scheduler preemption quantum).
+const HALF_LIFE_SYS: f64 = 0.17;
+/// I/O latency spikes resolve within ~1.4s (disk flush cycle).
+const HALF_LIFE_IO: f64 = 1.4;
+/// Memory allocation patterns shift over ~2.3s (GC/drop cycles).
+const HALF_LIFE_MEM: f64 = 2.3;
+/// Storage fills/drains slowly — ~14s memory (WAL rotation period).
+const HALF_LIFE_WAL: f64 = 14.0;
+/// Bandwidth bursts are transient — matched to I/O recovery.
+const HALF_LIFE_BW: f64 = 1.4;
+/// Connection churn settles over ~3.5s (TCP/QUIC handshake window).
+const HALF_LIFE_CONN: f64 = 3.5;
+/// Trust decisions are sticky — ~69s memory (multiple topology ticks).
+const HALF_LIFE_REP: f64 = 69.0;
+/// Entry pressure persists across ~7s (Sybil attack detection window).
+const HALF_LIFE_ENTRY: f64 = 7.0;
+/// Network RTT changes rapidly — ~700ms memory.
+const HALF_LIFE_LAT: f64 = 0.7;
+
 // --- Scaler Newtypes ---
 
 /// Hardened newtypes for the homeostasis API boundaries.
@@ -365,39 +420,57 @@ pub struct HomeostaticConfig {
     pub c_crit: f64,                      // Connection critical ratio (0.0-1.0)
     pub lambda_lat: f64,                  // Latency pressure decay rate (independent of lambda_sys)
     pub max_temporal_tolerance: Duration, // Hard clamp on temporal_tolerance (T2 fix)
+    /// Composite stress weights [s, d, m, w, b]. Sum = 1.0.
+    pub stress_weights: [f64; 5],
 }
 
 impl HomeostaticConfig {
     pub fn pipeline_capacity(&self) -> usize {
-        // We use s_crit (10.0) as the base.
-        // A coefficient of 20.0 means we can buffer 200 concurrent 'units' of stress.
-        (self.s_crit * 20.0) as usize
+        (self.s_crit * PIPELINE_CAPACITY_FACTOR) as usize
     }
 }
 
 impl Default for HomeostaticConfig {
     fn default() -> Self {
         Self {
-            lambda_sys: 4.0,
-            s_crit: 10.0,
-            lambda_io: 0.5,
-            d_crit: 25.0,
-            lambda_rep: 0.01,
-            omega: 100.0,
-            lambda_entry: 0.1,
+            // Decay rates: lambda = ln(2) / half_life
+            lambda_sys: LN_2 / HALF_LIFE_SYS,
+            lambda_io: LN_2 / HALF_LIFE_IO,
+            lambda_mem: LN_2 / HALF_LIFE_MEM,
+            lambda_wal: LN_2 / HALF_LIFE_WAL,
+            lambda_bw: LN_2 / HALF_LIFE_BW,
+            lambda_conn: LN_2 / HALF_LIFE_CONN,
+            lambda_rep: LN_2 / HALF_LIFE_REP,
+            lambda_entry: LN_2 / HALF_LIFE_ENTRY,
+            lambda_lat: LN_2 / HALF_LIFE_LAT,
+            // Critical thresholds: derived from tick interval and physical parameters
+            s_crit: 2.0 * NORMAL_TICK_SECS,
+            d_crit: 5.0 * NORMAL_TICK_SECS,
+            m_crit: REFERENCE_RAM_MIB * MEMORY_CRITICAL_FRACTION,
+            w_crit: 1.0 - STORAGE_SAFETY_MARGIN,
+            b_crit: BANDWIDTH_BUDGET_MIB_PER_SEC * NORMAL_TICK_SECS,
+            c_crit: 1.0 - CONNECTION_SAFETY_MARGIN,
+            // Sybil parameters
+            // psi_max: per-peer resource ceiling. At 64 max connections,
+            // total system capacity = 50 × 64 = 3200 units.
             psi_max: 50.0,
+            // k_sybil: at entry pressure = psi_max/k = 25, endowment halves.
             k_sybil: 2.0,
+            // omega: reputation scaling. With half-life=69s, a single evidence
+            // (±1.0) decays to ±0.5 after 69s. At omega=100, ~100 valid
+            // messages needed to fully restore a zero-reputation peer.
+            omega: 100.0,
+            // Temporal constants
+            // 500ms: typical NTP sync accuracy on mobile devices.
             base_temporal_drift: Duration::from_millis(500),
-            lambda_mem: 0.3,
-            m_crit: 512.0,
-            lambda_wal: 0.05,
-            w_crit: 0.8,
-            lambda_bw: 0.5,
-            b_crit: 100.0,
-            lambda_conn: 0.2,
-            c_crit: 0.9,
-            lambda_lat: 1.0,
-            max_temporal_tolerance: Duration::from_secs(10),
+            // 10s = 2 × NORMAL_TICK_SECS. Beyond this, timestamps are too
+            // stale for forensic chain-of-custody guarantees.
+            max_temporal_tolerance: Duration::from_secs(2 * NORMAL_TICK_SECS as u64),
+            // Composite stress weights. Sum = 1.0.
+            // Risk hierarchy: system metabolic (most critical — blocks all work) >
+            // I/O, memory, bandwidth (equal — all limit throughput) >
+            // storage (least critical — can defer writes).
+            stress_weights: [0.25, 0.20, 0.20, 0.15, 0.20],
         }
     }
 }

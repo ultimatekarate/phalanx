@@ -27,9 +27,11 @@ pub struct SystemGovernor {
     io_bytes_sent: Option<Arc<AtomicU64>>,
     io_bytes_received: Option<Arc<AtomicU64>>,
     io_ops: Option<Arc<AtomicU64>>,
+    transport_drops: Option<Arc<AtomicU64>>,
     last_io_bytes_sent: AtomicU64,
     last_io_bytes_received: AtomicU64,
     last_io_ops: AtomicU64,
+    last_transport_drops: AtomicU64,
 }
 
 impl Default for SystemGovernor {
@@ -44,7 +46,12 @@ impl SystemGovernor {
     }
 
     /// Create with a custom hardware probe (for mobile platforms).
-    pub fn with_probe(config: HomeostaticConfig, probe: Arc<dyn HardwareProbe>) -> Self {
+    /// Overrides m_crit from actual device RAM if the probe provides it.
+    pub fn with_probe(mut config: HomeostaticConfig, probe: Arc<dyn HardwareProbe>) -> Self {
+        if let Some(ram_bytes) = probe.total_ram_bytes() {
+            let ram_mib = ram_bytes as f64 / 1_048_576.0;
+            config.m_crit = ram_mib * phalanx_forensics::policy::MEMORY_CRITICAL_FRACTION;
+        }
         let integrals = IntegralState::from_config(&config);
         Self {
             current_state: RwLock::new(SystemStress::Nominal),
@@ -55,9 +62,11 @@ impl SystemGovernor {
             io_bytes_sent: None,
             io_bytes_received: None,
             io_ops: None,
+            transport_drops: None,
             last_io_bytes_sent: AtomicU64::new(0),
             last_io_bytes_received: AtomicU64::new(0),
             last_io_ops: AtomicU64::new(0),
+            last_transport_drops: AtomicU64::new(0),
         }
     }
 
@@ -89,9 +98,11 @@ impl SystemGovernor {
             io_bytes_sent: None,
             io_bytes_received: None,
             io_ops: None,
+            transport_drops: None,
             last_io_bytes_sent: AtomicU64::new(0),
             last_io_bytes_received: AtomicU64::new(0),
             last_io_ops: AtomicU64::new(0),
+            last_transport_drops: AtomicU64::new(0),
         }
     }
 
@@ -103,13 +114,16 @@ impl SystemGovernor {
         sent: Arc<AtomicU64>,
         received: Arc<AtomicU64>,
         ops: Arc<AtomicU64>,
+        dropped: Arc<AtomicU64>,
     ) -> Self {
         self.last_io_bytes_sent = AtomicU64::new(sent.load(Ordering::Relaxed));
         self.last_io_bytes_received = AtomicU64::new(received.load(Ordering::Relaxed));
         self.last_io_ops = AtomicU64::new(ops.load(Ordering::Relaxed));
+        self.last_transport_drops = AtomicU64::new(dropped.load(Ordering::Relaxed));
         self.io_bytes_sent = Some(sent);
         self.io_bytes_received = Some(received);
         self.io_ops = Some(ops);
+        self.transport_drops = Some(dropped);
         self
     }
 
@@ -142,11 +156,13 @@ impl SystemGovernor {
         // Periodic connectivity check (30s grace period)
         self.check_connectivity();
 
+        // Each penalty = fraction of s_crit. Ensures heat penalties scale
+        // with the system integral's critical threshold.
         let heat_penalty = match new_stress {
             SystemStress::Nominal => 0.0,
-            SystemStress::Fair => 0.5,
-            SystemStress::Serious => 2.0,
-            SystemStress::Critical => 10.0,
+            SystemStress::Fair => 0.05 * self.config.s_crit, // 5% of critical
+            SystemStress::Serious => 0.20 * self.config.s_crit, // 20% of critical
+            SystemStress::Critical => self.config.s_crit,    // saturates s in one tick
         };
 
         if heat_penalty > 0.0 {
@@ -172,7 +188,8 @@ impl SystemGovernor {
     }
 
     /// Sample socket-level I/O counters and feed deltas into Volterra integrals.
-    /// Bandwidth (bytes sent+received) → b integral, I/O ops → c integral.
+    /// Bandwidth (bytes sent+received) → b integral.
+    /// Connection health (drops/ops ratio) → c integral.
     fn sample_io_counters(&self) {
         // Bandwidth: bidirectional wire bytes → b integral
         if let (Some(ref sent), Some(ref recv)) = (&self.io_bytes_sent, &self.io_bytes_received) {
@@ -188,19 +205,29 @@ impl SystemGovernor {
             }
         }
 
-        // Connection activity: I/O ops → c integral.
-        // Same normalization pattern as record_transport_drop_pressure.
-        if let Some(ref ops) = self.io_ops {
+        // Connection health: drops/ops is a self-normalizing ratio [0, 1].
+        // No arbitrary constants — drops are bounded by ops.
+        let ops_delta = if let Some(ref ops) = self.io_ops {
             let cur = ops.load(Ordering::Relaxed);
             let prev = self.last_io_ops.swap(cur, Ordering::Relaxed);
-            let delta = cur.saturating_sub(prev);
-            if delta > 0 {
-                self.with_state_mut(|s| {
-                    // Normalize: 1000 ops in a tick = full pressure (1.0)
-                    let ratio = (delta as f64 / 1000.0).min(1.0);
-                    s.c.record(ratio);
-                });
-            }
+            cur.saturating_sub(prev)
+        } else {
+            0
+        };
+
+        let drops_delta = if let Some(ref drops) = self.transport_drops {
+            let cur = drops.load(Ordering::Relaxed);
+            let prev = self.last_transport_drops.swap(cur, Ordering::Relaxed);
+            cur.saturating_sub(prev)
+        } else {
+            0
+        };
+
+        if ops_delta > 0 && drops_delta > 0 {
+            self.with_state_mut(|s| {
+                let ratio = (drops_delta as f64 / ops_delta as f64).min(1.0);
+                s.c.record(ratio);
+            });
         }
     }
 
@@ -287,15 +314,19 @@ impl SystemGovernor {
     /// Weighted composite of all integral pressures for power state transitions.
     /// Returns 0.0 (idle) to 1.0+ (saturated).
     pub fn composite_stress(&self) -> f64 {
+        let w = &self.config.stress_weights;
         self.with_state(|s| {
-            let terms = [
-                (0.25, s.s.current_value() / self.config.s_crit),
-                (0.20, s.d.current_value() / self.config.d_crit),
-                (0.20, s.m.current_value() / self.config.m_crit),
-                (0.15, s.w.current_value() / self.config.w_crit),
-                (0.20, s.b.current_value() / self.config.b_crit),
+            let normalized = [
+                s.s.current_value() / self.config.s_crit,
+                s.d.current_value() / self.config.d_crit,
+                s.m.current_value() / self.config.m_crit,
+                s.w.current_value() / self.config.w_crit,
+                s.b.current_value() / self.config.b_crit,
             ];
-            terms.iter().map(|(w, n)| w * n.min(1.0)).sum()
+            w.iter()
+                .zip(normalized.iter())
+                .map(|(wi, ni)| wi * ni.min(1.0))
+                .sum()
         })
     }
 
@@ -316,8 +347,17 @@ impl SystemGovernor {
         battery.max(stress)
     }
 
+    // Hysteresis thresholds for power state transitions.
+    // Thresholds divide the [0, 1] composite_stress range into response zones.
+    // De-escalation requires more evidence (5 ticks) than escalation (3 ticks)
+    // because premature de-escalation wastes battery.
+    const LEAF_THRESHOLD: f64 = 0.85;
+    const CONSERVING_THRESHOLD: f64 = 0.50;
+    const NORMAL_THRESHOLD: f64 = 0.30;
+    const ESCALATION_TICKS: u8 = 3;
+    const DEESCALATION_TICKS: u8 = 5;
+
     /// Composite-stress-driven power state recommendation with hysteresis.
-    /// 3 consecutive ticks above 0.85 → Leaf, 3 above 0.50 → Conserving, 5 below 0.30 → Normal.
     ///
     /// **Important:** Stress can only produce Normal/Conserving/Leaf — never Dormant.
     /// Dormant is exclusively a battery gate output (background state, not software stress).
@@ -326,16 +366,16 @@ impl SystemGovernor {
         let composite = self.composite_stress();
         let mut integrals = self.integrals.write().unwrap_or_else(|e| e.into_inner());
 
-        if composite > 0.85 {
+        if composite > Self::LEAF_THRESHOLD {
             integrals.leaf_trigger_count = integrals.leaf_trigger_count.saturating_add(1);
             integrals.conserving_trigger_count = 0;
             integrals.normal_trigger_count = 0;
-        } else if composite > 0.50 {
+        } else if composite > Self::CONSERVING_THRESHOLD {
             integrals.conserving_trigger_count =
                 integrals.conserving_trigger_count.saturating_add(1);
             integrals.leaf_trigger_count = 0;
             integrals.normal_trigger_count = 0;
-        } else if composite < 0.3 {
+        } else if composite < Self::NORMAL_THRESHOLD {
             integrals.normal_trigger_count = integrals.normal_trigger_count.saturating_add(1);
             integrals.leaf_trigger_count = 0;
             integrals.conserving_trigger_count = 0;
@@ -345,11 +385,11 @@ impl SystemGovernor {
             integrals.normal_trigger_count = 0;
         }
 
-        let stress_state = if integrals.leaf_trigger_count >= 3 {
+        let stress_state = if integrals.leaf_trigger_count >= Self::ESCALATION_TICKS {
             PowerState::Leaf
-        } else if integrals.conserving_trigger_count >= 3 {
+        } else if integrals.conserving_trigger_count >= Self::ESCALATION_TICKS {
             PowerState::Conserving
-        } else if integrals.normal_trigger_count >= 5 {
+        } else if integrals.normal_trigger_count >= Self::DEESCALATION_TICKS {
             PowerState::Normal
         } else {
             // Maintain stress-specific state during hysteresis window.
@@ -497,21 +537,6 @@ impl SystemGovernor {
     /// Called from MeshSentinel on PeerDiscovered/PeerDisconnected events.
     /// Uses a default max of 64 connections (matching QUIC server default).
     const MAX_EXPECTED_CONNECTIONS: usize = 64;
-
-    /// Record transport event drop pressure.
-    /// Called from MeshSentinel on maintenance ticks with the delta of dropped
-    /// transport events since the last read. Feeds into the connection integral
-    /// because event drops indicate the processing pipeline can't keep up with
-    /// the connection load.
-    pub fn record_transport_drop_pressure(&self, dropped_delta: u64) {
-        if dropped_delta > 0 {
-            self.with_state_mut(|s| {
-                // Normalize: 100 drops in a tick = full pressure (1.0)
-                let ratio = (dropped_delta as f64 / 100.0).min(1.0);
-                s.c.record(ratio);
-            });
-        }
-    }
 
     pub fn record_connection_gauge(&self) {
         let (local, internet) = self.with_state(|s| (s.local_peer_count, s.internet_peer_count));
@@ -1405,11 +1430,13 @@ mod tests {
         let bytes_sent = Arc::new(AtomicU64::new(0));
         let bytes_received = Arc::new(AtomicU64::new(0));
         let io_ops = Arc::new(AtomicU64::new(0));
+        let dropped = Arc::new(AtomicU64::new(0));
 
         let gov = SystemGovernor::new().with_io_counters(
             bytes_sent.clone(),
             bytes_received.clone(),
             io_ops.clone(),
+            dropped.clone(),
         );
 
         // Simulate 10 MiB of wire traffic
@@ -1443,11 +1470,13 @@ mod tests {
         let bytes_sent = Arc::new(AtomicU64::new(5000));
         let bytes_received = Arc::new(AtomicU64::new(5000));
         let io_ops = Arc::new(AtomicU64::new(100));
+        let dropped = Arc::new(AtomicU64::new(5));
 
         let gov = SystemGovernor::new().with_io_counters(
             bytes_sent.clone(),
             bytes_received.clone(),
             io_ops.clone(),
+            dropped.clone(),
         );
 
         // First tick: last-values were seeded, so delta should be 0
@@ -1462,27 +1491,42 @@ mod tests {
     }
 
     #[test]
-    fn test_io_ops_feeds_connection_integral() {
+    fn test_drop_ratio_feeds_connection_integral() {
         let bytes_sent = Arc::new(AtomicU64::new(0));
         let bytes_received = Arc::new(AtomicU64::new(0));
         let io_ops = Arc::new(AtomicU64::new(0));
+        let dropped = Arc::new(AtomicU64::new(0));
 
         let gov = SystemGovernor::new().with_io_counters(
             bytes_sent.clone(),
             bytes_received.clone(),
             io_ops.clone(),
+            dropped.clone(),
         );
 
-        // Simulate 500 I/O operations (half of normalization constant)
-        io_ops.fetch_add(500, Ordering::Relaxed);
+        // Simulate 1000 ops with 500 drops → 50% drop ratio
+        io_ops.fetch_add(1000, Ordering::Relaxed);
+        dropped.fetch_add(500, Ordering::Relaxed);
 
         gov.update_vitals();
 
         let c_value = gov.with_state(|s| s.c.current_value());
         assert!(
             c_value > 0.0,
-            "Connection integral should reflect I/O ops, got {}",
+            "Connection integral should reflect drop ratio, got {}",
             c_value
+        );
+
+        // No drops with ops → no connection pressure
+        let c_before = gov.with_state(|s| s.c.current_value());
+        io_ops.fetch_add(1000, Ordering::Relaxed);
+        gov.update_vitals();
+        let c_after = gov.with_state(|s| s.c.current_value());
+        assert!(
+            c_after <= c_before,
+            "Connection integral should not increase without drops (before={}, after={})",
+            c_before,
+            c_after
         );
     }
 }

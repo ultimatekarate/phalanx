@@ -9,7 +9,7 @@
 use phalanx_node::vitals::{
     BatteryLevel, Celsius, HardwareProbe, LifecycleEvent, ThermalThresholds,
 };
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 use tokio::sync::mpsc;
 
@@ -22,6 +22,9 @@ pub struct MobileProbe {
     thermal_celsius: AtomicI32,
     is_charging: AtomicBool,
     is_background: AtomicBool,
+    /// Total device RAM in bytes. Set once from Flutter during init.
+    /// 0 means unavailable (falls back to reference device default).
+    total_ram_bytes: AtomicU64,
     /// Lifecycle event sender. Mutex only guards the Option (take-once pattern),
     /// not the hot path. The mpsc::Sender itself is lock-free.
     lifecycle_tx: Mutex<Option<mpsc::Sender<LifecycleEvent>>>,
@@ -34,18 +37,22 @@ pub struct MobileProbe {
 impl MobileProbe {
     /// Create a new MobileProbe with default sensor values.
     ///
+    /// `total_ram_bytes`: device RAM in bytes (from Flutter's platform API).
+    /// Pass 0 if unavailable — falls back to reference device default.
+    ///
     /// Defaults:
     /// - Battery: 100% (assume full charge on cold start)
     /// - Thermal: 25°C (room temperature)
     /// - Charging: false
     /// - Background: false (app starts in foreground)
-    pub fn new(thresholds: ThermalThresholds) -> Self {
+    pub fn new(thresholds: ThermalThresholds, total_ram_bytes: u64) -> Self {
         let (tx, rx) = mpsc::channel(16);
         Self {
             battery_level: AtomicU8::new(100),
             thermal_celsius: AtomicI32::new(25),
             is_charging: AtomicBool::new(false),
             is_background: AtomicBool::new(false),
+            total_ram_bytes: AtomicU64::new(total_ram_bytes),
             lifecycle_tx: Mutex::new(Some(tx)),
             lifecycle_rx: Mutex::new(Some(rx)),
             thresholds,
@@ -114,6 +121,15 @@ impl HardwareProbe for MobileProbe {
         self.thresholds
     }
 
+    fn total_ram_bytes(&self) -> Option<u64> {
+        let val = self.total_ram_bytes.load(Ordering::Relaxed);
+        if val > 0 {
+            Some(val)
+        } else {
+            None
+        }
+    }
+
     fn lifecycle_events(&self) -> Option<mpsc::Receiver<LifecycleEvent>> {
         // Take-once: the first caller (SystemGovernor) gets the receiver.
         // Subsequent calls return None.
@@ -132,7 +148,7 @@ mod tests {
 
     #[test]
     fn default_values_on_cold_start() {
-        let probe = MobileProbe::new(ThermalThresholds::default());
+        let probe = MobileProbe::new(ThermalThresholds::default(), 0);
 
         let battery = probe.battery_level().expect("battery should be Some");
         assert_eq!(battery.get(), 100);
@@ -145,7 +161,7 @@ mod tests {
 
     #[test]
     fn battery_updates_visible_through_trait() {
-        let probe = MobileProbe::new(ThermalThresholds::default());
+        let probe = MobileProbe::new(ThermalThresholds::default(), 0);
 
         probe.set_battery(75, true);
         let battery = probe.battery_level().expect("battery should be Some");
@@ -160,7 +176,7 @@ mod tests {
 
     #[test]
     fn battery_clamps_at_100() {
-        let probe = MobileProbe::new(ThermalThresholds::default());
+        let probe = MobileProbe::new(ThermalThresholds::default(), 0);
 
         probe.set_battery(255, false);
         let battery = probe.battery_level().expect("battery should be Some");
@@ -169,7 +185,7 @@ mod tests {
 
     #[test]
     fn battery_zero_is_valid() {
-        let probe = MobileProbe::new(ThermalThresholds::default());
+        let probe = MobileProbe::new(ThermalThresholds::default(), 0);
 
         probe.set_battery(0, false);
         let battery = probe.battery_level().expect("battery should be Some");
@@ -178,7 +194,7 @@ mod tests {
 
     #[test]
     fn thermal_updates_visible_through_trait() {
-        let probe = MobileProbe::new(ThermalThresholds::default());
+        let probe = MobileProbe::new(ThermalThresholds::default(), 0);
 
         probe.set_thermal(40);
         assert_eq!(probe.thermal_reading().expect("some").0, 40);
@@ -189,7 +205,7 @@ mod tests {
 
     #[test]
     fn thermal_negative_values_are_valid() {
-        let probe = MobileProbe::new(ThermalThresholds::default());
+        let probe = MobileProbe::new(ThermalThresholds::default(), 0);
 
         // Arctic field conditions
         probe.set_thermal(-20);
@@ -198,7 +214,7 @@ mod tests {
 
     #[test]
     fn lifecycle_foreground_background() {
-        let probe = MobileProbe::new(ThermalThresholds::default());
+        let probe = MobileProbe::new(ThermalThresholds::default(), 0);
 
         assert!(!probe.is_background());
 
@@ -211,7 +227,7 @@ mod tests {
 
     #[test]
     fn lifecycle_events_take_once() {
-        let probe = MobileProbe::new(ThermalThresholds::default());
+        let probe = MobileProbe::new(ThermalThresholds::default(), 0);
 
         let rx1 = probe.lifecycle_events();
         assert!(rx1.is_some(), "First call should return Some(receiver)");
@@ -222,7 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn lifecycle_events_forwarded_to_channel() {
-        let probe = MobileProbe::new(ThermalThresholds::default());
+        let probe = MobileProbe::new(ThermalThresholds::default(), 0);
 
         let mut rx = probe.lifecycle_events().expect("should get receiver");
 
@@ -238,13 +254,13 @@ mod tests {
 
     #[test]
     fn can_capture_in_background_defaults_false() {
-        let probe = MobileProbe::new(ThermalThresholds::default());
+        let probe = MobileProbe::new(ThermalThresholds::default(), 0);
         assert!(!probe.can_capture_in_background());
     }
 
     #[test]
     fn rapid_updates_dont_panic() {
-        let probe = MobileProbe::new(ThermalThresholds::default());
+        let probe = MobileProbe::new(ThermalThresholds::default(), 0);
 
         for i in 0..1000u16 {
             let level = (i % 101) as u8;
@@ -267,7 +283,7 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let probe = Arc::new(MobileProbe::new(ThermalThresholds::default()));
+        let probe = Arc::new(MobileProbe::new(ThermalThresholds::default(), 0));
 
         let writer = {
             let probe = probe.clone();

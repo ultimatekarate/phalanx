@@ -95,6 +95,12 @@ pub trait HardwareProbe: Send + Sync {
     /// Platform-specific thermal thresholds for this SoC.
     fn thermal_thresholds(&self) -> ThermalThresholds;
 
+    /// Total device RAM in bytes. Used to derive memory critical threshold.
+    /// Returns `None` if unavailable (test environments, no /proc/meminfo).
+    fn total_ram_bytes(&self) -> Option<u64> {
+        None
+    }
+
     /// Optional event channel for OS lifecycle transitions (foreground/background).
     /// Mobile implementations push callbacks into this channel.
     /// Desktop returns `None`.
@@ -177,5 +183,12 @@ impl HardwareProbe for SysfsProbe {
 
     fn thermal_thresholds(&self) -> ThermalThresholds {
         self.thresholds
+    }
+
+    fn total_ram_bytes(&self) -> Option<u64> {
+        let meminfo = fs::read_to_string("/proc/meminfo").ok()?;
+        let line = meminfo.lines().find(|l| l.starts_with("MemTotal:"))?;
+        let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kb * 1024)
     }
 }

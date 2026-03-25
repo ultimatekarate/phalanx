@@ -3880,6 +3880,7 @@ dependencies = [
  "lz4_flex",
  "mp4",
  "openh264",
+ "phalanx-lens",
  "phalanx-proto",
  "postcard",
  "rand_core 0.6.4",

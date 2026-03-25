@@ -7,6 +7,7 @@ description = "The Phalanx Laboratory: Verbs, Integrity Judges, and the Evidence
 [dependencies]
 # The Linguistic Foundation
 phalanx-proto = { path = "../phalanx-proto" }
+phalanx-lens = { path = "../phalanx-lens" }
 
 # Error Handling & Logic
 thiserror = "1.0"

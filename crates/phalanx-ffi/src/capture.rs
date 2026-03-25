@@ -29,9 +29,6 @@ use std::os::raw::c_char;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Default analog black level offset for 8-bit CMOS sensors.
-const DEFAULT_BLACK_LEVEL: f32 = 16.0;
-
 /// Static forensic lens — L1-cache optimized, no allocation needed.
 static LENS: ScalarLens = ScalarLens;
 
@@ -205,7 +202,7 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
         y_slice,
         width as usize,
         height as usize,
-        BlackLevel(DEFAULT_BLACK_LEVEL),
+        BlackLevel::default(),
     );
 
     // Step 2: Compress full-color frame (YUV→JPEG via turbojpeg)

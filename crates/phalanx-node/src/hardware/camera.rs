@@ -23,10 +23,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use phalanx_proto::prelude::*;
 
-/// Default analog black level offset for 8-bit sensors.
-/// Accounts for the analog black offset inherent in most CMOS sensors.
-const DEFAULT_BLACK_LEVEL: f32 = 16.0;
-
 // =====================================================================
 // ADAPTIVE FPS DUTY CYCLING
 // =====================================================================
@@ -336,7 +332,7 @@ impl PhalanxCameraThread {
                     &y_plane,
                     frame.width as usize,
                     frame.height as usize,
-                    BlackLevel(DEFAULT_BLACK_LEVEL),
+                    BlackLevel::default(),
                 );
 
                 // Compression (YUV→JPEG via turbojpeg)
@@ -418,6 +414,7 @@ mod tests {
             camera_fps: Fps::new(50),
             audio_sample_rate: SampleRate::new(44100),
             audio_channels: ChannelCount::new(2),
+            sensor_calibration: None,
         };
         let cam = PhalanxCameraThread::new(&config);
         let mut rx = cam.subscribe();
@@ -452,6 +449,7 @@ mod tests {
             camera_fps: Fps::new(10),
             audio_sample_rate: SampleRate::new(44100),
             audio_channels: ChannelCount::new(2),
+            sensor_calibration: None,
         };
 
         let cam = PhalanxCameraThread::new(&config);

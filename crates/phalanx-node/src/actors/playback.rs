@@ -114,6 +114,28 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                         }
                     };
 
+                    // Re-verify sensor provenance from the actual pixels before playback.
+                    // Only for video — audio has no ForensicMetrics.
+                    if !is_audio {
+                        if let Ok(jpeg_frames) = postcard::from_bytes::<Vec<Vec<u8>>>(&frame_data) {
+                            let thresholds = phalanx_forensics::gate::LensThresholds::default();
+                            for frame in &jpeg_frames {
+                                phalanx_forensics::gate::verify_provenance_from_jpeg(
+                                    frame,
+                                    &thresholds,
+                                )
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "LensGate re-verification failed during playback: {e}"
+                                    )
+                                })?;
+                            }
+                        }
+                        // If postcard deserialization fails, the frame_data may be in a
+                        // different format (e.g., raw JPEG). Continue to sink — the
+                        // re-verification is best-effort until the format is standardized.
+                    }
+
                     // Route to the correct sink — Rust demuxes, Flutter reads two channels.
                     if is_audio {
                         self.audio_sink

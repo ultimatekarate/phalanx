@@ -72,11 +72,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 egress.socket_bytes_sent(),
                 egress.socket_bytes_received(),
                 egress.socket_io_ops(),
+                egress.dropped_event_count(),
             ),
         ),
         vault_key,
         local_mesh: None, // NoOp — BLE/WiFi Direct injected during mobile integration
-        transport_drop_counter: Some(egress.dropped_event_count()),
         egress,
     };
 
