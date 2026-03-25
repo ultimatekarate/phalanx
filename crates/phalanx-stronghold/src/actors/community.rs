@@ -118,6 +118,7 @@ impl CommunityActor {
 
     // ── Command Handlers ────────────────────────────────────────────────
 
+    #[allow(clippy::cast_possible_truncation)] // Epoch millis fit in u64 for centuries.
     fn import(&mut self, community: Community) -> Result<CommunityId, StrongholdError> {
         let now = PhalanxTimestamp::from_millis(
             SystemTime::now()
@@ -204,6 +205,7 @@ impl CommunityActor {
 
     // ── Maintenance ─────────────────────────────────────────────────────
 
+    #[allow(clippy::cast_possible_truncation)] // Epoch millis fit in u64 for centuries.
     fn sweep_expired(&mut self) {
         let now = PhalanxTimestamp::from_millis(
             SystemTime::now()

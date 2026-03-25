@@ -51,7 +51,11 @@ impl KademliaGovernor {
             .map(|(i, p)| (i, p.reputation_score))
         {
             if reputation > min_score {
-                set.providers[idx] = new_entry;
+                // Safety: idx comes from enumerate() over set.providers, so it is always in bounds.
+                #[allow(clippy::indexing_slicing)]
+                {
+                    set.providers[idx] = new_entry;
+                }
                 return true;
             }
         }

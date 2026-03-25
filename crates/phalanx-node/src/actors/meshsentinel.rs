@@ -276,7 +276,9 @@ impl<I: IngressPort> MeshSentinel<I> {
             },
         )
         .await
-        .expect("Failed to initialize MediaEgressActor outbound queue");
+        .map_err(|e| -> Box<dyn Error> {
+            format!("Failed to initialize MediaEgressActor outbound queue: {e}").into()
+        })?;
 
         tokio::spawn(media_actor.run());
 
@@ -347,6 +349,7 @@ impl<I: IngressPort> MeshSentinel<I> {
         })
     }
 
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Counter increments and timestamp arithmetic.
     pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
         // Eclipse remediation: 5-minute tick for anchor promotion, eclipse detection, re-bootstrap.
         let mut topology_tick = tokio::time::interval(Duration::from_secs(300));
@@ -439,6 +442,7 @@ impl<I: IngressPort> MeshSentinel<I> {
 
     /// Unified event handler for both network ingress and local mesh events.
     /// Returns `true` if the engine should shut down.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Counter increments and timestamp arithmetic.
     async fn handle_network_event(&mut self, event: NetworkEvent) -> bool {
         match event {
             NetworkEvent::DataReceived {

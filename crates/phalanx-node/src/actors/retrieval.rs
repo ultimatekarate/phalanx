@@ -80,6 +80,7 @@ impl RetrievalActor {
         }
     }
 
+    #[allow(clippy::arithmetic_side_effects)] // Rate limit counter increment.
     async fn execute_secure_retrieval(
         &mut self,
         origin: NetworkId,

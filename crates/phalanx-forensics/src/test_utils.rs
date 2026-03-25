@@ -14,7 +14,11 @@ impl MockClock {
 
     /// Simulate the passage of time
     pub fn tick(&mut self, seconds: u64) {
-        self.current += seconds;
+        // Counter increment — overflow not reachable in practice.
+        #[allow(clippy::arithmetic_side_effects)]
+        {
+            self.current += seconds;
+        }
     }
 
     pub fn now(&self) -> MonotonicClock {

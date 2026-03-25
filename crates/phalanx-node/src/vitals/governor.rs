@@ -148,6 +148,7 @@ impl SystemGovernor {
         }
     }
 
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // IO counter delta arithmetic and bandwidth casting.
     pub fn update_vitals(&self) {
         let t_stress = self.read_thermal();
         let b_stress = self.read_battery();
@@ -190,6 +191,7 @@ impl SystemGovernor {
     /// Sample socket-level I/O counters and feed deltas into Volterra integrals.
     /// Bandwidth (bytes sent+received) → b integral.
     /// Connection health (drops/ops ratio) → c integral.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Delta arithmetic on saturating counters; u64→usize safe on 64-bit targets.
     fn sample_io_counters(&self) {
         // Bandwidth: bidirectional wire bytes → b integral
         if let (Some(ref sent), Some(ref recv)) = (&self.io_bytes_sent, &self.io_bytes_received) {
@@ -590,6 +592,7 @@ impl Homeostasis for SystemGovernor {
         self.with_state_mut(|s| s.e.record(magnitude));
     }
 
+    #[allow(clippy::arithmetic_side_effects)] // Duration addition — base + expansion, clamped by min().
     fn temporal_tolerance(&self) -> Duration {
         self.with_state(|s| {
             let base = self.config.base_temporal_drift;
@@ -687,6 +690,12 @@ impl Homeostasis for SystemGovernor {
 // =====================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use crate::vitals::*;
     use phalanx_proto::types::{PowerState, SystemStress, TaskCost};

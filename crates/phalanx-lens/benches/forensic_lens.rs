@@ -5,6 +5,11 @@
 // measures the actual cost on the hot path.
 //
 // Run: cargo bench -p phalanx-lens
+#![allow(
+    clippy::indexing_slicing,        // Pixel buffer indexing — bounds governed by loop invariants.
+    clippy::cast_possible_truncation, // Deliberate u8 truncation for pixel generation.
+    clippy::arithmetic_side_effects  // Bench arithmetic — not production code.
+)]
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use phalanx_lens::scalar::ScalarLens;

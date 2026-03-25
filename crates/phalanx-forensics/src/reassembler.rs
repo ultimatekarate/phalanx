@@ -32,6 +32,8 @@ const OTI_PREFIX_LEN: usize = 12;
 /// the turbojpeg encoder. This eliminates the YUV→RGB→YCbCr round-trip.
 ///
 /// `is_nv12`: true for iOS (UV order), false for Android NV21 (VU order).
+// Indices governed by buffer length checks and loop bounds on chroma_samples.
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub fn compress_frame(
     y_data: &[u8],
     uv_data: &[u8],
@@ -150,6 +152,8 @@ pub fn create_audio_shard(
 /// payloads that would expand beyond MAX_DECOMPRESSED_BYTES, preventing OOM attacks.
 const MAX_DECOMPRESSED_BYTES: usize = 128 * 1024 * 1024; // 128 MiB hard ceiling
 
+// Indices governed by length check: data.len() >= 4 before indexing [0..3].
+#[allow(clippy::indexing_slicing)]
 pub fn decompress_payload(data: &[u8]) -> Result<Vec<u8>, String> {
     // S1 FIX: Check the claimed decompressed size before allocating.
     // lz4_flex prepends a 4-byte little-endian uncompressed size.
@@ -213,6 +217,7 @@ impl Reassembler {
 
     /// P7 FIX: Evict shard contexts that have been inactive longer than
     /// SHARD_INACTIVITY_TIMEOUT. Returns the number of evicted contexts.
+    #[allow(clippy::arithmetic_side_effects)] // Duration multiplication — bounded by constant timeout.
     /// Contexts with `ttl_extended` (active assembly progress) get 2x timeout.
     pub fn evict_stale_contexts(&mut self) -> usize {
         let now = Instant::now();
@@ -369,6 +374,7 @@ impl Mold for ShardMold {
         false
     }
 
+    #[allow(clippy::arithmetic_side_effects)] // Index arithmetic governed by bounds checks and loop invariants.
     fn ingest(acc: &mut Self::Accumulator, item: Self::Input) -> Result<(), Self::Error> {
         // M1 FIX: Enforce per-shard byte budget before accepting the chunk.
         let incoming_bytes = item.data.len();
@@ -404,9 +410,12 @@ impl Mold for ShardMold {
         }
 
         // Extract OTI and symbol payload (copy symbol data before moving raw_data)
+        // Length validated above: raw_data.len() >= OTI_PREFIX_LEN (12).
+        #[allow(clippy::indexing_slicing)]
         let oti_bytes: [u8; 12] = raw_data[..OTI_PREFIX_LEN]
             .try_into()
-            .expect("OTI slice is exactly 12 bytes");
+            .map_err(|_| ShardError::InvalidSize("OTI slice not 12 bytes".into()))?;
+        #[allow(clippy::indexing_slicing)]
         let symbol_data = raw_data[OTI_PREFIX_LEN..].to_vec();
 
         // Initialize decoder on first symbol (lazy — any symbol carries the OTI)
@@ -548,6 +557,7 @@ pub trait FountainChunkifier {
 }
 
 impl FountainChunkifier for Vec<u8> {
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Fountain encoding arithmetic — indices bounded by encoder output.
     fn fountain_chunkify(
         &self,
         shard_id: ShardId,
@@ -571,7 +581,11 @@ impl FountainChunkifier for Vec<u8> {
 
         // Calculate repair symbol count from ratio
         // source_symbols ≈ ceil(data_len / symbol_size)
+        // Both values are non-negative: length and size are unsigned.
+        #[allow(clippy::cast_sign_loss)]
         let source_symbol_count = (self.len() as f32 / symbol_size.0 as f32).ceil() as u32;
+        // repair_ratio.get() >= 1.0 by construction, so product is non-negative.
+        #[allow(clippy::cast_sign_loss)]
         let repair_count =
             ((source_symbol_count as f32) * (repair_ratio.get() - 1.0)).ceil() as u32;
 
@@ -615,6 +629,7 @@ impl FountainChunkifier for Vec<u8> {
 /// Test helper: creates fountain-coded ShardChunks from raw data.
 /// Uses the actual production encode path — no dead code under test.
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 pub fn make_test_fountain_chunks(
     data: &[u8],
     shard_id: ShardId,
@@ -634,6 +649,15 @@ pub fn make_test_fountain_chunks(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::cast_sign_loss,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
     use crate::judge::PayloadCipher;

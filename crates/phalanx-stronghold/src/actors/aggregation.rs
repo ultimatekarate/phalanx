@@ -161,10 +161,13 @@ impl AggregationActor {
 
     // ── IngestChunk Flow ─────────────────────────────────────────────────
 
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Throttle arithmetic and duration cast.
     async fn handle_ingest(&mut self, chunk: ShardChunk) {
         // 1. Ingestion scaler: sleep-throttle under system pressure.
         let ingestion_headroom = self.governor.ingestion_scaler().0;
         if ingestion_headroom < 0.1 {
+            // Safety: ingestion_headroom is clamped to [0.0, 1.0], so (1.0 - x) * 100.0 is in [0, 100].
+            #[allow(clippy::cast_sign_loss)]
             tokio::time::sleep(Duration::from_millis(
                 ((1.0 - ingestion_headroom) * 100.0) as u64,
             ))

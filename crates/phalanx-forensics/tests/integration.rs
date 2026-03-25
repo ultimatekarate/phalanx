@@ -1,3 +1,13 @@
+#![allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 //! Integration tests for phalanx-forensics.
 //!
 //! These tests exercise security-critical verification logic that has zero

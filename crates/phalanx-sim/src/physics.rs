@@ -57,6 +57,7 @@ impl PhalanxPhysics {
     /// Derives the "Max Survival Time" for a shard in transit.
     /// If a shard doesn't arrive by this time, it is considered lost.
     #[must_use]
+    #[allow(clippy::arithmetic_side_effects)] // Timeout arithmetic from bounded simulation parameters.
     pub fn shard_timeout(&self) -> std::time::Duration {
         let ms = self.jitter_factor * (self.tau_rtt + self.delta_cpu);
         std::time::Duration::from_millis(ms)

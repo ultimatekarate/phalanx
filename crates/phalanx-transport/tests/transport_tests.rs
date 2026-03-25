@@ -2,6 +2,14 @@
 //!
 //! Tests verify the MockAdapter mesh simulation and PeerMapper identity
 //! translation — the layer where forensic identities meet libp2p.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -71,6 +71,7 @@ impl<E: EgressPort> EgressActor<E> {
         }
     }
 
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Counter increments and duration arithmetic.
     pub async fn run(mut self) {
         let mut retry_tick = interval(Duration::from_millis(500));
 
@@ -146,6 +147,7 @@ impl<E: EgressPort> EgressActor<E> {
         }
     }
 
+    #[allow(clippy::arithmetic_side_effects)] // Timestamp arithmetic for retry scheduling.
     async fn dispatch(&mut self, channel_id: String, response: RecordingResponse) {
         if self
             .port
@@ -176,6 +178,7 @@ impl<E: EgressPort> EgressActor<E> {
         }
     }
 
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Retry backoff arithmetic.
     async fn process_pending(&mut self) {
         let now = self.clock.now().unwrap_or_default();
         let mut retry_queue = VecDeque::new();

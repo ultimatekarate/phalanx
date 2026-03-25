@@ -69,6 +69,8 @@ pub(crate) async fn write_frame(
         )));
     }
 
+    #[allow(clippy::cast_possible_truncation)]
+    // Payload size checked against MAX_PAYLOAD_SIZE (< u32::MAX) above
     let len_bytes = (payload.len() as u32).to_le_bytes();
     stream.write_all(&len_bytes).await?;
     stream.write_all(&payload).await?;

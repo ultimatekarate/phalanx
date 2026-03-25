@@ -106,6 +106,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
         })
     }
 
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Counter increments and timestamp arithmetic.
     pub async fn run(mut self) {
         let mut retry_tick = tokio::time::interval(Duration::from_secs(5));
         let mut video_open = true;
@@ -137,6 +138,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
         }
     }
 
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Sequence counter and timestamp arithmetic.
     async fn process_media_egress(&mut self, mut evidence: Evidence, is_video: bool) {
         let topic = match &evidence {
             Evidence::Video(_) => &self.video_topic,
@@ -274,6 +276,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
 
     /// Drain pending entries from the outbound queue, respecting exponential backoff,
     /// and report queue pressure to the Volterra integral for FPS self-regulation.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Retry counter and timestamp arithmetic.
     async fn process_retry_queue(&mut self) {
         if self.outbound_queue.is_empty() {
             return;

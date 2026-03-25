@@ -113,6 +113,7 @@ impl Default for StrongholdGovernor {
 }
 
 impl Homeostasis for StrongholdGovernor {
+    #[allow(clippy::arithmetic_side_effects)] // Duration addition — base + expansion, clamped by min().
     fn temporal_tolerance(&self) -> Duration {
         self.with_state(|s| {
             let base = self.config.base_temporal_drift;

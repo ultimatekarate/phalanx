@@ -154,6 +154,7 @@ pub struct TelemetryCollector {
 impl TelemetryCollector {
     /// Spawn a background consumer task that reads from the telemetry channel
     /// and populates the internal metrics maps.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Counter increments and byte-length casts in telemetry aggregation.
     pub fn spawn(mut rx: mpsc::Receiver<SimEvent>) -> Self {
         let events = Arc::new(RwLock::new(Vec::new()));
         let node_metrics = Arc::new(RwLock::new(HashMap::new()));
@@ -216,6 +217,7 @@ impl TelemetryCollector {
     where
         F: Fn(&SimEvent) -> bool,
     {
+        #[allow(clippy::arithmetic_side_effects)] // Deadline = now + timeout.
         let deadline = Instant::now() + timeout;
         let mut last_checked = 0;
 
@@ -292,6 +294,7 @@ impl TelemetryCollector {
     }
 
     /// Human-readable telemetry summary.
+    #[allow(clippy::arithmetic_side_effects)] // Counter increments in event aggregation.
     pub async fn summary(&self) -> String {
         let events = self.events.read().await;
         let metrics = self.node_metrics.read().await;
@@ -373,7 +376,12 @@ impl TelemetryCollector {
     pub async fn drain_new(&self) -> Vec<SimEvent> {
         let events = self.events.read().await;
         let mut last = self.last_drained.lock().await;
-        let new_events: Vec<SimEvent> = events[*last..].iter().map(|(_, e)| e.clone()).collect();
+        let new_events: Vec<SimEvent> = events
+            .get(*last..)
+            .unwrap_or_default()
+            .iter()
+            .map(|(_, e)| e.clone())
+            .collect();
         *last = events.len();
         new_events
     }

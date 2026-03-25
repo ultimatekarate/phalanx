@@ -1,3 +1,14 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::float_cmp,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 // crates/phalanx-sim/tests/simulation_tests.rs
 //
 // Integration tests for the SimulationHarness, SimulationWorld,

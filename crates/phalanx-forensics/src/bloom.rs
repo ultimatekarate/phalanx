@@ -25,6 +25,8 @@ impl BloomFilter {
     }
 
     /// Insert a SHA-256 hash into the filter.
+    // Index from positions() is always < num_bits ≤ bits.len() * 64.
+    #[allow(clippy::indexing_slicing)]
     pub fn insert(&mut self, hash: &[u8; 32]) {
         for pos in self.positions(hash) {
             let word = pos / 64;
@@ -35,6 +37,8 @@ impl BloomFilter {
 
     /// Test whether a SHA-256 hash is probably in the filter.
     /// False positives are possible; false negatives are not.
+    // Index from positions() is always < num_bits ≤ bits.len() * 64.
+    #[allow(clippy::indexing_slicing)]
     pub fn contains(&self, hash: &[u8; 32]) -> bool {
         self.positions(hash).iter().all(|&pos| {
             let word = pos / 64;
@@ -50,6 +54,7 @@ impl BloomFilter {
 
     /// Derive k=4 bit positions from the first 16 bytes of a SHA-256 hash.
     /// Each 4-byte slice → u32 → mod num_bits.
+    #[allow(clippy::arithmetic_side_effects)] // Modular arithmetic for hash-derived bit positions.
     fn positions(&self, hash: &[u8; 32]) -> [usize; 4] {
         [
             u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]) as usize % self.num_bits,
@@ -107,6 +112,7 @@ impl RotatingBloomFilter {
 }
 
 #[cfg(test)]
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 mod tests {
     use super::*;
 

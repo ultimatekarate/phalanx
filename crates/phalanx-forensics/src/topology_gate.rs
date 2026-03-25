@@ -112,8 +112,13 @@ impl TransportBalance {
         }
     }
 
+    #[allow(clippy::cast_possible_truncation)] // f32→usize — small peer counts fit comfortably.
     pub fn max_local_mesh(&self, total: usize) -> usize {
-        ((total as f32) * self.local_mesh_fraction).ceil() as usize
+        // total and local_mesh_fraction are non-negative; product is non-negative.
+        #[allow(clippy::cast_sign_loss)]
+        {
+            ((total as f32) * self.local_mesh_fraction).ceil() as usize
+        }
     }
 
     pub fn max_internet(&self, total: usize) -> usize {
@@ -312,7 +317,11 @@ impl TopologyGate {
         transport: TransportClass,
         trust: TrustLevel,
     ) {
-        *self.subnet_counts.entry(bucket).or_insert(0) += 1;
+        // Counter increment — overflow not reachable in practice.
+        #[allow(clippy::arithmetic_side_effects)]
+        {
+            *self.subnet_counts.entry(bucket).or_insert(0) += 1;
+        }
         self.peers.insert(
             peer,
             PeerSlot {
@@ -372,6 +381,12 @@ impl TopologyGate {
 // ─── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
 mod tests {
     use super::*;
 

@@ -99,6 +99,7 @@ const MAX_EXPORT_FRAMES: u32 = 10_000;
 /// 4. Encode PCM audio to AAC via fdk-aac
 /// 5. Mux H.264 + AAC into MP4 container
 /// 6. Aggregate ForensicMetrics (min/max/mean)
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Transcode arithmetic — frame counts and byte offsets bounded by input validation.
 pub fn transcode_to_mp4(
     video_shards: Vec<DecodedVideoShard>,
     audio_shards: Vec<DecodedAudioShard>,
@@ -188,6 +189,7 @@ pub fn transcode_to_mp4(
 
 // ── JPEG Decoding ───────────────────────────────────────────────────────
 
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // YUV plane arithmetic — dimensions validated by turbojpeg decoder.
 pub(crate) fn decode_jpeg_to_yuv420(
     jpeg_bytes: &[u8],
     frame_idx: usize,
@@ -225,6 +227,8 @@ pub(crate) fn decode_jpeg_to_yuv420(
 
 // ── H.264 Encoding ──────────────────────────────────────────────────────
 
+// Indices governed by computed plane dimensions from width/height.
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn encode_h264(
     yuv_frames: &[Vec<u8>],
     width: u32,
@@ -284,6 +288,8 @@ fn encode_h264(
 
 // ── AAC Encoding ────────────────────────────────────────────────────────
 
+// Indices governed by chunks_exact(2) iterator and non-empty input guard.
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn encode_aac(audio_shards: &[DecodedAudioShard]) -> Result<Vec<u8>, TranscodeError> {
     use fdk_aac::enc::{Encoder, EncoderParams};
 
@@ -353,6 +359,7 @@ fn encode_aac(audio_shards: &[DecodedAudioShard]) -> Result<Vec<u8>, TranscodeEr
 
 // ── MP4 Muxing ──────────────────────────────────────────────────────────
 
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // MP4 container byte offset arithmetic and dimension casts.
 fn mux_mp4(
     h264_nals: &[Vec<u8>],
     aac_data: Option<&[u8]>,
@@ -440,6 +447,8 @@ fn mux_mp4(
 // ── NAL Parsing Helpers ─────────────────────────────────────────────────
 
 /// Extract SPS NAL unit from the H.264 bitstream (NAL type 7).
+// Indices governed by windows(4) iterator: window always has exactly 4 elements.
+#[allow(clippy::indexing_slicing)]
 fn extract_sps(nals: &[Vec<u8>]) -> Option<Vec<u8>> {
     for nal_data in nals {
         // Scan for NAL start codes and check type
@@ -464,6 +473,8 @@ fn extract_sps(nals: &[Vec<u8>]) -> Option<Vec<u8>> {
 }
 
 /// Extract PPS NAL unit from the H.264 bitstream (NAL type 8).
+// Indices governed by windows(4) iterator: window always has exactly 4 elements.
+#[allow(clippy::indexing_slicing)]
 fn extract_pps(nals: &[Vec<u8>]) -> Option<Vec<u8>> {
     for nal_data in nals {
         for window in nal_data.windows(4) {

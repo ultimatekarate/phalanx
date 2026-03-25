@@ -55,6 +55,7 @@ impl C2paOrchestrator {
     /// and producer identity. Readable by any C2PA-compatible verification tool.
     ///
     /// Pure logic — no signing, no disk IO.
+    #[allow(clippy::cast_possible_truncation)] // Epoch millis fit in u64 for centuries.
     pub fn build_corroboration_manifest(
         producer_did: &str,
         proof: &CorroborationProof,

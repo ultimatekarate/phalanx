@@ -161,7 +161,11 @@ impl IngestionActor {
             let stress = self.system_governor.current_stress();
 
             let endowment = self.system_governor.sybil_endowment();
-            self.ingress_governor.base_max_slots = endowment.0 as usize;
+            // Safety: endowment is a non-negative capacity value derived from governor config.
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            {
+                self.ingress_governor.base_max_slots = endowment.0 as usize;
+            }
 
             match self
                 .ingress_governor

@@ -200,6 +200,7 @@ impl Libp2pAdapter {
         Self::with_config(swarm, AdapterConfig::default(), IoCounters::new())
     }
 
+    #[allow(clippy::arithmetic_side_effects)] // Counter increments — overflow not reachable in practice.
     pub fn with_config<S>(
         mut swarm: Swarm<PhalanxBehaviour<S>>,
         config: AdapterConfig,
@@ -473,6 +474,9 @@ impl Libp2pAdapter {
         S: RecordStore + Send + Sync + 'static,
     {
         let adapter = Self::with_config(swarm, config, io_counters);
+        // Safety: from_swarm is called once immediately after construction, so the
+        // Mutex cannot be poisoned and the receiver is guaranteed to be present.
+        #[allow(clippy::expect_used)]
         let receiver = adapter
             .event_rx_factory
             .lock()
@@ -661,6 +665,14 @@ impl EgressPort for Libp2pEgress {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
     use libp2p::swarm::{ConnectionId, SwarmEvent};

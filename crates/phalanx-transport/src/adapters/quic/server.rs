@@ -205,6 +205,7 @@ async fn server_connection_handler(
                 network_id,
                 timestamp_ms,
             }) => {
+                #[allow(clippy::cast_possible_truncation)] // Epoch millis fits in u64 for centuries
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()

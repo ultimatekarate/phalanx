@@ -123,6 +123,12 @@ impl GrantAuthority for SealedLocator {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
 mod tests {
     use super::*;
     use phalanx_proto::crypto::CryptoError;

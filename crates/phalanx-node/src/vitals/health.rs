@@ -102,6 +102,7 @@ impl HealthTracker {
     }
 
     #[must_use]
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Duration jitter arithmetic.
     pub fn is_peer_stale(&self, peer_id: &NetworkId, physics: &PhalanxPhysics) -> bool {
         let last_time = match self.heartbeats.get(peer_id) {
             Some(t) => t,

@@ -124,6 +124,7 @@ pub(super) async fn client_actor(
             Ok(mut stream) => {
                 let identify = QuicWireMessage::Identify {
                     network_id: local_network_id.0.clone(),
+                    #[allow(clippy::cast_possible_truncation)] // Epoch millis fits in u64 for centuries
                     timestamp_ms: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()

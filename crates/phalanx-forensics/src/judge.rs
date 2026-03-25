@@ -154,6 +154,7 @@ pub trait TimeJudge {
 }
 
 impl TimeJudge for PhalanxTimestamp {
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Timestamp arithmetic and millis→u64 — epoch millis fit in u64 for centuries.
     fn verify_freshness(
         &self,
         now: PhalanxTimestamp,
@@ -184,6 +185,12 @@ pub use crate::gate::{
 };
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
 mod tests {
     use crate::witness::WitnessAuthority;
 

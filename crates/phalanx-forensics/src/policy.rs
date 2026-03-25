@@ -19,6 +19,7 @@ pub struct TrustArbiter;
 
 impl TrustArbiter {
     /// Pure, deterministic recovery logic.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Reputation arithmetic — scores clamped to [0, MAX_REPUTATION].
     pub fn accumulate_reputation(
         peers: &mut HashMap<Did, PeerRecord>,
         now: MonotonicClock,
@@ -54,6 +55,8 @@ impl TrustArbiter {
                 let recovery_factor = (normalized * normalized).max(0.05);
                 let scaled_step = ((recovery_step as f64) * recovery_factor) as i64;
                 let effective_step = scaled_step.max(1); // At least 1 per interval
+                                                         // intervals is bounded by elapsed/interval_secs, safe to cast.
+                #[allow(clippy::cast_possible_wrap)]
                 let total_recovery = (intervals as i64) * effective_step;
 
                 // ENFORCEMENT: Reputation cannot exceed the ceiling
@@ -249,6 +252,8 @@ impl HeartbeatGovernor {
         };
         dynamic_ms *= power_multiplier;
 
+        // dynamic_ms is non-negative: base_latency_ms, load, and power_multiplier are all >= 0.
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         HeartbeatInterval(dynamic_ms as u64)
     }
 }
@@ -342,11 +347,14 @@ pub struct BandwidthScale(pub f64);
 pub struct ConnectionScale(pub f64);
 
 impl IngestionScale {
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Throttle arithmetic — delay values bounded by base_delay_ms.
     pub fn as_throttle_delay(&self, base_delay_ms: u64) -> Duration {
         if self.0 <= 0.01 {
             Duration::from_millis(base_delay_ms * 100)
         } else {
             let multiplier = (1.0 / self.0) - 1.0;
+            // base_delay_ms and multiplier are non-negative.
+            #[allow(clippy::cast_sign_loss)]
             Duration::from_millis((base_delay_ms as f64 * multiplier) as u64)
         }
     }
@@ -425,8 +433,13 @@ pub struct HomeostaticConfig {
 }
 
 impl HomeostaticConfig {
+    #[allow(clippy::cast_possible_truncation)] // f64 to usize — pipeline capacity is small by design.
     pub fn pipeline_capacity(&self) -> usize {
-        (self.s_crit * PIPELINE_CAPACITY_FACTOR) as usize
+        // s_crit and PIPELINE_CAPACITY_FACTOR are positive constants.
+        #[allow(clippy::cast_sign_loss)]
+        {
+            (self.s_crit * PIPELINE_CAPACITY_FACTOR) as usize
+        }
     }
 }
 
@@ -465,6 +478,12 @@ impl Default for HomeostaticConfig {
             base_temporal_drift: Duration::from_millis(500),
             // 10s = 2 × NORMAL_TICK_SECS. Beyond this, timestamps are too
             // stale for forensic chain-of-custody guarantees.
+            // NORMAL_TICK_SECS is a positive constant (5.0).
+            #[allow(
+                clippy::cast_sign_loss,
+                clippy::arithmetic_side_effects,
+                clippy::cast_possible_truncation
+            )]
             max_temporal_tolerance: Duration::from_secs(2 * NORMAL_TICK_SECS as u64),
             // Composite stress weights. Sum = 1.0.
             // Risk hierarchy: system metabolic (most critical — blocks all work) >
@@ -541,6 +560,12 @@ pub trait Homeostasis {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
 mod tests {
     use super::*;
     use crate::test_utils::MockClock;

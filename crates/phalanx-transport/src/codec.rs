@@ -93,6 +93,8 @@ impl PhalanxRetrievalProtocol {
     where
         T: AsyncWrite + Unpin + Send,
     {
+        #[allow(clippy::cast_possible_truncation)]
+        // Payload size bounded by MAX_PAYLOAD_SIZE (< u32::MAX)
         let payload_len = payload.len() as u32;
         io.write_all(&payload_len.to_le_bytes()).await?;
         io.write_all(payload).await?;

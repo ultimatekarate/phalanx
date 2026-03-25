@@ -62,6 +62,8 @@ impl EclipseProbe {
     }
 
     /// Peer set stagnation: identical peer_set_hash across last 3+ snapshots.
+    // Indices governed by take(3) and len() >= 3 guard above.
+    #[allow(clippy::indexing_slicing)]
     fn is_stagnant(&self) -> bool {
         if self.history.len() < 3 {
             return false;
@@ -73,6 +75,7 @@ impl EclipseProbe {
     }
 
     /// Subnet concentration: >60% of peers share ≤2 SubnetBucket values.
+    #[allow(clippy::cast_possible_truncation)] // f64 threshold — peer count is small enough for usize.
     fn is_concentrated(&self) -> bool {
         let latest = match self.history.back() {
             Some(fp) => fp,
@@ -89,6 +92,8 @@ impl EclipseProbe {
 
         // Sum of top 2 buckets
         let top_two_sum: usize = counts.iter().take(2).sum();
+        // peer_count is non-negative, product with 0.6 is non-negative.
+        #[allow(clippy::cast_sign_loss)]
         let threshold = (latest.peer_count as f64 * 0.6).ceil() as usize;
 
         top_two_sum >= threshold

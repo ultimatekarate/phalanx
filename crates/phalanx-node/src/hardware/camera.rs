@@ -52,6 +52,7 @@ pub fn target_fps(base: Fps, power: PowerState) -> Fps {
 ///   frames flooding the egress pipeline.
 ///
 /// Returns the new interval to use for frame capture timing.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Duration blending arithmetic.
 pub fn compute_adaptive_interval(current_interval: Duration, target: Fps) -> Duration {
     match target.as_interval() {
         None => {
@@ -69,6 +70,8 @@ pub fn compute_adaptive_interval(current_interval: Duration, target: Fps) -> Dur
                 let current_ms = current_interval.as_millis() as f64;
                 let target_ms = target_interval.as_millis() as f64;
                 let blended_ms = current_ms + (target_ms - current_ms) * 0.5;
+                // Safety: blended_ms is computed from two positive Duration values, always non-negative.
+                #[allow(clippy::cast_sign_loss)]
                 Duration::from_millis(blended_ms as u64)
             } else {
                 current_interval
@@ -83,6 +86,11 @@ pub fn compute_adaptive_interval(current_interval: Duration, target: Fps) -> Dur
 /// The ForensicLens operates on the Y-plane to compute sensor fingerprints
 /// (Moiré energy + PRNU variance) before the JPEG compression stage
 /// destroys the raw sensor signal.
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::indexing_slicing
+)] // Pixel arithmetic — indices governed by loop bounds.
 fn extract_y_plane(rgb_data: &[u8], width: usize, height: usize) -> Vec<u8> {
     let pixel_count = width * height;
     let mut y_plane = Vec::with_capacity(pixel_count);
@@ -94,7 +102,9 @@ fn extract_y_plane(rgb_data: &[u8], width: usize, height: usize) -> Vec<u8> {
         let g = rgb_data.get(base + 1).copied().unwrap_or(0) as f32;
         let b = rgb_data.get(base + 2).copied().unwrap_or(0) as f32;
 
-        // BT.601 luma conversion — truncated to u8 (matches sensor ADC precision)
+        // BT.601 luma conversion — truncated to u8 (matches sensor ADC precision).
+        // Safety: RGB components are u8 (0-255), so the weighted sum is always in [0, 255].
+        #[allow(clippy::cast_sign_loss)]
         let y = (0.299 * r + 0.587 * g + 0.114 * b) as u8;
         y_plane.push(y);
     }
@@ -116,6 +126,7 @@ struct CameraDriver {
 }
 
 impl CameraDriver {
+    #[allow(clippy::arithmetic_side_effects)] // FPS interval computation.
     fn connect(_index: usize, fps: u32) -> Result<Self, String> {
         // [STUB] Real implementation would use `nokhwa` here.
         // For robustness testing, we use a reliable Mock Driver.
@@ -134,6 +145,7 @@ impl CameraDriver {
         })
     }
 
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Frame counter and timestamp arithmetic.
     fn capture_frame(&mut self) -> Result<VideoFrame, String> {
         // Simulate Hardware Wait (Blocking I/O)
         thread::sleep(self.fps_interval);
@@ -152,7 +164,9 @@ impl CameraDriver {
         // 640x480 * 3 bytes (RGB)
         let mut fake_data = vec![0u8; (self.width * self.height * 3) as usize];
         // Simple moving pattern so we can "see" the video changing
-        fake_data[0] = (self.frame_counter % 255) as u8;
+        if let Some(first) = fake_data.get_mut(0) {
+            *first = (self.frame_counter % 255) as u8;
+        }
 
         self.frame_counter += 1;
 
@@ -193,6 +207,7 @@ pub struct PhalanxCameraThread {
 
 impl PhalanxCameraThread {
     /// Creates the handle. Does NOT start the thread yet.
+    #[allow(clippy::arithmetic_side_effects)] // Channel buffer size — small constant multiplier.
     pub fn new(config: &HardwareConfig) -> Self {
         // Buffer ~2 seconds of frames to absorb system lag
         let (tx, _) = broadcast::channel(config.camera_fps.get() as usize * 2);
@@ -266,6 +281,7 @@ impl PhalanxCameraThread {
     /// COMPATIBILITY BRIDGE
     /// Matches the signature expected by main.rs.
     /// Spawns the Watchdog AND the Processor to feed the main channel.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Frame counter and timestamp arithmetic.
     pub fn spawn(
         self,
         index: Option<usize>,
@@ -401,6 +417,14 @@ impl PhalanxCameraThread {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
     use crate::config::HardwareConfig;

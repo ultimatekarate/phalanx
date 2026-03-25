@@ -100,6 +100,7 @@ impl PhalanxAudioThread {
     }
 
     /// COMPATIBILITY BRIDGE
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Audio buffer arithmetic and sample rate conversions.
     pub fn spawn(
         self,
         tx: mpsc::Sender<AudioShard>,
@@ -205,6 +206,7 @@ impl AudioDriver {
         })
     }
 
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Audio sample generation arithmetic.
     fn capture_chunk(&mut self) -> Result<AudioFrame, String> {
         thread::sleep(self.interval);
 
@@ -217,6 +219,8 @@ impl AudioDriver {
             .as_millis() as u64;
 
         // Mock Data: Sine Wave
+        // Safety: self.rate is a positive sample rate (e.g. 44100), product is always non-negative.
+        #[allow(clippy::cast_sign_loss)]
         let samples_to_gen = (self.rate as f32 * 0.1) as usize;
         let bytes_needed = samples_to_gen * self.channels as usize * 2;
 
@@ -245,6 +249,14 @@ impl AudioDriver {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
     #[tokio::test]

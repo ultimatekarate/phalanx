@@ -170,9 +170,14 @@ impl ProviderAuthority for DhtProviderSet {
             .map(|(idx, _)| idx);
 
         if let Some(idx) = min_idx {
+            // idx from enumerate() on self.providers — always valid.
+            #[allow(clippy::indexing_slicing)]
             if reputation > self.providers[idx].reputation_score {
                 // Swap out the low reputation peer for the better one
-                self.providers[idx] = new_entry;
+                #[allow(clippy::indexing_slicing)]
+                {
+                    self.providers[idx] = new_entry;
+                }
                 return true;
             }
         }

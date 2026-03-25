@@ -185,6 +185,7 @@ impl HardwareProbe for SysfsProbe {
         self.thresholds
     }
 
+    #[allow(clippy::arithmetic_side_effects)] // KB to bytes conversion — small constant multiplier.
     fn total_ram_bytes(&self) -> Option<u64> {
         let meminfo = fs::read_to_string("/proc/meminfo").ok()?;
         let line = meminfo.lines().find(|l| l.starts_with("MemTotal:"))?;

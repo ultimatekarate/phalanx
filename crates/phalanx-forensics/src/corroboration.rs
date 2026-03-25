@@ -23,6 +23,8 @@ use crate::crucible::EvidenceExt;
 /// Two-sample Kolmogorov-Smirnov test.
 /// Returns (D_n statistic, approximate p-value).
 /// Pure math — no IO.
+// Indices governed by loop bounds: i < a.len(), j < b.len().
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub fn ks_two_sample(a: &mut [f64], b: &mut [f64]) -> (f64, f64) {
     a.sort_unstable_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
     b.sort_unstable_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
@@ -62,6 +64,7 @@ pub fn ks_two_sample(a: &mut [f64], b: &mut [f64]) -> (f64, f64) {
 // ── PRNU Profiling ──────────────────────────────────────────────────────
 
 /// Extract PRNU statistics from video frames within a time window.
+#[allow(clippy::cast_possible_truncation)] // f64→f32 precision loss acceptable for PRNU statistics.
 fn extract_prnu_profile(
     recording: &Recording,
     overlap_start: u64,
@@ -119,6 +122,8 @@ fn extract_prnu_profile(
         std_prnu_var: std_prnu,
         mean_h_energy: mean_h,
         mean_v_energy: mean_v,
+        // n is a count of frames, always non-negative.
+        #[allow(clippy::cast_sign_loss)]
         sample_count: n as u32,
     };
 
@@ -196,6 +201,7 @@ const MIN_PRNU_FRAMES: u32 = 10;
 /// 4. All chains have intact integrity (head + tail hashes present)
 ///
 /// Proximity witnesses are attached as supporting evidence — not required.
+#[allow(clippy::arithmetic_side_effects)] // Timestamp arithmetic for overlap computation.
 pub fn corroborate(
     recordings: &[&Recording],
     proximity_log: &[ProximityWitness],
@@ -267,29 +273,34 @@ pub fn corroborate(
     }
 
     // 5. Pairwise KS tests
-    let mut divergences = Vec::new();
-    for i in 0..prnu_samples.len() {
-        for j in (i + 1)..prnu_samples.len() {
-            let mut a = prnu_samples[i].1.clone();
-            let mut b = prnu_samples[j].1.clone();
-            let (ks_stat, p_value) = ks_two_sample(&mut a, &mut b);
+    // Indices governed by loop bounds: i < prnu_samples.len(), j < prnu_samples.len().
+    #[allow(clippy::indexing_slicing)]
+    let divergences = {
+        let mut divergences = Vec::new();
+        for i in 0..prnu_samples.len() {
+            for j in (i + 1)..prnu_samples.len() {
+                let mut a = prnu_samples[i].1.clone();
+                let mut b = prnu_samples[j].1.clone();
+                let (ks_stat, p_value) = ks_two_sample(&mut a, &mut b);
 
-            if p_value >= divergence_alpha {
-                return Err(CorroborationError::InsufficientDivergence(
-                    prnu_samples[i].0.clone(),
-                    prnu_samples[j].0.clone(),
+                if p_value >= divergence_alpha {
+                    return Err(CorroborationError::InsufficientDivergence(
+                        prnu_samples[i].0.clone(),
+                        prnu_samples[j].0.clone(),
+                        p_value,
+                    ));
+                }
+
+                divergences.push(SensorDivergence {
+                    device_a: prnu_samples[i].0.clone(),
+                    device_b: prnu_samples[j].0.clone(),
+                    ks_statistic: ks_stat,
                     p_value,
-                ));
+                });
             }
-
-            divergences.push(SensorDivergence {
-                device_a: prnu_samples[i].0.clone(),
-                device_b: prnu_samples[j].0.clone(),
-                ks_statistic: ks_stat,
-                p_value,
-            });
         }
-    }
+        divergences
+    };
 
     // 6. Proximity matching (supporting evidence, not required)
     let proximity_evidence: Vec<ProximityWitness> = proximity_log
@@ -311,6 +322,14 @@ pub fn corroborate(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
     use phalanx_proto::evidence::*;
