@@ -405,16 +405,13 @@ mod tests {
     use super::*;
     use crate::config::HardwareConfig;
     use phalanx_lens::scalar::ScalarLens;
-    use phalanx_proto::types::{ChannelCount, SampleRate};
     use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn test_time_drift_compensation() {
         let config = HardwareConfig {
             camera_fps: Fps::new(50),
-            audio_sample_rate: SampleRate::new(44100),
-            audio_channels: ChannelCount::new(2),
-            sensor_calibration: None,
+            ..Default::default()
         };
         let cam = PhalanxCameraThread::new(&config);
         let mut rx = cam.subscribe();
@@ -447,9 +444,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(10);
         let config = HardwareConfig {
             camera_fps: Fps::new(10),
-            audio_sample_rate: SampleRate::new(44100),
-            audio_channels: ChannelCount::new(2),
-            sensor_calibration: None,
+            ..Default::default()
         };
 
         let cam = PhalanxCameraThread::new(&config);
