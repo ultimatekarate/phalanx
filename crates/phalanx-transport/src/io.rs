@@ -33,6 +33,8 @@ pub async fn write_length_prefixed_payload<T>(io: &mut T, payload: &[u8]) -> io:
 where
     T: AsyncWrite + Unpin + Send,
 {
+    #[allow(clippy::cast_possible_truncation)]
+    // Payload size bounded by RECORDING_SIZE_THRESHOLD (< u32::MAX)
     let payload_length = payload.len() as u32;
     io.write_all(&payload_length.to_le_bytes()).await?;
     io.write_all(payload).await?;

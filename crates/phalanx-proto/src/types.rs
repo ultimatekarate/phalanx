@@ -135,6 +135,7 @@ pub struct ByteCapacity(pub u64);
 
 impl ByteCapacity {
     #[must_use]
+    #[allow(clippy::arithmetic_side_effects)] // Conversion constant — no overflow for realistic MiB values.
     pub fn from_mib(mib: u64) -> Self {
         Self(mib * 1024 * 1024)
     }
@@ -362,6 +363,7 @@ impl Fps {
         if self.0 == 0 {
             None
         } else {
+            #[allow(clippy::arithmetic_side_effects)] // Division by non-zero checked above.
             Some(Duration::from_millis(1000 / self.0 as u64))
         }
     }
@@ -511,6 +513,17 @@ impl fmt::Display for ChannelCount {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::float_cmp,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
 

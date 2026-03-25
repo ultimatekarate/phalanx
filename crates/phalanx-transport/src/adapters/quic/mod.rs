@@ -249,6 +249,13 @@ pub(crate) async fn translate_response(
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
     use phalanx_proto::MAX_PAYLOAD_SIZE;

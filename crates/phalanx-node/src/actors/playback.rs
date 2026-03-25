@@ -53,6 +53,7 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
         }
     }
 
+    #[allow(clippy::arithmetic_side_effects)] // Sequence arithmetic for playback timing.
     pub async fn run(&mut self, recording_id: RecordingId) -> Result<()> {
         loop {
             // Non-blocking: drain any provider results that arrived since last iteration.

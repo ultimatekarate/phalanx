@@ -45,6 +45,7 @@ const MIN_CALIBRATION_LUMINANCE: f32 = 1.0;
 /// 5. `prnu_floor = max(mean_r − 3σ, PRNU_FLOOR_MINIMUM)`
 ///
 /// Returns `SensorCalibration` with the derived floor and valid frame count.
+#[allow(clippy::arithmetic_side_effects)] // Statistical arithmetic — subtraction for variance, division for mean.
 pub fn calibrate_prnu(metrics: &[ForensicMetrics]) -> Result<SensorCalibration, ShardError> {
     // Filter out dark frames — unreliable ratios
     let ratios: Vec<f32> = metrics
@@ -94,7 +95,12 @@ pub fn calibrate_prnu(metrics: &[ForensicMetrics]) -> Result<SensorCalibration, 
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::float_cmp,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
     use phalanx_test_fixtures::metrics::forensic_metrics_with_prnu;

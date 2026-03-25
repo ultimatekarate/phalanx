@@ -1,3 +1,11 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 use phalanx_forensics::reassembler::FountainChunkifier;
 use phalanx_forensics::witness::WitnessAuthority;
 use phalanx_forensics::Reassembler;

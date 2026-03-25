@@ -1,3 +1,11 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::vault::{derive_vault_key, read_encrypted_file, Guardian};

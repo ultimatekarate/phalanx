@@ -91,9 +91,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn setup_shutdown_handler() {
-    ctrlc::set_handler(move || {
+    if let Err(e) = ctrlc::set_handler(move || {
         println!("\n[PHALANX] Shutdown initiated. Sealing vault...");
         std::process::exit(0);
-    })
-    .expect("Error setting Ctrl-C handler");
+    }) {
+        eprintln!("Failed to set Ctrl-C handler: {e}");
+    }
 }

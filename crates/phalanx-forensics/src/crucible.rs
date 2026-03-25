@@ -471,6 +471,7 @@ impl Mold for RecordingAmalgam {
         acc.artifacts.len() >= RECORDING_SIZE_THRESHOLD || elapsed > RECORDING_TIME_THRESHOLD
     }
 
+    #[allow(clippy::arithmetic_side_effects)] // Sequence arithmetic for gap detection — bounded by sorted envelope iteration.
     fn assemble(&self, key: RecordingId, acc: Self::Accumulator) -> Option<Self::Output> {
         if acc.artifacts.is_empty() {
             return None;
@@ -541,6 +542,12 @@ impl Mold for RecordingAmalgam {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
 mod tests {
     use super::*;
     use std::time::Duration;

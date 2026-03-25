@@ -1,3 +1,11 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 // crates/phalanx-node/tests/ingestion_tests.rs
 //
 // Unit tests for the IngestionActor's validation pipeline.

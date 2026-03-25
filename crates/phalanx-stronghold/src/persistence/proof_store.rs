@@ -123,6 +123,7 @@ impl ProofStore {
 }
 
 /// Parse a 64-char hex string into [u8; 32].
+#[allow(clippy::arithmetic_side_effects)] // Hex index arithmetic — i*2 bounded by array length.
 fn parse_hex_hash(s: &str) -> Option<[u8; 32]> {
     if s.len() != 64 {
         return None;

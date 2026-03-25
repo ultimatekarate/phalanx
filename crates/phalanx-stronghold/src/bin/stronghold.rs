@@ -213,6 +213,7 @@ async fn cmd_import_community(
     Ok(())
 }
 
+#[allow(clippy::arithmetic_side_effects)] // Counter increment bounded by directory entries.
 async fn cmd_list_communities(vault_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let communities_dir = vault_path.join("communities");
     if !communities_dir.exists() {
@@ -420,6 +421,7 @@ fn parse_hex_hash(hex: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
     Ok(arr)
 }
 
+#[allow(clippy::arithmetic_side_effects)] // Hex index arithmetic — i*2 bounded by string length.
 fn parse_hex_bytes(hex: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     if !hex.len().is_multiple_of(2) {
         return Err("Hex string must have even length".into());
@@ -432,6 +434,7 @@ fn parse_hex_bytes(hex: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     Ok(bytes)
 }
 
+#[allow(clippy::arithmetic_side_effects)] // Hex string capacity — bytes * 2.
 fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {

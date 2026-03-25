@@ -88,6 +88,7 @@ impl WitnessAuthority for WitnessEnvelope {
         SignatureHash(hash)
     }
 
+    #[allow(clippy::cast_possible_truncation)] // Chunk index as u32 — bounded by MAX_SYMBOLS_PER_CONTEXT.
     fn into_chunks(
         self,
         shard_id: ShardId,

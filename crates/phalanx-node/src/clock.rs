@@ -79,6 +79,7 @@ pub struct TrustedClock {
 
 pub type TimeResult<T> = Result<T, TimeError>;
 
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Timestamp arithmetic — epoch millis fit in u64/i64 for centuries.
 impl TrustedClock {
     #[must_use]
     pub fn new() -> Self {
@@ -113,7 +114,9 @@ impl TrustedClock {
         // If PhalanxTimestamp requires milliseconds in the future, remove the `/ 1000`.
         let offset_sec = *offset_guard;
 
-        // Ensure we don't return negative time if offset is massive
+        // Ensure we don't return negative time if offset is massive.
+        // Safety: .max(0) guarantees non-negative value before cast.
+        #[allow(clippy::cast_sign_loss)]
         let result = (local + offset_sec).max(0) as u64;
 
         // T1 FIX: Record last successful timestamp for fallback
@@ -166,6 +169,8 @@ impl TrustedClock {
                     .map_err(|e| TimeError::ClockSkew(e.to_string()))?
                     .as_secs();
 
+                // Safety: NTP and system seconds are well within i64 range (Unix timestamps).
+                #[allow(clippy::cast_possible_wrap)]
                 let diff_sec = (ntp_sec as i64) - (system_sec as i64);
                 let offset_ms = diff_sec * 1000;
 
@@ -186,6 +191,7 @@ impl TrustedClock {
     }
 }
 
+#[allow(clippy::cast_possible_truncation)] // Epoch millis fit in u64 for centuries.
 impl TrustedClockTrait for TrustedClock {
     fn now(&self) -> PhalanxTimestamp {
         self.now().unwrap_or_else(|_| {
@@ -219,6 +225,12 @@ impl Default for TrustedClock {
 // ============================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};

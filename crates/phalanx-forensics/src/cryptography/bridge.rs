@@ -26,6 +26,8 @@ pub fn ed_to_x25519_sk(ed_key: &SigningKey) -> Result<x25519_dalek::StaticSecret
     hasher.update(ed_key.to_bytes());
     let hash_result = hasher.finalize();
 
+    // SHA-512 output is 64 bytes; slicing [0..32] is always valid.
+    #[allow(clippy::indexing_slicing)]
     let x25519_bytes: [u8; 32] = hash_result[0..32]
         .try_into()
         .map_err(|_| CryptoError::EncodingError("Scalar derivation failed".into()))?;

@@ -23,7 +23,10 @@ impl SubnetBucket {
     pub fn from_ipv6_prefix(prefix_bytes: &[u8]) -> Self {
         use sha2::{Digest, Sha256};
         let hash = Sha256::digest(prefix_bytes);
-        Self([hash[0], hash[1]])
+        // SHA-256 always produces 32 bytes — indices 0 and 1 are always valid.
+        let a = hash.first().copied().unwrap_or(0);
+        let b = hash.get(1).copied().unwrap_or(0);
+        Self([a, b])
     }
 
     /// Sentinel bucket for local mesh (BLE/WiFi Direct) peers — no IP to bucket.
@@ -105,6 +108,17 @@ pub enum EclipseRisk {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::float_cmp,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
 

@@ -36,7 +36,7 @@ use crate::signing::create_stronghold_signer;
 /// postcard-serialized evidence files to `output_dir`.
 ///
 /// Returns the paths of all files written.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]
 pub async fn run_export(
     identity: &PhalanxIdentity,
     evidence_store: &EvidenceStore,
@@ -232,6 +232,7 @@ pub async fn run_export(
 /// The sidecar embeds the proof's forensic assertions (event window, device
 /// attestations, sensor divergences, proximity count) as structured C2PA claims.
 /// Readable by any C2PA-compatible verification tool.
+#[allow(clippy::cast_possible_truncation)] // Overlap duration millis — bounded by event window.
 async fn build_c2pa_sidecar(
     identity: &PhalanxIdentity,
     config: &CorroborationConfig,

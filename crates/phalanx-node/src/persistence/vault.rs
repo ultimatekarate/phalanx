@@ -52,6 +52,7 @@ struct RecordingLog {
 /// M7 FIX: Vault key derivation now includes a random 32-byte salt.
 /// This ensures that identity key compromise does not directly yield the vault key.
 /// The salt is stored unencrypted in a `.vault_salt` file next to the vault directory.
+#[allow(clippy::arithmetic_side_effects)] // Buffer capacity arithmetic — sum of known-size fields.
 pub fn derive_vault_key(identity: &PhalanxIdentity, salt: &[u8; 32]) -> SymmetricKey {
     let key_bytes = Zeroizing::new(identity.keypair.to_bytes());
     // Concatenate domain separator with salt for the BLAKE3 derivation context
@@ -110,6 +111,7 @@ pub struct StorageLedger {
     pub own_bytes_pushed: ByteCapacity,
 }
 
+#[allow(clippy::arithmetic_side_effects)] // Ledger arithmetic — byte accounting with bounded values.
 impl StorageLedger {
     /// Total foreign bytes (committed + transient).
     pub fn total_foreign_bytes(&self) -> u64 {
@@ -217,6 +219,8 @@ impl Guardian {
         let mut anchor = None;
 
         if seq.0 > 1 {
+            // Subtraction guarded by seq.0 > 1 check above.
+            #[allow(clippy::arithmetic_side_effects)]
             let prev_seq = StorageSequence(seq.0 - 1);
 
             // Look up the previous anchor in the vault
@@ -328,6 +332,7 @@ impl Guardian {
 
     /// Estimates the total bytes held across all active recording contexts in the crucible.
     /// Used by the StorageActor to feed WAL/storage pressure into the integral loop.
+    #[allow(clippy::arithmetic_side_effects)] // Byte estimate — multiplication of counts by small constant.
     pub fn wal_bytes_estimate(&self) -> u64 {
         // Conservative per-envelope estimate: signature (64) + evidence (~4KB avg) + metadata
         const AVG_ENVELOPE_BYTES: u64 = 4096;
@@ -352,6 +357,7 @@ impl Guardian {
 
     /// Append a single shard to the recording log. Disk-first — called immediately
     /// after fountain reassembly, before any in-memory verification.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Frame arithmetic — payload sizes bounded by MTU.
     pub async fn append_shard(&mut self, envelope: &WitnessEnvelope) -> Result<(), GuardianError> {
         let recording_id = envelope.evidence.recording_id().clone();
         let sequence_id = envelope.evidence.sequence_id();
@@ -665,6 +671,7 @@ impl Guardian {
     }
 
     /// Rebuild the in-memory index from a recording log file. Tolerates corrupt tail frames.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // File offset arithmetic — payload_len read from frame header.
     async fn rebuild_index(
         file: &mut tokio::fs::File,
         _vault_key: &SymmetricKey,
@@ -706,6 +713,7 @@ impl Guardian {
 }
 
 /// Encrypt and atomically write to disk (write .tmp → rename to final path).
+#[allow(clippy::arithmetic_side_effects)] // Buffer capacity — sum of nonce and ciphertext lengths.
 async fn atomic_encrypted_write(
     path: &Path,
     plaintext: &[u8],
@@ -750,6 +758,7 @@ pub async fn read_encrypted_file(
 }
 
 #[async_trait]
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // WAL frame arithmetic — payload sizes bounded by MTU.
 impl TransientJournal for FileJournal {
     async fn record_chunk(&mut self, chunk: &ShardChunk) -> Result<(), ShardError> {
         // P2 FIX: Check aggregate WAL size before writing.
@@ -1009,6 +1018,12 @@ impl TransientJournal for FileJournal {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
     use phalanx_forensics::witness::WitnessAuthority;

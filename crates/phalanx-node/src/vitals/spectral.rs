@@ -91,6 +91,7 @@ impl SpectralObserver {
     }
 
     /// Record data volume received from a peer (called on every data message).
+    #[allow(clippy::arithmetic_side_effects)] // Counter increment — overflow not reachable in practice.
     pub fn record_data_received(&mut self, peer_id: NetworkId, bytes: usize) {
         let obs = self
             .peers
@@ -192,6 +193,12 @@ impl Default for SpectralObserver {
 // =====================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod shield_wall_tests {
     use super::*;
 

@@ -3,6 +3,11 @@
 //! These tests verify that ScalarLens produces expected metrics for
 //! known input patterns, establishing baseline behavior for the
 //! forensic evidence provenance pipeline.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)] // Test pixel buffers — bounds governed by loop invariants.
 
 use phalanx_lens::scalar::ScalarLens;
 use phalanx_lens::ForensicLens;

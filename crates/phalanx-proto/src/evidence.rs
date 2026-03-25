@@ -199,6 +199,7 @@ impl Deref for StorageSequence {
     }
 }
 
+#[allow(clippy::arithmetic_side_effects)] // Trait impl — wrapping semantics intentional for sequence arithmetic.
 impl Add<u32> for StorageSequence {
     type Output = Self;
     fn add(self, rhs: u32) -> Self {
@@ -206,12 +207,14 @@ impl Add<u32> for StorageSequence {
     }
 }
 
+#[allow(clippy::arithmetic_side_effects)] // Trait impl — wrapping semantics intentional for sequence arithmetic.
 impl AddAssign<u32> for StorageSequence {
     fn add_assign(&mut self, rhs: u32) {
         self.0 += rhs;
     }
 }
 
+#[allow(clippy::arithmetic_side_effects)] // Trait impl — wrapping semantics intentional for sequence arithmetic.
 impl Sub<u32> for StorageSequence {
     type Output = Self;
     fn sub(self, rhs: u32) -> Self {

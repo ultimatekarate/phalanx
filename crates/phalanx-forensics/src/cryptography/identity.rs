@@ -18,7 +18,10 @@ use super::{decrypt_bytes, encrypt_bytes};
 /// m=19 MiB, t=2 iterations, p=1 lane, 32-byte output.
 /// Mobile-appropriate. Compile-time constants prevent silent changes
 /// on dependency updates from making existing identity files unreadable.
+/// Returns None only if the hardcoded constants are invalid (impossible in practice).
 pub fn identity_argon2() -> Argon2<'static> {
+    // These are compile-time-known constants; Params::new cannot fail for these values.
+    #[allow(clippy::expect_used)]
     let params = Params::new(19 * 1024, 2, 1, Some(32)).expect("hardcoded Argon2 params are valid");
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
@@ -28,6 +31,7 @@ pub fn identity_argon2() -> Argon2<'static> {
 /// Returns: `[16-byte salt][24-byte nonce][ciphertext]`
 ///
 /// Pure crypto — caller handles file IO.
+#[allow(clippy::arithmetic_side_effects)] // Buffer capacity arithmetic — sum of known constant-size fields.
 pub fn seal_identity(identity: &PhalanxIdentity, passphrase: &str) -> Result<Vec<u8>, CryptoError> {
     // Serialize via IdentityDiskFormat — the only authorized serialization path for keypairs.
     let disk_format = IdentityDiskFormat::from_identity(identity);
@@ -101,6 +105,12 @@ pub fn unseal_identity(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
 mod tests {
     use super::*;
 

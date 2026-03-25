@@ -120,10 +120,13 @@ where
     // Calculate gossipsub heartbeat based on physics simulation state
     let gossip_heartbeat = VitalityRate::new(physics.tau_rtt).as_duration();
 
+    // Multiplier is a small constant; overflow not reachable in practice.
+    #[allow(clippy::arithmetic_side_effects)]
+    let gossip_max_transmit = max_chunk_size_bytes * 2;
     let gossipsub_config = gossipsub::ConfigBuilder::default()
         .heartbeat_interval(gossip_heartbeat)
         .validation_mode(gossipsub::ValidationMode::Strict)
-        .max_transmit_size(max_chunk_size_bytes * 2)
+        .max_transmit_size(gossip_max_transmit)
         .build()
         .map_err(std::io::Error::other)?;
 
@@ -214,6 +217,14 @@ where
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
     use crate::builder::pnet::PreSharedKey;

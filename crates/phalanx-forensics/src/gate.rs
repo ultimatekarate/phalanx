@@ -274,7 +274,11 @@ pub fn verify_provenance_from_jpeg(
     })?;
 
     // Y-plane is the first (width × height) bytes of the YUV420 buffer
+    #[allow(clippy::arithmetic_side_effects)]
+    // Pixel plane dimensions — product of validated width/height.
     let y_len = (width * height) as usize;
+    // Slice bound clamped to yuv.len() — cannot exceed buffer.
+    #[allow(clippy::indexing_slicing)]
     let y_plane = &yuv[..y_len.min(yuv.len())];
 
     // Re-compute ForensicMetrics from the actual pixels
@@ -533,6 +537,12 @@ impl PromotionGate for ForensicUnit<WitnessEnvelope, Unverified> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
 mod tests {
     use super::*;
 

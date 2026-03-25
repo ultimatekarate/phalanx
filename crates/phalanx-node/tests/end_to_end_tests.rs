@@ -1,3 +1,11 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 //! End-to-end cross-crate integration tests for phalanx-node.
 //!
 //! These tests wire multiple actors/components together to verify

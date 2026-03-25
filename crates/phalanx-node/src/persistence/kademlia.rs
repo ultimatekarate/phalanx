@@ -99,6 +99,7 @@ impl RedbStore {
         Ok(())
     }
 
+    #[allow(clippy::arithmetic_side_effects)] // Counter increment and provider list arithmetic.
     pub fn prune_expired_blocking(&self) -> std::result::Result<usize, redb::Error> {
         let write_txn = self.db.begin_write()?;
         let mut pruned_count = 0;
@@ -180,6 +181,7 @@ impl RedbStore {
 
     /// Iterates through the records table and compiles a distribution of payload variants.
     /// Excludes expired records from the metric count.
+    #[allow(clippy::arithmetic_side_effects)] // Counter increments bounded by table size.
     pub fn get_storage_metrics(
         &self,
     ) -> std::result::Result<std::collections::HashMap<PayloadKind, usize>, redb::Error> {

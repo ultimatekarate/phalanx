@@ -33,10 +33,13 @@ impl PhalanxTimestamp {
     /// non-critical timestamps) or a `TrustedClockTrait` implementor (for
     /// security-critical timestamps, e.g., the NTP-corrected `TrustedClock`
     /// in phalanx-node).
+    #[allow(clippy::expect_used, clippy::cast_possible_truncation)]
     pub(crate) fn now() -> Self {
+        // expect: SystemTime before UNIX_EPOCH is an unrecoverable OS-level fault.
+        // truncation: u128 millis won't exceed u64 until year 584,942,417.
         let millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("System clock went backwards")
+            .expect("system clock before UNIX epoch")
             .as_millis() as u64;
 
         Self(millis)

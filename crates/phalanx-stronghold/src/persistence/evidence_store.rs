@@ -111,6 +111,7 @@ impl EvidenceStore {
     }
 
     /// Read all shards for a recording, detect gaps, and build a Recording.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Sequence arithmetic for gap detection and epoch millis.
     pub async fn read_recording(
         &self,
         community_id: &CommunityId,
@@ -239,6 +240,7 @@ impl EvidenceStore {
     }
 
     /// Total bytes consumed by a community's evidence directory.
+    #[allow(clippy::arithmetic_side_effects)] // Byte total accumulation.
     pub async fn community_bytes(
         &self,
         community_id: &CommunityId,
@@ -326,6 +328,7 @@ impl EvidenceStore {
 // hex encoding helper — using the blake3 hex output directly for recording IDs,
 // but we need hex for CommunityId ([u8; 32]).
 mod hex {
+    #[allow(clippy::arithmetic_side_effects)] // Hex string capacity — bytes * 2.
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
         let bytes = bytes.as_ref();
         let mut s = String::with_capacity(bytes.len() * 2);

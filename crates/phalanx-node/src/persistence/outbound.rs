@@ -63,6 +63,7 @@ impl OutboundQueue {
     }
 
     /// Enqueue a failed-to-publish evidence payload for later retry.
+    #[allow(clippy::arithmetic_side_effects)] // Counter increment and byte accounting.
     pub async fn enqueue(
         &mut self,
         topic: MeshTopic,
@@ -115,6 +116,7 @@ impl OutboundQueue {
 
     /// Re-enqueue an entry that failed to publish, incrementing its attempt counter.
     /// Returns `None` if the entry has exceeded MAX_ATTEMPTS (abandoned with forensic log).
+    #[allow(clippy::arithmetic_side_effects)] // Retry counter increment.
     pub async fn requeue_failed(
         &mut self,
         mut entry: OutboundEntry,
@@ -164,6 +166,7 @@ impl OutboundQueue {
     /// Re-enqueue an entry without incrementing attempts (backoff not yet elapsed).
     /// Pushes to front to preserve FIFO ordering. No WAL write needed — entry is
     /// already persisted on disk from the original `enqueue()` call.
+    #[allow(clippy::arithmetic_side_effects)] // Byte accounting.
     pub fn requeue_unchanged(&mut self, entry: OutboundEntry) {
         let byte_len = entry.envelope_bytes.len() as u64;
         self.entries.push_front(entry);
@@ -217,6 +220,7 @@ impl OutboundQueue {
         }
     }
 
+    #[allow(clippy::arithmetic_side_effects)] // ID and byte total recovery arithmetic.
     async fn recover_from_disk(&mut self) -> std::io::Result<()> {
         let mut read_dir = tokio::fs::read_dir(&self.wal_dir).await?;
         let mut recovered: Vec<OutboundEntry> = Vec::new();
@@ -281,6 +285,12 @@ impl OutboundQueue {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
     use tempfile::tempdir;

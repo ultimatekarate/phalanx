@@ -148,9 +148,11 @@ pub struct SystemClock;
 
 impl ClockProvider for SystemClock {
     fn current_monotonic(&self) -> MonotonicClock {
+        // Safety: SystemTime::now() is always >= UNIX_EPOCH on supported platforms.
+        // If the clock is before UNIX_EPOCH, fall back to 0.
         let start = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("Time moved backwards")
+            .unwrap_or(std::time::Duration::from_secs(0))
             .as_secs();
         MonotonicClock(start)
     }
@@ -367,6 +369,7 @@ impl TrustRegistry {
         Ok(())
     }
 
+    #[allow(clippy::arithmetic_side_effects)] // Timestamp multiplication and reputation arithmetic.
     pub async fn record_offense<C: ClockProvider>(
         &mut self,
         did: &Did,
@@ -524,6 +527,7 @@ impl TrustRegistry {
         self.peers.get_mut(did).map(|record| &mut record.reputation)
     }
 
+    #[allow(clippy::arithmetic_side_effects)] // Counter increment — overflow not reachable in practice.
     fn generate_unique_pet_name(&self, did: &Did) -> PetName {
         let base_name = format!(
             "Unknown-{}",
@@ -658,6 +662,12 @@ impl ReputationGate for TrustRegistry {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
     use crate::vitals::init_observability;
