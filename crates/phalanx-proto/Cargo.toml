@@ -34,3 +34,6 @@ zeroize = { version = "1", features = ["derive"] }
 proptest = "1.4"
 # For integration tests that need signing/verification (WitnessAuthority lives in forensics)
 phalanx-forensics = { path = "../phalanx-forensics" }
+
+[lints]
+workspace = true

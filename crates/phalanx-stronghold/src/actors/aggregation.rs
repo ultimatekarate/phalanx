@@ -97,7 +97,7 @@ impl AggregationActor {
             evidence_store,
             community_routing: HashMap::new(),
             governor,
-            replay_filter: RotatingBloomFilter::new(1_000_000),
+            replay_filter: RotatingBloomFilter::new(RotatingBloomFilter::DEFAULT_CAPACITY),
             proximity_log: Vec::new(),
             rx,
         }

@@ -32,3 +32,6 @@ serde = { version = "1.0", features = ["derive"] }
 
 # Per-node vault temp directories
 tempfile = "3"
+
+[lints]
+workspace = true

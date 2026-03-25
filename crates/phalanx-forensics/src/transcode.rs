@@ -370,13 +370,18 @@ fn mux_mp4(
     let cursor = Cursor::new(&mut buf);
 
     let config = Mp4Config {
-        major_brand: str::parse("isom").unwrap(),
+        major_brand: str::parse("isom")
+            .map_err(|e: mp4::Error| TranscodeError::Mp4MuxError(e.to_string()))?,
         minor_version: 512,
         compatible_brands: vec![
-            str::parse("isom").unwrap(),
-            str::parse("iso2").unwrap(),
-            str::parse("avc1").unwrap(),
-            str::parse("mp41").unwrap(),
+            str::parse("isom")
+                .map_err(|e: mp4::Error| TranscodeError::Mp4MuxError(e.to_string()))?,
+            str::parse("iso2")
+                .map_err(|e: mp4::Error| TranscodeError::Mp4MuxError(e.to_string()))?,
+            str::parse("avc1")
+                .map_err(|e: mp4::Error| TranscodeError::Mp4MuxError(e.to_string()))?,
+            str::parse("mp41")
+                .map_err(|e: mp4::Error| TranscodeError::Mp4MuxError(e.to_string()))?,
         ],
         timescale: 1000,
     };

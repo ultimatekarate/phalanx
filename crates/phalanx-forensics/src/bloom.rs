@@ -74,6 +74,14 @@ pub struct RotatingBloomFilter {
 }
 
 impl RotatingBloomFilter {
+    /// Default capacity for replay-protection filters.
+    ///
+    /// At k=4 hash functions and 10K expected insertions per rotation,
+    /// 1M bits yields a false-positive rate well under 1%.
+    /// All production callers should use this constant rather than
+    /// hardcoding the value, so tuning happens in one place.
+    pub const DEFAULT_CAPACITY: usize = 1_000_000;
+
     pub fn new(num_bits: usize) -> Self {
         Self {
             current: BloomFilter::new(num_bits),
@@ -112,7 +120,7 @@ mod tests {
 
     #[test]
     fn bloom_insert_then_contains() {
-        let mut bf = BloomFilter::new(1_000_000);
+        let mut bf = BloomFilter::new(RotatingBloomFilter::DEFAULT_CAPACITY);
         let h = test_hash(42);
         assert!(!bf.contains(&h));
         bf.insert(&h);
@@ -121,14 +129,14 @@ mod tests {
 
     #[test]
     fn bloom_absent_item_not_found() {
-        let mut bf = BloomFilter::new(1_000_000);
+        let mut bf = BloomFilter::new(RotatingBloomFilter::DEFAULT_CAPACITY);
         bf.insert(&test_hash(1));
         assert!(!bf.contains(&test_hash(2)));
     }
 
     #[test]
     fn bloom_clear_removes_all() {
-        let mut bf = BloomFilter::new(1_000_000);
+        let mut bf = BloomFilter::new(RotatingBloomFilter::DEFAULT_CAPACITY);
         bf.insert(&test_hash(1));
         bf.clear();
         assert!(!bf.contains(&test_hash(1)));
@@ -136,7 +144,7 @@ mod tests {
 
     #[test]
     fn rotating_survives_one_rotation() {
-        let mut rbf = RotatingBloomFilter::new(1_000_000);
+        let mut rbf = RotatingBloomFilter::new(RotatingBloomFilter::DEFAULT_CAPACITY);
         let h = test_hash(99);
         rbf.insert(&h);
         rbf.rotate();
@@ -146,7 +154,7 @@ mod tests {
 
     #[test]
     fn rotating_gone_after_two_rotations() {
-        let mut rbf = RotatingBloomFilter::new(1_000_000);
+        let mut rbf = RotatingBloomFilter::new(RotatingBloomFilter::DEFAULT_CAPACITY);
         let h = test_hash(99);
         rbf.insert(&h);
         rbf.rotate();
@@ -156,7 +164,7 @@ mod tests {
 
     #[test]
     fn rotating_current_and_previous_both_checked() {
-        let mut rbf = RotatingBloomFilter::new(1_000_000);
+        let mut rbf = RotatingBloomFilter::new(RotatingBloomFilter::DEFAULT_CAPACITY);
         let h1 = test_hash(1);
         let h2 = test_hash(2);
 
@@ -171,7 +179,7 @@ mod tests {
 
     #[test]
     fn false_positive_rate_under_one_percent() {
-        let mut bf = BloomFilter::new(1_000_000);
+        let mut bf = BloomFilter::new(RotatingBloomFilter::DEFAULT_CAPACITY);
 
         // Insert 10K items
         for i in 0..10_000u16 {

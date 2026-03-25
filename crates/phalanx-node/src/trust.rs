@@ -47,9 +47,16 @@ pub trait TrustOracle: Send + Sync {
 
 impl TrustOracle for ReputationProjection {
     fn is_blacklisted_by_did(&self, did: &Did) -> bool {
-        let did_map = self.did_to_network_id.read().unwrap();
+        // Poisoned lock → treat as blacklisted (fail-secure).
+        let Ok(did_map) = self.did_to_network_id.read() else {
+            tracing::error!("did_to_network_id lock poisoned — failing secure");
+            return true;
+        };
         if let Some(network_id) = did_map.get(did) {
-            let scores_map = self.scores.read().unwrap();
+            let Ok(scores_map) = self.scores.read() else {
+                tracing::error!("scores lock poisoned — failing secure");
+                return true;
+            };
             if let Some(info) = scores_map.get(network_id) {
                 return info.is_blacklisted;
             }
@@ -58,9 +65,16 @@ impl TrustOracle for ReputationProjection {
     }
 
     fn check_trust_by_did(&self, did: &Did) -> TrustLevel {
-        let did_map = self.did_to_network_id.read().unwrap();
+        // Poisoned lock → Blocked (fail-secure).
+        let Ok(did_map) = self.did_to_network_id.read() else {
+            tracing::error!("did_to_network_id lock poisoned — failing secure");
+            return TrustLevel::Blocked;
+        };
         if let Some(network_id) = did_map.get(did) {
-            let scores_map = self.scores.read().unwrap();
+            let Ok(scores_map) = self.scores.read() else {
+                tracing::error!("scores lock poisoned — failing secure");
+                return TrustLevel::Blocked;
+            };
             scores_map
                 .get(network_id)
                 .map_or(TrustLevel::Ignored, |info| info.trust_level)
@@ -77,8 +91,11 @@ impl TrustOracle for ReputationProjection {
             return TrustLevel::Blocked;
         }
 
-        // Check community membership for trust elevation.
-        let communities = self.communities.read().unwrap();
+        // Poisoned lock → Blocked (fail-secure).
+        let Ok(communities) = self.communities.read() else {
+            tracing::error!("communities lock poisoned — failing secure");
+            return TrustLevel::Blocked;
+        };
         let mut best = individual;
         for (baseline_trust, member_dids) in communities.iter() {
             if member_dids.contains(did) && *baseline_trust > best {
@@ -93,16 +110,22 @@ impl ReputationProjection {
     /// Sync community data for effective_trust lookups.
     /// Called by TrustRegistry when communities are loaded or updated.
     pub fn sync_communities(&self, community_data: CommunityTrustData) {
-        let mut communities = self.communities.write().unwrap();
+        let Ok(mut communities) = self.communities.write() else {
+            tracing::error!("communities lock poisoned — cannot sync");
+            return;
+        };
         *communities = community_data;
     }
 }
 
 impl PeerEvaluator for ReputationProjection {
     fn evaluate_reputation(&self, peer_id: &NetworkId) -> f32 {
-        self.scores
-            .read()
-            .unwrap()
+        // Poisoned lock → minimum trust score (fail-secure).
+        let Ok(scores) = self.scores.read() else {
+            tracing::error!("scores lock poisoned — failing secure");
+            return 0.0;
+        };
+        scores
             .get(peer_id)
             // E4 FIX: Unknown peers start at 0.1 (minimum trust), not 1.0 (maximum).
             // This prevents Sybil attackers from receiving full trust on first contact.
@@ -292,17 +315,17 @@ impl TrustRegistry {
             trust_level: record.level,
         };
 
-        projection
-            .scores
-            .write()
-            .unwrap()
-            .insert(network_id.clone(), info);
+        if let Ok(mut scores) = projection.scores.write() {
+            scores.insert(network_id.clone(), info);
+        } else {
+            tracing::error!("scores lock poisoned — cannot sync projection");
+        }
 
-        projection
-            .did_to_network_id
-            .write()
-            .unwrap()
-            .insert(did.clone(), network_id);
+        if let Ok(mut did_map) = projection.did_to_network_id.write() {
+            did_map.insert(did.clone(), network_id);
+        } else {
+            tracing::error!("did_to_network_id lock poisoned — cannot sync projection");
+        }
     }
 
     /// Updates the last interaction timestamp. Must be awaited.
@@ -509,13 +532,11 @@ impl TrustRegistry {
         let mut fallback_name = base_name.clone();
         let mut counter = 1;
 
-        let mut pet_name =
-            PetName::new(&fallback_name).unwrap_or_else(|_| PetName::new("Unknown").unwrap());
+        let mut pet_name = PetName::new(&fallback_name).unwrap_or_else(|_| PetName::unknown());
 
         while self.pet_name_index.contains_key(&pet_name) {
             fallback_name = format!("{}-{}", base_name, counter);
-            pet_name =
-                PetName::new(&fallback_name).unwrap_or_else(|_| PetName::new("Unknown").unwrap());
+            pet_name = PetName::new(&fallback_name).unwrap_or_else(|_| PetName::unknown());
             counter += 1;
         }
         pet_name

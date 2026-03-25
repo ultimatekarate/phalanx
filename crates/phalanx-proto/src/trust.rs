@@ -99,6 +99,12 @@ impl PetName {
         Ok(Self(s))
     }
 
+    /// Infallible fallback for unresolvable peer names.
+    #[must_use]
+    pub fn unknown() -> Self {
+        Self("Unknown".to_string())
+    }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0

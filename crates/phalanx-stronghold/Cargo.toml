@@ -59,3 +59,6 @@ ctrlc = "3.5.2"
 tempfile = "3.26.0"
 oneshot = { version = "0.2.1", features = ["async"] }
 phalanx-test-fixtures = { workspace = true }
+
+[lints]
+workspace = true
