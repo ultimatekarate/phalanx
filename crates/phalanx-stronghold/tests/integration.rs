@@ -30,6 +30,10 @@ use tempfile::tempdir;
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
+/// Constructs an *unsigned* WitnessEnvelope with hand-crafted hashes.
+/// Not using the Phrasebook's signed envelopes because these tests exercise
+/// persistence (struct serialization), not forensic workflow. The unsigned
+/// construction is intentional — it isolates the storage layer from signing.
 fn make_envelope(seq: u32, recording_id: &str, did_str: &str) -> WitnessEnvelope {
     WitnessEnvelope {
         evidence: Evidence::Video(VideoShard {
@@ -38,12 +42,7 @@ fn make_envelope(seq: u32, recording_id: &str, did_str: &str) -> WitnessEnvelope
             fps: phalanx_proto::types::Fps::new(30),
             recording_id: RecordingId::new(recording_id),
             payload: DataPayload::Clear(vec![0u8; 100]),
-            lens_metrics: ForensicMetrics {
-                prnu_var: 150.0,
-                h_energy: 5.0,
-                v_energy: 3.0,
-                mean_luminance: 128.0,
-            },
+            lens_metrics: phalanx_test_fixtures::metrics::forensic_metrics_synthetic(),
         }),
         evidence_hash: {
             let mut h = [0u8; 32];

@@ -15,7 +15,7 @@ use phalanx_forensics::witness::WitnessAuthority;
 
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{
-    DataPayload, Evidence, ForensicMetrics, ShardChunk, SignatureHash, StorageSequence, VideoShard,
+    DataPayload, Evidence, ForensicMetrics, ShardChunk, StorageSequence, VideoShard,
     WitnessEnvelope,
 };
 use phalanx_proto::identity::PhalanxIdentity;
@@ -24,47 +24,14 @@ use phalanx_proto::storage::HandoverProof;
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock, TrustedClock};
 use phalanx_proto::types::{ForensicUnit, Fps, RepairRatio, SymbolSize, Unverified, Verified};
 
+use phalanx_test_fixtures::envelope::{
+    verified_unit_for_recording, video_evidence_for_recording, witness_envelope_for_recording,
+};
+
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
 fn test_identity() -> PhalanxIdentity {
     PhalanxIdentity::new_ephemeral()
-}
-
-fn make_video_evidence(
-    recording_id: &RecordingId,
-    seq: u32,
-    timestamp: PhalanxTimestamp,
-) -> Evidence {
-    Evidence::Video(VideoShard {
-        timestamp,
-        sequence_id: StorageSequence(seq),
-        fps: Fps::new(30),
-        recording_id: recording_id.clone(),
-        payload: DataPayload::Clear(vec![0xDE, 0xAD]),
-        lens_metrics: ForensicMetrics::default(),
-    })
-}
-
-fn sign_test_envelope(
-    identity: &PhalanxIdentity,
-    recording_id: &RecordingId,
-    seq: u32,
-    prev_hash: Option<SignatureHash>,
-) -> WitnessEnvelope {
-    let now = SystemClock.now();
-    let evidence = make_video_evidence(recording_id, seq, now);
-    WitnessEnvelope::sign_envelope(evidence, identity, identity.network_id.clone(), prev_hash)
-        .expect("signing should not fail in tests")
-}
-
-fn make_verified_unit(
-    identity: &PhalanxIdentity,
-    recording_id: &RecordingId,
-    seq: u32,
-    prev_hash: Option<SignatureHash>,
-) -> ForensicUnit<WitnessEnvelope, Verified> {
-    let env = sign_test_envelope(identity, recording_id, seq, prev_hash);
-    ForensicUnit::<WitnessEnvelope, Verified>::new_verified(env)
 }
 
 // ─── Group A: Crucible with real RecordingAmalgam ─────────────────────────
@@ -79,7 +46,7 @@ fn amalgam_seals_at_threshold() {
     let mut prev_hash = None;
     let mut sealed = false;
     for seq in 0..100u32 {
-        let unit = make_verified_unit(&identity, &rid, seq, prev_hash);
+        let unit = verified_unit_for_recording(&identity, &rid, seq, prev_hash);
         prev_hash = Some(unit.data.signature_hash());
         match crucible.process(unit) {
             Ok(Some(_recording)) => {
@@ -105,7 +72,7 @@ fn amalgam_flush_all_returns_partial() {
 
     let mut prev_hash = None;
     for seq in 0..5u32 {
-        let unit = make_verified_unit(&identity, &rid, seq, prev_hash);
+        let unit = verified_unit_for_recording(&identity, &rid, seq, prev_hash);
         prev_hash = Some(unit.data.signature_hash());
         let result = crucible.process(unit);
         assert!(
@@ -127,12 +94,12 @@ fn amalgam_rejects_sequence_conflict() {
     let mut crucible = Crucible::new(RecordingAmalgam, Duration::from_secs(1), 1000);
 
     // First envelope at seq 0 to establish the recording
-    let unit_0 = make_verified_unit(&identity, &rid, 0, None);
+    let unit_0 = verified_unit_for_recording(&identity, &rid, 0, None);
     let hash_0 = unit_0.data.signature_hash();
     crucible.process(unit_0).unwrap();
 
     // First envelope at seq 5
-    let unit_a = make_verified_unit(&identity, &rid, 5, Some(hash_0));
+    let unit_a = verified_unit_for_recording(&identity, &rid, 5, Some(hash_0));
     let hash_a = unit_a.data.signature_hash();
     crucible.process(unit_a).unwrap();
 
@@ -143,7 +110,7 @@ fn amalgam_rejects_sequence_conflict() {
         fps: Fps::new(30),
         recording_id: rid.clone(),
         payload: DataPayload::Clear(vec![0xFF, 0xFF, 0xFF]),
-        lens_metrics: ForensicMetrics::default(),
+        lens_metrics: phalanx_test_fixtures::metrics::forensic_metrics_synthetic(),
     });
     let env_b = WitnessEnvelope::sign_envelope(
         evidence_b,
@@ -172,7 +139,7 @@ fn amalgam_handover_transfers_ownership() {
     // DID-A frames: seq 0, 1, 2
     let mut prev_hash = None;
     for seq in 0..3u32 {
-        let unit = make_verified_unit(&identity_a, &rid, seq, prev_hash);
+        let unit = verified_unit_for_recording(&identity_a, &rid, seq, prev_hash);
         prev_hash = Some(unit.data.signature_hash());
         crucible.process(unit).unwrap();
     }
@@ -200,7 +167,7 @@ fn amalgam_handover_transfers_ownership() {
 
     // DID-B frames: seq 4, 5, 6
     for seq in 4..7u32 {
-        let unit = make_verified_unit(&identity_b, &rid, seq, prev_hash);
+        let unit = verified_unit_for_recording(&identity_b, &rid, seq, prev_hash);
         prev_hash = Some(unit.data.signature_hash());
         let result = crucible.process(unit);
         assert!(
@@ -223,7 +190,7 @@ fn amalgam_freeze_thaw_continues_ingestion() {
     // Ingest 3 envelopes
     let mut prev_hash = None;
     for seq in 0..3u32 {
-        let unit = make_verified_unit(&identity, &rid, seq, prev_hash);
+        let unit = verified_unit_for_recording(&identity, &rid, seq, prev_hash);
         prev_hash = Some(unit.data.signature_hash());
         crucible.process(unit).unwrap();
     }
@@ -236,7 +203,7 @@ fn amalgam_freeze_thaw_continues_ingestion() {
 
     // Continue ingestion from seq 3
     for seq in 3..6u32 {
-        let unit = make_verified_unit(&identity, &rid, seq, prev_hash);
+        let unit = verified_unit_for_recording(&identity, &rid, seq, prev_hash);
         prev_hash = Some(unit.data.signature_hash());
         restored.process(unit).unwrap();
     }
@@ -254,14 +221,14 @@ fn amalgam_capacity_exhausted() {
     // Fill 2 recording slots
     let rid_1 = RecordingId::new("cap_1");
     let rid_2 = RecordingId::new("cap_2");
-    let unit_1 = make_verified_unit(&identity, &rid_1, 0, None);
-    let unit_2 = make_verified_unit(&identity, &rid_2, 0, None);
+    let unit_1 = verified_unit_for_recording(&identity, &rid_1, 0, None);
+    let unit_2 = verified_unit_for_recording(&identity, &rid_2, 0, None);
     crucible.process(unit_1).unwrap();
     crucible.process(unit_2).unwrap();
 
     // 3rd recording should fail
     let rid_3 = RecordingId::new("cap_3");
-    let unit_3 = make_verified_unit(&identity, &rid_3, 0, None);
+    let unit_3 = verified_unit_for_recording(&identity, &rid_3, 0, None);
     let result = crucible.process(unit_3);
     assert!(result.is_err(), "Should reject when capacity exhausted");
 }
@@ -272,7 +239,7 @@ fn amalgam_capacity_exhausted() {
 fn integrity_gate_accepts_valid_envelope() {
     let identity = test_identity();
     let rid = RecordingId::new("integrity_ok");
-    let env = sign_test_envelope(&identity, &rid, 0, None);
+    let env = witness_envelope_for_recording(&identity, &rid, 0, None);
     let clock = SystemClock;
 
     let result = env.check_integrity(&identity.network_id, &clock, Duration::from_secs(30), None);
@@ -283,7 +250,7 @@ fn integrity_gate_accepts_valid_envelope() {
 fn integrity_gate_rejects_tampered_signature() {
     let identity = test_identity();
     let rid = RecordingId::new("tamper_test");
-    let mut env = sign_test_envelope(&identity, &rid, 0, None);
+    let mut env = witness_envelope_for_recording(&identity, &rid, 0, None);
 
     // Flip one byte in signature
     if let Some(byte) = env.witness_signature.first_mut() {
@@ -303,7 +270,7 @@ fn integrity_gate_rejects_stale_timestamp() {
     // Create evidence with old timestamp (1 hour ago)
     let old_time =
         PhalanxTimestamp::from_millis(SystemClock.now().as_u64().saturating_sub(3_600_000));
-    let evidence = make_video_evidence(&rid, 0, old_time);
+    let evidence = video_evidence_for_recording(&rid, 0, old_time);
     let env =
         WitnessEnvelope::sign_envelope(evidence, &identity, identity.network_id.clone(), None)
             .expect("sign should not fail");
@@ -322,7 +289,7 @@ fn integrity_gate_rejects_stale_timestamp() {
 fn promotion_gate_full_pipeline() {
     let identity = test_identity();
     let rid = RecordingId::new("promote_test");
-    let env = sign_test_envelope(&identity, &rid, 0, None);
+    let env = witness_envelope_for_recording(&identity, &rid, 0, None);
     let unit = ForensicUnit::<WitnessEnvelope, Unverified>::new(env);
 
     let clock = SystemClock;
@@ -358,7 +325,7 @@ fn unmarshal_truncated_payload_fails() {
     // Attack: network truncation
     let identity = test_identity();
     let rid = RecordingId::new("truncate_test");
-    let env = sign_test_envelope(&identity, &rid, 0, None);
+    let env = witness_envelope_for_recording(&identity, &rid, 0, None);
 
     let serialized = postcard::to_allocvec(&env).expect("serialize should not fail");
     let truncated = &serialized[..serialized.len() / 2];
@@ -374,7 +341,7 @@ fn unmarshal_truncated_payload_fails() {
 fn unmarshal_valid_roundtrip() {
     let identity = test_identity();
     let rid = RecordingId::new("roundtrip_test");
-    let env = sign_test_envelope(&identity, &rid, 0, None);
+    let env = witness_envelope_for_recording(&identity, &rid, 0, None);
 
     let serialized = postcard::to_allocvec(&env).expect("serialize should not fail");
     let recovered: WitnessEnvelope =
@@ -391,7 +358,7 @@ fn unmarshal_valid_roundtrip() {
 fn zero_length_signature_rejected() {
     let identity = test_identity();
     let rid = RecordingId::new("empty_sig_test");
-    let mut env = sign_test_envelope(&identity, &rid, 0, None);
+    let mut env = witness_envelope_for_recording(&identity, &rid, 0, None);
 
     // Zero out the signature
     env.witness_signature = vec![];
@@ -410,7 +377,7 @@ fn max_sequence_id_no_overflow() {
     let rid = RecordingId::new("overflow_test");
     let mut crucible = Crucible::new(RecordingAmalgam, Duration::from_secs(1), 1000);
 
-    let unit = make_verified_unit(&identity, &rid, u32::MAX, None);
+    let unit = verified_unit_for_recording(&identity, &rid, u32::MAX, None);
     let result = crucible.process(unit);
     // Should not panic — either Ok or Err is acceptable, just no panic
     let _ = result;
@@ -457,7 +424,7 @@ impl phalanx_proto::storage::TransientJournal for MockJournal {
 async fn reassembler_ingest_chunk_assembles_envelope() {
     let identity = test_identity();
     let rid = RecordingId::new("reassemble_test");
-    let env = sign_test_envelope(&identity, &rid, 0, None);
+    let env = witness_envelope_for_recording(&identity, &rid, 0, None);
 
     // Serialize the envelope, then fountain-encode it
     let serialized = postcard::to_allocvec(&env).expect("serialize");
@@ -517,7 +484,7 @@ async fn reassembler_per_peer_quota_enforcement() {
             fps: Fps::new(30),
             recording_id: rid,
             payload: DataPayload::Clear(vec![0xAB; 4096]), // Large payload → many chunks
-            lens_metrics: ForensicMetrics::default(),
+            lens_metrics: phalanx_test_fixtures::metrics::forensic_metrics_synthetic(),
         });
         let env = WitnessEnvelope::sign_envelope(
             large_evidence,
@@ -569,7 +536,7 @@ async fn reassembler_per_peer_quota_enforcement() {
 async fn reassembler_stale_context_eviction() {
     let identity = test_identity();
     let rid = RecordingId::new("stale_evict_test");
-    let env = sign_test_envelope(&identity, &rid, 0, None);
+    let env = witness_envelope_for_recording(&identity, &rid, 0, None);
 
     // Create fountain chunks with small symbol size to get multiple chunks
     let serialized = postcard::to_allocvec(&env).expect("serialize");
@@ -639,7 +606,7 @@ fn decrypt_wrong_key_fails() {
 fn sign_verify_tampered_envelope() {
     let identity = test_identity();
     let rid = RecordingId::new("verify_test");
-    let env = sign_test_envelope(&identity, &rid, 0, None);
+    let env = witness_envelope_for_recording(&identity, &rid, 0, None);
 
     // Verify original is valid
     assert!(env.verify_envelope(), "Original envelope should verify");

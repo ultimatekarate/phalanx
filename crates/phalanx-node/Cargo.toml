@@ -62,5 +62,8 @@ c2pa = { version = "0.78.0", default-features = false, features = ["rust_native_
 # Stability analysis (optional)
 nalgebra = { version = "0.33", optional = true }
 
+[dev-dependencies]
+phalanx-test-fixtures = { workspace = true }
+
 [features]
 stability-analysis = ["dep:nalgebra"]

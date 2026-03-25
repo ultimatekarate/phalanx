@@ -59,6 +59,7 @@ This document establishes the "Linguistic Model" of Phalanx. All code must be pa
 5. **NEVER** use mutex or RwLock unless it is absolutely necessary. Treat network deadlocks as a conflict of tense.  
 6. **ALWAYS** ensure subject-verb agreement: a Noun constructed for consumption by a Verb must satisfy that Verb's preconditions. Temporal Nouns must agree with temporal Verbs. Cryptographic Nouns must agree with verification Verbs.
 7. **NEVER** construct test Nouns with fixed values when the consumption path includes a Verb that validates against live state. Use the same source the Verb uses.
+8. **NEVER** add `phalanx-test-fixtures` as a production `[dependency]`. The Phrasebook exists only in dev-dependency graphs. If a fixture is needed at runtime, promote the construction logic to its owning crate as a semantic constructor.
 
 ---
 
@@ -93,3 +94,19 @@ The prelude is the public vocabulary of a crate — the set of names that every 
 - Only types that most consumers need belong in the prelude. Core evidence types, identity types, and error types qualify. Persistence contracts, scheduling types, and operational state do not.
 - Adding a type to the prelude is a deliberate act. It increases the default cognitive load for every consumer of the crate.
 - When in doubt, require direct import. A consumer who needs a specialized type can import it from the defining module. A consumer who doesn't need it should never see it.
+
+---
+
+## IX. THE PHRASEBOOK (phalanx-test-fixtures)
+
+**Role:** Pre-composed Test Sentences. Construction knowledge encapsulation.
+**Constraint:** Dev-dependency only. No IO. No new Verbs. No new domain types.
+
+A Phrasebook composes Dictionary Nouns with Laboratory Verbs to produce synthetic test instances. It exists because tests in the Hands should not need to know the Laboratory's validation preconditions in order to construct valid Nouns.
+
+* May depend on the Dictionary (phalanx-proto) and the Laboratory (phalanx-forensics).
+* Must NOT depend on the Hands (phalanx-node, phalanx-transport).
+* Must NOT introduce domain types — it only constructs existing ones.
+* Must NOT introduce Verbs — it only calls existing ones.
+* Must appear only in `[dev-dependencies]`, never in `[dependencies]`.
+* Must self-test: fixtures that claim to pass a Laboratory Verb must prove it.
