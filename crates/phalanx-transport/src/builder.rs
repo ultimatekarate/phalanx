@@ -1,4 +1,5 @@
 use crate::builder::kad::store::RecordStore;
+use crate::counting::{CountingMuxer, IoCounters};
 use futures::future::Either;
 use libp2p::{
     autonat, connection_limits, core::upgrade::Version, dcutr, gossipsub, identify,
@@ -28,15 +29,21 @@ pub struct TransportConfig {
 /// (WiFi → cellular) is handled transparently by the protocol.
 pub fn build_quic_transport(
     local_key: &Keypair,
+    counters: &IoCounters,
 ) -> Result<
     libp2p::core::transport::Boxed<(PeerId, libp2p::core::muxing::StreamMuxerBox)>,
     Box<dyn Error>,
 > {
     let quic_config = libp2p::quic::Config::new(local_key);
     let transport = libp2p::quic::tokio::Transport::new(quic_config);
+    let counters = counters.clone();
 
     Ok(transport
-        .map(|(peer_id, muxer), _| (peer_id, libp2p::core::muxing::StreamMuxerBox::new(muxer)))
+        .map(move |(peer_id, muxer), _| {
+            let inner = libp2p::core::muxing::StreamMuxerBox::new(muxer);
+            let counting = CountingMuxer::wrap(inner, &counters);
+            (peer_id, libp2p::core::muxing::StreamMuxerBox::new(counting))
+        })
         .boxed())
 }
 
@@ -47,6 +54,7 @@ pub fn build_quic_transport(
 pub fn build_tcp_fallback(
     local_key: &Keypair,
     psk: Option<pnet::PreSharedKey>,
+    counters: &IoCounters,
 ) -> Result<
     libp2p::core::transport::Boxed<(PeerId, libp2p::core::muxing::StreamMuxerBox)>,
     Box<dyn Error>,
@@ -61,6 +69,7 @@ pub fn build_tcp_fallback(
     type RawStream = libp2p::tcp::tokio::TcpStream;
     type EncryptedStream = libp2p::pnet::PnetOutput<RawStream>;
 
+    let counters = counters.clone();
     let transport = if let Some(key) = psk {
         let pnet_config = pnet::PnetConfig::new(key);
         dns_transport
@@ -70,6 +79,11 @@ pub fn build_tcp_fallback(
             .authenticate(noise_config)
             .multiplex(yamux_config)
             .timeout(Duration::from_secs(20))
+            .map(move |(peer_id, muxer), _| {
+                let boxed = libp2p::core::muxing::StreamMuxerBox::new(muxer);
+                let counting = CountingMuxer::wrap(boxed, &counters);
+                (peer_id, libp2p::core::muxing::StreamMuxerBox::new(counting))
+            })
             .boxed()
     } else {
         dns_transport
@@ -78,6 +92,11 @@ pub fn build_tcp_fallback(
             .authenticate(noise_config)
             .multiplex(yamux_config)
             .timeout(Duration::from_secs(20))
+            .map(move |(peer_id, muxer), _| {
+                let boxed = libp2p::core::muxing::StreamMuxerBox::new(muxer);
+                let counting = CountingMuxer::wrap(boxed, &counters);
+                (peer_id, libp2p::core::muxing::StreamMuxerBox::new(counting))
+            })
             .boxed()
     };
 

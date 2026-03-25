@@ -15,6 +15,7 @@ use phalanx_proto::identity::PhalanxIdentity;
 use crate::adapters::libp2p::{Libp2pAdapter, Libp2pEgress, Libp2pIngress};
 use crate::builder::{build_behaviour, build_quic_transport, build_tcp_fallback};
 use crate::config::MeshTransportConfig;
+use crate::counting::IoCounters;
 use crate::identity_ext::Libp2pExt;
 use phalanx_proto::network::TransportError;
 
@@ -87,11 +88,14 @@ where
     // ── Relay ────────────────────────────────────────────────
     let (relay_transport, relay_client) = relay::client::new(local_peer_id);
 
+    // ── I/O counters ──────────────────────────────────────────
+    let io_counters = IoCounters::new();
+
     // ── Transport composition ────────────────────────────────
-    let quic_transport =
-        build_quic_transport(&local_key).map_err(|e| TransportError::Network(e.to_string()))?;
-    let tcp_fallback =
-        build_tcp_fallback(&local_key, psk).map_err(|e| TransportError::Network(e.to_string()))?;
+    let quic_transport = build_quic_transport(&local_key, &io_counters)
+        .map_err(|e| TransportError::Network(e.to_string()))?;
+    let tcp_fallback = build_tcp_fallback(&local_key, psk, &io_counters)
+        .map_err(|e| TransportError::Network(e.to_string()))?;
 
     let behaviour = build_behaviour(
         &local_key,
@@ -120,14 +124,22 @@ where
         .map_err(|e| TransportError::Network(format!("QUIC transport: {e}")))?
         .with_other_transport(|_key| tcp_fallback)
         .map_err(|e| TransportError::Network(format!("TCP transport: {e}")))?
-        .with_other_transport(|key| {
-            let noise_config = noise::Config::new(key)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            let yamux_config = yamux::Config::default();
-            Ok(relay_transport
-                .upgrade(Version::V1)
-                .authenticate(noise_config)
-                .multiplex(yamux_config))
+        .with_other_transport({
+            let relay_counters = io_counters.clone();
+            move |key| {
+                let noise_config = noise::Config::new(key)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                let yamux_config = yamux::Config::default();
+                Ok(relay_transport
+                    .upgrade(Version::V1)
+                    .authenticate(noise_config)
+                    .multiplex(yamux_config)
+                    .map(move |(peer_id, muxer), _| {
+                        let boxed = libp2p::core::muxing::StreamMuxerBox::new(muxer);
+                        let counting = crate::counting::CountingMuxer::wrap(boxed, &relay_counters);
+                        (peer_id, libp2p::core::muxing::StreamMuxerBox::new(counting))
+                    }))
+            }
         })
         .map_err(|e| TransportError::Network(format!("Relay transport: {e}")))?
         .with_behaviour(|_| behaviour)
@@ -172,7 +184,7 @@ where
     }
 
     // ── Adapter creation ─────────────────────────────────────
-    let (ingress, egress) = Libp2pAdapter::from_swarm(swarm, config.adapter.clone());
+    let (ingress, egress) = Libp2pAdapter::from_swarm(swarm, config.adapter.clone(), io_counters);
 
     Ok((ingress, egress))
 }

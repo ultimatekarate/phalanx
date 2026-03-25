@@ -19,6 +19,7 @@ pub mod behaviour;
 pub mod builder;
 pub mod codec;
 pub mod config;
+pub mod counting;
 pub mod dht;
 pub mod events;
 pub mod factory;
