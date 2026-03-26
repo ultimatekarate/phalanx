@@ -28,11 +28,13 @@ pub fn ed_to_x25519_sk(ed_key: &SigningKey) -> Result<x25519_dalek::StaticSecret
 
     // SHA-512 output is 64 bytes; slicing [0..32] is always valid.
     #[allow(clippy::indexing_slicing)]
-    let x25519_bytes: [u8; 32] = hash_result[0..32]
+    let mut x25519_bytes: [u8; 32] = hash_result[0..32]
         .try_into()
         .map_err(|_| CryptoError::EncodingError("Scalar derivation failed".into()))?;
 
-    Ok(x25519_dalek::StaticSecret::from(x25519_bytes))
+    let secret = x25519_dalek::StaticSecret::from(x25519_bytes);
+    zeroize::Zeroize::zeroize(&mut x25519_bytes);
+    Ok(secret)
 }
 
 /// Resolves a `did:key:z...` DID to an Ed25519 VerifyingKey.

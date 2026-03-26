@@ -18,6 +18,7 @@ use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
 use phalanx_node::playback::sink::{ArtifactSink, VideoPlayerSink};
+use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{
     DataPayload, EnvelopeState, Evidence, ForensicMetrics, StorageSequence, VideoShard,
     WitnessEnvelope,
@@ -493,4 +494,251 @@ async fn test_artifact_sink_empty_finalize() {
 
     let contents = tokio::fs::read(&output_path).await.unwrap();
     assert!(contents.is_empty());
+}
+
+/// Round-trip test: compress → encrypt → ingest → playback (decode_payload decrypts + decompresses).
+/// This test would have caught the original split-brain bug where playback returned raw ciphertext.
+#[tokio::test]
+async fn test_encrypted_playback_round_trip() {
+    use phalanx_forensics::reassembler::compress_payload;
+    use phalanx_forensics::PayloadCipher;
+
+    let temp_dir = tempdir().expect("Failed to create temporary directory");
+    let vault_path = temp_dir.path().to_string_lossy().to_string();
+
+    let (identity, _) = PhalanxIdentity::generate().unwrap();
+    let config = NodeConfig::default();
+
+    let (storage_tx, mut storage_rx) = mpsc::channel::<StorageCommand>(100);
+    let (disc_tx, _disc_rx) = mpsc::channel(1);
+    let (ui_tx, mut ui_rx) = mpsc::channel(10);
+
+    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
+    let session_key = phalanx_forensics::generate_session_key();
+
+    let identity_clone = identity.clone();
+    tokio::spawn(async move {
+        let mut guardian = Guardian::new(
+            &vault_path,
+            &config,
+            identity_clone.did,
+            Arc::new(SystemClock),
+            vault_key,
+        );
+        while let Some(cmd) = storage_rx.recv().await {
+            match cmd {
+                StorageCommand::GetShard {
+                    recording_id,
+                    sequence_id,
+                    reply_to,
+                } => {
+                    let _ = reply_to.send(guardian.get_shard(&recording_id, sequence_id));
+                }
+                StorageCommand::IngestEnvelope {
+                    state,
+                    reply_to,
+                    ttl,
+                } => {
+                    let result = guardian.ingest_envelope(state, ttl).await;
+                    let _ = reply_to.send(result);
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let recording_id = RecordingId::new("v_encrypted_test");
+    let original_data = b"JPEG frame payload for encryption test";
+
+    // Production pipeline: compress → encrypt
+    let compressed = compress_payload(original_data);
+    let mut payload = DataPayload::Compressed(compressed);
+    payload
+        .apply_encryption(&session_key)
+        .expect("Encryption must succeed");
+
+    // Payload is now DataPayload::Encrypted { nonce, ciphertext }
+    assert!(matches!(payload, DataPayload::Encrypted { .. }));
+
+    let shard = VideoShard {
+        timestamp: SystemClock.now(),
+        sequence_id: StorageSequence(1),
+        fps: Fps::new(30),
+        recording_id: recording_id.clone(),
+        payload,
+        lens_metrics: ForensicMetrics::default(),
+    };
+
+    let envelope = WitnessEnvelope::sign_envelope(
+        Evidence::Video(shard),
+        &identity,
+        NetworkId::random(),
+        None,
+    )
+    .unwrap();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    storage_tx
+        .send(StorageCommand::IngestEnvelope {
+            state: EnvelopeState::Intact(envelope),
+            reply_to: tx,
+            ttl: Duration::from_secs(1),
+        })
+        .await
+        .unwrap();
+    rx.await.unwrap().unwrap();
+
+    // Create coordinator WITH the decryption key
+    let video_sink = VideoPlayerSink::new(ui_tx);
+    let (audio_ui_tx, _audio_ui_rx) = mpsc::channel(10);
+    let audio_sink = VideoPlayerSink::new(audio_ui_tx);
+    let (egress_tx, _egress_rx) = mpsc::channel::<EgressCommand>(10);
+    let (_providers_tx, providers_rx) = mpsc::channel(1);
+
+    let mut coordinator = PlaybackCoordinator::new(
+        storage_tx.clone(),
+        egress_tx,
+        Some(session_key),
+        video_sink,
+        audio_sink,
+        disc_tx,
+        providers_rx,
+        Arc::new(identity.clone()),
+    );
+
+    let v_id_clone = recording_id.clone();
+    let _handle = tokio::spawn(async move {
+        coordinator.run(v_id_clone).await.unwrap();
+    });
+
+    // The coordinator should decrypt + decompress and deliver the original cleartext
+    let frame = ui_rx.recv().await.expect("Should receive decrypted frame");
+    assert_eq!(
+        frame, original_data,
+        "Decrypted playback must match original cleartext"
+    );
+}
+
+/// Verify that playback with the wrong key produces an error, not raw ciphertext.
+#[tokio::test]
+async fn test_encrypted_playback_wrong_key_fails() {
+    use phalanx_forensics::reassembler::compress_payload;
+    use phalanx_forensics::PayloadCipher;
+
+    let temp_dir = tempdir().expect("Failed to create temporary directory");
+    let vault_path = temp_dir.path().to_string_lossy().to_string();
+
+    let (identity, _) = PhalanxIdentity::generate().unwrap();
+    let config = NodeConfig::default();
+
+    let (storage_tx, mut storage_rx) = mpsc::channel::<StorageCommand>(100);
+    let (disc_tx, _disc_rx) = mpsc::channel(1);
+    let (ui_tx, mut ui_rx) = mpsc::channel(10);
+
+    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
+    let correct_key = phalanx_forensics::generate_session_key();
+    let wrong_key = SymmetricKey([0xBB; 32]);
+
+    let identity_clone = identity.clone();
+    tokio::spawn(async move {
+        let mut guardian = Guardian::new(
+            &vault_path,
+            &config,
+            identity_clone.did,
+            Arc::new(SystemClock),
+            vault_key,
+        );
+        while let Some(cmd) = storage_rx.recv().await {
+            match cmd {
+                StorageCommand::GetShard {
+                    recording_id,
+                    sequence_id,
+                    reply_to,
+                } => {
+                    let _ = reply_to.send(guardian.get_shard(&recording_id, sequence_id));
+                }
+                StorageCommand::IngestEnvelope {
+                    state,
+                    reply_to,
+                    ttl,
+                } => {
+                    let result = guardian.ingest_envelope(state, ttl).await;
+                    let _ = reply_to.send(result);
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let recording_id = RecordingId::new("v_wrong_key_test");
+    let compressed = compress_payload(b"secret data");
+    let mut payload = DataPayload::Compressed(compressed);
+    payload
+        .apply_encryption(&correct_key)
+        .expect("Encryption must succeed");
+
+    let shard = VideoShard {
+        timestamp: SystemClock.now(),
+        sequence_id: StorageSequence(1),
+        fps: Fps::new(30),
+        recording_id: recording_id.clone(),
+        payload,
+        lens_metrics: ForensicMetrics::default(),
+    };
+
+    let envelope = WitnessEnvelope::sign_envelope(
+        Evidence::Video(shard),
+        &identity,
+        NetworkId::random(),
+        None,
+    )
+    .unwrap();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    storage_tx
+        .send(StorageCommand::IngestEnvelope {
+            state: EnvelopeState::Intact(envelope),
+            reply_to: tx,
+            ttl: Duration::from_secs(1),
+        })
+        .await
+        .unwrap();
+    rx.await.unwrap().unwrap();
+
+    // Create coordinator with the WRONG key
+    let video_sink = VideoPlayerSink::new(ui_tx);
+    let (audio_ui_tx, _audio_ui_rx) = mpsc::channel(10);
+    let audio_sink = VideoPlayerSink::new(audio_ui_tx);
+    let (egress_tx, _egress_rx) = mpsc::channel::<EgressCommand>(10);
+    let (_providers_tx, providers_rx) = mpsc::channel(1);
+
+    let mut coordinator = PlaybackCoordinator::new(
+        storage_tx.clone(),
+        egress_tx,
+        Some(wrong_key),
+        video_sink,
+        audio_sink,
+        disc_tx,
+        providers_rx,
+        Arc::new(identity.clone()),
+    );
+
+    let v_id_clone = recording_id.clone();
+    let handle = tokio::spawn(async move { coordinator.run(v_id_clone).await });
+
+    // With the wrong key, decode_payload should return an AEAD error.
+    // The coordinator should NOT deliver raw ciphertext to the sink.
+    let result = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    match result {
+        Ok(Ok(Err(_))) => {} // Expected: run() returns a decode error
+        Ok(Err(_)) => panic!("Task panicked"),
+        Ok(Ok(Ok(_))) => panic!("Coordinator should not succeed with wrong key"),
+        Err(_) => {
+            // Timeout — check that no frame was delivered
+            assert!(
+                ui_rx.try_recv().is_err(),
+                "Wrong key must NOT deliver ciphertext to the sink"
+            );
+        }
+    }
 }
