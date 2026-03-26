@@ -27,6 +27,8 @@ jobs:
 
       - name: Build iOS Static Library (Release)
         # We build for physical iPhones (aarch64)
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "15.0"
         run: cargo build --release --target aarch64-apple-ios -p phalanx-ffi
 
       - name: Upload iOS Artifact
