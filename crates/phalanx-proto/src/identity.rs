@@ -1,5 +1,5 @@
 use ed25519_dalek::SigningKey;
-use rand_core::OsRng;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -176,7 +176,7 @@ impl NetworkId {
     /// Generates a random NetworkId for testing.
     pub fn random() -> Self {
         use rand::Rng;
-        let bytes: [u8; 32] = rand::rng().random();
+        let bytes: [u8; 32] = rand::thread_rng().gen();
         Self(bs58::encode(bytes).into_string())
     }
 }
