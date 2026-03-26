@@ -365,8 +365,6 @@ impl<I: IngressPort> MeshSentinel<I> {
                 }
 
                 // Poll local mesh transport for events (BLE, WiFi Direct).
-                // When the local mesh is available, events are routed through the
-                // same ingestion pipeline as network events.
                 Some(local_event) = async {
                     match self.local_mesh.as_mut() {
                         Some(mesh) if mesh.is_available() => mesh.next_local_event().await,
@@ -377,59 +375,23 @@ impl<I: IngressPort> MeshSentinel<I> {
                     self.handle_network_event(local_event).await
                 }
 
-                // DHT: StorageActor persisted a shard — announce as provider.
                 Some(recording_id) = self.commit_notify_rx.recv() => {
-                    if let Err(e) = self.egress_tx
-                        .send(EgressCommand::AnnounceRecording(recording_id))
-                        .await
-                    {
-                        tracing::warn!("Failed to announce recording on DHT — egress channel closed: {e}");
-                    }
-                    false
+                    self.handle_commit_notification(recording_id).await
                 }
 
-                // DHT: PlaybackCoordinator needs a missing shard — find providers.
                 Some((recording_id, _sequence_id)) = self.discovery_rx.recv() => {
-                    if let Err(e) = self.egress_tx
-                        .send(EgressCommand::FindProviders(recording_id))
-                        .await
-                    {
-                        tracing::warn!("Failed to find providers — egress channel closed: {e}");
-                    }
-                    false
+                    self.handle_discovery_query(recording_id).await
                 }
 
-                // Lifecycle events from mobile OS (foreground/background).
-                // When the app transitions to foreground, immediately recalculate
-                // PowerState and update vitals — don't wait for the polling tick.
-                // This ensures capture resumes within milliseconds of foregrounding.
-                // Desktop: lifecycle_rx is None, so this arm blocks via pending().
                 Some(lifecycle_event) = async {
                     match self.lifecycle_rx.as_mut() {
                         Some(rx) => rx.recv().await,
                         None => std::future::pending().await,
                     }
                 } => {
-                    match lifecycle_event {
-                        LifecycleEvent::Foregrounded => {
-                            tracing::info!(
-                                event = "lifecycle_foregrounded",
-                                "App foregrounded — immediate PowerState recalculation"
-                            );
-                            self.system_governor.update_vitals();
-                        }
-                        LifecycleEvent::Backgrounded => {
-                            tracing::info!(
-                                event = "lifecycle_backgrounded",
-                                "App backgrounded — PowerState will transition to Dormant"
-                            );
-                            self.system_governor.update_vitals();
-                        }
-                    }
-                    false // Never shutdown from lifecycle events
+                    self.handle_lifecycle_event(lifecycle_event)
                 }
 
-                // Eclipse remediation tick: anchor promotion, eclipse fingerprint, re-bootstrap check.
                 _ = topology_tick.tick() => {
                     self.topology_maintenance_tick().await;
                     false
@@ -441,6 +403,53 @@ impl<I: IngressPort> MeshSentinel<I> {
             }
         }
         Ok(())
+    }
+
+    /// DHT: StorageActor persisted a shard — announce as provider.
+    async fn handle_commit_notification(&mut self, recording_id: RecordingId) -> bool {
+        if let Err(e) = self
+            .egress_tx
+            .send(EgressCommand::AnnounceRecording(recording_id))
+            .await
+        {
+            tracing::warn!("Failed to announce recording on DHT — egress channel closed: {e}");
+        }
+        false
+    }
+
+    /// DHT: PlaybackCoordinator needs a missing shard — find providers.
+    async fn handle_discovery_query(&mut self, recording_id: RecordingId) -> bool {
+        if let Err(e) = self
+            .egress_tx
+            .send(EgressCommand::FindProviders(recording_id))
+            .await
+        {
+            tracing::warn!("Failed to find providers — egress channel closed: {e}");
+        }
+        false
+    }
+
+    /// Lifecycle events from mobile OS (foreground/background).
+    /// Immediately recalculates PowerState so capture resumes within milliseconds.
+    /// Desktop: lifecycle_rx is None, so this arm blocks via pending().
+    fn handle_lifecycle_event(&self, event: LifecycleEvent) -> bool {
+        match event {
+            LifecycleEvent::Foregrounded => {
+                tracing::info!(
+                    event = "lifecycle_foregrounded",
+                    "App foregrounded — immediate PowerState recalculation"
+                );
+                self.system_governor.update_vitals();
+            }
+            LifecycleEvent::Backgrounded => {
+                tracing::info!(
+                    event = "lifecycle_backgrounded",
+                    "App backgrounded — PowerState will transition to Dormant"
+                );
+                self.system_governor.update_vitals();
+            }
+        }
+        false // Never shutdown from lifecycle events
     }
 
     /// Unified event handler for both network ingress and local mesh events.

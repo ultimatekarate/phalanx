@@ -81,69 +81,99 @@ impl<E: EgressPort> EgressActor<E> {
                     self.process_pending().await;
                 }
                 Some(cmd) = self.rx.recv() => {
-                    match cmd {
-                        EgressCommand::Dispatch { channel_id, response } => {
-                            self.dispatch(channel_id, response).await;
-                        }
-                        EgressCommand::DrainForSalvage { reply_to } => {
-                            let _ = reply_to.send(self.pending.drain(..).collect());
-                            break;
-                        }
-                        EgressCommand::AnnounceRecording(recording_id) => {
-                            // P7 FIX: Dedup DHT announces within a 30s window.
-                            // Prevents per-shard announce storms and post-partition spam.
-                            let now = Instant::now();
-                            if now.duration_since(self.last_announce_clear) > ANNOUNCE_DEDUP_WINDOW {
-                                self.announced.clear();
-                                self.last_announce_clear = now;
-                            }
-                            if !self.announced.insert(recording_id.clone()) {
-                                tracing::debug!(
-                                    recording = %recording_id,
-                                    "DHT: Skipping duplicate announce (dedup window)"
-                                );
-                                continue;
-                            }
-                            if let Err(e) = self.port.announce_recording(&recording_id).await {
-                                tracing::warn!(
-                                    recording = %recording_id,
-                                    error = %e,
-                                    "DHT: Failed to announce recording"
-                                );
-                            }
-                        }
-                        EgressCommand::FindProviders(recording_id) => {
-                            if let Err(e) = self.port.find_providers(&recording_id).await {
-                                tracing::warn!(
-                                    recording = %recording_id,
-                                    error = %e,
-                                    "DHT: Failed to query providers"
-                                );
-                            }
-                        }
-                        EgressCommand::RequestShards { target, request } => {
-                            if let Err(e) = self.port.send_request(&target, request).await {
-                                tracing::warn!(
-                                    peer = %target,
-                                    error = %e,
-                                    "DHT: Failed to send shard request"
-                                );
-                            }
-                        }
-                        EgressCommand::DisconnectPeer(peer) => {
-                            self.port.disconnect_peer(&peer).await;
-                        }
-                        EgressCommand::ReBootstrap(peers) => {
-                            if let Err(e) = self.port.rebootstrap(&peers).await {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Eclipse: Re-bootstrap failed"
-                                );
-                            }
-                        }
+                    if self.handle_command(cmd).await {
+                        break;
                     }
                 }
             }
+        }
+    }
+
+    // ── Command Handlers ────────────────────────────────────────────────
+
+    /// Dispatches a single egress command. Returns `true` if the run loop should exit.
+    #[allow(clippy::arithmetic_side_effects)] // Dedup window duration arithmetic.
+    async fn handle_command(&mut self, cmd: EgressCommand) -> bool {
+        match cmd {
+            EgressCommand::Dispatch {
+                channel_id,
+                response,
+            } => {
+                self.dispatch(channel_id, response).await;
+            }
+            EgressCommand::DrainForSalvage { reply_to } => {
+                let _ = reply_to.send(self.pending.drain(..).collect());
+                return true;
+            }
+            EgressCommand::AnnounceRecording(recording_id) => {
+                self.handle_announce(recording_id).await;
+            }
+            EgressCommand::FindProviders(recording_id) => {
+                self.handle_find_providers(recording_id).await;
+            }
+            EgressCommand::RequestShards { target, request } => {
+                self.handle_request_shards(target, request).await;
+            }
+            EgressCommand::DisconnectPeer(peer) => {
+                self.port.disconnect_peer(&peer).await;
+            }
+            EgressCommand::ReBootstrap(peers) => {
+                self.handle_rebootstrap(peers).await;
+            }
+        }
+        false
+    }
+
+    /// P7 FIX: Dedup DHT announces within a 30s window.
+    /// Prevents per-shard announce storms and post-partition spam.
+    async fn handle_announce(&mut self, recording_id: RecordingId) {
+        let now = Instant::now();
+        if now.duration_since(self.last_announce_clear) > ANNOUNCE_DEDUP_WINDOW {
+            self.announced.clear();
+            self.last_announce_clear = now;
+        }
+        if !self.announced.insert(recording_id.clone()) {
+            tracing::debug!(
+                recording = %recording_id,
+                "DHT: Skipping duplicate announce (dedup window)"
+            );
+            return;
+        }
+        if let Err(e) = self.port.announce_recording(&recording_id).await {
+            tracing::warn!(
+                recording = %recording_id,
+                error = %e,
+                "DHT: Failed to announce recording"
+            );
+        }
+    }
+
+    async fn handle_find_providers(&mut self, recording_id: RecordingId) {
+        if let Err(e) = self.port.find_providers(&recording_id).await {
+            tracing::warn!(
+                recording = %recording_id,
+                error = %e,
+                "DHT: Failed to query providers"
+            );
+        }
+    }
+
+    async fn handle_request_shards(&mut self, target: NetworkId, request: RecordingRequest) {
+        if let Err(e) = self.port.send_request(&target, request).await {
+            tracing::warn!(
+                peer = %target,
+                error = %e,
+                "DHT: Failed to send shard request"
+            );
+        }
+    }
+
+    async fn handle_rebootstrap(&mut self, peers: Vec<String>) {
+        if let Err(e) = self.port.rebootstrap(&peers).await {
+            tracing::warn!(
+                error = %e,
+                "Eclipse: Re-bootstrap failed"
+            );
         }
     }
 

@@ -141,39 +141,16 @@ impl<E: EgressPort> MediaEgressActor<E> {
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Sequence counter and timestamp arithmetic.
     async fn process_media_egress(&mut self, mut evidence: Evidence, is_video: bool) {
         let topic = match &evidence {
-            Evidence::Video(_) => &self.video_topic,
-            Evidence::Audio(_) => &self.audio_topic,
+            Evidence::Video(_) => self.video_topic.clone(),
+            Evidence::Audio(_) => self.audio_topic.clone(),
             _ => {
                 tracing::warn!("Unexpected evidence type for media egress");
                 return;
             }
         };
 
-        // LensGate: verify sensor provenance BEFORE encryption.
-        // Rejects synthetic/deepfake frames at the source.
-        if let Evidence::Video(ref v) = evidence {
-            if let Err(e) = v.lens_metrics.check_provenance(&self.lens_thresholds) {
-                tracing::error!(event = "lens_gate_local_rejection", error = %e);
-                return;
-            }
-        }
-
-        // Encrypt payload on the async worker thread (not the FFI capture thread).
-        // Encryption failure is fatal — plaintext evidence MUST NOT reach the mesh.
-        match &mut evidence {
-            Evidence::Video(v) => {
-                if let Err(e) = v.payload.apply_encryption(&self.vault_key) {
-                    tracing::error!("Video encryption failed — dropping shard to prevent plaintext broadcast: {e}");
-                    return;
-                }
-            }
-            Evidence::Audio(a) => {
-                if let Err(e) = a.payload.apply_encryption(&self.vault_key) {
-                    tracing::error!("Audio encryption failed — dropping shard to prevent plaintext broadcast: {e}");
-                    return;
-                }
-            }
-            _ => {}
+        if !self.gate_and_encrypt(&mut evidence) {
+            return;
         }
 
         let prev_hash = if is_video {
@@ -197,7 +174,6 @@ impl<E: EgressPort> MediaEgressActor<E> {
             self.audio_prev_hash = Some(new_hash);
         }
 
-        // Serialize the sealed envelope
         let envelope_bytes = match postcard::to_allocvec(&envelope) {
             Ok(data) => data,
             Err(e) => {
@@ -206,9 +182,6 @@ impl<E: EgressPort> MediaEgressActor<E> {
             }
         };
 
-        // Fountain-encode into ShardChunks.
-        // Each symbol is self-describing (12-byte OTI prefix) so the receiver
-        // can initialize the decoder from ANY received symbol.
         let shard_id = ShardId(self.next_shard_id);
         self.next_shard_id += 1;
 
@@ -229,9 +202,55 @@ impl<E: EgressPort> MediaEgressActor<E> {
             }
         };
 
-        // Publish each fountain symbol as a separate gossipsub message.
-        // The receiver's ingestion pipeline deserializes each as a ShardChunk
-        // and feeds it to the Reassembler's fountain decoder.
+        self.publish_fountain_symbols(&topic, shard_id, chunks, is_video)
+            .await;
+    }
+
+    // ── Media Egress Handlers ───────────────────────────────────────────
+
+    /// LensGate provenance check + AEAD encryption.
+    /// Returns `false` if the evidence must be dropped (provenance rejection or
+    /// encryption failure — plaintext MUST NOT reach the mesh).
+    fn gate_and_encrypt(&self, evidence: &mut Evidence) -> bool {
+        // LensGate: verify sensor provenance BEFORE encryption.
+        // Rejects synthetic/deepfake frames at the source.
+        if let Evidence::Video(ref v) = evidence {
+            if let Err(e) = v.lens_metrics.check_provenance(&self.lens_thresholds) {
+                tracing::error!(event = "lens_gate_local_rejection", error = %e);
+                return false;
+            }
+        }
+
+        // Encrypt payload on the async worker thread (not the FFI capture thread).
+        // Encryption failure is fatal — plaintext evidence MUST NOT reach the mesh.
+        match evidence {
+            Evidence::Video(v) => {
+                if let Err(e) = v.payload.apply_encryption(&self.vault_key) {
+                    tracing::error!("Video encryption failed — dropping shard to prevent plaintext broadcast: {e}");
+                    return false;
+                }
+            }
+            Evidence::Audio(a) => {
+                if let Err(e) = a.payload.apply_encryption(&self.vault_key) {
+                    tracing::error!("Audio encryption failed — dropping shard to prevent plaintext broadcast: {e}");
+                    return false;
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// Publish each fountain symbol as a separate gossipsub message.
+    /// Failed symbols are persisted to the WAL for retry.
+    #[allow(clippy::arithmetic_side_effects)] // Published counter increment.
+    async fn publish_fountain_symbols(
+        &mut self,
+        topic: &MeshTopic,
+        shard_id: ShardId,
+        chunks: Vec<phalanx_proto::evidence::ShardChunk>,
+        is_video: bool,
+    ) {
         let symbol_count = chunks.len();
         let mut published = 0;
         for chunk in chunks {
