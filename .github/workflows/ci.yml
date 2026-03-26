@@ -1,0 +1,52 @@
+name: CI — Lint, Test, Android
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Clippy (workspace)
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Test (workspace)
+        run: cargo test --workspace
+
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Locate NDK Toolchain
+        id: ndk
+        run: |
+          # GitHub runners pre-install the NDK at $ANDROID_NDK_HOME
+          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+          echo "toolchain=$TOOLCHAIN" >> "$GITHUB_OUTPUT"
+
+      - name: Build Android Static Library (Release)
+        env:
+          CC_aarch64_linux_android: ${{ steps.ndk.outputs.toolchain }}/bin/aarch64-linux-android24-clang
+          AR_aarch64_linux_android: ${{ steps.ndk.outputs.toolchain }}/bin/llvm-ar
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.ndk.outputs.toolchain }}/bin/aarch64-linux-android24-clang
+        run: cargo build --release --target aarch64-linux-android -p phalanx-ffi
+
+      - name: Upload Android Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: phalanx-android-lib
+          path: target/aarch64-linux-android/release/libphalanx_ffi.so
