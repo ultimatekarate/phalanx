@@ -38,38 +38,6 @@ impl HandoverJudge for HandoverProof {
     }
 }
 
-pub trait Decryptor {
-    fn reveal(&self, key: &SymmetricKey) -> Result<Vec<u8>, CryptoError>;
-}
-
-impl Decryptor for DataPayload {
-    fn reveal(&self, key: &SymmetricKey) -> Result<Vec<u8>, CryptoError> {
-        match self {
-            DataPayload::Encrypted { nonce, ciphertext } => {
-                // Initialize the cryptographic engine using the provided 32-byte key
-                let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
-
-                // Load the 24-byte extended nonce
-                let x_nonce = XNonce::from_slice(nonce);
-
-                // Perform Authenticated Decryption
-                // If the ciphertext was tampered with, this will safely fail.
-                let decrypted_bytes = cipher
-                    .decrypt(x_nonce, ciphertext.as_ref())
-                    .map_err(|_| CryptoError::DecryptionFailure)?;
-
-                Ok(decrypted_bytes)
-            }
-
-            // If the payload is already in the clear, just clone and return it
-            DataPayload::Clear(data) => Ok(data.clone()),
-
-            // Gaps and Compressed data cannot be decrypted directly via this trait
-            _ => Err(CryptoError::DecryptionFailure),
-        }
-    }
-}
-
 pub trait PayloadCipher {
     fn apply_encryption(&mut self, key: &SymmetricKey) -> Result<(), CryptoError>;
     fn reveal(&self, key: &SymmetricKey) -> Result<Vec<u8>, CryptoError>;
@@ -119,6 +87,45 @@ impl PayloadCipher for DataPayload {
             DataPayload::Clear(data) => Ok(data.clone()),
             _ => Err(CryptoError::DecryptionFailure),
         }
+    }
+}
+
+/// Decode a `DataPayload` into cleartext bytes (consuming).
+///
+/// This is the single canonical decode path for end-to-end consumers.
+/// Takes ownership of the payload — zero-copy on `Clear`, no clone.
+///
+/// - `Clear` → returned as-is (moved out)
+/// - `Encrypted` → XChaCha20-Poly1305 decrypt, then LZ4 decompress
+/// - `Compressed` → LZ4 decompress
+/// - `Missing` → error
+///
+/// The production pipeline is compress → encrypt, so encrypted payloads
+/// are always decompressed after decryption.
+///
+/// For borrow-based decryption without decompression (e.g., stronghold
+/// export which writes decrypted envelopes to disk), use `PayloadCipher::reveal()`.
+pub fn decode_payload(
+    payload: DataPayload,
+    key: Option<&SymmetricKey>,
+) -> Result<Vec<u8>, CryptoError> {
+    match payload {
+        DataPayload::Clear(data) => Ok(data),
+        DataPayload::Encrypted { nonce, ciphertext } => {
+            let key = key.ok_or(CryptoError::DecryptionFailure)?;
+            let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
+            let x_nonce = XNonce::from_slice(&nonce);
+
+            let decrypted = cipher
+                .decrypt(x_nonce, ciphertext.as_ref())
+                .map_err(|_| CryptoError::DecryptionFailure)?;
+
+            crate::reassembler::decompress_payload(&decrypted)
+                .map_err(|_| CryptoError::DecompressionFailure)
+        }
+        DataPayload::Compressed(data) => crate::reassembler::decompress_payload(&data)
+            .map_err(|_| CryptoError::DecompressionFailure),
+        DataPayload::Missing => Err(CryptoError::DecryptionFailure),
     }
 }
 

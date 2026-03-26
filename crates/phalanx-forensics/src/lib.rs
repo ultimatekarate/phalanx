@@ -26,7 +26,7 @@ pub mod storage {
 
 pub use crucible::{Crucible, Mold, RecordingAmalgam};
 pub use cryptography::{decrypt_bytes, encrypt_bytes, generate_session_key};
-pub use judge::{Decryptor, HandoverJudge, PayloadCipher};
+pub use judge::{decode_payload, HandoverJudge, PayloadCipher};
 pub use policy::TrafficGovernor;
 pub use policy::{
     BandwidthScale, ConnectionScale, DecayingIntegral, FinalizationScale, Homeostasis,
@@ -40,7 +40,7 @@ pub use trust::{PeerEvaluator, ReputationGate};
 pub mod prelude {
     pub use crate::crucible::{Crucible, Mold, RecordingAmalgam};
     pub use crate::cryptography::{decrypt_bytes, encrypt_bytes};
-    pub use crate::judge::{Decryptor, HandoverJudge, PayloadCipher};
+    pub use crate::judge::{decode_payload, HandoverJudge, PayloadCipher};
     pub use crate::policy::TrafficGovernor;
     pub use crate::reassembler::{Reassembler, ShardMold};
     // TransientJournal is now in phalanx_proto::storage (canonical location).

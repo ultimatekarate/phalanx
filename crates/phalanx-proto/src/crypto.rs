@@ -17,6 +17,8 @@ pub enum CryptoError {
     DidResolutionFailure,
     #[error("Encoding error: {0}")]
     EncodingError(String),
+    #[error("Decompression failure")]
+    DecompressionFailure,
 }
 
 /// M5 FIX: Removed Serialize/Deserialize to prevent accidental key leakage.

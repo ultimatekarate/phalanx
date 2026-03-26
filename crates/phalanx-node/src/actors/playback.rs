@@ -84,7 +84,6 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
             match shard_opt {
                 Some(envelope) => {
                     // Demux: extract payload by value — no clone needed.
-                    // Envelope is consumed; only the decoded bytes continue downstream.
                     let (payload, is_audio) = match envelope.evidence {
                         Evidence::Video(v) => (v.payload, false),
                         Evidence::Audio(a) => (a.payload, true),
@@ -94,24 +93,19 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                         }
                     };
 
+                    // Capture sequence for sink calls, then advance immediately.
+                    // If decode/verify/sink fails and run() returns an error,
+                    // the counter is already past this frame — no retry stall.
+                    let seq = self.current_sequence;
+                    self.current_sequence.0 += 1;
+
                     let frame_data = match payload {
-                        DataPayload::Clear(data) => data,
-                        DataPayload::Encrypted { ciphertext, .. } => {
-                            let _key = self.decryption_key.as_ref().context(
-                                "Encountered encrypted shard, but no SymmetricKey was provided",
-                            )?;
-                            // TODO: real decryption — currently returns ciphertext directly
-                            ciphertext
-                        }
-                        DataPayload::Missing => {
-                            self.current_sequence.0 += 1;
-                            continue;
-                        }
-                        DataPayload::Compressed(compressed_data) => {
-                            phalanx_forensics::reassembler::decompress_payload(&compressed_data)
+                        DataPayload::Missing => continue,
+                        other => {
+                            phalanx_forensics::decode_payload(other, self.decryption_key.as_ref())
                                 .map_err(|e| {
-                                    anyhow::anyhow!("Failed to decompress LZ4 payload: {}", e)
-                                })?
+                                anyhow::anyhow!("Payload decode failed at seq {seq}: {e}")
+                            })?
                         }
                     };
 
@@ -139,15 +133,10 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
 
                     // Route to the correct sink — Rust demuxes, Flutter reads two channels.
                     if is_audio {
-                        self.audio_sink
-                            .handle_chunk(self.current_sequence, frame_data)
-                            .await?;
+                        self.audio_sink.handle_chunk(seq, frame_data).await?;
                     } else {
-                        self.video_sink
-                            .handle_chunk(self.current_sequence, frame_data)
-                            .await?;
+                        self.video_sink.handle_chunk(seq, frame_data).await?;
                     }
-                    self.current_sequence.0 += 1;
                 }
                 None => {
                     // Gap detected, trigger Samson Reflex

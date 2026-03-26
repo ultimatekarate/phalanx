@@ -20,19 +20,6 @@ pub enum DataPayload {
     Missing,
 }
 
-impl DataPayload {
-    /// Decrypt an encrypted payload using the provided symmetric key.
-    /// Returns the cleartext bytes, or an error if the payload is not encrypted
-    /// or if decryption fails.
-    pub fn decrypt(&self, _key: &crate::crypto::SymmetricKey) -> anyhow::Result<Vec<u8>> {
-        match self {
-            DataPayload::Encrypted { ciphertext, .. } => Ok(ciphertext.clone()),
-            DataPayload::Clear(data) => Ok(data.clone()),
-            _ => Err(anyhow::anyhow!("Cannot decrypt a non-encrypted payload")),
-        }
-    }
-}
-
 impl Default for DataPayload {
     fn default() -> Self {
         DataPayload::Clear(Vec::new())
