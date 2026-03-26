@@ -43,6 +43,199 @@ fn subnet_bucket_from_addr(addr: SocketAddr) -> SubnetBucket {
 
 // ── Client Actor ─────────────────────────────────────────────────────────
 
+/// Outcome of a single connect-identify-loop cycle.
+enum CycleOutcome {
+    /// Connection dropped — should reconnect after backoff.
+    Reconnect,
+    /// Egress channel closed — actor should stop entirely.
+    EgressClosed,
+}
+
+/// Attempt a QUIC connection to the server.
+///
+/// On success, returns the connection and resets `attempt` to 0.
+/// On failure, emits a PeerDisconnected event and returns `None`.
+async fn attempt_connect(
+    client: &s2n_quic::Client,
+    server_address: SocketAddr,
+    server_name: &str,
+    attempt: &mut u32,
+    server_network_id: &NetworkId,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+) -> Option<s2n_quic::Connection> {
+    let connect = s2n_quic::client::Connect::new(server_address).with_server_name(server_name);
+
+    match client.connect(connect).await {
+        Ok(conn) => {
+            *attempt = 0; // Reset on successful connect
+            Some(conn)
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "phalanx::quic",
+                error = %e,
+                server = %server_address,
+                attempt = *attempt,
+                "Failed to connect to Stronghold"
+            );
+
+            // Emit disconnect event (server unreachable counts as "lost")
+            let _ = event_tx
+                .send(NetworkEvent::PeerDisconnected {
+                    peer: server_network_id.clone(),
+                })
+                .await;
+
+            None
+        }
+    }
+}
+
+/// Send an Identify message on a new bidirectional stream.
+///
+/// Returns `true` if identification succeeded, `false` otherwise.
+async fn attempt_identify(
+    connection: &mut s2n_quic::Connection,
+    local_network_id: &NetworkId,
+) -> bool {
+    match connection.open_bidirectional_stream().await {
+        Ok(mut stream) => {
+            let identify = QuicWireMessage::Identify {
+                network_id: local_network_id.0.clone(),
+                #[allow(clippy::cast_possible_truncation)] // Epoch millis fits in u64 for centuries
+                timestamp_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            };
+            match write_frame(&mut stream, &identify).await {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::error!(
+                        target: "phalanx::quic",
+                        error = %e,
+                        "Failed to send Identify message"
+                    );
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            tracing::error!(
+                target: "phalanx::quic",
+                error = %e,
+                "Failed to open identity stream"
+            );
+            false
+        }
+    }
+}
+
+/// Increment `attempt`, check against max, log and sleep for backoff.
+///
+/// Returns `true` if the actor should continue retrying, `false` if
+/// `max_reconnect_attempts` was exceeded and the actor should stop.
+async fn apply_backoff(
+    attempt: &mut u32,
+    max_reconnect_attempts: Option<u32>,
+    base_backoff_secs: u64,
+    max_backoff_secs: u64,
+) -> bool {
+    *attempt = attempt.saturating_add(1);
+    if let Some(max) = max_reconnect_attempts {
+        if *attempt > max {
+            tracing::error!(
+                target: "phalanx::quic",
+                "Max reconnect attempts ({}) exceeded, giving up",
+                max
+            );
+            return false;
+        }
+    }
+
+    let delay = backoff_delay(*attempt, base_backoff_secs, max_backoff_secs);
+    tracing::info!(
+        target: "phalanx::quic",
+        delay_secs = delay.as_secs(),
+        attempt = *attempt,
+        "Reconnecting after backoff"
+    );
+    tokio::time::sleep(delay).await;
+    true
+}
+
+/// Run a single connect-identify-loop cycle.
+///
+/// Returns `CycleOutcome::Reconnect` if the connection dropped (should retry),
+/// or `CycleOutcome::EgressClosed` if the egress channel was closed (should stop).
+async fn run_connection_cycle(
+    server_address: SocketAddr,
+    local_network_id: &NetworkId,
+    server_network_id: &NetworkId,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    command_rx: &mut mpsc::Receiver<QuicCommand>,
+    mut connection: s2n_quic::Connection,
+) -> CycleOutcome {
+    tracing::info!(
+        target: "phalanx::quic",
+        server = %server_address,
+        "Connected to Stronghold via QUIC"
+    );
+
+    // ── Identify ─────────────────────────────────────────────────
+    if !attempt_identify(&mut connection, local_network_id).await {
+        return CycleOutcome::Reconnect;
+    }
+
+    // ── Emit PeerDiscovered ──────────────────────────────────────
+    let bucket = connection
+        .remote_addr()
+        .ok()
+        .map(subnet_bucket_from_addr)
+        .unwrap_or_else(|| subnet_bucket_from_addr(server_address));
+    let _ = event_tx
+        .send(NetworkEvent::PeerDiscovered {
+            peer: server_network_id.clone(),
+            source: DiscoverySource::Quic,
+            bucket,
+            transport: TransportClass::from_discovery_source(DiscoverySource::Quic),
+        })
+        .await;
+
+    // ── Connection Loop ──────────────────────────────────────────
+    let egress_closed = client_connection_loop(
+        &mut connection,
+        event_tx,
+        command_rx,
+        server_network_id,
+        local_network_id,
+    )
+    .await;
+
+    // ── Disconnected ─────────────────────────────────────────────
+    tracing::info!(
+        target: "phalanx::quic",
+        server = %server_address,
+        "Disconnected from Stronghold"
+    );
+
+    let _ = event_tx
+        .send(NetworkEvent::PeerDisconnected {
+            peer: server_network_id.clone(),
+        })
+        .await;
+
+    if egress_closed {
+        tracing::info!(
+            target: "phalanx::quic",
+            "Egress channel closed, client actor stopping"
+        );
+        CycleOutcome::EgressClosed
+    } else {
+        CycleOutcome::Reconnect
+    }
+}
+
 /// Client actor: maintains a QUIC connection to a Stronghold server with
 /// automatic reconnection and exponential backoff.
 ///
@@ -65,174 +258,59 @@ pub(super) async fn client_actor(
 
     loop {
         // ── Connect ──────────────────────────────────────────────────
-        let connect =
-            s2n_quic::client::Connect::new(server_address).with_server_name(server_name.as_str());
-
-        let mut connection = match client.connect(connect).await {
-            Ok(conn) => {
-                attempt = 0; // Reset on successful connect
-                conn
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "phalanx::quic",
-                    error = %e,
-                    server = %server_address,
-                    attempt,
-                    "Failed to connect to Stronghold"
-                );
-
-                // Emit disconnect event (server unreachable counts as "lost")
-                let _ = event_tx
-                    .send(NetworkEvent::PeerDisconnected {
-                        peer: server_network_id.clone(),
-                    })
-                    .await;
-
-                attempt = attempt.saturating_add(1);
-                if let Some(max) = max_reconnect_attempts {
-                    if attempt > max {
-                        tracing::error!(
-                            target: "phalanx::quic",
-                            "Max reconnect attempts ({}) exceeded, giving up",
-                            max
-                        );
-                        return;
-                    }
+        let connection = match attempt_connect(
+            &client,
+            server_address,
+            server_name.as_str(),
+            &mut attempt,
+            &server_network_id,
+            &event_tx,
+        )
+        .await
+        {
+            Some(conn) => conn,
+            None => {
+                if !apply_backoff(
+                    &mut attempt,
+                    max_reconnect_attempts,
+                    base_backoff_secs,
+                    max_backoff_secs,
+                )
+                .await
+                {
+                    return;
                 }
-
-                let delay = backoff_delay(attempt, base_backoff_secs, max_backoff_secs);
-                tracing::info!(
-                    target: "phalanx::quic",
-                    delay_secs = delay.as_secs(),
-                    attempt,
-                    "Reconnecting after backoff"
-                );
-                tokio::time::sleep(delay).await;
                 continue;
             }
         };
 
-        tracing::info!(
-            target: "phalanx::quic",
-            server = %server_address,
-            "Connected to Stronghold via QUIC"
-        );
-
-        // ── Identify ─────────────────────────────────────────────────
-        let identified = match connection.open_bidirectional_stream().await {
-            Ok(mut stream) => {
-                let identify = QuicWireMessage::Identify {
-                    network_id: local_network_id.0.clone(),
-                    #[allow(clippy::cast_possible_truncation)] // Epoch millis fits in u64 for centuries
-                    timestamp_ms: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64,
-                };
-                match write_frame(&mut stream, &identify).await {
-                    Ok(()) => true,
-                    Err(e) => {
-                        tracing::error!(
-                            target: "phalanx::quic",
-                            error = %e,
-                            "Failed to send Identify message"
-                        );
-                        false
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    target: "phalanx::quic",
-                    error = %e,
-                    "Failed to open identity stream"
-                );
-                false
-            }
-        };
-
-        if !identified {
-            // Treat identity failure as a connection failure — backoff and retry.
-            attempt = attempt.saturating_add(1);
-            if let Some(max) = max_reconnect_attempts {
-                if attempt > max {
-                    return;
-                }
-            }
-            let delay = backoff_delay(attempt, base_backoff_secs, max_backoff_secs);
-            tokio::time::sleep(delay).await;
-            continue;
-        }
-
-        // ── Emit PeerDiscovered ──────────────────────────────────────
-        let bucket = connection
-            .remote_addr()
-            .ok()
-            .map(subnet_bucket_from_addr)
-            .unwrap_or_else(|| subnet_bucket_from_addr(server_address));
-        let _ = event_tx
-            .send(NetworkEvent::PeerDiscovered {
-                peer: server_network_id.clone(),
-                source: DiscoverySource::Quic,
-                bucket,
-                transport: TransportClass::from_discovery_source(DiscoverySource::Quic),
-            })
-            .await;
-
-        // ── Connection Loop ──────────────────────────────────────────
-        let egress_closed = client_connection_loop(
-            &mut connection,
+        // ── Run Connection Cycle ─────────────────────────────────────
+        let outcome = run_connection_cycle(
+            server_address,
+            &local_network_id,
+            &server_network_id,
             &event_tx,
             &mut command_rx,
-            &server_network_id,
-            &local_network_id,
+            connection,
         )
         .await;
 
-        // ── Disconnected ─────────────────────────────────────────────
-        tracing::info!(
-            target: "phalanx::quic",
-            server = %server_address,
-            "Disconnected from Stronghold"
-        );
-
-        let _ = event_tx
-            .send(NetworkEvent::PeerDisconnected {
-                peer: server_network_id.clone(),
-            })
-            .await;
-
-        // If the egress channel was closed (QuicEgress dropped), stop entirely.
-        if egress_closed {
-            tracing::info!(
-                target: "phalanx::quic",
-                "Egress channel closed, client actor stopping"
-            );
-            return;
-        }
-
-        // Backoff before reconnect
-        attempt = attempt.saturating_add(1);
-        if let Some(max) = max_reconnect_attempts {
-            if attempt > max {
-                tracing::error!(
-                    target: "phalanx::quic",
-                    "Max reconnect attempts ({}) exceeded, giving up",
-                    max
-                );
-                return;
+        match outcome {
+            CycleOutcome::EgressClosed => return,
+            CycleOutcome::Reconnect => {
+                // Backoff before reconnect
+                if !apply_backoff(
+                    &mut attempt,
+                    max_reconnect_attempts,
+                    base_backoff_secs,
+                    max_backoff_secs,
+                )
+                .await
+                {
+                    return;
+                }
             }
         }
-
-        let delay = backoff_delay(attempt, base_backoff_secs, max_backoff_secs);
-        tracing::info!(
-            target: "phalanx::quic",
-            delay_secs = delay.as_secs(),
-            attempt,
-            "Reconnecting after backoff"
-        );
-        tokio::time::sleep(delay).await;
     }
 }
 

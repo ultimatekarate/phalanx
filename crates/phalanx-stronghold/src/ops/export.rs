@@ -29,6 +29,98 @@ use crate::persistence::evidence_store::EvidenceStore;
 use crate::persistence::proof_store::ProofStore;
 use crate::signing::create_stronghold_signer;
 
+/// Load and unlock grants, returning a map of recording ID to symmetric key.
+///
+/// Same pattern as corroborate: each grant file is a postcard-serialized
+/// SealedLocator. We unlock with our identity to recover the SymmetricKey.
+///
+/// RT-9: verify grant-community binding — the grant's target recording
+/// must reference one of the recordings in this proof.
+async fn load_grants(
+    identity: &PhalanxIdentity,
+    grant_paths: &[PathBuf],
+    recording_ids: &[RecordingId],
+) -> Result<HashMap<RecordingId, SymmetricKey>, StrongholdError> {
+    let mut key_map: HashMap<RecordingId, SymmetricKey> = HashMap::new();
+
+    for path in grant_paths {
+        let grant_bytes = tokio::fs::read(path).await.map_err(|e| {
+            StrongholdError::Grant(format!("Failed to read grant file {}: {e}", path.display()))
+        })?;
+
+        let locator: SealedLocator = postcard::from_bytes(&grant_bytes).map_err(|e| {
+            StrongholdError::Grant(format!(
+                "Failed to deserialize grant {}: {e}",
+                path.display()
+            ))
+        })?;
+
+        // RT-9: The grant's target must reference one of the proof's recordings.
+        if !recording_ids.contains(&locator.target) {
+            return Err(StrongholdError::Grant(format!(
+                "Grant target {} does not match any recording in the proof",
+                locator.target.as_str()
+            )));
+        }
+
+        let raw_key = locator.unlock(identity).map_err(|e| {
+            StrongholdError::Grant(format!(
+                "Failed to unlock grant for {}: {e}",
+                locator.target.as_str()
+            ))
+        })?;
+
+        debug!(recording = %locator.target.as_str(), "Grant unlocked for export");
+        key_map.insert(locator.target, SymmetricKey(raw_key));
+    }
+
+    Ok(key_map)
+}
+
+/// Decrypt encrypted payloads in memory using grant keys.
+///
+/// Same pattern as corroborate: iterate artifacts, decrypt DataPayload
+/// in place using the corresponding grant key.
+fn decrypt_recordings(
+    recordings: &mut [phalanx_proto::evidence::Recording],
+    key_map: &HashMap<RecordingId, SymmetricKey>,
+) -> Result<(), StrongholdError> {
+    for rec in recordings {
+        let key = match key_map.get(&rec.id) {
+            Some(k) => k,
+            None => {
+                return Err(StrongholdError::RecordingEncrypted(rec.id.clone()));
+            }
+        };
+
+        for env in &mut rec.artifacts {
+            match &mut env.evidence {
+                Evidence::Video(shard) => {
+                    let clear = shard.payload.reveal(key).map_err(|e| {
+                        StrongholdError::Grant(format!(
+                            "Decryption failed for video shard in {}: {e}",
+                            rec.id.as_str()
+                        ))
+                    })?;
+                    shard.payload = phalanx_proto::evidence::DataPayload::Clear(clear);
+                }
+                Evidence::Audio(shard) => {
+                    let clear = shard.payload.reveal(key).map_err(|e| {
+                        StrongholdError::Grant(format!(
+                            "Decryption failed for audio shard in {}: {e}",
+                            rec.id.as_str()
+                        ))
+                    })?;
+                    shard.payload = phalanx_proto::evidence::DataPayload::Clear(clear);
+                }
+                // Gap, Handover, and Proximity evidence carry no encrypted payload.
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 /// One-shot export operation.
 ///
 /// Loads a previously-stored proof, re-decrypts the contributing recordings
@@ -64,45 +156,7 @@ pub async fn run_export(
         .collect();
 
     // ── 3. Load and unlock grants ──────────────────────────────────────
-    //
-    // Same pattern as corroborate: each grant file is a postcard-serialized
-    // SealedLocator. We unlock with our identity to recover the SymmetricKey.
-    //
-    // RT-9: verify grant-community binding — the grant's target recording
-    // must reference one of the recordings in this proof.
-
-    let mut key_map: HashMap<RecordingId, SymmetricKey> = HashMap::new();
-
-    for path in grant_paths {
-        let grant_bytes = tokio::fs::read(path).await.map_err(|e| {
-            StrongholdError::Grant(format!("Failed to read grant file {}: {e}", path.display()))
-        })?;
-
-        let locator: SealedLocator = postcard::from_bytes(&grant_bytes).map_err(|e| {
-            StrongholdError::Grant(format!(
-                "Failed to deserialize grant {}: {e}",
-                path.display()
-            ))
-        })?;
-
-        // RT-9: The grant's target must reference one of the proof's recordings.
-        if !recording_ids.contains(&locator.target) {
-            return Err(StrongholdError::Grant(format!(
-                "Grant target {} does not match any recording in the proof",
-                locator.target.as_str()
-            )));
-        }
-
-        let raw_key = locator.unlock(identity).map_err(|e| {
-            StrongholdError::Grant(format!(
-                "Failed to unlock grant for {}: {e}",
-                locator.target.as_str()
-            ))
-        })?;
-
-        debug!(recording = %locator.target.as_str(), "Grant unlocked for export");
-        key_map.insert(locator.target, SymmetricKey(raw_key));
-    }
+    let key_map = load_grants(identity, grant_paths, &recording_ids).await?;
 
     // ── 4. Load recordings for each attestation ────────────────────────
 
@@ -113,43 +167,7 @@ pub async fn run_export(
     }
 
     // ── 5. Decrypt encrypted payloads in memory ────────────────────────
-    //
-    // Same pattern as corroborate: iterate artifacts, decrypt DataPayload
-    // in place using the corresponding grant key.
-
-    for rec in &mut recordings {
-        let key = match key_map.get(&rec.id) {
-            Some(k) => k,
-            None => {
-                return Err(StrongholdError::RecordingEncrypted(rec.id.clone()));
-            }
-        };
-
-        for env in &mut rec.artifacts {
-            match &mut env.evidence {
-                Evidence::Video(shard) => {
-                    let clear = shard.payload.reveal(key).map_err(|e| {
-                        StrongholdError::Grant(format!(
-                            "Decryption failed for video shard in {}: {e}",
-                            rec.id.as_str()
-                        ))
-                    })?;
-                    shard.payload = phalanx_proto::evidence::DataPayload::Clear(clear);
-                }
-                Evidence::Audio(shard) => {
-                    let clear = shard.payload.reveal(key).map_err(|e| {
-                        StrongholdError::Grant(format!(
-                            "Decryption failed for audio shard in {}: {e}",
-                            rec.id.as_str()
-                        ))
-                    })?;
-                    shard.payload = phalanx_proto::evidence::DataPayload::Clear(clear);
-                }
-                // Gap, Handover, and Proximity evidence carry no encrypted payload.
-                _ => {}
-            }
-        }
-    }
+    decrypt_recordings(&mut recordings, &key_map)?;
 
     // ── 6. Write export files ──────────────────────────────────────────
     //

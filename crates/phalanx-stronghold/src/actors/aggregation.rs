@@ -161,8 +161,12 @@ impl AggregationActor {
 
     // ── IngestChunk Flow ─────────────────────────────────────────────────
 
+    /// Pre-ingest gate checks: throttle, routing, bandwidth, replay.
+    ///
+    /// Returns `Some(communities)` if the chunk passes all gates,
+    /// or `None` if it should be dropped.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Throttle arithmetic and duration cast.
-    async fn handle_ingest(&mut self, chunk: ShardChunk) {
+    async fn pre_ingest_gates(&mut self, chunk: &ShardChunk) -> Option<Vec<CommunityId>> {
         // 1. Ingestion scaler: sleep-throttle under system pressure.
         let ingestion_headroom = self.governor.ingestion_scaler().0;
         if ingestion_headroom < 0.1 {
@@ -183,7 +187,7 @@ impl AggregationActor {
                     did = %owner_did,
                     "AggregationActor: unknown DID, dropping chunk"
                 );
-                return;
+                return None;
             }
         };
 
@@ -194,7 +198,7 @@ impl AggregationActor {
                 peer = %peer_id,
                 "AggregationActor: per-peer bandwidth exceeded, dropping chunk"
             );
-            return;
+            return None;
         }
         self.governor.record_peer_bandwidth(&peer_id);
 
@@ -202,9 +206,61 @@ impl AggregationActor {
         let chunk_hash = blake3::hash(&chunk.data);
         if self.replay_filter.contains(chunk_hash.as_bytes()) {
             debug!("AggregationActor: replay detected, dropping chunk");
-            return;
+            return None;
         }
         self.replay_filter.insert(chunk_hash.as_bytes());
+
+        Some(communities)
+    }
+
+    /// Store an assembled recording and collect proximity evidence.
+    #[allow(clippy::cast_possible_truncation)] // estimated_bytes arithmetic
+    async fn store_recording(&mut self, recording: &Recording, communities: &[CommunityId]) {
+        // Store via evidence_store for each community the DID belongs to.
+        for community_id in communities {
+            for artifact in &recording.artifacts {
+                if let Err(e) = self
+                    .evidence_store
+                    .append_envelope(community_id, &recording.id, artifact)
+                    .await
+                {
+                    warn!(
+                        community = ?community_id,
+                        recording = %recording.id,
+                        error = %e,
+                        "AggregationActor: failed to store envelope"
+                    );
+                }
+            }
+        }
+
+        // Record storage pressure after writes.
+        // Use a rough estimate based on artifact count * average size.
+        #[allow(clippy::arithmetic_side_effects)] // Artifact count × 4096 won't overflow u64.
+        let estimated_bytes = recording.artifacts.len() as u64 * 4096;
+        self.governor
+            .record_storage_pressure(estimated_bytes, 100 * 1024 * 1024 * 1024);
+
+        info!(
+            recording = %recording.id,
+            artifacts = recording.artifacts.len(),
+            communities = communities.len(),
+            "AggregationActor: recording stored"
+        );
+
+        // If any artifact is Proximity evidence, push to proximity_log.
+        for artifact in &recording.artifacts {
+            if let Evidence::Proximity(pw) = &artifact.evidence {
+                self.proximity_log.push(pw.clone());
+            }
+        }
+    }
+
+    async fn handle_ingest(&mut self, chunk: ShardChunk) {
+        let communities = match self.pre_ingest_gates(&chunk).await {
+            Some(c) => c,
+            None => return,
+        };
 
         // 5. Feed into shard_crucible. On decode -> WitnessEnvelope.
         let envelope = match self.shard_crucible.process(chunk) {
@@ -253,43 +309,8 @@ impl AggregationActor {
             return;
         }
 
-        // 9. Store via evidence_store for each community the DID belongs to.
-        for community_id in &communities {
-            for artifact in &recording.artifacts {
-                if let Err(e) = self
-                    .evidence_store
-                    .append_envelope(community_id, &recording.id, artifact)
-                    .await
-                {
-                    warn!(
-                        community = ?community_id,
-                        recording = %recording.id,
-                        error = %e,
-                        "AggregationActor: failed to store envelope"
-                    );
-                }
-            }
-        }
-
-        // Record storage pressure after writes.
-        // Use a rough estimate based on artifact count * average size.
-        let estimated_bytes = recording.artifacts.len() as u64 * 4096;
-        self.governor
-            .record_storage_pressure(estimated_bytes, 100 * 1024 * 1024 * 1024);
-
-        info!(
-            recording = %recording.id,
-            artifacts = recording.artifacts.len(),
-            communities = communities.len(),
-            "AggregationActor: recording stored"
-        );
-
-        // 10. If any artifact is Proximity evidence, push to proximity_log.
-        for artifact in &recording.artifacts {
-            if let Evidence::Proximity(pw) = &artifact.evidence {
-                self.proximity_log.push(pw.clone());
-            }
-        }
+        // 9-10. Store and collect proximity evidence.
+        self.store_recording(&recording, &communities).await;
     }
 
     // ── FetchRecordings ──────────────────────────────────────────────────

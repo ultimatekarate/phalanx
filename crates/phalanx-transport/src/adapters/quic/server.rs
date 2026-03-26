@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use phalanx_proto::identity::NetworkId;
 use phalanx_proto::network::NetworkEvent;
+use phalanx_proto::retrieval::{RecordingRequest, RecordingResponse};
 use phalanx_proto::telemetry::DiscoverySource;
 use phalanx_proto::topic::MeshTopic;
 use phalanx_proto::topology::{SubnetBucket, TransportClass};
@@ -81,62 +82,12 @@ pub(super) async fn server_actor(
 /// Route a command from QuicEgress to the appropriate connection(s).
 async fn route_server_command(cmd: QuicCommand, connections: &ConnectionMap) {
     match cmd {
-        QuicCommand::Publish(topic, data) => {
-            let conns = connections.read().await;
-            let topic_str = topic.to_string();
-            for (peer_id, sender) in conns.iter() {
-                let msg = QuicWireMessage::Publish {
-                    topic: topic_str.clone(),
-                    data: data.clone(),
-                };
-                if sender.send(msg).await.is_err() {
-                    tracing::warn!(
-                        target: "phalanx::quic",
-                        peer = %peer_id.0,
-                        "Failed to route publish to connection"
-                    );
-                }
-            }
-        }
+        QuicCommand::Publish(topic, data) => route_publish(connections, topic, data).await,
         QuicCommand::SendRequest(target, request) => {
-            let conns = connections.read().await;
-            if let Some(sender) = conns.get(&target) {
-                let msg = QuicWireMessage::Request {
-                    channel_id: format!("quic:{}", target.0),
-                    request,
-                };
-                if sender.send(msg).await.is_err() {
-                    tracing::warn!(
-                        target: "phalanx::quic",
-                        peer = %target.0,
-                        "Failed to route request to connection"
-                    );
-                }
-            } else {
-                tracing::warn!(
-                    target: "phalanx::quic",
-                    peer = %target.0,
-                    "No connection found for request target"
-                );
-            }
+            route_request(connections, target, request).await;
         }
         QuicCommand::SendResponse(channel_id, response) => {
-            // channel_id format: "{network_id}:{seq}" — extract network_id to route.
-            let target_id = extract_network_id_from_channel(&channel_id);
-            let conns = connections.read().await;
-            if let Some(sender) = conns.get(&NetworkId(target_id.clone())) {
-                let msg = QuicWireMessage::Response {
-                    channel_id,
-                    response,
-                };
-                if sender.send(msg).await.is_err() {
-                    tracing::warn!(
-                        target: "phalanx::quic",
-                        peer = %target_id,
-                        "Failed to route response to connection"
-                    );
-                }
-            }
+            route_response(connections, channel_id, response).await;
         }
         QuicCommand::Ban(peer) => {
             let mut conns = connections.write().await;
@@ -147,6 +98,73 @@ async fn route_server_command(cmd: QuicCommand, connections: &ConnectionMap) {
                     "Banned peer, dropping QUIC connection"
                 );
             }
+        }
+    }
+}
+
+/// Broadcast a publish message to all connected peers.
+async fn route_publish(connections: &ConnectionMap, topic: MeshTopic, data: Vec<u8>) {
+    let conns = connections.read().await;
+    let topic_str = topic.to_string();
+    for (peer_id, sender) in conns.iter() {
+        let msg = QuicWireMessage::Publish {
+            topic: topic_str.clone(),
+            data: data.clone(),
+        };
+        if sender.send(msg).await.is_err() {
+            tracing::warn!(
+                target: "phalanx::quic",
+                peer = %peer_id.0,
+                "Failed to route publish to connection"
+            );
+        }
+    }
+}
+
+/// Route a request to a specific peer.
+async fn route_request(connections: &ConnectionMap, target: NetworkId, request: RecordingRequest) {
+    let conns = connections.read().await;
+    if let Some(sender) = conns.get(&target) {
+        let msg = QuicWireMessage::Request {
+            channel_id: format!("quic:{}", target.0),
+            request,
+        };
+        if sender.send(msg).await.is_err() {
+            tracing::warn!(
+                target: "phalanx::quic",
+                peer = %target.0,
+                "Failed to route request to connection"
+            );
+        }
+    } else {
+        tracing::warn!(
+            target: "phalanx::quic",
+            peer = %target.0,
+            "No connection found for request target"
+        );
+    }
+}
+
+/// Route a response to the peer identified by the channel_id.
+async fn route_response(
+    connections: &ConnectionMap,
+    channel_id: String,
+    response: RecordingResponse,
+) {
+    // channel_id format: "{network_id}:{seq}" — extract network_id to route.
+    let target_id = extract_network_id_from_channel(&channel_id);
+    let conns = connections.read().await;
+    if let Some(sender) = conns.get(&NetworkId(target_id.clone())) {
+        let msg = QuicWireMessage::Response {
+            channel_id,
+            response,
+        };
+        if sender.send(msg).await.is_err() {
+            tracing::warn!(
+                target: "phalanx::quic",
+                peer = %target_id,
+                "Failed to route response to connection"
+            );
         }
     }
 }
@@ -185,6 +203,107 @@ fn subnet_bucket_from_addr(addr: SocketAddr) -> SubnetBucket {
 
 // ── Server Connection Handler ────────────────────────────────────────────
 
+/// Perform the identity handshake on a new connection.
+///
+/// Waits for the first bidirectional stream, reads an Identify message,
+/// and validates timestamp freshness (P5 FIX: prevent replay of captured frames).
+///
+/// Returns the peer's `NetworkId` on success, or `None` if the handshake fails.
+#[allow(clippy::cast_possible_truncation)] // Epoch millis fits in u64 for centuries
+async fn perform_identity_handshake(connection: &mut s2n_quic::Connection) -> Option<NetworkId> {
+    // Phase 1: Identity handshake — first stream must carry an Identify message.
+    // P5 FIX: Verify timestamp freshness to prevent replay of captured Identify frames.
+    let stream_result = connection.accept_bidirectional_stream().await;
+    let mut stream = match stream_result {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            tracing::debug!(
+                target: "phalanx::quic",
+                "Connection closed before identity"
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "phalanx::quic",
+                error = %e,
+                "Stream accept failed during identity"
+            );
+            return None;
+        }
+    };
+
+    match read_frame(&mut stream).await {
+        Ok(QuicWireMessage::Identify {
+            network_id,
+            timestamp_ms,
+        }) => {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let age_ms = now_ms.saturating_sub(timestamp_ms);
+            if age_ms > 30_000 {
+                tracing::warn!(
+                    target: "phalanx::quic",
+                    claimed_id = %network_id,
+                    age_ms,
+                    "Identify timestamp too old (>30s), rejecting"
+                );
+                return None;
+            }
+            Some(NetworkId(network_id))
+        }
+        Ok(_other) => {
+            tracing::warn!(
+                target: "phalanx::quic",
+                "First message was not Identify, dropping connection"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "phalanx::quic",
+                error = %e,
+                "Failed to read identity frame"
+            );
+            None
+        }
+    }
+}
+
+/// Send an outbound wire message to a client on a new stream.
+///
+/// Returns `true` if the connection should continue, `false` if it should break.
+async fn send_outbound_message(
+    connection: &mut s2n_quic::Connection,
+    msg: &QuicWireMessage,
+    peer_id: &str,
+) -> bool {
+    match connection.open_bidirectional_stream().await {
+        Ok(mut stream) => {
+            if let Err(e) = write_frame(&mut stream, msg).await {
+                tracing::warn!(
+                    target: "phalanx::quic",
+                    peer = %peer_id,
+                    error = %e,
+                    "Failed to write frame to client"
+                );
+            }
+            true
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "phalanx::quic",
+                peer = %peer_id,
+                error = %e,
+                "Failed to open outbound stream"
+            );
+            false
+        }
+    }
+}
+
 /// Handles a single client connection on the server side.
 ///
 /// Flow:
@@ -197,62 +316,9 @@ async fn server_connection_handler(
     event_tx: mpsc::Sender<NetworkEvent>,
     connections: ConnectionMap,
 ) {
-    // Phase 1: Identity handshake — first stream must carry an Identify message.
-    // P5 FIX: Verify timestamp freshness to prevent replay of captured Identify frames.
-    let network_id = match connection.accept_bidirectional_stream().await {
-        Ok(Some(mut stream)) => match read_frame(&mut stream).await {
-            Ok(QuicWireMessage::Identify {
-                network_id,
-                timestamp_ms,
-            }) => {
-                #[allow(clippy::cast_possible_truncation)] // Epoch millis fits in u64 for centuries
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                let age_ms = now_ms.saturating_sub(timestamp_ms);
-                if age_ms > 30_000 {
-                    tracing::warn!(
-                        target: "phalanx::quic",
-                        claimed_id = %network_id,
-                        age_ms,
-                        "Identify timestamp too old (>30s), rejecting"
-                    );
-                    return;
-                }
-                NetworkId(network_id)
-            }
-            Ok(_other) => {
-                tracing::warn!(
-                    target: "phalanx::quic",
-                    "First message was not Identify, dropping connection"
-                );
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "phalanx::quic",
-                    error = %e,
-                    "Failed to read identity frame"
-                );
-                return;
-            }
-        },
-        Ok(None) => {
-            tracing::debug!(
-                target: "phalanx::quic",
-                "Connection closed before identity"
-            );
-            return;
-        }
-        Err(e) => {
-            tracing::warn!(
-                target: "phalanx::quic",
-                error = %e,
-                "Stream accept failed during identity"
-            );
-            return;
-        }
+    let network_id = match perform_identity_handshake(&mut connection).await {
+        Some(id) => id,
+        None => return,
     };
 
     tracing::info!(
@@ -319,26 +385,8 @@ async fn server_connection_handler(
             maybe_cmd = conn_rx.recv() => {
                 match maybe_cmd {
                     Some(msg) => {
-                        match connection.open_bidirectional_stream().await {
-                            Ok(mut stream) => {
-                                if let Err(e) = write_frame(&mut stream, &msg).await {
-                                    tracing::warn!(
-                                        target: "phalanx::quic",
-                                        peer = %network_id.0,
-                                        error = %e,
-                                        "Failed to write frame to client"
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    target: "phalanx::quic",
-                                    peer = %network_id.0,
-                                    error = %e,
-                                    "Failed to open outbound stream"
-                                );
-                                break;
-                            }
+                        if !send_outbound_message(&mut connection, &msg, &network_id.0).await {
+                            break;
                         }
                     }
                     None => {
