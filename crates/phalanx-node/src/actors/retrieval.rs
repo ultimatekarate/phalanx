@@ -13,7 +13,7 @@ use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*;
 use phalanx_proto::trust::Offense;
-use phalanx_proto::types::{ForensicUnit, TaskCost, Verified};
+use phalanx_proto::types::{ForensicUnit, Sealed, TaskCost, Verified};
 use phalanx_proto::RecordingRequest;
 use std::sync::Arc;
 
@@ -87,58 +87,8 @@ impl RetrievalActor {
         request: RecordingRequest,
         channel_id: String,
     ) {
-        // Per-recording rate limit: prevent targeted DoS on a single recording.
-        if !self
-            .system_governor
-            .is_retrieval_rate_ok(&request.recording_id.0)
-        {
-            tracing::warn!(
-                target: "phalanx::retrieval",
-                recording = %request.recording_id,
-                peer = %origin,
-                "Per-recording retrieval rate limit exceeded"
-            );
-            self.dispatch_resilient_response(channel_id, RecordingResponse::Busy)
-                .await;
-            return;
-        }
-        self.system_governor
-            .record_retrieval_attempt(&request.recording_id.0);
-
-        let local_id = &self.identity.network_id;
-        let io_scale: FinalizationScale = self.system_governor.finalization_scaler();
-
-        if io_scale.0 < 0.2 {
-            tracing::warn!(
-                target: "phalanx::retrieval",
-                io_scale = io_scale.0,
-                peer = %origin,
-                "I/O Digestion integral saturated. Sending Busy response."
-            );
-            // P8 FIX: Send Busy response instead of silent drop so the requesting
-            // peer knows to retry later rather than waiting indefinitely.
-            self.dispatch_resilient_response(channel_id, RecordingResponse::Busy)
-                .await;
-            return;
-        }
-
-        if !self.system_governor.check_permission(TaskCost::Heavy) {
-            tracing::warn!(target: "phalanx::egress", "Retrieval rejected: System thermal/battery limits exceeded");
-            self.dispatch_resilient_response(channel_id, RecordingResponse::Unauthorized)
-                .await;
-            return;
-        }
-
-        if PhalanxNodeIdentityExt::verify_retrieval_auth(&*self.identity, &request).is_err() {
-            tracing::warn!(peer = %origin, recording = %request.recording_id, "Privacy Gate: Unauthorized retrieval attempt blocked");
-            let _ = self
-                .trust_tx
-                .send(TrustCommand::RecordOffense {
-                    did: request.target_did.clone(),
-                    offense: Offense::InvalidSignature,
-                })
-                .await;
-            self.dispatch_resilient_response(channel_id, RecordingResponse::Unauthorized)
+        if let Some(gate_response) = self.check_retrieval_gates(&origin, &request).await {
+            self.dispatch_resilient_response(channel_id, gate_response)
                 .await;
             return;
         }
@@ -163,9 +113,86 @@ impl RetrievalActor {
         let raw_envelopes = reply_rx.await.unwrap_or_default();
         self.system_governor.record_io_pressure(io_start.elapsed());
 
-        let mut sealed_units = Vec::new();
+        let sealed_units = self.verify_and_seal_envelopes(raw_envelopes, &request);
+
+        let response = if sealed_units.is_empty() {
+            RecordingResponse::NotFound
+        } else {
+            RecordingResponse::Success(sealed_units)
+        };
+        self.dispatch_resilient_response(channel_id, response).await;
+    }
+
+    // ── Retrieval Handlers ──────────────────────────────────────────────
+
+    /// Pre-retrieval gate checks: rate limit, I/O saturation, thermal/battery,
+    /// and privacy auth. Returns `Some(response)` if the request should be
+    /// rejected, `None` if all gates pass.
+    #[allow(clippy::arithmetic_side_effects)] // Rate limit counter increment.
+    async fn check_retrieval_gates(
+        &mut self,
+        origin: &NetworkId,
+        request: &RecordingRequest,
+    ) -> Option<RecordingResponse> {
+        // Per-recording rate limit: prevent targeted DoS on a single recording.
+        if !self
+            .system_governor
+            .is_retrieval_rate_ok(&request.recording_id.0)
+        {
+            tracing::warn!(
+                target: "phalanx::retrieval",
+                recording = %request.recording_id,
+                peer = %origin,
+                "Per-recording retrieval rate limit exceeded"
+            );
+            return Some(RecordingResponse::Busy);
+        }
+        self.system_governor
+            .record_retrieval_attempt(&request.recording_id.0);
+
+        let io_scale: FinalizationScale = self.system_governor.finalization_scaler();
+
+        if io_scale.0 < 0.2 {
+            tracing::warn!(
+                target: "phalanx::retrieval",
+                io_scale = io_scale.0,
+                peer = %origin,
+                "I/O Digestion integral saturated. Sending Busy response."
+            );
+            return Some(RecordingResponse::Busy);
+        }
+
+        if !self.system_governor.check_permission(TaskCost::Heavy) {
+            tracing::warn!(target: "phalanx::egress", "Retrieval rejected: System thermal/battery limits exceeded");
+            return Some(RecordingResponse::Unauthorized);
+        }
+
+        if PhalanxNodeIdentityExt::verify_retrieval_auth(&*self.identity, request).is_err() {
+            tracing::warn!(peer = %origin, recording = %request.recording_id, "Privacy Gate: Unauthorized retrieval attempt blocked");
+            let _ = self
+                .trust_tx
+                .send(TrustCommand::RecordOffense {
+                    did: request.target_did.clone(),
+                    offense: Offense::InvalidSignature,
+                })
+                .await;
+            return Some(RecordingResponse::Unauthorized);
+        }
+
+        None
+    }
+
+    /// Validate integrity and apply egress policy to each envelope.
+    /// Returns only the envelopes that pass both checks.
+    fn verify_and_seal_envelopes(
+        &self,
+        raw_envelopes: Vec<WitnessEnvelope>,
+        request: &RecordingRequest,
+    ) -> Vec<ForensicUnit<WitnessEnvelope, Sealed>> {
+        let local_id = &self.identity.network_id;
         let current_stress = self.system_governor.current_stress();
         let target_trust = self.trust_oracle.check_trust_by_did(&request.target_did);
+        let mut sealed_units = Vec::new();
 
         for env in raw_envelopes {
             let sequence_id = env.evidence.sequence_id();
@@ -191,12 +218,7 @@ impl RetrievalActor {
             }
         }
 
-        let response = if sealed_units.is_empty() {
-            RecordingResponse::NotFound
-        } else {
-            RecordingResponse::Success(sealed_units)
-        };
-        self.dispatch_resilient_response(channel_id, response).await;
+        sealed_units
     }
 
     async fn dispatch_resilient_response(
