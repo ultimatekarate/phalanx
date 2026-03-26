@@ -16,8 +16,6 @@ phalanx-node = { path = "../phalanx-node" }
 tokio = { version = "1.0", features = ["full", "test-util"] } # test-util is KEY for virtual time
 async-trait = "0.1"
 futures = "0.3"
-parking_lot = "0.12" # Fast, ergonomic mutexes for the World State
-
 # Chaos & Observability
 rand = "0.8"        # For "The Chaos Preposition" (packet drops/latency)
 tracing = "0.1"     # To see what the God-crate is doing

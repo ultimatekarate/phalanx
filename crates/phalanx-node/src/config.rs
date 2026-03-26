@@ -57,18 +57,6 @@ pub struct NetworkConfig {
     pub listen_addresses: Vec<String>,
 }
 
-impl NodeConfig {
-    pub fn load_from_config_crate(path: PathBuf) -> Result<Self, config::ConfigError> {
-        let s = config::Config::builder()
-            .add_source(config::File::from(path))
-            .add_source(config::Environment::with_prefix("PHALANX"))
-            .build()?;
-        let mut config: Self = s.try_deserialize()?;
-        config.hardware = config.hardware.validated();
-        Ok(config)
-    }
-}
-
 #[derive(Debug)]
 pub enum ConfigError {
     NotFound(String),

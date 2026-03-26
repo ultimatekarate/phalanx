@@ -23,15 +23,11 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 
 # FFI
-libc = "0.2"
 serde_json = "1.0"
 postcard = { workspace = true }
 
 # C2PA export (rust_native_crypto avoids OpenSSL dependency)
 c2pa = { version = "0.78", default-features = false, features = ["rust_native_crypto", "file_io"] }
-
-# Self-signed X.509 cert generation for C2PA signing
-rcgen = "0.13"
 
 # Ed25519 signing (for C2PA signer)
 ed25519-dalek = { version = "2.1", features = ["serde"] }
