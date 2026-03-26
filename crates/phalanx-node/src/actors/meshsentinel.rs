@@ -18,9 +18,12 @@ use crate::{trust::TrustRegistry, StorageActor};
 use phalanx_forensics::eclipse::{self, EclipseProbe, MeshFingerprint};
 use phalanx_forensics::policy::{IngressGovernor, TrafficGovernor};
 use phalanx_forensics::prelude::*;
+use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::network::{EgressPort, IngressPort, LocalMeshPort};
 use phalanx_proto::prelude::*;
 use phalanx_proto::storage::TransientJournal;
+use phalanx_proto::telemetry::DiscoverySource;
+use phalanx_proto::topology::{SubnetBucket, TransportClass};
 use phalanx_proto::trust::Offense;
 use phalanx_transport::identity_ext::Libp2pExt;
 use std::sync::Arc;
@@ -450,169 +453,19 @@ impl<I: IngressPort> MeshSentinel<I> {
                 topic,
                 data,
             } => {
-                // P5 FIX: Reject oversized messages before any processing.
-                // This prevents memory amplification from messages that exceed
-                // the configured chunk size, protecting the ingestion pipeline.
-                if data.len() > self.config.network.max_chunk_size_bytes * 2 {
-                    tracing::warn!(
-                        size = data.len(),
-                        limit = self.config.network.max_chunk_size_bytes * 2,
-                        peer = %origin,
-                        "P5: Oversized message rejected pre-queue"
-                    );
-                    return false;
-                }
-
-                if topic.as_str() == self.config.network.control_topic.as_str() {
-                    if let Ok(msg) = phalanx_forensics::gate::unmarshal::<ControlMessage>(
-                        &data,
-                        "control_message",
-                    ) {
-                        let peer_id_for_spectral = msg.sender.clone();
-                        self.health_tracker.register_activity(msg);
-
-                        // Shield Wall: evaluate spectral consistency
-                        if let Some(residual) =
-                            self.health_tracker.spectral.evaluate(&peer_id_for_spectral)
-                        {
-                            if residual > self.health_tracker.spectral.anomaly_threshold {
-                                // Drive peer toward decoupling via existing Volterra integral
-                                self.system_governor.record_spectral_anomaly(
-                                    &peer_id_for_spectral.to_string(),
-                                    residual,
-                                );
-
-                                tracing::warn!(
-                                    target: "phalanx::shield_wall",
-                                    peer = %peer_id_for_spectral,
-                                    residual = %residual,
-                                    "SPECTRAL_ANOMALY_DETECTED"
-                                );
-                            }
-                        }
-                    }
-                } else {
-                    // Shield Wall: record data volume for spectral observation
-                    self.health_tracker
-                        .spectral
-                        .record_data_received(origin.clone(), data.len());
-
-                    // Bandwidth gate: reject at the edge when saturated
-                    if self.system_governor.bandwidth_scaler().0 < 0.05 {
-                        tracing::warn!(
-                            size = data.len(),
-                            peer = %origin,
-                            "Bandwidth saturated, dropping chunk"
-                        );
-                    } else if self
-                        .ingestion_tx
-                        .try_send(IngestionCommand::ProcessChunk {
-                            peer_id: origin,
-                            data,
-                            topic,
-                        })
-                        .is_err()
-                    {
-                        // Channel full — record memory pressure from the backlog
-                        self.system_governor
-                            .record_memory_pressure(self.config.network.max_chunk_size_bytes * 200);
-                        tracing::warn!("Ingestion channel full, dropping chunk.");
-                    }
-                }
+                self.handle_data_received(origin, topic, data).await;
                 false
             }
-
-            // Record peer discovery source for connectivity detection.
-            // Internet peers (Kademlia, Bootstrap) immediately mark internet as available.
-            // mDNS peers increment local count. The 30s grace period in SystemGovernor
-            // handles the transition to offline when only local peers remain.
             NetworkEvent::PeerDiscovered {
                 peer,
                 source,
                 bucket,
                 transport,
             } => {
-                // E6: Per-second rate limit on peer discovery processing.
-                // Prevents CPU exhaustion from burst PeerDiscovered floods.
-                // The TopologyGate handles admission; this gate prevents the
-                // cost of evaluating admission on thousands of events per second.
-                const MAX_DISCOVERIES_PER_SECOND: u32 = 10;
-                let now = std::time::Instant::now();
-                if now.duration_since(self.peer_discovery_window) >= Duration::from_secs(1) {
-                    self.peer_discovery_count = 0;
-                    self.peer_discovery_window = now;
-                }
-                self.peer_discovery_count += 1;
-                if self.peer_discovery_count > MAX_DISCOVERIES_PER_SECOND {
-                    tracing::debug!(
-                        event = "e6_rate_limit",
-                        peer = %peer,
-                        "E6: Peer discovery rate exceeded, dropping"
-                    );
-                    return false;
-                }
-
-                // Topology-aware admission: check subnet diversity, transport quotas, IWFQ.
-                let balance = self.compute_transport_balance();
-                match self.topology_gate.try_admit(
-                    peer.clone(),
-                    TrustLevel::default(), // Unknown peers start as Ignored
-                    bucket,
-                    transport,
-                    balance,
-                ) {
-                    Ok((_ticket, evicted)) => {
-                        // Admission succeeded — preserve existing behavior.
-                        self.system_governor.record_peer_discovery(source);
-                        self.system_governor.record_connection_gauge();
-
-                        // ProximityWitness capture: if we're recording and this is LocalMesh,
-                        // log the co-location event for the Corroboration Gate.
-                        if transport == TransportClass::LocalMesh {
-                            if let Some(ref rec_id) = self.active_recording_id {
-                                self.proximity_witnesses.push(
-                                    phalanx_proto::corroboration::ProximityWitness {
-                                        local_did: self.identity.did.clone(),
-                                        remote_did: phalanx_proto::identity::Did::new(
-                                            peer.0.clone(),
-                                        ),
-                                        recording_id: rec_id.clone(),
-                                        observed_at: self.clock.now().unwrap_or_default(),
-                                        transport,
-                                    },
-                                );
-                            }
-                        }
-
-                        if let Some(evicted_peer) = evicted {
-                            tracing::debug!(
-                                event = "topology_eviction",
-                                evicted = %evicted_peer,
-                                newcomer = %peer,
-                                "IWFQ: Evicted lower-trust peer to admit newcomer"
-                            );
-                            let _ = self
-                                .egress_tx
-                                .send(EgressCommand::DisconnectPeer(evicted_peer))
-                                .await;
-                        }
-                    }
-                    Err(reason) => {
-                        tracing::debug!(
-                            event = "topology_rejected",
-                            peer = %peer,
-                            reason = %reason,
-                            "TopologyGate rejected peer"
-                        );
-                        let _ = self
-                            .egress_tx
-                            .send(EgressCommand::DisconnectPeer(peer))
-                            .await;
-                    }
-                }
+                self.handle_peer_discovered(peer, source, bucket, transport)
+                    .await;
                 false
             }
-
             NetworkEvent::RecordingRequested {
                 origin,
                 request,
@@ -628,85 +481,21 @@ impl<I: IngressPort> MeshSentinel<I> {
                     .await;
                 false
             }
-
-            // DHT: Providers discovered for a recording.
-            // Filter out self (don't request shards from yourself), then forward to
-            // PlaybackCoordinator which owns the auth context to construct retrieval requests.
             NetworkEvent::ProvidersDiscovered {
                 recording_id,
                 providers,
             } => {
-                let local_id = self.identity.to_network_id();
-                let remote_providers: Vec<_> =
-                    providers.into_iter().filter(|p| *p != local_id).collect();
-                if !remote_providers.is_empty() {
-                    tracing::info!(
-                        recording = %recording_id,
-                        count = remote_providers.len(),
-                        "DHT: Providers discovered for recording"
-                    );
-                    let _ = self.providers_tx.try_send((recording_id, remote_providers));
-                }
+                self.handle_providers_discovered(recording_id, providers);
                 false
             }
-
-            // DHT: Shards received from a peer — write each to the recording log.
             NetworkEvent::ShardResponseReceived { origin, envelopes } => {
-                tracing::info!(
-                    peer = %origin,
-                    count = envelopes.len(),
-                    "DHT: Shard response received"
-                );
-                for envelope in envelopes {
-                    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                    if let Err(e) = self
-                        .storage_tx
-                        .send(StorageCommand::WriteShard {
-                            envelope,
-                            reply_to: reply_tx,
-                        })
-                        .await
-                    {
-                        tracing::warn!("DHT shard write: storage channel closed: {e}");
-                        continue;
-                    }
-                    // Await confirmation — don't fire-and-forget evidence writes.
-                    match reply_rx.await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => {
-                            tracing::warn!("DHT shard write failed: {e}");
-                        }
-                        Err(_) => {
-                            tracing::warn!("DHT shard write: storage actor dropped reply channel");
-                        }
-                    }
-                }
+                self.handle_shard_response(origin, envelopes).await;
                 false
             }
-
             NetworkEvent::PeerDisconnected { peer } => {
-                tracing::info!(
-                    event = "peer_disconnected",
-                    peer = %peer,
-                    "Peer disconnected"
-                );
-                // Eclipse remediation: release topology slot (no-op if anchored — must demote first).
-                self.topology_gate.demote_anchor(&peer);
-                self.topology_gate.release(&peer);
-                // Shield Wall: clean up spectral observation state for departed peer.
-                self.health_tracker.spectral.remove_peer(&peer);
-                // QUIC disconnects are always internet peers (not mDNS-local).
-                self.system_governor.record_peer_departure(false);
-                // P12 FIX: Update c_integral on disconnect.
-                self.system_governor.record_connection_gauge();
+                self.handle_peer_disconnected(peer).await;
                 false
             }
-
-            // BLE auth events: Flutter drives the handshake. These variants exist
-            // in NetworkEvent for completeness but MeshSentinel doesn't process them
-            // directly. Flutter calls phalanx_sign_ble_challenge (to respond to remote
-            // challenges) and phalanx_verify_ble_peer (to verify remote responses)
-            // via FFI. Verified peers arrive as normal PeerDiscovered events.
             NetworkEvent::BleAuthChallengeReceived { .. }
             | NetworkEvent::BleAuthResponseReceived { .. } => {
                 tracing::debug!(
@@ -714,29 +503,255 @@ impl<I: IngressPort> MeshSentinel<I> {
                 );
                 false
             }
-
             NetworkEvent::Shutdown => {
-                tracing::info!("Engine: Initiating emergency salvage");
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                if self
-                    .egress_tx
-                    .send(EgressCommand::DrainForSalvage { reply_to: tx })
-                    .await
-                    .is_ok()
-                {
-                    if let Ok(payload) = timeout(Duration::from_millis(500), rx).await {
-                        let _ = self
-                            .storage_tx
-                            .send(StorageCommand::EmergencySalvage(
-                                payload.unwrap_or_default(),
-                            ))
-                            .await;
-                    }
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                true // Signal shutdown to the run loop
+                self.handle_shutdown().await;
+                true
             }
         }
+    }
+
+    // ── Event Handlers ──────────────────────────────────────────────────
+
+    /// Handles incoming data: oversized message rejection, control message
+    /// spectral analysis, and bandwidth-gated ingestion forwarding.
+    #[allow(clippy::arithmetic_side_effects)] // Size comparisons and memory pressure recording.
+    async fn handle_data_received(&mut self, origin: NetworkId, topic: MeshTopic, data: Vec<u8>) {
+        // P5 FIX: Reject oversized messages before any processing.
+        if data.len() > self.config.network.max_chunk_size_bytes * 2 {
+            tracing::warn!(
+                size = data.len(),
+                limit = self.config.network.max_chunk_size_bytes * 2,
+                peer = %origin,
+                "P5: Oversized message rejected pre-queue"
+            );
+            return;
+        }
+
+        if topic.as_str() == self.config.network.control_topic.as_str() {
+            self.handle_control_message(&data);
+        } else {
+            self.handle_data_chunk(origin, topic, data);
+        }
+    }
+
+    fn handle_control_message(&mut self, data: &[u8]) {
+        if let Ok(msg) =
+            phalanx_forensics::gate::unmarshal::<ControlMessage>(data, "control_message")
+        {
+            let peer_id_for_spectral = msg.sender.clone();
+            self.health_tracker.register_activity(msg);
+
+            // Shield Wall: evaluate spectral consistency
+            if let Some(residual) = self.health_tracker.spectral.evaluate(&peer_id_for_spectral) {
+                if residual > self.health_tracker.spectral.anomaly_threshold {
+                    self.system_governor
+                        .record_spectral_anomaly(&peer_id_for_spectral.to_string(), residual);
+                    tracing::warn!(
+                        target: "phalanx::shield_wall",
+                        peer = %peer_id_for_spectral,
+                        residual = %residual,
+                        "SPECTRAL_ANOMALY_DETECTED"
+                    );
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::arithmetic_side_effects)] // Memory pressure arithmetic.
+    fn handle_data_chunk(&mut self, origin: NetworkId, topic: MeshTopic, data: Vec<u8>) {
+        // Shield Wall: record data volume for spectral observation
+        self.health_tracker
+            .spectral
+            .record_data_received(origin.clone(), data.len());
+
+        // Bandwidth gate: reject at the edge when saturated
+        if self.system_governor.bandwidth_scaler().0 < 0.05 {
+            tracing::warn!(
+                size = data.len(),
+                peer = %origin,
+                "Bandwidth saturated, dropping chunk"
+            );
+        } else if self
+            .ingestion_tx
+            .try_send(IngestionCommand::ProcessChunk {
+                peer_id: origin,
+                data,
+                topic,
+            })
+            .is_err()
+        {
+            self.system_governor
+                .record_memory_pressure(self.config.network.max_chunk_size_bytes * 200);
+            tracing::warn!("Ingestion channel full, dropping chunk.");
+        }
+    }
+
+    /// Topology-aware peer admission with rate limiting, subnet diversity,
+    /// IWFQ eviction, and proximity witness capture.
+    #[allow(clippy::arithmetic_side_effects)] // Rate limit counter increment.
+    async fn handle_peer_discovered(
+        &mut self,
+        peer: NetworkId,
+        source: DiscoverySource,
+        bucket: SubnetBucket,
+        transport: TransportClass,
+    ) {
+        // E6: Per-second rate limit on peer discovery processing.
+        const MAX_DISCOVERIES_PER_SECOND: u32 = 10;
+        let now = std::time::Instant::now();
+        if now.duration_since(self.peer_discovery_window) >= Duration::from_secs(1) {
+            self.peer_discovery_count = 0;
+            self.peer_discovery_window = now;
+        }
+        self.peer_discovery_count += 1;
+        if self.peer_discovery_count > MAX_DISCOVERIES_PER_SECOND {
+            tracing::debug!(
+                event = "e6_rate_limit",
+                peer = %peer,
+                "E6: Peer discovery rate exceeded, dropping"
+            );
+            return;
+        }
+
+        // Topology-aware admission: check subnet diversity, transport quotas, IWFQ.
+        let balance = self.compute_transport_balance();
+        match self.topology_gate.try_admit(
+            peer.clone(),
+            TrustLevel::default(),
+            bucket,
+            transport,
+            balance,
+        ) {
+            Ok((_ticket, evicted)) => {
+                self.system_governor.record_peer_discovery(source);
+                self.system_governor.record_connection_gauge();
+
+                // ProximityWitness capture: if recording and this is LocalMesh,
+                // log the co-location event for the Corroboration Gate.
+                if transport == TransportClass::LocalMesh {
+                    if let Some(ref rec_id) = self.active_recording_id {
+                        self.proximity_witnesses.push(
+                            phalanx_proto::corroboration::ProximityWitness {
+                                local_did: self.identity.did.clone(),
+                                remote_did: phalanx_proto::identity::Did::new(peer.0.clone()),
+                                recording_id: rec_id.clone(),
+                                observed_at: self.clock.now().unwrap_or_default(),
+                                transport,
+                            },
+                        );
+                    }
+                }
+
+                if let Some(evicted_peer) = evicted {
+                    tracing::debug!(
+                        event = "topology_eviction",
+                        evicted = %evicted_peer,
+                        newcomer = %peer,
+                        "IWFQ: Evicted lower-trust peer to admit newcomer"
+                    );
+                    let _ = self
+                        .egress_tx
+                        .send(EgressCommand::DisconnectPeer(evicted_peer))
+                        .await;
+                }
+            }
+            Err(reason) => {
+                tracing::debug!(
+                    event = "topology_rejected",
+                    peer = %peer,
+                    reason = %reason,
+                    "TopologyGate rejected peer"
+                );
+                let _ = self
+                    .egress_tx
+                    .send(EgressCommand::DisconnectPeer(peer))
+                    .await;
+            }
+        }
+    }
+
+    /// DHT: Filter out self, forward remote providers to PlaybackCoordinator.
+    fn handle_providers_discovered(
+        &mut self,
+        recording_id: RecordingId,
+        providers: Vec<NetworkId>,
+    ) {
+        let local_id = self.identity.to_network_id();
+        let remote_providers: Vec<_> = providers.into_iter().filter(|p| *p != local_id).collect();
+        if !remote_providers.is_empty() {
+            tracing::info!(
+                recording = %recording_id,
+                count = remote_providers.len(),
+                "DHT: Providers discovered for recording"
+            );
+            let _ = self.providers_tx.try_send((recording_id, remote_providers));
+        }
+    }
+
+    /// DHT: Write received shards to the recording log, awaiting each confirmation.
+    async fn handle_shard_response(&mut self, origin: NetworkId, envelopes: Vec<WitnessEnvelope>) {
+        tracing::info!(
+            peer = %origin,
+            count = envelopes.len(),
+            "DHT: Shard response received"
+        );
+        for envelope in envelopes {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            if let Err(e) = self
+                .storage_tx
+                .send(StorageCommand::WriteShard {
+                    envelope,
+                    reply_to: reply_tx,
+                })
+                .await
+            {
+                tracing::warn!("DHT shard write: storage channel closed: {e}");
+                continue;
+            }
+            match reply_rx.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!("DHT shard write failed: {e}");
+                }
+                Err(_) => {
+                    tracing::warn!("DHT shard write: storage actor dropped reply channel");
+                }
+            }
+        }
+    }
+
+    async fn handle_peer_disconnected(&mut self, peer: NetworkId) {
+        tracing::info!(
+            event = "peer_disconnected",
+            peer = %peer,
+            "Peer disconnected"
+        );
+        self.topology_gate.demote_anchor(&peer);
+        self.topology_gate.release(&peer);
+        self.health_tracker.spectral.remove_peer(&peer);
+        self.system_governor.record_peer_departure(false);
+        self.system_governor.record_connection_gauge();
+    }
+
+    async fn handle_shutdown(&mut self) {
+        tracing::info!("Engine: Initiating emergency salvage");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if self
+            .egress_tx
+            .send(EgressCommand::DrainForSalvage { reply_to: tx })
+            .await
+            .is_ok()
+        {
+            if let Ok(payload) = timeout(Duration::from_millis(500), rx).await {
+                let _ = self
+                    .storage_tx
+                    .send(StorageCommand::EmergencySalvage(
+                        payload.unwrap_or_default(),
+                    ))
+                    .await;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
     pub fn spawn_playback<V: PlaybackSink + 'static, A: PlaybackSink + 'static>(
