@@ -57,6 +57,7 @@ pub mod stability {
     pub mod config;
     pub mod dyson;
     pub mod eigenvalues;
+    pub mod integrators;
     pub mod jacobian;
     pub mod nonlinear;
     pub mod pade;
@@ -65,6 +66,7 @@ pub mod stability {
     pub use config::*;
     pub use dyson::*;
     pub use eigenvalues::*;
+    pub use integrators::*;
     pub use jacobian::*;
     pub use nonlinear::*;
     pub use pade::*;
