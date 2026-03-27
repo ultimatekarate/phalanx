@@ -11,6 +11,7 @@ use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
 
 use crate::trust::ReputationProjection;
+use crate::vitals::canary::{CanaryMonitor, CanaryState};
 use crate::vitals::{HealthTracker, Homeostasis, LifecycleEvent, SystemGovernor};
 use crate::Guardian;
 use crate::{trust::TrustRegistry, StorageActor};
@@ -128,6 +129,18 @@ pub struct MeshSentinel<I: IngressPort> {
     pub proximity_witnesses: Vec<phalanx_proto::corroboration::ProximityWitness>,
     /// Trusted clock for forensic timestamps.
     pub clock: Arc<TrustedClock>,
+
+    // ── Silent Canary ──────────────────────────────────────────────────
+    /// Lightweight peer identity cache: NetworkId → Did.
+    /// Populated from WitnessEnvelope signatures during shard ingestion.
+    /// MUST NEVER be persisted to disk — memory-only, dies with the process.
+    peer_did_cache: std::collections::HashMap<NetworkId, Did>,
+    /// Community-scoped dead man's switch. Monitors mesh presence of
+    /// community peers during active recordings.
+    pub canary: CanaryMonitor,
+    /// Community IDs for canary key derivation. Snapshot taken at construction;
+    /// only members who imported the community can derive the alert decryption key.
+    community_ids: Vec<phalanx_proto::community::CommunityId>,
 }
 
 impl<I: IngressPort> MeshSentinel<I> {
@@ -212,6 +225,8 @@ impl<I: IngressPort> MeshSentinel<I> {
 
         // Trust Manager Actor
         let reputation_projection = deps.trust_registry.projection_handle();
+        // Silent Canary: snapshot community IDs before moving the registry.
+        let community_ids: Vec<_> = deps.trust_registry.communities.keys().copied().collect();
         let trust_registry = deps.trust_registry;
         let trust_actor = TrustActor::new(trust_registry, trust_rx);
         tokio::spawn(trust_actor.run());
@@ -359,6 +374,9 @@ impl<I: IngressPort> MeshSentinel<I> {
             content_key_tx,
             proximity_witnesses: Vec::new(),
             clock: clock_handle.clone(),
+            peer_did_cache: std::collections::HashMap::new(),
+            canary: CanaryMonitor::new(2), // 2 consecutive stale ticks to confirm
+            community_ids,
         })
     }
 
@@ -709,6 +727,9 @@ impl<I: IngressPort> MeshSentinel<I> {
                 self.system_governor.record_peer_discovery(source);
                 self.system_governor.record_connection_gauge();
 
+                // Silent Canary: cancel any pending dark-peer confirmation.
+                self.canary.on_peer_reconnected(&peer);
+
                 // ProximityWitness capture: if recording and this is LocalMesh,
                 // log the co-location event for the Corroboration Gate.
                 if transport == TransportClass::LocalMesh {
@@ -779,6 +800,10 @@ impl<I: IngressPort> MeshSentinel<I> {
             "DHT: Shard response received"
         );
         for envelope in envelopes {
+            // Silent Canary: populate peer DID cache and register contribution
+            // for community peers during active recordings.
+            self.register_canary_contribution(&origin, &envelope);
+
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
             if let Err(e) = self
                 .storage_tx
@@ -814,6 +839,133 @@ impl<I: IngressPort> MeshSentinel<I> {
         self.health_tracker.spectral.remove_peer(&peer);
         self.system_governor.record_peer_departure(false);
         self.system_governor.record_connection_gauge();
+
+        // Silent Canary: mark peer as potentially dark. The canary only fires
+        // after heartbeat staleness is confirmed (not on disconnect alone).
+        if self.active_recording_id.is_some() && self.canary.is_active() {
+            self.canary.on_peer_disconnected(&peer);
+
+            // Check staleness immediately — the peer may already be stale.
+            let physics = PhalanxPhysics::default();
+            if self.health_tracker.is_peer_stale(&peer, &physics) {
+                if let Some(state) = self.canary.on_peer_stale(&peer) {
+                    self.handle_canary_alert(state).await;
+                }
+            }
+        }
+    }
+
+    // ── Silent Canary: registration, escalation, and broadcast ──────────
+
+    /// Update the peer DID cache and register a canary contribution if the
+    /// peer is a verified community member with an active recording.
+    fn register_canary_contribution(&mut self, origin: &NetworkId, envelope: &WitnessEnvelope) {
+        use crate::trust::TrustOracle;
+        use phalanx_forensics::crucible::EvidenceExt;
+        use phalanx_proto::trust::TrustLevel;
+
+        // Always populate the peer identity cache (memory-only).
+        self.peer_did_cache
+            .insert(origin.clone(), envelope.did.clone());
+
+        // Only register canary contributions during an active recording.
+        if self.active_recording_id.is_none() {
+            return;
+        }
+
+        // Only watch community members (effective_trust >= Verified).
+        let trust = self.reputation.effective_trust(&envelope.did);
+        if trust < TrustLevel::Verified {
+            return;
+        }
+
+        let recording_id = envelope.evidence.recording_id();
+        self.canary
+            .register_contribution(origin, &envelope.did, recording_id);
+    }
+
+    /// Dispatch canary escalation based on how many community peers remain.
+    async fn handle_canary_alert(&mut self, state: CanaryState) {
+        let (silent_peers, recordings_at_risk, peers_remaining) = match state {
+            CanaryState::Alert {
+                silent_peers,
+                recordings_at_risk,
+                peers_remaining,
+            } => (silent_peers, recordings_at_risk, peers_remaining),
+            CanaryState::Normal => return,
+        };
+
+        tracing::warn!(
+            silent = silent_peers.len(),
+            at_risk = recordings_at_risk.len(),
+            remaining = peers_remaining,
+            "Silent Canary: community peer(s) confirmed dark"
+        );
+
+        // Re-replicate dark peer's recordings via existing DHT infrastructure.
+        for rid in &recordings_at_risk {
+            let _ = self
+                .egress_tx
+                .send(EgressCommand::FindProviders(rid.clone()))
+                .await;
+        }
+
+        if peers_remaining == 0 {
+            // Local salvage — no peers left to distribute to.
+            let _ = self
+                .storage_tx
+                .send(StorageCommand::EmergencySalvage(vec![]))
+                .await;
+        }
+
+        // Broadcast encrypted canary alert to community members.
+        self.broadcast_canary_alert(silent_peers.len()).await;
+    }
+
+    /// Encrypt and broadcast a canary alert. Only community members who
+    /// imported the same community can derive the decryption key.
+    async fn broadcast_canary_alert(&mut self, silent_count: usize) {
+        let detected_at = self.clock.now().unwrap_or_default();
+        let alert = phalanx_proto::network::CanaryAlert {
+            silent_count: phalanx_proto::network::SilentCount(silent_count as u32),
+            detected_at,
+        };
+
+        let plaintext = match postcard::to_allocvec(&alert) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(error = %e, "Canary: failed to serialize alert");
+                return;
+            }
+        };
+
+        // Broadcast once per community (each derives its own canary key).
+        for cid in &self.community_ids {
+            let canary_key = SymmetricKey(blake3::derive_key(
+                "phalanx.canary.v1.community-alert",
+                &cid.0,
+            ));
+
+            let (nonce, ciphertext) =
+                match phalanx_forensics::cryptography::encrypt_bytes(&canary_key, &plaintext) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Canary: encryption failed");
+                        continue;
+                    }
+                };
+
+            let mut payload = nonce;
+            payload.extend(ciphertext);
+
+            let _ = self
+                .egress_tx
+                .send(EgressCommand::PublishMesh {
+                    topic: MeshTopic::mesh(),
+                    data: payload,
+                })
+                .await;
+        }
     }
 
     async fn handle_shutdown(&mut self) {

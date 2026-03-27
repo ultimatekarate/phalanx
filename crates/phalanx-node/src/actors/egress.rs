@@ -37,6 +37,11 @@ pub enum EgressCommand {
     WithdrawProvider(RecordingId),
     /// Cryptographic Forgetting: publish a DHT tombstone for a revoked recording.
     AnnounceTombstone(RecordingId, DhtPayload),
+    /// Silent Canary: publish an encrypted alert on a mesh topic.
+    PublishMesh {
+        topic: phalanx_proto::topic::MeshTopic,
+        data: Vec<u8>,
+    },
 }
 
 pub struct EgressActor<E: EgressPort> {
@@ -155,6 +160,15 @@ impl<E: EgressPort> EgressActor<E> {
                         recording = %recording_id,
                         error = %e,
                         "Failed to announce DHT tombstone"
+                    );
+                }
+            }
+            EgressCommand::PublishMesh { topic, data } => {
+                if let Err(e) = self.port.publish(&topic, data).await {
+                    tracing::warn!(
+                        topic = %topic,
+                        error = %e,
+                        "Failed to publish mesh message"
                     );
                 }
             }
