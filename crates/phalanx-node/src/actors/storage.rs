@@ -11,6 +11,7 @@ use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::PhalanxIdentity;
 use phalanx_proto::identity::RecordingId;
 use phalanx_proto::prelude::{ShardChunk, ShardError};
+use phalanx_proto::revocation::RevocationToken;
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::storage::PendingEgress;
 use phalanx_proto::storage::TransientJournal;
@@ -71,6 +72,11 @@ pub enum StorageCommand {
     },
     /// Emergency backup of egress queues during node shutdown.
     EmergencySalvage(Vec<PendingEgress>),
+    /// Cryptographic Forgetting: destroy all evidence for a recording.
+    Revoke {
+        token: RevocationToken,
+        reply_to: oneshot::Sender<Result<(), GuardianError>>,
+    },
 }
 
 impl<J: TransientJournal> StorageActor<J> {
@@ -125,6 +131,10 @@ impl<J: TransientJournal> StorageActor<J> {
                             StorageCommand::EmergencySalvage(pending) => {
                                 // This handles the BrokenJournal error internally and continues
                                 self.handle_salvage(pending).await;
+                            }
+                            StorageCommand::Revoke { token, reply_to } => {
+                                let result = self.handle_revoke(token).await;
+                                let _ = reply_to.send(result);
                             }
                         },
                         None => {
@@ -331,6 +341,53 @@ impl<J: TransientJournal> StorageActor<J> {
             );
         }
         result
+    }
+
+    /// Cryptographic Forgetting: authorize and execute a recording revocation.
+    async fn handle_revoke(&mut self, token: RevocationToken) -> Result<(), GuardianError> {
+        let recording_id = token.recording_id.clone();
+
+        // 1. Verify the token's self-contained signature
+        phalanx_forensics::revocation::verify_revocation_token(&token).map_err(|e| {
+            GuardianError::VerificationFailed(format!("Revocation token invalid: {e}"))
+        })?;
+
+        // 2. Look up any envelope to get the recording's embedded revocation key
+        let envelopes = self
+            .guardian
+            .read_all_shards(&recording_id, None)
+            .await
+            .unwrap_or_default();
+
+        if let Some(first) = envelopes.first() {
+            // Authorize: token key must match the recording's embedded key
+            phalanx_forensics::revocation::authorize_revocation(&token, &first.revocation_key)
+                .map_err(|e| {
+                    GuardianError::VerificationFailed(format!(
+                        "Revocation authorization failed: {e}"
+                    ))
+                })?;
+        }
+        // If no local envelopes exist, the self-contained signature is sufficient.
+        // Honor the revocation to block future shards for this recording.
+
+        // 3. Execute the revocation
+        self.guardian.revoke_recording(&recording_id).await?;
+
+        // 4. Persist to journal for crash recovery
+        if let Err(e) = self.journal.record_revocations(&[token]).await {
+            tracing::error!(
+                recording = %recording_id,
+                error = %e,
+                "Failed to persist revocation to journal"
+            );
+        }
+
+        tracing::info!(
+            recording = %recording_id,
+            "Recording revoked — all evidence destroyed"
+        );
+        Ok(())
     }
 
     /// Persists network state to the WAL and salvages Guardian data.

@@ -19,6 +19,7 @@ use phalanx_proto::time::TrustedClock;
 use phalanx_proto::types::ByteCapacity;
 use phalanx_proto::types::ForensicUnit;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -177,6 +178,8 @@ pub struct Guardian {
     pub ledger: StorageLedger,
     /// Append-only recording logs, one per recording. Keyed by RecordingId.
     recording_logs: BTreeMap<RecordingId, RecordingLog>,
+    /// Revoked recordings: future shards for these recordings are rejected.
+    revoked_recordings: HashSet<RecordingId>,
 }
 
 impl Guardian {
@@ -195,6 +198,7 @@ impl Guardian {
             vault_key,
             ledger: StorageLedger::default(),
             recording_logs: BTreeMap::new(),
+            revoked_recordings: HashSet::new(),
         }
     }
 
@@ -208,6 +212,11 @@ impl Guardian {
 
         let EnvelopeState::Intact(envelope) = state;
         let vid = envelope.evidence.recording_id().clone();
+
+        // Cryptographic Forgetting: reject shards for revoked recordings.
+        if self.revoked_recordings.contains(&vid) {
+            return Err(GuardianError::RecordingRevoked(vid.to_string()));
+        }
         let seq = envelope.evidence.sequence_id();
         let sender_did = envelope.witness_peer_id.clone();
 
@@ -282,6 +291,39 @@ impl Guardian {
         self.get_active_recording_shards(recording_id)
             .and_then(|shards| shards.get(&sequence_id))
             .cloned()
+    }
+
+    /// Cryptographic Forgetting: destroy all evidence for a recording.
+    ///
+    /// 1. Remove from in-memory Crucible contexts
+    /// 2. Close and delete the recording log file
+    /// 3. Delete the `.recording` file from disk
+    /// 4. Mark as revoked to block future ingestion
+    pub async fn revoke_recording(
+        &mut self,
+        recording_id: &RecordingId,
+    ) -> Result<(), GuardianError> {
+        // 1. Remove from Crucible (in-memory state)
+        self.crucible.contexts.remove(recording_id);
+
+        // 2. Close and delete recording log
+        if let Some(log) = self.recording_logs.remove(recording_id) {
+            // Drop the file handle first (closes the file)
+            let path = log.path.clone();
+            drop(log);
+            // Overwrite with zeros before delete (defense-in-depth)
+            if let Ok(metadata) = fs::metadata(&path).await {
+                let zeros = vec![0u8; metadata.len() as usize];
+                let _ = fs::write(&path, &zeros).await;
+            }
+            let _ = fs::remove_file(&path).await;
+            tracing::info!(recording = %recording_id, path = ?path, "Recording log zeroed and deleted");
+        }
+
+        // 3. Mark as revoked (blocks future ingestion)
+        self.revoked_recordings.insert(recording_id.clone());
+
+        Ok(())
     }
 
     /// Explicit salvage command for node termination sequences.
@@ -360,6 +402,12 @@ impl Guardian {
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Frame arithmetic — payload sizes bounded by MTU.
     pub async fn append_shard(&mut self, envelope: &WitnessEnvelope) -> Result<(), GuardianError> {
         let recording_id = envelope.evidence.recording_id().clone();
+
+        // Cryptographic Forgetting: reject shards for revoked recordings.
+        if self.revoked_recordings.contains(&recording_id) {
+            return Err(GuardianError::RecordingRevoked(recording_id.to_string()));
+        }
+
         let sequence_id = envelope.evidence.sequence_id();
         let owner_did = envelope.did.clone();
 

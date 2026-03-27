@@ -62,6 +62,10 @@ pub enum AggregationCommand {
     RefreshRouting {
         routing: HashMap<Did, Vec<CommunityId>>,
     },
+    /// Cryptographic Forgetting: destroy all evidence for a recording.
+    Revoke {
+        recording_id: RecordingId,
+    },
 }
 
 // ── Actor ────────────────────────────────────────────────────────────────
@@ -155,6 +159,16 @@ impl AggregationActor {
                     dids = self.community_routing.len(),
                     "AggregationActor: routing cache refreshed"
                 );
+            }
+            AggregationCommand::Revoke { recording_id } => {
+                // Remove from in-memory recording crucible
+                self.recording_crucible.contexts.remove(&recording_id);
+                // Remove from evidence store (disk)
+                if let Err(e) = self.evidence_store.revoke_recording(&recording_id).await {
+                    warn!(recording = %recording_id, error = %e, "Failed to revoke from evidence store");
+                } else {
+                    info!(recording = %recording_id, "Recording revoked from Stronghold");
+                }
             }
         }
     }

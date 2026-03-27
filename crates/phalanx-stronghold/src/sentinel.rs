@@ -115,7 +115,13 @@ impl<I: IngressPort> StrongholdSentinel<I> {
     /// Dispatch a single NetworkEvent. Returns `true` if shutdown requested.
     async fn handle_event(&self, event: NetworkEvent) -> bool {
         match event {
-            NetworkEvent::DataReceived { data, .. } => {
+            NetworkEvent::DataReceived { data, topic, .. } => {
+                // Cryptographic Forgetting: route revocation tokens
+                if topic.as_str() == phalanx_proto::topic::MeshTopic::revocation().as_str() {
+                    self.handle_revocation(&data);
+                    return false;
+                }
+
                 // Deserialize ShardChunk from the wire bytes.
                 let chunk: ShardChunk = match gate::unmarshal(&data, "StrongholdSentinel::ingest") {
                     Ok(c) => c,
@@ -148,6 +154,35 @@ impl<I: IngressPort> StrongholdSentinel<I> {
             // ShardResponseReceived, PeerDisconnected, BLE auth events
             // are handled by the phone's MeshSentinel, not the Stronghold.
             _ => false,
+        }
+    }
+
+    /// Cryptographic Forgetting: verify and forward revocation tokens to AggregationActor.
+    fn handle_revocation(&self, data: &[u8]) {
+        let token: phalanx_proto::revocation::RevocationToken =
+            match gate::unmarshal(data, "StrongholdSentinel::revocation") {
+                Ok(t) => t,
+                Err(e) => {
+                    debug!(error = %e, "StrongholdSentinel: malformed revocation token");
+                    return;
+                }
+            };
+
+        if let Err(e) = phalanx_forensics::revocation::verify_revocation_token(&token) {
+            warn!(
+                recording = %token.recording_id,
+                error = %e,
+                "StrongholdSentinel: invalid revocation token rejected"
+            );
+            return;
+        }
+
+        if let Err(e) = self.aggregation_tx.try_send(AggregationCommand::Revoke {
+            recording_id: token.recording_id.clone(),
+        }) {
+            warn!(error = %e, "StrongholdSentinel: aggregation channel full, dropping revocation");
+        } else {
+            info!(recording = %token.recording_id, "Revocation forwarded to aggregation");
         }
     }
 

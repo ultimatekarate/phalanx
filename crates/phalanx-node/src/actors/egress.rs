@@ -1,9 +1,11 @@
 use crate::clock::TrustedClock;
 use crate::vitals::{Homeostasis, SystemGovernor};
 use phalanx_proto::identity::{NetworkId, RecordingId};
+use phalanx_proto::kademlia::DhtPayload;
 use phalanx_proto::network::EgressPort;
 use phalanx_proto::prelude::*;
 use phalanx_proto::retrieval::RecordingRequest;
+use phalanx_proto::revocation::RevocationToken;
 use phalanx_proto::storage::PendingEgress;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
@@ -29,6 +31,12 @@ pub enum EgressCommand {
     DisconnectPeer(NetworkId),
     /// Eclipse remediation: re-dial bootstrap peers and trigger Kademlia random walk.
     ReBootstrap(Vec<String>),
+    /// Cryptographic Forgetting: publish a revocation token to the gossipsub topic.
+    PublishRevocation(RevocationToken),
+    /// Cryptographic Forgetting: remove local provider records for a revoked recording.
+    WithdrawProvider(RecordingId),
+    /// Cryptographic Forgetting: publish a DHT tombstone for a revoked recording.
+    AnnounceTombstone(RecordingId, DhtPayload),
 }
 
 pub struct EgressActor<E: EgressPort> {
@@ -119,6 +127,36 @@ impl<E: EgressPort> EgressActor<E> {
             }
             EgressCommand::ReBootstrap(peers) => {
                 self.handle_rebootstrap(peers).await;
+            }
+            EgressCommand::PublishRevocation(token) => {
+                if let Err(e) = self.port.publish_revocation(&token).await {
+                    tracing::warn!(
+                        recording = %token.recording_id,
+                        error = %e,
+                        "Failed to publish revocation token"
+                    );
+                }
+            }
+            EgressCommand::WithdrawProvider(recording_id) => {
+                if let Err(e) = self.port.withdraw_provider(&recording_id).await {
+                    tracing::warn!(
+                        recording = %recording_id,
+                        error = %e,
+                        "Failed to withdraw provider record"
+                    );
+                }
+            }
+            EgressCommand::AnnounceTombstone(recording_id, payload) => {
+                // Publish the tombstone to the DHT keyed by the RecordingId
+                let data = postcard::to_allocvec(&payload).unwrap_or_default();
+                let topic = phalanx_proto::topic::MeshTopic::revocation();
+                if let Err(e) = self.port.publish(&topic, data).await {
+                    tracing::warn!(
+                        recording = %recording_id,
+                        error = %e,
+                        "Failed to announce DHT tombstone"
+                    );
+                }
             }
         }
         false
