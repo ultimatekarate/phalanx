@@ -1,5 +1,6 @@
 // crates/phalanx-proto/src/evidence.rs
 use crate::identity::{Did, NetworkId, RecordingId, ShardId};
+use crate::revocation::RevocationKey;
 use crate::storage::HandoverProof;
 use crate::time::PhalanxTimestamp;
 use crate::types::{ChannelCount, EncodingSymbolId, Fps, SampleRate};
@@ -56,6 +57,11 @@ pub struct WitnessEnvelope {
     pub witness_signature: Vec<u8>,
     pub did: Did,
     pub prev_hash: Option<SignatureHash>,
+    /// Revocation authority for this recording. Derived from the recorder's
+    /// BIP39 mnemonic (seed bytes [32..64]). Embedded in every envelope so any
+    /// node can verify a RevocationToken without needing the genesis shard.
+    #[serde(default)]
+    pub revocation_key: RevocationKey,
 }
 
 /// A cryptographic anchor for a specific unit of evidence.

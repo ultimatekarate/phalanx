@@ -54,6 +54,7 @@ impl WitnessAuthority for WitnessEnvelope {
             witness_signature: signature.to_bytes().to_vec(),
             did: identity.did.clone(),
             prev_hash,
+            revocation_key: identity.revocation_key,
         })
     }
 

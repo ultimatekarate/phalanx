@@ -5,6 +5,7 @@ use crate::evidence::WitnessEnvelope;
 use crate::identity::{Did, RecordingId};
 use crate::prelude::{MeshTopic, NetworkId};
 use crate::retrieval::{RecordingRequest, RecordingResponse};
+use crate::revocation::RevocationToken;
 use crate::telemetry::DiscoverySource;
 use crate::topology::{SubnetBucket, TransportClass};
 
@@ -140,6 +141,20 @@ pub trait EgressPort: Send + Sync + Clone {
     /// Re-dial bootstrap peers and trigger a Kademlia random walk.
     /// Default: no-op (transports that don't support this ignore the request).
     async fn rebootstrap(&self, _peers: &[String]) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Publish a revocation token to the revocation gossipsub topic.
+    /// Default: serializes and publishes to `MeshTopic::revocation()`.
+    async fn publish_revocation(&self, token: &RevocationToken) -> Result<(), String> {
+        let data =
+            postcard::to_allocvec(token).map_err(|e| format!("Revocation serialize: {e}"))?;
+        self.publish(&MeshTopic::revocation(), data).await
+    }
+
+    /// Remove local provider records for a revoked recording from the DHT.
+    /// Default: no-op (transports that don't maintain provider records ignore this).
+    async fn withdraw_provider(&self, _recording_id: &RecordingId) -> Result<(), String> {
         Ok(())
     }
 }

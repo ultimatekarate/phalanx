@@ -3,7 +3,13 @@
 
 # Phalanx
 
-Mobile-first, cross-platform forensic evidence provenance system. Phalanx captures, verifies, and distributes forensic evidence across a peer-to-peer mesh with cryptographic integrity guarantees at every layer. The stronghold binary provides forensic corroboration — determining whether distinct videos from independent devices observed the same event.
+Phalanx is a mobile-first, cross-platform P2P forensic evidence provenance system. Phalanx captures, verifies, and distributes forensic evidence across a peer-to-peer mesh with cryptographic integrity guarantees at every layer. The stronghold binary provides forensic corroboration — determining whether distinct videos from independent devices observed the same event.
+
+This is started as a way to use AI tools to learn Rust and it rapidly got out of hand. This is also my first mobile application. I cut my teeth learning QBASIC and writing C++ in notepad- not because I'm especially hardcore, but because it was what was available to me at the time. I've spent the past few year writing Python code professionally. I wouldn't describe myself as a 10x engineer. Truth be told, I am jealous of those that can whip through code at lightning speed with VIM keybindings. I wish I could but I've broken, dislocated, or sprained every single one of my fingers- it's the price you pay to be a middle blocker in volleyball. I call my right index finger my "weather finger." My bottleneck has never been ideas. It's always been syntax and keystrokes. Phalanx is 100% my ideas and roughly 10% of my keystrokes.
+
+I'm not an expert in any of the fields you see in this repo (Well, I do have a PhD in numerical analysis so there's that) but I don't have to be because I can RTFM. The nerds of yore knew that there would come a time when someone else would need invoke the deep magic. That's why they wrote it down. There are some genuinely novel ideas in this code base, but for the most part it is an act of synthesis that is heavily influenced by Grace Hopper and Margaret Hamilton.
+
+Grace Hopper believed that the language should be the logic. She dared to believe that the machines should meet the humans where they are- that's why we have compilers. Margaret Hamilton, the woman who coined the phrase 'software engineering', believed that software deserved the same level of rigor as the hardware that it ran on. Both were dismissed and they built the thing anyway- and they were right to do it. I'm not Grace Hopper. I'm not Margaret Hamilton. Hell, I don't think I'm a particularly good programmer. I'm just someone that had an idea that they wanted to try out- and now the world has Phalanx. Use it or don't. Hopefully, at least one person will find it useful.
 
 ## Architecture
 

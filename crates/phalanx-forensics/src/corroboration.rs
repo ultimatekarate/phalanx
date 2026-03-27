@@ -362,6 +362,7 @@ mod tests {
                 witness_signature: vec![0u8; 64],
                 did: Did::new(format!("did:key:{did}")),
                 prev_hash: None,
+                revocation_key: phalanx_proto::revocation::RevocationKey::default(),
             };
             artifacts.push(env);
         }
