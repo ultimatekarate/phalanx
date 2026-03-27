@@ -29,6 +29,12 @@ impl MeshTopic {
     pub fn revocation() -> Self {
         Self::new("revocation/1.0.0")
     }
+
+    /// Generic mesh control topic. Used for canary alerts and other
+    /// encrypted community messages indistinguishable from normal traffic.
+    pub fn mesh() -> Self {
+        Self::new("mesh/1.0.0")
+    }
 }
 
 impl Default for MeshTopic {

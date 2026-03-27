@@ -1,4 +1,4 @@
-name: CI — Lint, Test, Android
+name: Android pipeline
 
 on:
   push:

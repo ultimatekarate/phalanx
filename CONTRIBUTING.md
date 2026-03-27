@@ -1,9 +1,5 @@
 # CONTRIBUTING TO PHALANX
 
-Phalanx is a distributed forensic evidence provenance system. It uses control theory for self-regulation, fountain codes for data resilience, eclipse attack detection for network security, PRNU sensor fingerprinting for deepfake rejection, and decentralized identity for zero-trust peer authentication. It is conceptually dense.
-
-You do not need to understand all of it to contribute to any of it.
-
 The codebase is structured so that each technical specialty occupies a well-defined set of files with minimal entanglement. A networking engineer can improve the QUIC transport without understanding Padé approximants. A statistician can refine the Kolmogorov-Smirnov corroboration test without knowing how libp2p gossipsub works. A storage engineer can optimize the vault without touching the actor system. The linguistic model (`linguistic-code-model.md`) enforces these boundaries at the crate level — they are not conventions, they are compiler-enforced facts.
 
 Before contributing, read `linguistic-code-model.md`. It defines the parts of speech (Nouns, Verbs, Conjunctions, Prepositions, etc.) and the rules that govern them. Then find your specialty below and start there.

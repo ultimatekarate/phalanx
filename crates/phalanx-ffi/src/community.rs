@@ -118,6 +118,10 @@ pub unsafe extern "C" fn phalanx_set_recording_state(
                 // For now, they're logged. The Stronghold aggregation path will consume them.
             }
         }
+        if rec_id.is_none() {
+            // Silent Canary: clear watched state when recording stops.
+            sentinel.canary.clear();
+        }
         sentinel.active_recording_id = rec_id;
     });
 

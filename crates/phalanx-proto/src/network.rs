@@ -86,6 +86,25 @@ pub struct BleResponse {
     pub signature: Vec<u8>,
 }
 
+// ── Silent Canary ─────────────────────────────────────────────────────────
+//
+// Dead man's switch alert: community member(s) went dark during active recording.
+// Broadcast encrypted with a key derived from CommunityId — only members can decrypt.
+
+/// Count of community peers confirmed silent. Newtype prevents confusion
+/// with other u32 quantities (sequence IDs, shard counts, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SilentCount(pub u32);
+
+/// Anonymous alert: community member(s) went silent during active recording.
+/// No identifying information about WHO went silent — just count and timestamp.
+/// Encrypted with community-derived key before broadcast; non-members cannot decrypt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CanaryAlert {
+    pub silent_count: SilentCount,
+    pub detected_at: crate::time::PhalanxTimestamp,
+}
+
 // ── Transport Capability Contracts ────────────────────────────────────────
 //
 // These are Nouns (capability contracts) — they define the shape of network

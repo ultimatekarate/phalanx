@@ -37,6 +37,7 @@ pub mod persistence {
 pub mod trust;
 
 pub mod vitals {
+    pub mod canary;
     pub mod config;
     pub mod governor;
     pub mod hardware;
@@ -44,6 +45,7 @@ pub mod vitals {
     pub mod spectral;
     pub mod types;
 
+    pub use canary::*;
     pub use config::*;
     pub use governor::*;
     pub use hardware::*;
