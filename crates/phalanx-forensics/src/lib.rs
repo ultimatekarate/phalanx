@@ -13,6 +13,7 @@ pub mod judge;
 pub mod kademlia;
 pub mod policy;
 pub mod reassembler;
+pub mod revocation;
 pub mod test_utils;
 pub mod topology_gate;
 pub mod transcode;

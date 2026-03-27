@@ -74,6 +74,7 @@ mod tests {
             witness_signature: vec![0u8; 64],
             did: Did::new("did:test:dummy"),
             prev_hash: None,
+            revocation_key: crate::revocation::RevocationKey::default(),
         };
         ForensicUnit::<_, Verified>::new_verified(envelope).seal()
     }

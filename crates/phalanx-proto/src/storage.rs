@@ -5,6 +5,7 @@ use crate::identity::{Did, RecordingId};
 use crate::prelude::NetworkId;
 use crate::prelude::PhalanxTimestamp;
 use crate::prelude::ShardError;
+use crate::revocation::RevocationToken;
 use crate::types::ByteCapacity;
 use async_trait::async_trait;
 use ed25519_dalek::Signature;
@@ -47,6 +48,9 @@ pub enum GuardianError {
 
     #[error("Sequence conflict: sequence {0} already exists with different content")]
     SequenceConflict(u64),
+
+    #[error("Recording revoked: {0}")]
+    RecordingRevoked(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -95,4 +99,15 @@ pub trait TransientJournal: Send + Sync + 'static {
     // --- Workbench State Recovery ---
     async fn record_workbench_state(&mut self, state_bytes: &[u8]) -> Result<(), ShardError>;
     async fn read_workbench_state(&mut self) -> Result<Vec<u8>, ShardError>;
+
+    // --- Revocation Persistence ---
+    async fn record_revocations(
+        &mut self,
+        _revocations: &[RevocationToken],
+    ) -> Result<(), ShardError> {
+        Ok(())
+    }
+    async fn read_all_revocations(&mut self) -> Result<Vec<RevocationToken>, ShardError> {
+        Ok(vec![])
+    }
 }

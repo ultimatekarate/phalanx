@@ -64,6 +64,7 @@ fn make_envelope(seq: u32, recording_id: &str, did_str: &str) -> WitnessEnvelope
         witness_signature: vec![0u8; 64],
         did: Did::new(did_str),
         prev_hash: None,
+        revocation_key: phalanx_proto::revocation::RevocationKey::default(),
     }
 }
 

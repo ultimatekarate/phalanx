@@ -11,6 +11,7 @@ pub mod kademlia; // The Ledger Nouns
 pub mod network;
 pub mod playback;
 pub mod retrieval;
+pub mod revocation; // The Forgetting
 pub mod storage; // The Vault Nouns
 pub mod telemetry;
 pub mod time; // The When

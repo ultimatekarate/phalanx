@@ -1,3 +1,4 @@
+use crate::revocation::RevocationKey;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -221,6 +222,9 @@ pub struct PhalanxIdentity {
     pub did: Did,
     pub network_id: NetworkId,
     pub keypair: SigningKey,
+    /// The public half of the revocation keypair. Derived from BIP39 mnemonic
+    /// (seed bytes [32..64]). Default (all zeros) for ephemeral identities.
+    pub revocation_key: RevocationKey,
 }
 
 impl PhalanxIdentity {
@@ -248,6 +252,7 @@ impl PhalanxIdentity {
             did,
             network_id,
             keypair: signing_key,
+            revocation_key: RevocationKey::default(),
         }
     }
 }
@@ -274,6 +279,10 @@ pub struct IdentityDiskFormat {
     pub did: Did,
     pub network_id: NetworkId,
     pub keypair_bytes: [u8; 32],
+    /// Revocation public key. `serde(default)` for backwards compatibility —
+    /// existing identity files load with `RevocationKey::default()`.
+    #[serde(default)]
+    pub revocation_key: RevocationKey,
 }
 
 impl IdentityDiskFormat {
@@ -284,6 +293,7 @@ impl IdentityDiskFormat {
             did: identity.did.clone(),
             network_id: identity.network_id.clone(),
             keypair_bytes: identity.keypair.to_bytes(),
+            revocation_key: identity.revocation_key,
         }
     }
 
@@ -294,6 +304,7 @@ impl IdentityDiskFormat {
             did: self.did,
             network_id: self.network_id,
             keypair: SigningKey::from_bytes(&self.keypair_bytes),
+            revocation_key: self.revocation_key,
         }
     }
 }

@@ -25,6 +25,10 @@ impl MeshTopic {
     pub fn video() -> Self {
         Self::new("video/1.0.0")
     }
+
+    pub fn revocation() -> Self {
+        Self::new("revocation/1.0.0")
+    }
 }
 
 impl Default for MeshTopic {

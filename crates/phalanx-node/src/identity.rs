@@ -3,6 +3,7 @@ use ed25519_dalek::SigningKey;
 use phalanx_forensics::cryptography::identity::{seal_identity, unseal_identity};
 use phalanx_proto::identity::PhalanxLocator;
 use phalanx_proto::prelude::{Did, IdentityError, PhalanxIdentity};
+use phalanx_proto::revocation::RevocationKey;
 use phalanx_proto::RecordingRequest;
 use rand::Rng;
 use std::fs;
@@ -16,6 +17,9 @@ pub trait PhalanxNodeIdentityExt: Sized {
     fn load_from_disk<P: AsRef<Path>>(path: P, passphrase: &str) -> Result<Self, IdentityError>;
     fn verify_retrieval_auth(&self, request: &RecordingRequest) -> Result<(), IdentityError>;
     fn init<P: AsRef<Path>>(path: P, passphrase: &str) -> Result<Self, IdentityError>;
+    /// Derive the revocation signing key from the BIP39 mnemonic.
+    /// This is the ONLY way to obtain the private half — it is never stored on disk.
+    fn revocation_signing_key(phrase: &str) -> Result<SigningKey, IdentityError>;
 }
 
 impl PhalanxNodeIdentityExt for PhalanxIdentity {
@@ -37,6 +41,13 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         let verifying_key = signing_key.verifying_key();
         let public_key_bytes = verifying_key.to_bytes();
 
+        // Derive revocation public key from seed[32..64]
+        let revocation_bytes: [u8; 32] = seed[32..64]
+            .try_into()
+            .map_err(|_| IdentityError::CryptoError("Revocation seed fail".into()))?;
+        let revocation_signing = SigningKey::from_bytes(&revocation_bytes);
+        let revocation_key = RevocationKey(revocation_signing.verifying_key().to_bytes());
+
         let did = Did::derive_did_key(&public_key_bytes);
         let network_id = did.to_network_id();
 
@@ -46,6 +57,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
                 version: IDENTITY_VERSION,
                 did,
                 keypair: signing_key,
+                revocation_key,
             },
             phrase,
         ))
@@ -63,6 +75,13 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         let verifying_key = signing_key.verifying_key();
         let public_key_bytes = verifying_key.to_bytes();
 
+        // Derive revocation public key from seed[32..64]
+        let revocation_bytes: [u8; 32] = seed[32..64]
+            .try_into()
+            .map_err(|_| IdentityError::CryptoError("Revocation seed fail".into()))?;
+        let revocation_signing = SigningKey::from_bytes(&revocation_bytes);
+        let revocation_key = RevocationKey(revocation_signing.verifying_key().to_bytes());
+
         let did = Did::derive_did_key(&public_key_bytes);
         let network_id = did.to_network_id();
 
@@ -71,6 +90,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
             version: IDENTITY_VERSION,
             did,
             keypair: signing_key,
+            revocation_key,
         })
     }
 
@@ -159,6 +179,16 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
                 Err(err)
             }
         }
+    }
+
+    fn revocation_signing_key(phrase: &str) -> Result<SigningKey, IdentityError> {
+        let mnemonic = Mnemonic::parse(phrase)
+            .map_err(|e: bip39::Error| IdentityError::MnemonicError(e.to_string()))?;
+        let seed = mnemonic.to_seed("");
+        let revocation_bytes: [u8; 32] = seed[32..64]
+            .try_into()
+            .map_err(|_| IdentityError::CryptoError("Revocation seed fail".into()))?;
+        Ok(SigningKey::from_bytes(&revocation_bytes))
     }
 }
 
