@@ -112,6 +112,7 @@ async fn build_media_egress<E: EgressPort + 'static>(
         system_governor: gov,
         max_storage_bytes: 100_000_000,
         vault_key: SymmetricKey([0u8; 32]),
+        content_key_rx: tokio::sync::watch::channel(None).1,
         clock: Arc::new(TrustedClock::new()),
         lens_thresholds: phalanx_forensics::gate::LensThresholds::default(),
     };

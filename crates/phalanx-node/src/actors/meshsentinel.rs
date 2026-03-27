@@ -118,8 +118,11 @@ pub struct MeshSentinel<I: IngressPort> {
     /// Active recording ID, if any. Set by FFI when recording starts, cleared on stop.
     /// Used to capture ProximityWitness entries when LocalMesh peers are discovered.
     pub active_recording_id: Option<RecordingId>,
-    /// Recording key for the active recording (for auto-sealing grants to Stronghold).
+    /// Per-recording content key for the active recording (DEK for crypto-shredding).
+    /// Set when recording starts (via StorageCommand::StartRecording), cleared on stop.
     pub active_recording_key: Option<[u8; 32]>,
+    /// Watch channel sender for pushing per-recording content keys to MediaEgressActor.
+    pub content_key_tx: tokio::sync::watch::Sender<Option<phalanx_proto::crypto::SymmetricKey>>,
     /// Proximity witnesses captured during the current recording.
     /// Flushed to the evidence pipeline when the recording ends.
     pub proximity_witnesses: Vec<phalanx_proto::corroboration::ProximityWitness>,
@@ -253,6 +256,11 @@ impl<I: IngressPort> MeshSentinel<I> {
         // with integral feedback: outbound queue pressure → w_integral → FPS self-regulation.
         let outbound_wal_dir =
             std::path::PathBuf::from(&deps.config.storage.vault_path).join("outbound_wal");
+        // Per-recording content key watch channel: MeshSentinel → MediaEgressActor.
+        // When a recording starts, the content key (DEK) is sent via this channel.
+        // MediaEgressActor prefers the content key over vault_key for encryption.
+        let (content_key_tx, content_key_rx) =
+            tokio::sync::watch::channel::<Option<phalanx_proto::crypto::SymmetricKey>>(None);
         let media_actor = MediaEgressActor::new(
             deps.egress.clone(),
             arc_identity.clone(),
@@ -268,6 +276,7 @@ impl<I: IngressPort> MeshSentinel<I> {
                 system_governor: deps.system_governor.clone(),
                 max_storage_bytes: deps.config.storage.max_storage_bytes.as_u64(),
                 vault_key: deps.vault_key.clone(),
+                content_key_rx,
                 clock: clock_handle.clone(),
                 lens_thresholds: deps
                     .config
@@ -347,6 +356,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             peer_discovery_window: std::time::Instant::now(),
             active_recording_id: None,
             active_recording_key: None,
+            content_key_tx,
             proximity_witnesses: Vec::new(),
             clock: clock_handle.clone(),
         })
@@ -827,7 +837,7 @@ impl<I: IngressPort> MeshSentinel<I> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    pub fn spawn_playback<V: PlaybackSink + 'static, A: PlaybackSink + 'static>(
+    pub async fn spawn_playback<V: PlaybackSink + 'static, A: PlaybackSink + 'static>(
         &mut self,
         recording_id: RecordingId,
         video_sink: V,
@@ -839,10 +849,27 @@ impl<I: IngressPort> MeshSentinel<I> {
         let (providers_tx, providers_rx) = mpsc::channel(100);
         self.providers_tx = providers_tx;
 
+        // Resolve per-recording content key for decryption.
+        // Falls back to vault_key (network_key) for legacy recordings without content keys.
+        let decryption_key = {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let _ = self
+                .storage_tx
+                .send(StorageCommand::GetContentKey {
+                    recording_id: recording_id.clone(),
+                    reply_to: tx,
+                })
+                .await;
+            match rx.await {
+                Ok(Some(key_bytes)) => Some(phalanx_proto::crypto::SymmetricKey(key_bytes)),
+                _ => Some((*self.network_key).clone()), // fallback for legacy
+            }
+        };
+
         let mut coordinator = PlaybackCoordinator::new(
             self.storage_tx.clone(),
             self.egress_tx.clone(),
-            Some((*self.network_key).clone()),
+            decryption_key,
             video_sink,
             audio_sink,
             self.discovery_tx.clone(),
