@@ -538,6 +538,8 @@ impl<I: IngressPort> MeshSentinel<I> {
 
         if topic.as_str() == self.config.network.control_topic.as_str() {
             self.handle_control_message(&data);
+        } else if topic.as_str() == self.config.network.revocation_topic.as_str() {
+            self.handle_revocation(origin, &data).await;
         } else {
             self.handle_data_chunk(origin, topic, data);
         }
@@ -592,6 +594,68 @@ impl<I: IngressPort> MeshSentinel<I> {
             self.system_governor
                 .record_memory_pressure(self.config.network.max_chunk_size_bytes * 200);
             tracing::warn!("Ingestion channel full, dropping chunk.");
+        }
+    }
+
+    /// Cryptographic Forgetting: process an inbound revocation token from gossipsub.
+    async fn handle_revocation(&mut self, origin: NetworkId, data: &[u8]) {
+        // 1. Deserialize
+        let token: phalanx_proto::revocation::RevocationToken =
+            match phalanx_forensics::gate::unmarshal_checked(data, "revocation_token") {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(peer = %origin, error = %e, "Malformed revocation token");
+                    return;
+                }
+            };
+
+        // 2. Verify self-contained signature
+        if let Err(e) = phalanx_forensics::revocation::verify_revocation_token(&token) {
+            tracing::warn!(
+                peer = %origin,
+                recording = %token.recording_id,
+                error = %e,
+                "Invalid revocation token rejected"
+            );
+            return;
+        }
+
+        // 3. Forward to StorageActor for authorization and execution
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let recording_id = token.recording_id.clone();
+        if self
+            .storage_tx
+            .send(StorageCommand::Revoke {
+                token: token.clone(),
+                reply_to: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            tracing::error!("Storage channel closed — cannot process revocation");
+            return;
+        }
+
+        match reply_rx.await {
+            Ok(Ok(())) => {
+                tracing::info!(recording = %recording_id, "Revocation applied — propagating");
+                // 4. Epidemic propagation: republish to gossipsub
+                let _ = self
+                    .egress_tx
+                    .send(EgressCommand::PublishRevocation(token))
+                    .await;
+                // 5. Withdraw local DHT provider records
+                let _ = self
+                    .egress_tx
+                    .send(EgressCommand::WithdrawProvider(recording_id))
+                    .await;
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(recording = %recording_id, error = %e, "Revocation rejected");
+            }
+            Err(_) => {
+                tracing::error!("Storage reply channel dropped during revocation");
+            }
         }
     }
 

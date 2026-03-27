@@ -269,6 +269,38 @@ impl EvidenceStore {
         Ok(total)
     }
 
+    /// Cryptographic Forgetting: remove all shards for a recording across all communities.
+    /// Searches all community directories for the recording's hash directory.
+    pub async fn revoke_recording(
+        &self,
+        recording_id: &RecordingId,
+    ) -> Result<(), StrongholdError> {
+        let target_dir = recording_dir_name(recording_id);
+        let evidence_root = self.root.join("evidence");
+
+        if !evidence_root.exists() {
+            return Ok(());
+        }
+
+        let mut community_dirs = tokio::fs::read_dir(&evidence_root).await?;
+        while let Some(community_entry) = community_dirs.next_entry().await? {
+            if !community_entry.file_type().await?.is_dir() {
+                continue;
+            }
+            let recording_path = community_entry.path().join(&target_dir);
+            if recording_path.exists() {
+                tokio::fs::remove_dir_all(&recording_path).await?;
+                tracing::info!(
+                    recording = %recording_id,
+                    path = %recording_path.display(),
+                    "Stronghold: recording directory deleted"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Load all stored proximity evidence for a community.
     pub async fn list_proximity(
         &self,

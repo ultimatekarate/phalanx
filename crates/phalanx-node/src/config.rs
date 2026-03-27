@@ -55,6 +55,9 @@ pub struct NetworkConfig {
     /// Default: `["/ip4/0.0.0.0/udp/0/quic-v1", "/ip4/0.0.0.0/tcp/0"]`.
     #[serde(default = "default_listen_addresses")]
     pub listen_addresses: Vec<String>,
+    /// Topic for revocation token propagation (Cryptographic Forgetting).
+    #[serde(default = "default_revocation_topic")]
+    pub revocation_topic: MeshTopic,
 }
 
 #[derive(Debug)]
@@ -159,6 +162,9 @@ fn default_listen_addresses() -> Vec<String> {
         "/ip4/0.0.0.0/tcp/0".to_string(),
     ]
 }
+fn default_revocation_topic() -> MeshTopic {
+    MeshTopic::revocation()
+}
 
 impl Default for NetworkConfig {
     fn default() -> Self {
@@ -176,6 +182,7 @@ impl Default for NetworkConfig {
             repair_ratio: RepairRatio::default(),
             symbol_size: SymbolSize::default(),
             listen_addresses: default_listen_addresses(),
+            revocation_topic: default_revocation_topic(),
         }
     }
 }
