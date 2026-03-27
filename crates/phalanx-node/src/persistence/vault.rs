@@ -12,6 +12,7 @@ use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::RecordingId;
 use phalanx_proto::prelude::*;
+use phalanx_proto::revocation::RevocationToken;
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::storage::PendingEgress;
 use phalanx_proto::storage::TransientJournal;
@@ -179,7 +180,8 @@ pub struct Guardian {
     /// Append-only recording logs, one per recording. Keyed by RecordingId.
     recording_logs: BTreeMap<RecordingId, RecordingLog>,
     /// Revoked recordings: future shards for these recordings are rejected.
-    revoked_recordings: HashSet<RecordingId>,
+    /// Public for StorageActor bootstrap (recovering revocations from journal).
+    pub revoked_recordings: HashSet<RecordingId>,
 }
 
 impl Guardian {
@@ -200,6 +202,13 @@ impl Guardian {
             recording_logs: BTreeMap::new(),
             revoked_recordings: HashSet::new(),
         }
+    }
+
+    /// Returns `true` if the recording exists locally — either committed to
+    /// disk (recording_logs) or in-progress reassembly (Crucible contexts).
+    pub fn has_recording(&self, recording_id: &RecordingId) -> bool {
+        self.recording_logs.contains_key(recording_id)
+            || self.crucible.contexts.contains_key(recording_id)
     }
 
     /// The sole entry point for data promotion into the permanent archive.
@@ -1062,6 +1071,34 @@ impl TransientJournal for FileJournal {
 
         let (nonce, ciphertext) = buffer.split_at(AEAD_NONCE_LEN);
         Ok(decrypt_bytes(&self.vault_key, nonce, ciphertext)?)
+    }
+
+    async fn record_revocations(
+        &mut self,
+        revocations: &[RevocationToken],
+    ) -> Result<(), ShardError> {
+        let path = self.file_path.with_file_name("revocations.bin");
+
+        // Read existing revocations, append new ones, write back atomically
+        let mut all = self.read_all_revocations().await.unwrap_or_default();
+        all.extend_from_slice(revocations);
+
+        let plaintext = postcard::to_allocvec(&all)?;
+        atomic_encrypted_write(&path, &plaintext, &self.vault_key)
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn read_all_revocations(&mut self) -> Result<Vec<RevocationToken>, ShardError> {
+        let path = self.file_path.with_file_name("revocations.bin");
+        if !path.exists() {
+            return Ok(vec![]);
+        }
+        let plaintext = read_encrypted_file(&path, &self.vault_key)
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
+        Ok(postcard::from_bytes(&plaintext)?)
     }
 }
 

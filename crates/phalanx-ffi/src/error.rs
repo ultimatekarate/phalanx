@@ -37,6 +37,8 @@ pub enum PhalanxError {
     AlreadyRecording = -11,
     /// No active recording to stop or push frames to.
     NotRecording = -12,
+    /// Cryptographic Forgetting: revocation failed (bad mnemonic, key mismatch, or storage error).
+    RevocationFailed = -13,
 }
 
 impl PhalanxError {
@@ -79,6 +81,7 @@ mod tests {
         assert_eq!(PhalanxError::ConfigError.code(), -10);
         assert_eq!(PhalanxError::AlreadyRecording.code(), -11);
         assert_eq!(PhalanxError::NotRecording.code(), -12);
+        assert_eq!(PhalanxError::RevocationFailed.code(), -13);
     }
 
     #[test]
@@ -97,6 +100,7 @@ mod tests {
             PhalanxError::ConfigError.code(),
             PhalanxError::AlreadyRecording.code(),
             PhalanxError::NotRecording.code(),
+            PhalanxError::RevocationFailed.code(),
         ];
 
         let mut sorted = codes.clone();
@@ -122,6 +126,7 @@ mod tests {
             PhalanxError::ConfigError,
             PhalanxError::AlreadyRecording,
             PhalanxError::NotRecording,
+            PhalanxError::RevocationFailed,
         ];
 
         for variant in &error_variants {

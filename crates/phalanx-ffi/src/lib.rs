@@ -19,6 +19,7 @@ pub mod capture;
 pub mod community;
 pub mod error;
 pub mod export;
+pub mod forget;
 pub mod handle;
 pub mod local_mesh;
 pub mod memory;

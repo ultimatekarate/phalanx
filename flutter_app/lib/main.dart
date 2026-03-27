@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'providers/phalanx_provider.dart';
 import 'screens/capture_screen.dart';
+import 'screens/genesis_phrase_screen.dart';
 import 'screens/peers_screen.dart';
 import 'screens/playback_screen.dart';
 import 'screens/settings_screen.dart';
@@ -38,6 +39,7 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
   final Battery _battery = Battery();
   Timer? _sensorTimer;
   bool _engineReady = false;
+  String? _genesisPhrase;
 
   @override
   void initState() {
@@ -56,10 +58,13 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
       // store in secure keychain. For now, use environment or default.
       const passphrase = 'phalanx-mobile-dev';
 
-      bridge.create(storagePath, passphrase);
+      final genesisPhrase = bridge.create(storagePath, passphrase);
       bridge.start();
 
-      setState(() => _engineReady = true);
+      setState(() {
+        _engineReady = true;
+        _genesisPhrase = genesisPhrase;
+      });
 
       // Start sensor polling
       _startSensorPolling();
@@ -129,6 +134,24 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
   Widget build(BuildContext context) {
     final emergencyMode = ref.watch(emergencyModeProvider);
 
+    // Show loading → genesis phrase → capture, in sequence
+    final Widget home;
+    if (!_engineReady) {
+      home = const Scaffold(
+        backgroundColor: Colors.black,
+        body: Center(child: CircularProgressIndicator(color: Colors.white)),
+      );
+    } else if (_genesisPhrase != null) {
+      home = GenesisPhraseScreen(
+        phrase: _genesisPhrase!,
+        onAcknowledged: () {
+          setState(() => _genesisPhrase = null);
+        },
+      );
+    } else {
+      home = CaptureScreen(emergencyMode: emergencyMode);
+    }
+
     return MaterialApp(
       title: 'Phalanx',
       debugShowCheckedModeBanner: false,
@@ -139,7 +162,7 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
           elevation: 0,
         ),
       ),
-      home: CaptureScreen(emergencyMode: emergencyMode),
+      home: home,
       routes: {
         '/playback': (_) => const PlaybackScreen(),
         '/peers': (_) => const PeersScreen(),

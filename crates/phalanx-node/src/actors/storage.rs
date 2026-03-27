@@ -101,6 +101,31 @@ impl<J: TransientJournal> StorageActor<J> {
             }
         }
 
+        // Recover revoked recordings from journal
+        match self.journal.read_all_revocations().await {
+            Ok(tokens) => {
+                for token in &tokens {
+                    self.guardian
+                        .revoked_recordings
+                        .insert(token.recording_id.clone());
+                }
+                if !tokens.is_empty() {
+                    tracing::info!(
+                        target: "phalanx::storage",
+                        count = tokens.len(),
+                        "Restored revoked recordings from journal"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    target: "phalanx::storage",
+                    error = %e,
+                    "Failed to read revocations from journal"
+                );
+            }
+        }
+
         let mut maintenance_timer = interval(Duration::from_millis(1000));
 
         loop {
@@ -367,9 +392,17 @@ impl<J: TransientJournal> StorageActor<J> {
                         "Revocation authorization failed: {e}"
                     ))
                 })?;
+        } else if !self.guardian.has_recording(&recording_id) {
+            // Unknown recording — cannot verify authorization.
+            // Reject to prevent unauthorized cross-identity revocation.
+            // Late-joining nodes discover revocations via DHT tombstone.
+            return Err(GuardianError::VerificationFailed(
+                "Cannot authorize revocation for unknown recording".into(),
+            ));
         }
-        // If no local envelopes exist, the self-contained signature is sufficient.
-        // Honor the revocation to block future shards for this recording.
+        // Recording exists locally (in logs or Crucible) but read_all_shards
+        // returned empty (e.g., partially ingested). Honor with self-contained
+        // signature as fallback.
 
         // 3. Execute the revocation
         self.guardian.revoke_recording(&recording_id).await?;

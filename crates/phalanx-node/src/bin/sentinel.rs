@@ -31,7 +31,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .map_err(|_| "Security Violation: PHALANX_IDENTITY_PASSPHRASE not set")?;
 
     // Identity & Security Setup
-    let my_identity = PhalanxIdentity::init("identity.bin", &identity_passphrase)?;
+    let (my_identity, _genesis_phrase) =
+        PhalanxIdentity::init("identity.bin", &identity_passphrase)?;
     let psk_path = Path::new("swarm.key");
     let psk = load_swarm_key(psk_path);
 
