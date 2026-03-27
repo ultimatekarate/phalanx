@@ -16,7 +16,10 @@ pub trait PhalanxNodeIdentityExt: Sized {
     fn save_to_disk<P: AsRef<Path>>(&self, path: P, passphrase: &str) -> Result<(), IdentityError>;
     fn load_from_disk<P: AsRef<Path>>(path: P, passphrase: &str) -> Result<Self, IdentityError>;
     fn verify_retrieval_auth(&self, request: &RecordingRequest) -> Result<(), IdentityError>;
-    fn init<P: AsRef<Path>>(path: P, passphrase: &str) -> Result<Self, IdentityError>;
+    fn init<P: AsRef<Path>>(
+        path: P,
+        passphrase: &str,
+    ) -> Result<(Self, Option<String>), IdentityError>;
     /// Derive the revocation signing key from the BIP39 mnemonic.
     /// This is the ONLY way to obtain the private half — it is never stored on disk.
     fn revocation_signing_key(phrase: &str) -> Result<SigningKey, IdentityError>;
@@ -156,23 +159,26 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
             .map_err(|_| IdentityError::CryptoError("Signature Verification Failed".into()))
     }
 
-    fn init<P: AsRef<Path>>(path: P, passphrase: &str) -> Result<Self, IdentityError> {
+    fn init<P: AsRef<Path>>(
+        path: P,
+        passphrase: &str,
+    ) -> Result<(Self, Option<String>), IdentityError> {
         // FIX: Replaced IoError match with an explicit path check
         if !path.as_ref().exists() {
             tracing::warn!("Sovereign root: NOT FOUND. Initiating Genesis...");
 
             let (new_identity, mnemonic) = Self::generate()?;
             tracing::info!("!!! GENESIS SUCCESSFUL !!!");
-            tracing::info!("RESTORE PHRASE: {}", mnemonic);
+            // Mnemonic is returned to caller for UI display — no longer logged.
 
             new_identity.save_to_disk(&path, passphrase)?;
-            return Ok(new_identity);
+            return Ok((new_identity, Some(mnemonic)));
         }
 
         match Self::load_from_disk(&path, passphrase) {
             Ok(identity) => {
                 tracing::info!(path = ?path.as_ref(), "Sovereign root: RESTORED");
-                Ok(identity)
+                Ok((identity, None))
             }
             Err(err) => {
                 tracing::error!(error = %err, "Sovereign root: CORRUPTED or UNREADABLE");

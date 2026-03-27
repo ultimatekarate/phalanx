@@ -30,7 +30,7 @@ use phalanx_proto::prelude::PhalanxIdentity;
 use phalanx_transport::adapters::local_mesh::{LocalMeshAdapter, OutboundLocalPacket};
 use phalanx_transport::prelude::Libp2pIngress;
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -132,7 +132,13 @@ pub unsafe extern "C" fn phalanx_create(
     config_path: *const c_char,
     storage_path: *const c_char,
     passphrase: *const c_char,
+    out_genesis_phrase: *mut *mut c_char,
 ) -> *mut PhalanxHandle {
+    // Initialize out-param to null (no genesis phrase by default)
+    if !out_genesis_phrase.is_null() {
+        *out_genesis_phrase = std::ptr::null_mut();
+    }
+
     // Validate required parameters
     if storage_path.is_null() || passphrase.is_null() {
         return std::ptr::null_mut();
@@ -170,9 +176,19 @@ pub unsafe extern "C" fn phalanx_create(
         runtime.block_on(async { bootstrap(config, storage_str, passphrase_str).await });
 
     match handle_result {
-        Ok(mut handle) => {
+        Ok((mut handle, genesis_phrase)) => {
             // Move the runtime into the handle (it was created outside the async block)
             handle.runtime = runtime;
+
+            // Write genesis phrase to out-param if a new identity was created
+            if let Some(phrase) = genesis_phrase {
+                if !out_genesis_phrase.is_null() {
+                    if let Ok(cstr) = CString::new(phrase) {
+                        *out_genesis_phrase = cstr.into_raw();
+                    }
+                }
+            }
+
             Box::into_raw(Box::new(handle))
         }
         Err(_) => std::ptr::null_mut(),
@@ -180,14 +196,17 @@ pub unsafe extern "C" fn phalanx_create(
 }
 
 /// Internal async bootstrap — mirrors `sentinel.rs` dependency graph.
+/// Returns `(PhalanxHandle, Option<String>)` where the String is the BIP39
+/// mnemonic phrase when a new identity was generated (genesis). `None` when
+/// loading an existing identity from disk.
 async fn bootstrap(
     config: NodeConfig,
     storage_path: &str,
     passphrase: &str,
-) -> Result<PhalanxHandle, PhalanxError> {
+) -> Result<(PhalanxHandle, Option<String>), PhalanxError> {
     // Identity
     let identity_path = Path::new(storage_path).join("identity.bin");
-    let identity =
+    let (identity, genesis_phrase) =
         PhalanxIdentity::init(&identity_path, passphrase).map_err(|_| PhalanxError::BootFailed)?;
 
     let node_did = identity.did.as_str().to_string();
@@ -278,24 +297,27 @@ async fn bootstrap(
         .build()
         .map_err(|_| PhalanxError::BootFailed)?;
 
-    Ok(PhalanxHandle {
-        runtime: dummy_rt,
-        state: Mutex::new(HandleState::Booting),
-        governor,
-        probe,
-        trust_tx,
-        video_tx,
-        audio_tx,
-        sentinel: Mutex::new(Some(sentinel)),
-        node_did,
-        recording_active: AtomicBool::new(false),
-        local_mesh_tx: Some(local_mesh_tx),
-        local_mesh_outbound_rx: Mutex::new(Some(local_mesh_outbound_rx)),
-        local_mesh_available,
-        vault_key: handle_vault_key,
-        identity: handle_identity,
-        calibration_metrics: Mutex::new(None),
-    })
+    Ok((
+        PhalanxHandle {
+            runtime: dummy_rt,
+            state: Mutex::new(HandleState::Booting),
+            governor,
+            probe,
+            trust_tx,
+            video_tx,
+            audio_tx,
+            sentinel: Mutex::new(Some(sentinel)),
+            node_did,
+            recording_active: AtomicBool::new(false),
+            local_mesh_tx: Some(local_mesh_tx),
+            local_mesh_outbound_rx: Mutex::new(Some(local_mesh_outbound_rx)),
+            local_mesh_available,
+            vault_key: handle_vault_key,
+            identity: handle_identity,
+            calibration_metrics: Mutex::new(None),
+        },
+        genesis_phrase,
+    ))
 }
 
 /// Starts the engine's main run loop on a background tokio task.
@@ -464,7 +486,12 @@ mod tests {
     fn create_with_null_storage_returns_null() {
         unsafe {
             let passphrase = CString::new("test").expect("valid");
-            let handle = phalanx_create(std::ptr::null(), std::ptr::null(), passphrase.as_ptr());
+            let handle = phalanx_create(
+                std::ptr::null(),
+                std::ptr::null(),
+                passphrase.as_ptr(),
+                std::ptr::null_mut(),
+            );
             assert!(handle.is_null());
         }
     }
@@ -473,7 +500,12 @@ mod tests {
     fn create_with_null_passphrase_returns_null() {
         unsafe {
             let storage = CString::new("/tmp/phalanx_test").expect("valid");
-            let handle = phalanx_create(std::ptr::null(), storage.as_ptr(), std::ptr::null());
+            let handle = phalanx_create(
+                std::ptr::null(),
+                storage.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+            );
             assert!(handle.is_null());
         }
     }
@@ -481,7 +513,12 @@ mod tests {
     #[test]
     fn create_with_both_null_returns_null() {
         unsafe {
-            let handle = phalanx_create(std::ptr::null(), std::ptr::null(), std::ptr::null());
+            let handle = phalanx_create(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+            );
             assert!(handle.is_null());
         }
     }

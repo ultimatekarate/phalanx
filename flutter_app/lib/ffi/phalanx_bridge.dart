@@ -22,6 +22,7 @@ class PhalanxError {
   static const configError = -10;
   static const alreadyRecording = -11;
   static const notRecording = -12;
+  static const revocationFailed = -13;
 }
 
 /// Exception thrown when an FFI call fails.
@@ -40,10 +41,10 @@ class PhalanxException implements Exception {
 
 // Lifecycle
 typedef _PhalanxCreateC = Pointer<Void> Function(
-  Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>,
+  Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Pointer<Utf8>>,
 );
 typedef _PhalanxCreateDart = Pointer<Void> Function(
-  Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>,
+  Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Pointer<Utf8>>,
 );
 
 typedef _PhalanxI32HandleC = Int32 Function(Pointer<Void>);
@@ -187,6 +188,14 @@ typedef _PhalanxExportC2paDart = int Function(
   Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>,
 );
 
+// Cryptographic Forgetting
+typedef _PhalanxForgetRecordingC = Int32 Function(
+  Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>,
+);
+typedef _PhalanxForgetRecordingDart = int Function(
+  Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>,
+);
+
 // Memory
 typedef _PhalanxFreeStringC = Void Function(Pointer<Utf8>);
 typedef _PhalanxFreeStringDart = void Function(Pointer<Utf8>);
@@ -233,6 +242,7 @@ class PhalanxBridge {
   late final _PhalanxShareLinkDart _getShareLink;
   late final _PhalanxOpenLinkDart _openLink;
   late final _PhalanxExportC2paDart _exportC2pa;
+  late final _PhalanxForgetRecordingDart _forgetRecording;
   late final _PhalanxFreeStringDart _freeString;
   late final _PhalanxFreeBytesDart _freeBytes;
 
@@ -338,6 +348,10 @@ class PhalanxBridge {
         _lib.lookupFunction<_PhalanxExportC2paC, _PhalanxExportC2paDart>(
           'phalanx_export_c2pa',
         );
+    _forgetRecording = _lib
+        .lookupFunction<_PhalanxForgetRecordingC, _PhalanxForgetRecordingDart>(
+          'phalanx_forget_recording',
+        );
     _freeString =
         _lib.lookupFunction<_PhalanxFreeStringC, _PhalanxFreeStringDart>(
           'phalanx_free_string',
@@ -359,24 +373,40 @@ class PhalanxBridge {
   // =====================================================================
 
   /// Initialize the Phalanx engine with storage path and passphrase.
-  void create(String storagePath, String passphrase, {String? configPath}) {
+  ///
+  /// Returns the BIP39 genesis phrase if a new identity was created,
+  /// or null if an existing identity was loaded from disk. The caller
+  /// must show this phrase to the user exactly once — it is the only
+  /// way to recover revocation authority.
+  String? create(String storagePath, String passphrase, {String? configPath}) {
     final storageNative = storagePath.toNativeUtf8();
     final passphraseNative = passphrase.toNativeUtf8();
     final configNative = configPath?.toNativeUtf8() ?? nullptr;
+    final outPhrase = calloc<Pointer<Utf8>>();
 
     try {
       _handle = _create(
         configNative.cast(),
         storageNative.cast(),
         passphraseNative.cast(),
+        outPhrase,
       );
       if (_handle == nullptr) {
         throw PhalanxException(PhalanxError.bootFailed, 'phalanx_create');
       }
+
+      // Extract genesis phrase if a new identity was created
+      if (outPhrase.value != nullptr) {
+        final phrase = outPhrase.value.toDartString();
+        _freeString(outPhrase.value);
+        return phrase;
+      }
+      return null;
     } finally {
       calloc.free(storageNative);
       calloc.free(passphraseNative);
       if (configNative != nullptr) calloc.free(configNative);
+      calloc.free(outPhrase);
     }
   }
 
@@ -708,6 +738,32 @@ class PhalanxBridge {
       _check(_openLink(_handle, linkNative.cast()), 'phalanx_open_link');
     } finally {
       calloc.free(linkNative);
+    }
+  }
+
+  // =====================================================================
+  // CRYPTOGRAPHIC FORGETTING
+  // =====================================================================
+
+  /// Permanently destroy all evidence for a recording across the entire mesh.
+  ///
+  /// Requires the user's 12-word BIP39 recovery phrase. The revocation
+  /// signing key is derived from the phrase, used to create a signed
+  /// revocation token, and then the phrase is securely wiped from memory.
+  ///
+  /// Throws [PhalanxException] with code -13 (revocationFailed) if the
+  /// mnemonic is invalid or does not match the recording's revocation key.
+  void forgetRecording(String recordingId, String mnemonicPhrase) {
+    final recNative = recordingId.toNativeUtf8();
+    final phraseNative = mnemonicPhrase.toNativeUtf8();
+    try {
+      _check(
+        _forgetRecording(_handle, recNative.cast(), phraseNative.cast()),
+        'phalanx_forget_recording',
+      );
+    } finally {
+      calloc.free(recNative);
+      calloc.free(phraseNative);
     }
   }
 }

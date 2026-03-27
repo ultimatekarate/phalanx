@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../providers/phalanx_provider.dart';
+import '../widgets/forget_dialog.dart';
 
 /// Playback screen — list of recordings with tap-to-play and share.
 class PlaybackScreen extends ConsumerStatefulWidget {
@@ -96,6 +97,34 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
     }
   }
 
+  Future<void> _forgetRecording(String recordingId) async {
+    // Stop playback first if this recording is active
+    if (_activeRecordingId == recordingId) {
+      _stopPlayback();
+    }
+
+    try {
+      final bridge = ref.read(phalanxProvider);
+      final forgotten = await showForgetRecordingDialog(
+        context: context,
+        bridge: bridge,
+        recordingId: recordingId,
+      );
+
+      if (forgotten && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Recording permanently forgotten'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+        // TODO: Refresh recording list after successful revocation
+      }
+    } catch (e) {
+      _showError('Forget failed: $e');
+    }
+  }
+
   void _showError(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(
@@ -173,6 +202,16 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
                     tooltip: 'Export as C2PA',
                     onPressed: () => _exportC2pa(_activeRecordingId!),
                   ),
+                  const SizedBox(width: 16),
+                  IconButton(
+                    icon: const Icon(
+                      Icons.delete_forever,
+                      color: Colors.red,
+                      size: 28,
+                    ),
+                    tooltip: 'Forget Recording',
+                    onPressed: () => _forgetRecording(_activeRecordingId!),
+                  ),
                 ],
               ),
             ),
@@ -183,6 +222,7 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
             child: _RecordingList(
               onPlay: _startPlayback,
               onShare: _shareRecording,
+              onForget: _forgetRecording,
               activeId: _activeRecordingId,
             ),
           ),
@@ -197,17 +237,43 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
 class _RecordingList extends StatelessWidget {
   final void Function(String) onPlay;
   final void Function(String) onShare;
+  final void Function(String) onForget;
   final String? activeId;
 
   const _RecordingList({
     required this.onPlay,
     required this.onShare,
+    required this.onForget,
     this.activeId,
   });
 
   @override
   Widget build(BuildContext context) {
-    // TODO: Replace with actual recording list from storage
+    // TODO: Replace with actual recording list from storage.
+    // Each recording tile should look like:
+    //
+    //   ListTile(
+    //     title: Text(recording.id),
+    //     subtitle: Text(recording.timestamp),
+    //     trailing: PopupMenuButton<String>(
+    //       onSelected: (action) {
+    //         switch (action) {
+    //           case 'play':   onPlay(recording.id);
+    //           case 'share':  onShare(recording.id);
+    //           case 'forget': onForget(recording.id);
+    //         }
+    //       },
+    //       itemBuilder: (_) => [
+    //         const PopupMenuItem(value: 'play',   child: Text('Play')),
+    //         const PopupMenuItem(value: 'share',  child: Text('Share')),
+    //         const PopupMenuItem(
+    //           value: 'forget',
+    //           child: Text('Forget Forever', style: TextStyle(color: Colors.red)),
+    //         ),
+    //       ],
+    //     ),
+    //   )
+    //
     return const Center(
       child: Text(
         'Recordings will appear here after capture.',
