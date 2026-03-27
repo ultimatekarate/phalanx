@@ -32,14 +32,15 @@ pub struct MediaEgressConfig {
     pub system_governor: Arc<SystemGovernor>,
     /// Denominator for storage pressure ratio (typically `config.storage.max_storage_bytes`).
     pub max_storage_bytes: u64,
-    /// Encryption key for payload AEAD. Encryption runs here (async worker thread)
-    /// rather than on the FFI capture thread — keeps the camera callback fast.
-    /// Apparently, low-end Mediatek devices with weak entropy sources and
-    /// slow cores drop frames when XChaCha20 + getrandom() block the camera HAL
-    /// return path. Moving encryption off the capture thread eliminates that jitter.
-    /// Cleartext in the in-process mpsc channel is not a threat model concern: an
-    /// attacker with process memory access already has the key.
+    /// Encryption key for payload AEAD (legacy fallback / KEK).
+    /// Encryption runs here (async worker thread) rather than on the FFI capture
+    /// thread — keeps the camera callback fast. Low-end Mediatek devices with weak
+    /// entropy sources and slow cores drop frames when XChaCha20 + getrandom()
+    /// block the camera HAL return path.
     pub vault_key: SymmetricKey, // Phalanx is for the people.
+    /// Per-recording content key receiver. When `Some`, encrypts with the recording's
+    /// DEK instead of vault_key. Updated via watch channel when recordings start/stop.
+    pub content_key_rx: tokio::sync::watch::Receiver<Option<SymmetricKey>>,
     /// Trusted clock for forensic timestamps.
     pub clock: Arc<TrustedClock>,
     /// LensGate thresholds — calibrated if sensor setup was performed, defaults otherwise.
@@ -58,8 +59,10 @@ pub struct MediaEgressActor<E: EgressPort> {
     audio_prev_hash: Option<SignatureHash>,
     symbol_size: SymbolSize,
     repair_ratio: RepairRatio,
-    /// Encryption key — encrypt payloads on the async thread, not the FFI capture thread.
+    /// Encryption key (legacy fallback / KEK) — encrypt payloads on async thread, not FFI.
     vault_key: SymmetricKey,
+    /// Per-recording content key. Prefers this over vault_key when `Some`.
+    content_key_rx: tokio::sync::watch::Receiver<Option<SymmetricKey>>,
     /// Monotonic shard ID counter. Each sealed envelope gets a unique ShardId
     /// so the receiver's Crucible can track reassembly contexts independently.
     next_shard_id: u64,
@@ -97,6 +100,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
             symbol_size: config.symbol_size,
             repair_ratio: config.repair_ratio,
             vault_key: config.vault_key,
+            content_key_rx: config.content_key_rx,
             next_shard_id: 0,
             outbound_queue,
             system_governor: config.system_governor,
@@ -223,15 +227,22 @@ impl<E: EgressPort> MediaEgressActor<E> {
 
         // Encrypt payload on the async worker thread (not the FFI capture thread).
         // Encryption failure is fatal — plaintext evidence MUST NOT reach the mesh.
+        // Prefer per-recording content key (DEK) over vault_key (KEK fallback).
+        let key = self
+            .content_key_rx
+            .borrow()
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| self.vault_key.clone());
         match evidence {
             Evidence::Video(v) => {
-                if let Err(e) = v.payload.apply_encryption(&self.vault_key) {
+                if let Err(e) = v.payload.apply_encryption(&key) {
                     tracing::error!("Video encryption failed — dropping shard to prevent plaintext broadcast: {e}");
                     return false;
                 }
             }
             Evidence::Audio(a) => {
-                if let Err(e) = a.payload.apply_encryption(&self.vault_key) {
+                if let Err(e) = a.payload.apply_encryption(&key) {
                     tracing::error!("Audio encryption failed — dropping shard to prevent plaintext broadcast: {e}");
                     return false;
                 }

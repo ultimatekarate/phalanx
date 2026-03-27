@@ -19,6 +19,7 @@ use phalanx_proto::storage::TransientJournal;
 use phalanx_proto::time::TrustedClock;
 use phalanx_proto::types::ByteCapacity;
 use phalanx_proto::types::ForensicUnit;
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
@@ -28,6 +29,7 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tracing::info;
+use zeroize::Zeroize;
 use zeroize::Zeroizing;
 const MAX_WAL_CHUNK_BYTES: u32 = 16 * 1024 * 1024; // 16 MiB
 const _MAX_WORKBENCH_STATE_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
@@ -182,6 +184,10 @@ pub struct Guardian {
     /// Revoked recordings: future shards for these recordings are rejected.
     /// Public for StorageActor bootstrap (recovering revocations from journal).
     pub revoked_recordings: HashSet<RecordingId>,
+    /// Per-recording content encryption keys (DEKs). vault_key acts as KEK.
+    /// Uses `[u8; 32]` instead of `SymmetricKey` to allow Serialize/Deserialize
+    /// (respects M5 no-Serialize invariant on SymmetricKey).
+    pub content_keyring: BTreeMap<RecordingId, [u8; 32]>,
 }
 
 impl Guardian {
@@ -201,6 +207,7 @@ impl Guardian {
             ledger: StorageLedger::default(),
             recording_logs: BTreeMap::new(),
             revoked_recordings: HashSet::new(),
+            content_keyring: BTreeMap::new(),
         }
     }
 
@@ -210,6 +217,64 @@ impl Guardian {
         self.recording_logs.contains_key(recording_id)
             || self.crucible.contexts.contains_key(recording_id)
     }
+
+    // ── Content keyring (per-recording DEKs) ──────────────────────────
+
+    /// Generate and store a new random content key for a recording.
+    pub fn generate_content_key(&mut self, recording_id: &RecordingId) -> SymmetricKey {
+        let mut key_bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut key_bytes);
+        self.content_keyring.insert(recording_id.clone(), key_bytes);
+        SymmetricKey(key_bytes)
+    }
+
+    /// Retrieve the content key for a recording, if it exists.
+    pub fn get_content_key(&self, recording_id: &RecordingId) -> Option<SymmetricKey> {
+        self.content_keyring
+            .get(recording_id)
+            .map(|b| SymmetricKey(*b))
+    }
+
+    /// Destroy the content key for a recording (crypto-shredding moment).
+    /// Zeroizes the key bytes in memory before removal. Returns `true` if a key existed.
+    pub fn destroy_content_key(&mut self, recording_id: &RecordingId) -> bool {
+        if let Some(key_bytes) = self.content_keyring.get_mut(recording_id) {
+            key_bytes.zeroize();
+            self.content_keyring.remove(recording_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Resolve the encryption key for a recording.
+    /// Returns per-recording ContentKey if available, else vault_key (legacy fallback).
+    pub fn resolve_encryption_key(&self, recording_id: &RecordingId) -> SymmetricKey {
+        self.get_content_key(recording_id)
+            .unwrap_or_else(|| self.vault_key.clone())
+    }
+
+    /// Persist the entire keyring to disk, encrypted with vault_key (KEK).
+    pub async fn persist_keyring(&self) -> Result<(), GuardianError> {
+        let path = Path::new(&self.vault_path).join("content_keyring.bin");
+        let plaintext = postcard::to_allocvec(&self.content_keyring)
+            .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
+        atomic_encrypted_write(&path, &plaintext, &self.vault_key).await
+    }
+
+    /// Load keyring from disk. Called during bootstrap.
+    pub async fn load_keyring(&mut self) -> Result<(), GuardianError> {
+        let path = Path::new(&self.vault_path).join("content_keyring.bin");
+        if !path.exists() {
+            return Ok(());
+        }
+        let plaintext = read_encrypted_file(&path, &self.vault_key).await?;
+        self.content_keyring = postcard::from_bytes(&plaintext)
+            .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
+        Ok(())
+    }
+
+    // ── Data promotion ──────────────────────────────────────────────────
 
     /// The sole entry point for data promotion into the permanent archive.
     pub async fn ingest_envelope(
@@ -304,20 +369,30 @@ impl Guardian {
 
     /// Cryptographic Forgetting: destroy all evidence for a recording.
     ///
-    /// 1. Remove from in-memory Crucible contexts
-    /// 2. Close and delete the recording log file
-    /// 3. Delete the `.recording` file from disk
-    /// 4. Mark as revoked to block future ingestion
+    /// Crash-safe ordering: persist key destruction to disk FIRST, then delete
+    /// data files. If we crash after keyring persist but before data deletion,
+    /// the key is gone → ciphertext permanently unreadable (crypto-shredded).
     pub async fn revoke_recording(
         &mut self,
         recording_id: &RecordingId,
     ) -> Result<(), GuardianError> {
-        // 1. Remove from Crucible (in-memory state)
+        // 1. Crypto-shred: destroy content key and persist to disk FIRST.
+        //    After persist_keyring() completes, key is gone from disk atomically.
+        let key_destroyed = self.destroy_content_key(recording_id);
+        if key_destroyed {
+            self.persist_keyring().await?;
+            tracing::info!(
+                target: "phalanx::vault",
+                recording = %recording_id,
+                "Content key destroyed (crypto-shredded)"
+            );
+        }
+
+        // 2. Remove from Crucible (in-memory state)
         self.crucible.contexts.remove(recording_id);
 
-        // 2. Close and delete recording log
+        // 3. Close and delete recording log (defense-in-depth — data already unreadable)
         if let Some(log) = self.recording_logs.remove(recording_id) {
-            // Drop the file handle first (closes the file)
             let path = log.path.clone();
             drop(log);
             // Overwrite with zeros before delete (defense-in-depth)
@@ -329,7 +404,7 @@ impl Guardian {
             tracing::info!(recording = %recording_id, path = ?path, "Recording log zeroed and deleted");
         }
 
-        // 3. Mark as revoked (blocks future ingestion)
+        // 4. Mark as revoked (blocks future ingestion)
         self.revoked_recordings.insert(recording_id.clone());
 
         Ok(())
@@ -448,6 +523,9 @@ impl Guardian {
             );
         }
 
+        // Resolve encryption key before taking mutable borrow on recording_logs
+        let key = self.resolve_encryption_key(&recording_id);
+
         let Some(log) = self.recording_logs.get_mut(&recording_id) else {
             return Err(GuardianError::StorageFailure(
                 "recording log missing after insert".to_string(),
@@ -465,7 +543,7 @@ impl Guardian {
         let plaintext = postcard::to_allocvec(envelope)
             .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
 
-        let (nonce, ciphertext) = encrypt_bytes(&self.vault_key, &plaintext)
+        let (nonce, ciphertext) = encrypt_bytes(&key, &plaintext)
             .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
 
         // Frame: [4-byte seq_id LE][4-byte payload_len LE][24-byte nonce][ciphertext]
@@ -513,6 +591,9 @@ impl Guardian {
         sequence_id: StorageSequence,
         _owner_did: Option<&Did>,
     ) -> Result<WitnessEnvelope, GuardianError> {
+        // Resolve decryption key before taking mutable borrow on recording_logs
+        let key = self.resolve_encryption_key(recording_id);
+
         let log = self.recording_logs.get_mut(recording_id).ok_or_else(|| {
             GuardianError::StorageFailure(format!("No recording log for {}", recording_id))
         })?;
@@ -555,10 +636,8 @@ impl Guardian {
             .read_exact(&mut payload)
             .await
             .map_err(|e| GuardianError::StorageFailure(e.to_string()))?;
-
-        // Decrypt
         let (nonce, ciphertext) = payload.split_at(AEAD_NONCE_LEN);
-        let plaintext = decrypt_bytes(&self.vault_key, nonce, ciphertext)
+        let plaintext = decrypt_bytes(&key, nonce, ciphertext)
             .map_err(|_| GuardianError::StorageFailure("AEAD authentication failed".to_string()))?;
 
         // Deserialize
@@ -572,6 +651,9 @@ impl Guardian {
         recording_id: &RecordingId,
         _owner_did: Option<&Did>,
     ) -> Result<Vec<WitnessEnvelope>, GuardianError> {
+        // Resolve decryption key before taking mutable borrow on recording_logs
+        let key = self.resolve_encryption_key(recording_id);
+
         let log = match self.recording_logs.get_mut(recording_id) {
             Some(l) => l,
             None => return Ok(vec![]),
@@ -616,7 +698,7 @@ impl Guardian {
             }
 
             let (nonce, ciphertext) = payload.split_at(AEAD_NONCE_LEN);
-            let plaintext = match decrypt_bytes(&self.vault_key, nonce, ciphertext) {
+            let plaintext = match decrypt_bytes(&key, nonce, ciphertext) {
                 Ok(pt) => pt,
                 Err(_) => {
                     tracing::warn!("Recording log: AEAD failed, skipping frame");

@@ -97,7 +97,7 @@ pub unsafe extern "C" fn phalanx_start_playback(
         let mut engine = sentinel_ref.lock().await;
         // Rust demuxes — Evidence::Video → video_sink, Evidence::Audio → audio_sink.
         // Flutter reads two stateless channels via poll_video_frame / poll_audio_frame.
-        let _task = engine.spawn_playback(rec_id, video_sink, audio_sink);
+        let _task = engine.spawn_playback(rec_id, video_sink, audio_sink).await;
     });
 
     // Return opaque session pointer — caller owns this

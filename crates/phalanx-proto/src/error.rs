@@ -21,6 +21,8 @@ pub enum ShardError {
     Unauthorized(String),
     #[error("Size cannot be 0")]
     InvalidSize(String),
+    #[error("Recording has been revoked")]
+    RecordingRevoked,
 }
 
 impl From<postcard::Error> for ShardError {

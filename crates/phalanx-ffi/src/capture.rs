@@ -18,7 +18,9 @@ use crate::handle::PhalanxHandle;
 use phalanx_forensics::reassembler::{compress_frame, create_audio_shard, create_video_shard};
 use phalanx_lens::scalar::ScalarLens;
 use phalanx_lens::ForensicLens;
+use phalanx_node::actors::storage::StorageCommand;
 use phalanx_node::hardware::camera::target_fps;
+use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::prelude::RecordingId;
 use phalanx_proto::time::PhalanxTimestamp;
@@ -96,6 +98,52 @@ pub unsafe extern "C" fn phalanx_start_recording(
     SEQUENCE.store(0, Ordering::Relaxed);
     AUDIO_SEQUENCE.store(0, Ordering::Relaxed);
 
+    // Request per-recording content key from StorageActor.
+    // block_on is acceptable here — recording start is user-initiated (button press),
+    // sub-millisecond key generation, not on the camera HAL path.
+    let recording_id = RecordingId::from(id_str.clone());
+    let sentinel_ref = {
+        let Ok(guard) = h.sentinel.lock() else {
+            return PhalanxError::InvalidState.code();
+        };
+        match guard.as_ref() {
+            Some(s) => s.clone(),
+            None => return PhalanxError::NotRunning.code(),
+        }
+    };
+
+    let key_result = h.runtime.block_on(async {
+        let sentinel = sentinel_ref.lock().await;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        sentinel
+            .storage_tx
+            .send(StorageCommand::StartRecording {
+                recording_id: recording_id.clone(),
+                reply_to: tx,
+            })
+            .await
+            .map_err(|_| ())?;
+        rx.await.map_err(|_| ())
+    });
+
+    match key_result {
+        Ok(Ok(key_bytes)) => {
+            // Push content key to MediaEgressActor via watch channel
+            h.runtime.block_on(async {
+                let sentinel = sentinel_ref.lock().await;
+                let _ = sentinel.content_key_tx.send(Some(SymmetricKey(key_bytes)));
+            });
+        }
+        Ok(Err(_)) | Err(()) => {
+            // Content key generation failed — fall back to vault_key.
+            // Recording still starts; encryption uses vault_key via watch channel's None.
+            tracing::warn!(
+                target: "phalanx::ffi",
+                "Content key generation failed — falling back to vault_key"
+            );
+        }
+    }
+
     // Set recording active — recording_id is returned to the caller
     // and passed back on each push call (no Mutex storage needed).
     h.recording_active.store(true, Ordering::Relaxed);
@@ -125,6 +173,18 @@ pub unsafe extern "C" fn phalanx_stop_recording(handle: *mut PhalanxHandle) -> i
     }
 
     h.recording_active.store(false, Ordering::Relaxed);
+
+    // Clear per-recording content key — MediaEgressActor reverts to vault_key (None).
+    if let Ok(guard) = h.sentinel.lock() {
+        if let Some(sentinel_ref) = guard.as_ref() {
+            let sentinel_ref = sentinel_ref.clone();
+            drop(guard);
+            h.runtime.block_on(async {
+                let sentinel = sentinel_ref.lock().await;
+                let _ = sentinel.content_key_tx.send(None);
+            });
+        }
+    }
 
     PhalanxError::Ok.code()
 }

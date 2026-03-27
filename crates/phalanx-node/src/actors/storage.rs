@@ -77,6 +77,18 @@ pub enum StorageCommand {
         token: RevocationToken,
         reply_to: oneshot::Sender<Result<(), GuardianError>>,
     },
+    /// Request a new per-recording content key. Guardian generates a random DEK,
+    /// persists the keyring, and returns the raw key bytes.
+    StartRecording {
+        recording_id: RecordingId,
+        reply_to: oneshot::Sender<Result<[u8; 32], ShardError>>,
+    },
+    /// Retrieve the content key for a recording (for playback decryption).
+    /// Returns `None` if no content key exists (legacy recording → use vault_key).
+    GetContentKey {
+        recording_id: RecordingId,
+        reply_to: oneshot::Sender<Option<[u8; 32]>>,
+    },
 }
 
 impl<J: TransientJournal> StorageActor<J> {
@@ -126,6 +138,40 @@ impl<J: TransientJournal> StorageActor<J> {
             }
         }
 
+        // Load per-recording content keyring
+        if let Err(e) = self.guardian.load_keyring().await {
+            tracing::error!(
+                target: "phalanx::storage",
+                error = %e,
+                "Failed to load content keyring"
+            );
+        }
+
+        // Ghost key cleanup: destroy any content keys for revoked recordings.
+        // Handles partial crash where revocation was journaled but key survived.
+        let revoked: Vec<RecordingId> = self.guardian.revoked_recordings.iter().cloned().collect();
+        let mut ghost_keys_cleaned = 0u32;
+        for rid in &revoked {
+            if self.guardian.destroy_content_key(rid) {
+                ghost_keys_cleaned += 1;
+            }
+        }
+        if ghost_keys_cleaned > 0 {
+            if let Err(e) = self.guardian.persist_keyring().await {
+                tracing::error!(
+                    target: "phalanx::storage",
+                    error = %e,
+                    "Failed to persist keyring after ghost key cleanup"
+                );
+            } else {
+                tracing::info!(
+                    target: "phalanx::storage",
+                    count = ghost_keys_cleaned,
+                    "Cleaned ghost content keys for revoked recordings"
+                );
+            }
+        }
+
         let mut maintenance_timer = interval(Duration::from_millis(1000));
 
         loop {
@@ -160,6 +206,15 @@ impl<J: TransientJournal> StorageActor<J> {
                             StorageCommand::Revoke { token, reply_to } => {
                                 let result = self.handle_revoke(token).await;
                                 let _ = reply_to.send(result);
+                            }
+                            StorageCommand::StartRecording { recording_id, reply_to } => {
+                                let result = self.handle_start_recording(&recording_id).await;
+                                let _ = reply_to.send(result);
+                            }
+                            StorageCommand::GetContentKey { recording_id, reply_to } => {
+                                let key = self.guardian.get_content_key(&recording_id)
+                                    .map(|k| *k.as_bytes());
+                                let _ = reply_to.send(key);
                             }
                         },
                         None => {
@@ -347,6 +402,16 @@ impl<J: TransientJournal> StorageActor<J> {
 
     /// Writes a single shard to the recording log, notifies DHT, and verifies in-memory.
     async fn handle_write_shard(&mut self, envelope: WitnessEnvelope) -> Result<(), GuardianError> {
+        // Ensure a content key exists for this recording (generates one for foreign recordings
+        // on first shard arrival). Local recordings already have keys from StartRecording.
+        let rid = envelope.evidence.recording_id();
+        if self.guardian.get_content_key(rid).is_none()
+            && !self.guardian.revoked_recordings.contains(rid)
+        {
+            self.guardian.generate_content_key(rid);
+            self.guardian.persist_keyring().await?;
+        }
+
         // 1. Disk first
         self.guardian.append_shard(&envelope).await?;
         let recording_id = envelope.evidence.recording_id().clone();
@@ -421,6 +486,27 @@ impl<J: TransientJournal> StorageActor<J> {
             "Recording revoked — all evidence destroyed"
         );
         Ok(())
+    }
+
+    /// Generate a per-recording content key and persist the keyring.
+    async fn handle_start_recording(
+        &mut self,
+        recording_id: &RecordingId,
+    ) -> Result<[u8; 32], ShardError> {
+        if self.guardian.revoked_recordings.contains(recording_id) {
+            return Err(ShardError::RecordingRevoked);
+        }
+        let key = self.guardian.generate_content_key(recording_id);
+        self.guardian
+            .persist_keyring()
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
+        tracing::info!(
+            target: "phalanx::storage",
+            recording = %recording_id,
+            "Content key generated for new recording"
+        );
+        Ok(*key.as_bytes())
     }
 
     /// Persists network state to the WAL and salvages Guardian data.
