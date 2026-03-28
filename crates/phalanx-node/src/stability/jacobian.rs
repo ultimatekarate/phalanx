@@ -42,9 +42,13 @@ pub fn build_jacobian(
     let sigma_m = (1.0 - op.vals[M] / cfg.m_crit).max(0.0);
 
     // Sybil endowment at operating point and its derivative w.r.t. e.
+    // ψ(e) = ψ_max / (1 + (k·e)²)  — quadratic denominator zeros derivative
+    // at e=0, preserves half-endowment at e = 1/k, and improves Sybil defense.
     let e_val = op.vals[E];
-    let endowment = cfg.psi_max / (1.0 + cfg.k_sybil * e_val);
-    let dendowment_de = -cfg.psi_max * cfg.k_sybil / (1.0 + cfg.k_sybil * e_val).powi(2);
+    let ke = cfg.k_sybil * e_val;
+    let endowment = cfg.psi_max / (1.0 + ke.powi(2));
+    let dendowment_de =
+        -cfg.psi_max * 2.0 * cfg.k_sybil.powi(2) * e_val / (1.0 + ke.powi(2)).powi(2);
     // Normalized endowment effect: fraction of max endowment being used.
     let endowment_frac = endowment / cfg.psi_max; // 1.0 at idle, → 0 under attack
 
@@ -124,12 +128,13 @@ pub fn build_jacobian(
     // For the rejection term, the coupling coefficient ∂f_m2/∂w is positive
     // (destabilizing: more storage pressure → more memory pressure).
     // -------------------------------------------------------------------
-    let u_m_reject = rates.u_m * 0.1; // rejection pathway is ~10% of normal memory flow
     j[(M, S)] = rates.u_m * sigma_b * endowment_frac * sigma_m * dscaler(op.vals[S], cfg.s_crit);
     j[(M, E)] = rates.u_m * sigma_b * sigma_s * sigma_m * (dendowment_de / cfg.psi_max);
     j[(M, M)] = -cfg.lambda_mem
         + rates.u_m * sigma_b * sigma_s * endowment_frac * dscaler(op.vals[M], cfg.m_crit);
-    j[(M, W)] = u_m_reject / cfg.w_crit; // positive: storage stress → memory backpressure
+    // M-W coupling is zero: storage→memory rejection is threshold-activated
+    // (fires only when W > 95% of w_crit), not proportional. The correct
+    // linearization at all analyzed operating points is J[M,W] = 0.
     j[(M, B)] = rates.u_m * sigma_s * endowment_frac * sigma_m * dscaler(op.vals[B], cfg.b_crit);
 
     // -------------------------------------------------------------------

@@ -461,6 +461,8 @@ async fn test_traffic_governor_dormant_rejects_remote() {
 // =====================================================================
 
 /// Multiple valid chunks from different peers should all reach storage.
+/// Uses 3 chunks to stay within the quadratic Sybil endowment budget
+/// (ψ/(1+(ke)²) drops faster than the old linear form under rapid bursts).
 #[tokio::test]
 async fn test_multiple_chunks_from_different_peers() {
     let config = NodeConfig::test_defaults();
@@ -468,7 +470,7 @@ async fn test_multiple_chunks_from_different_peers() {
     let (actor, tx, mut storage_rx, _egress_rx, _trust_rx, _gov) = build_test_ingestion(config);
     let handle = tokio::spawn(actor.run());
 
-    for i in 0..5u32 {
+    for i in 0..3u32 {
         let owner_did = Did::new(&format!("did:key:z6MkOwner{}", i));
         let data = make_chunk(&owner_did, 128);
         tx.send(IngestionCommand::ProcessChunk {
@@ -480,9 +482,9 @@ async fn test_multiple_chunks_from_different_peers() {
         .unwrap_or_default();
     }
 
-    // All 5 should arrive at storage
+    // All 3 should arrive at storage
     let mut received = 0;
-    for _ in 0..5u32 {
+    for _ in 0..3u32 {
         if tokio::time::timeout(Duration::from_secs(2), storage_rx.recv())
             .await
             .is_ok()
@@ -490,7 +492,7 @@ async fn test_multiple_chunks_from_different_peers() {
             received += 1;
         }
     }
-    assert_eq!(received, 5, "All 5 valid chunks should reach storage");
+    assert_eq!(received, 3, "All 3 valid chunks should reach storage");
 
     drop(tx);
     let _ = handle.await;

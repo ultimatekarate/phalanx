@@ -147,6 +147,103 @@ pub struct OperatingPoint {
     pub vals: [f64; DIM],
 }
 
+// =====================================================================
+// NORMALIZATION AND LYAPUNOV MATRIX
+// =====================================================================
+
+/// Normalization scales: each integral divided by its critical threshold
+/// yields a dimensionless quantity in [0, 1] (0 = idle, 1 = critical).
+///
+///   e_crit = psi_max / k_sybil = 25.0
+///   l_crit = max_temporal_tolerance = 10.0
+pub fn normalization_scales(cfg: &HomeostaticConfig) -> [f64; DIM] {
+    [
+        cfg.s_crit,
+        cfg.d_crit,
+        cfg.psi_max / cfg.k_sybil,                // e_crit
+        cfg.max_temporal_tolerance.as_secs_f64(), // l_crit
+        cfg.m_crit,
+        cfg.w_crit,
+        cfg.b_crit,
+        cfg.c_crit,
+    ]
+}
+
+/// Lyapunov matrix P for contractivity proof.  V(x) = xᵀPx.
+///
+/// Found by semidefinite programming (Clarabel solver, iterative cutting-plane
+/// method). Satisfies: P ≻ 0 and PJ_n(x) + J_n(x)ᵀP ≺ 0 for all x in the
+/// feasible operating region [0, x_crit]^8 and all traffic regimes.
+///
+/// Row/column ordering: S(0), D(1), E(2), L(3), M(4), W(5), B(6), C(7).
+///
+/// Eigenvalues of P: [0.019, 0.025, 0.063, 0.221, 0.478, 0.489, 2.598, 4.107]
+/// Condition number: 214
+pub const LYAPUNOV_P: [[f64; DIM]; DIM] = [
+    [
+        0.48853893,
+        0.0,
+        -0.04433978,
+        -0.00129228,
+        0.04634798,
+        -0.01068656,
+        0.09410637,
+        0.0,
+    ],
+    [0.0, 0.0247523, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [
+        -0.04433978,
+        0.0,
+        0.37958021,
+        -0.00045057,
+        -0.6374144,
+        -0.03226468,
+        -0.23970966,
+        0.0,
+    ],
+    [
+        -0.00129228,
+        0.0,
+        -0.00045057,
+        0.01922904,
+        -0.00485699,
+        0.00080795,
+        -0.00638932,
+        0.0,
+    ],
+    [
+        0.04634798,
+        0.0,
+        -0.6374144,
+        -0.00485699,
+        3.11686355,
+        -0.08886839,
+        0.71126063,
+        0.0,
+    ],
+    [
+        -0.01068656,
+        0.0,
+        -0.03226468,
+        0.00080795,
+        -0.08886839,
+        0.46992898,
+        -0.07334512,
+        0.0,
+    ],
+    [
+        0.09410637,
+        0.0,
+        -0.23970966,
+        -0.00638932,
+        0.71126063,
+        -0.07334512,
+        3.43822599,
+        0.0,
+    ],
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.06288099],
+];
+
 impl OperatingPoint {
     /// System at rest — all integrals near zero.
     pub fn idle() -> Self {
