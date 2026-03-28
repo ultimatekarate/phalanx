@@ -31,10 +31,24 @@ pub struct StabilityReport {
     pub jsym_negative_definite: bool,
     /// Maximum eigenvalue of the symmetric part (J+Jᵀ)/2.
     pub jsym_max_eigenvalue: f64,
+    /// Whether Q = PJ_n + J_nᵀP is negative definite under the Lyapunov
+    /// matrix P, where J_n is the unit-normalized Jacobian.
+    /// Contractivity implies global asymptotic stability and bounded
+    /// transient overshoots — the strongest stability guarantee.
+    pub is_contractive: bool,
+    /// Contractivity margin: -λ_max(Q).  Positive means contractive.
+    pub contractivity_margin: f64,
 }
 
 /// Compute eigenvalues and stability properties from a Jacobian matrix.
-pub fn analyze_stability(scenario: &str, jacobian: &DMatrix<f64>) -> StabilityReport {
+///
+/// The `norm_scales` parameter provides the normalization constants for the
+/// contractivity check.  If `None`, contractivity fields default to false/0.
+pub fn analyze_stability(
+    scenario: &str,
+    jacobian: &DMatrix<f64>,
+    norm_scales: Option<&[f64; DIM]>,
+) -> StabilityReport {
     let eigenvalues = jacobian.complex_eigenvalues();
     let eigs: Vec<Complex<f64>> = eigenvalues.iter().cloned().collect();
 
@@ -50,6 +64,13 @@ pub fn analyze_stability(scenario: &str, jacobian: &DMatrix<f64>) -> StabilityRe
     let jsym_eigs = jsym.symmetric_eigenvalues();
     let jsym_max = jsym_eigs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
+    // Contractivity analysis: Q = P·J_n + J_nᵀ·P where J_n is normalized.
+    let (is_contractive, contractivity_margin) = if let Some(scales) = norm_scales {
+        check_contractivity(jacobian, scales)
+    } else {
+        (false, 0.0)
+    };
+
     StabilityReport {
         scenario: scenario.to_string(),
         eigenvalues: eigs,
@@ -60,7 +81,37 @@ pub fn analyze_stability(scenario: &str, jacobian: &DMatrix<f64>) -> StabilityRe
         jacobian: jacobian.clone(),
         jsym_negative_definite: jsym_max < 0.0,
         jsym_max_eigenvalue: jsym_max,
+        is_contractive,
+        contractivity_margin,
     }
+}
+
+/// Check contractivity under the Lyapunov matrix P.
+///
+/// Normalizes the Jacobian: J_n[i,j] = J[i,j] · scales[j] / scales[i],
+/// then computes Q = P·J_n + J_nᵀ·P and checks all eigenvalues < 0.
+fn check_contractivity(jacobian: &DMatrix<f64>, scales: &[f64; DIM]) -> (bool, f64) {
+    // Build the normalized Jacobian: J_n = D_n · J · D_n⁻¹
+    // where D_n = diag(1/scales), so J_n[i,j] = J[i,j] * scales[j] / scales[i]
+    let mut jn = DMatrix::zeros(DIM, DIM);
+    for i in 0..DIM {
+        for j in 0..DIM {
+            jn[(i, j)] = jacobian[(i, j)] * scales[j] / scales[i];
+        }
+    }
+
+    // Load P from the const array
+    let p = DMatrix::from_fn(DIM, DIM, |i, j| LYAPUNOV_P[i][j]);
+
+    // Q = P·J_n + J_nᵀ·P
+    let q = &p * &jn + jn.transpose() * &p;
+    // Symmetrize for numerical stability
+    let q_sym = (&q + q.transpose()) * 0.5;
+
+    let q_eigs = q_sym.symmetric_eigenvalues();
+    let q_max = q_eigs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+    (q_max < 0.0, -q_max)
 }
 
 /// Run stability analysis across idle / half-critical / near-critical operating
@@ -104,11 +155,13 @@ pub fn full_analysis(cfg: &HomeostaticConfig) -> Vec<StabilityReport> {
         ),
     ];
 
+    let scales = normalization_scales(cfg);
+
     scenarios
         .into_iter()
         .map(|(label, rates, op)| {
             let jac = build_jacobian(cfg, &rates, &op);
-            analyze_stability(label, &jac)
+            analyze_stability(label, &jac, Some(&scales))
         })
         .collect()
 }
@@ -182,6 +235,15 @@ pub fn format_report(reports: &[StabilityReport]) -> String {
             }
         ));
         out.push_str(&format!(
+            "  Contractivity:      {} (margin: {:.6})\n",
+            if report.is_contractive {
+                "CONTRACTIVE (PJ_n + J_nᵀP ≺ 0)"
+            } else {
+                "not contractive"
+            },
+            report.contractivity_margin,
+        ));
+        out.push_str(&format!(
             "  Stability verdict:  {}\n\n",
             if report.is_stable {
                 "STABLE (all Re(λ) < 0)"
@@ -193,6 +255,11 @@ pub fn format_report(reports: &[StabilityReport]) -> String {
 
     // Summary
     let all_stable = reports.iter().all(|r| r.is_stable);
+    let all_contractive = reports.iter().all(|r| r.is_contractive);
+    let min_margin = reports
+        .iter()
+        .map(|r| r.contractivity_margin)
+        .fold(f64::INFINITY, f64::min);
     out.push_str("═══════════════════════════════════════════════════════════════\n");
     out.push_str(&format!(
         "  Overall: {}\n",
@@ -202,6 +269,12 @@ pub fn format_report(reports: &[StabilityReport]) -> String {
             "INSTABILITY DETECTED — review scenarios above"
         }
     ));
+    if all_contractive {
+        out.push_str(&format!(
+            "  Contractivity: ALL SCENARIOS CONTRACTIVE (min margin: {:.6})\n",
+            min_margin
+        ));
+    }
     out.push_str("═══════════════════════════════════════════════════════════════\n");
 
     out
@@ -225,7 +298,7 @@ mod tests {
     fn test_default_config_stable_at_idle() {
         let cfg = default_cfg();
         let jac = build_jacobian(&cfg, &BaseImpulseRates::moderate(), &OperatingPoint::idle());
-        let report = analyze_stability("idle", &jac);
+        let report = analyze_stability("idle", &jac, None);
         assert!(
             report.is_stable,
             "System unstable at idle! Max Re(λ) = {}",
@@ -241,7 +314,7 @@ mod tests {
             &BaseImpulseRates::moderate(),
             &OperatingPoint::half_critical(&cfg),
         );
-        let report = analyze_stability("half-critical", &jac);
+        let report = analyze_stability("half-critical", &jac, None);
         assert!(
             report.is_stable,
             "System unstable at half-critical! Max Re(λ) = {}",
@@ -257,7 +330,7 @@ mod tests {
             &BaseImpulseRates::heavy(),
             &OperatingPoint::near_critical(&cfg),
         );
-        let report = analyze_stability("near-critical", &jac);
+        let report = analyze_stability("near-critical", &jac, None);
         assert!(
             report.is_stable,
             "System unstable near critical! Max Re(λ) = {}",
@@ -358,7 +431,7 @@ mod tests {
             setter(&mut cfg, perturbed);
 
             let jac = build_jacobian(&cfg, &rates, &op);
-            let report = analyze_stability(name, &jac);
+            let report = analyze_stability(name, &jac, None);
             assert!(
                 report.is_stable,
                 "System became unstable when {} was halved to {}! Max Re(λ) = {}",

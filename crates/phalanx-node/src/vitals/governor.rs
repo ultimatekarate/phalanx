@@ -616,7 +616,9 @@ impl Homeostasis for SystemGovernor {
 
     fn sybil_endowment(&self) -> SybilEndowment {
         self.with_state(|s| {
-            SybilEndowment(self.config.psi_max / (1.0 + self.config.k_sybil * s.e.current_value()))
+            SybilEndowment(
+                self.config.psi_max / (1.0 + (self.config.k_sybil * s.e.current_value()).powi(2)),
+            )
         })
     }
 
