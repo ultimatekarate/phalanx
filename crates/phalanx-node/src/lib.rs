@@ -57,6 +57,7 @@ pub mod vitals {
 #[cfg(feature = "stability-analysis")]
 pub mod stability {
     pub mod config;
+    pub mod contractivity;
     pub mod dyson;
     pub mod eigenvalues;
     pub mod integrators;
