@@ -51,30 +51,40 @@ Row/column ordering: S(0), D(1), E(2), L(3), M(4), W(5), B(6), C(7)
   reflecting that I/O and connection pressure are dynamically independent of the
   other channels.
 
-## Formal verification (three-layer proof)
+## Formal verification (two-layer proof)
 
 ### Layer 1: Grid verification
-- Q(x) = PJ_n(x) + J_n(x)^T P evaluated at 29,348,550 sample points
+
+- Q(x) = PJ_n(x) + J_n(x)^T P evaluated at 15,552 grid vertices
+  (3 traffic × 2^5 scaler vertices × 162 e-grid points)
 - Worst margin: 0.01649 (at heavy traffic, s=0, m=0, b=95, w=0.8, l=0, e=0)
 - Zero violations
 
-### Layer 2: Convexity (handles s, m, b, w, l directions)
-- The normalized Jacobian J_n is **linear** in s, m, b, w (piecewise, within each
-  scaler region) and piecewise constant in l (threshold at max_tolerance)
-- Therefore Q(x) is linear in these variables (for fixed e and traffic regime)
-- lambda_max of a linear symmetric matrix pencil (1-t)A + tB is **convex** in t
-- Convexity implies: maximum over an interval occurs at the endpoints
-- Consequence: grid vertices are sufficient for these 5 dimensions. No intermediate
-  point can be worse than both adjacent vertices.
+### Layer 2: Continuity — grid vertices cover the continuous region
 
-### Layer 3: Lipschitz (handles e direction)
-- Q(x) is nonlinear in e (through the endowment function 1/(1+(ke)^2))
-- For each grid vertex in (s,m,b,w,l)-space, compute the per-vertex Lipschitz
-  constant L_e = max |d lambda_max / de| over the e-interval
-- Check that L_e * (e-spacing/2) < local margin at the vertex endpoints
-- Adaptive e-grid: 162 points (spacing 0.001 near e=0, 0.005 in [0.01, 0.5],
-  0.05 in [0.5, 2], ~1 in [2, 25])
-- Max Lipschitz ratio: 0.279 < 1 (all 161 intervals pass)
+**Convexity (handles s, m, b, w, l):**
+
+- J_n is **linear** in s, m, b, w (piecewise, within each scaler region) and
+  piecewise constant in l (threshold at max_tolerance)
+- Therefore Q(x) is linear in these variables (for fixed e and traffic regime)
+- lambda_max of a linear symmetric matrix pencil (1-t)A + tB is convex in t
+  (it is the pointwise supremum of the linear Rayleigh quotients v^T A(t) v)
+- Consequence: grid vertices are sufficient for these 5 dimensions
+
+**Eigenvalue perturbation theory (handles e):**
+
+- Q(x) is nonlinear in e through the endowment function ef(e) = 1/(1+(ke)^2)
+- Decompose J_n(e) = J_const + ef(e)·A_ef_n + def(e)·A_def_n where the
+  coefficient matrices are independent of e (extracted via three-point evaluation)
+- At each e-grid endpoint, compute Q's eigendecomposition. Project the
+  perturbation onto the dominant eigenvector v₁:
+  - First-order: α = v₁ᵀ(Δef·Q_ef + Δdef·Q_def)v₁
+  - Second-order (Temple–Kato): (‖Ev₁‖² − α²) / γ where γ is the spectral gap
+- The key insight: ‖Ev₁‖ (action of the perturbation on v₁) replaces ‖E‖₂
+  (worst-case norm), exploiting the misalignment between the perturbation
+  structure and Q's dominant eigenspace
+- Adaptive e-grid: 162 points
+- Max perturbation/margin ratio: 0.861 (verified at test time)
 
 ## Consequences
 
@@ -118,4 +128,4 @@ Heavy:    u = (5, 3, 50, 2, 200, 0.15, 40, 0.5)
 
 - **SDP solver**: CVXPY 1.8.2 with Clarabel backend
 - **Verification**: NumPy eigenvalue computation (numpy.linalg.eigvalsh)
-- **Lipschitz bounds**: Finite difference estimation (h = 1e-7)
+- **Continuity bounds**: Eigenvalue perturbation theory (Temple–Kato bound in Schur basis)

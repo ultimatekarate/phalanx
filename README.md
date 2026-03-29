@@ -1,11 +1,15 @@
+# Phalanx
+
+## Build Status
+
 [![Android](https://github.com/ultimatekarate/phalanx/actions/workflows/android-build.yml/badge.svg)](https://github.com/ultimatekarate/phalanx/actions/workflows/android-build.yml)
 [![iOS](https://github.com/ultimatekarate/phalanx/actions/workflows/ios-build.yml/badge.svg)](https://github.com/ultimatekarate/phalanx/actions/workflows/ios-build.yml)
 
-# Phalanx
+## About Phalanx
 
-Phalanx is a mobile-first, cross-platform P2P forensic evidence provenance system. Phalanx captures, verifies, and distributes forensic evidence across a peer-to-peer mesh with cryptographic integrity guarantees at every layer. The stronghold binary provides forensic corroboration — determining whether distinct videos from independent devices observed the same event. It uses control theory for self-regulation, fountain codes for data resilience, eclipse attack detection for network security, PRNU sensor fingerprinting for deepfake rejection, and decentralized identity for zero-trust peer authentication. It is conceptually dense.
+Phalanx is a mobile-first, cross-platform P2P forensic evidence provenance system that makes the truth expensive to suppress and dignity expensive to violate. Phalanx captures, verifies, and distributes forensic evidence across a peer-to-peer mesh with cryptographic integrity guarantees at every layer. The stronghold binary provides forensic corroboration — determining whether distinct videos from independent devices observed the same event. It uses control theory for self-regulation, fountain codes for data resilience, eclipse attack detection for network security, PRNU sensor fingerprinting combined with Moire pattern detection for deepfake rejection, and decentralized identity for zero-trust peer authentication. It also has functionality to cryptographically forget. When you decide to delete something recorded by Phalanx it is gone forever.
 
-I have gone to great lengths to ensure that you do not need to understand all of it to contribute to any of it. If you are interested, please read [the guide for contributing](CONTRIBUTING.md). There you will find the code base broken down by technical specialty with a list of files and a brief summary of what each file does.
+Phalanx is conceptually dense. I have gone to great lengths to ensure that you do not need to understand all of it to contribute to any of it. If you are interested, please read [the guide for contributing](CONTRIBUTING.md). There you will find the code base broken down by technical specialty with a list of files and a brief summary of what each file does.
 
 ## How It Works
 
@@ -14,7 +18,7 @@ much more robust and secure. The moment you hit record your data is being encryp
 
 ## Architecture
 
-The codebase is governed by a [Linguistic Code Model](linguistic-code-model.md) that partitions all code by linguistic role. Crate boundaries are structural — the compiler enforces them, not convention.
+The codebase is governed by a [Linguistic Code Model](linguistic-code-model.md) that partitions all code by linguistic role. It's essentially what happens when you combine functional core, imperative shell with Apollo-era DSKY applied to architecture — and use the Rust compiler to give it actual teeth. Crate boundaries are structural — the compiler enforces them, not convention.
 
 | Crate | Role | Description |
 | --- | --- | --- |
@@ -94,7 +98,7 @@ See `Cargo.toml` workspace lints for the full configuration.
 
 ## License
 
-Not yet specified.
+Patent pending.
 
 ## Background
 
@@ -102,4 +106,4 @@ This is started as a way to use AI tools to learn Rust and it rapidly got out of
 
 I'm not an expert in any of the fields you see in this repo (Well, I do have a PhD in numerical analysis so there's that) but I don't have to be because I can RTFM. The nerds of yore knew that there would come a time when someone else would need invoke the deep magic. That's why they wrote it down. There are some genuinely novel ideas in this code base, but for the most part it is an act of synthesis that is heavily influenced by Grace Hopper and Margaret Hamilton.
 
-Grace Hopper believed that the language should be the logic. She dared to believe that the machines should meet the humans where they are- that's why we have compilers. Margaret Hamilton, the woman who coined the phrase 'software engineering', believed that software deserved the same level of rigor as the hardware that it ran on. Both were dismissed and they built the thing anyway- and they were right to do it. I'm not Grace Hopper. I'm not Margaret Hamilton. Hell, I don't think I'm a particularly good programmer. I'm just someone that had an idea that they wanted to try out- and now the world has Phalanx. Use it or don't. Hopefully, at least one person will find it useful.
+Grace Hopper believed that the language should be the logic. She dared to believe that the machines should meet the humans where they are- that's why we have compilers. Margaret Hamilton, the woman who coined the phrase 'software engineering', believed that software deserved the same level of rigor as the hardware that it ran on. Both were dismissed and they built the thing anyway- and they were right to do it. I'm not Grace Hopper. I'm not Margaret Hamilton. I'm just someone that had an idea that they wanted to try out- and now the world has Phalanx. Use it or don't. Hopefully, at least one person will find it useful.

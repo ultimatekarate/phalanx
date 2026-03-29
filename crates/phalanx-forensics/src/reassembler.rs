@@ -217,6 +217,12 @@ impl Reassembler {
 
     /// P7 FIX: Evict shard contexts that have been inactive longer than
     /// SHARD_INACTIVITY_TIMEOUT. Returns the number of evicted contexts.
+    ///
+    /// LAYERING NOTE: This bypasses `Crucible::flush_stale()` intentionally.
+    /// Crucible's flush checks `created_at` and attempts `assemble()` — wrong
+    /// for fountain reconstruction, where liveness (last symbol received) is
+    /// what matters and partial decodes have no useful output. The clean fix
+    /// is a `Mold::is_stale()` hook so Crucible can own eviction generically.
     #[allow(clippy::arithmetic_side_effects)] // Duration multiplication — bounded by constant timeout.
     /// Contexts with `ttl_extended` (active assembly progress) get 2x timeout.
     pub fn evict_stale_contexts(&mut self) -> usize {
