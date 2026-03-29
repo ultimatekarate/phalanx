@@ -1,5 +1,9 @@
 # CONTRIBUTING TO PHALANX
 
+I built this project in isolation. It started as a way to learn Rust and it grew from there. If you browse the commit history you'll find me talking to myself — working through problems out loud, reacting in real time when something clicked or when the compiler surprised me. They reflect the process, not doubt about the results. In particular, I want to draw attention to the despair I felt when I decided to refactor this project from a single crate monolith into a multi-crate workspace. It's easy to look at the current state of the code and become overwhelmed. Look at the initial commits- I was happy just to capture jpeg stills.
+
+I'm not an expert in cryptography, control theory, networking, or any of the other fields represented here. I RTFM, implemented what made sense to me, and tried to get it right. If you are an expert and something I did gives you pause — a non-standard key derivation, an assumption that doesn't hold, an edge case I didn't consider — that is the most valuable contribution you can make. You don't need to fix it. Just telling me what's wrong and why is enough- I love to learn new ideas. Or you could fix it. Truthfully, I'm tired, this project has been so much fun, but it's also been so taxing.
+
 The codebase is structured so that each technical specialty occupies a well-defined set of files with minimal entanglement. A networking engineer can improve the QUIC transport without understanding Padé approximants. A statistician can refine the Kolmogorov-Smirnov corroboration test without knowing how libp2p gossipsub works. A storage engineer can optimize the vault without touching the actor system. The linguistic model (`linguistic-code-model.md`) enforces these boundaries at the crate level — they are not conventions, they are compiler-enforced facts.
 
 Before contributing, read `linguistic-code-model.md`. It defines the parts of speech (Nouns, Verbs, Conjunctions, Prepositions, etc.) and the rules that govern them. Then find your specialty below and start there.
@@ -200,8 +204,10 @@ Deterministic simulation harness, chaos injection, virtual clocks, and test fixt
 
 ## Before You Submit
 
-1. Read `linguistic-code-model.md` — particularly Sections I (Parts of Speech) and II (Structural Enforcement).
-2. Run `cargo clippy --workspace --all-targets` — zero errors, zero governance lint warnings.
-3. Run `cargo test --workspace` — all tests pass.
-4. If you added an `#[allow(clippy::...)]`, include a comment explaining why the suppression is safe.
-5. If you added a new type, check the linguistic model to determine which crate it belongs in. Nouns go in the Dictionary. Verbs go in the Laboratory. Prepositions go in the Post Office.
+Don't you dare disrespect for yourself by submitting anything less than your best. Mistakes are acceptable, that is how we learn. The important thing is that we try. I do have some rules:
+
+1. Read `linguistic-code-model.md` — particularly Sections I (Parts of Speech) and II (Structural Enforcement), I promise it is worth it. Read the friendly manual.
+2. If you added a new type, check the linguistic model to determine which crate it belongs in. Nouns go in the Dictionary. Verbs go in the Laboratory. Prepositions go in the Post Office.
+3. Run `cargo clippy --workspace --all-targets` — zero errors, zero governance lint warnings.
+4. Run `cargo test --workspace` — all tests pass.
+5. If you added an `#[allow(clippy::...)]`, include a comment explaining why the suppression is safe.
