@@ -13,6 +13,7 @@
 
 use crate::error::PhalanxError;
 use crate::handle::PhalanxHandle;
+use crate::logcat::phalanx_log;
 
 use phalanx_node::actors::storage::StorageCommand;
 use phalanx_node::{PlaybackCoordinator, VideoPlayerSink};
@@ -34,6 +35,10 @@ use tokio::sync::mpsc;
 pub struct PlaybackSession {
     video_rx: mpsc::Receiver<Vec<u8>>,
     audio_rx: mpsc::Receiver<Vec<u8>>,
+    /// DIAGNOSTIC: counts poll_video_frame calls to confirm Flutter is polling
+    video_poll_count: u32,
+    /// DIAGNOSTIC: counts how many video frames were delivered
+    video_hit_count: u32,
 }
 
 // =====================================================================
@@ -79,8 +84,14 @@ pub unsafe extern "C" fn phalanx_start_playback(
     // Flutter polls at ~33ms (30fps). Worst-case Android UI stall (old-space GC +
     // layout in same frame) ≈ 80ms → ceil(80/33) = 3. Small enough that
     // backpressure keeps the coordinator from prefetching the whole recording.
-    let (video_tx, video_rx) = mpsc::channel(3);
-    let (audio_tx, audio_rx) = mpsc::channel(3);
+    // Buffer = 8 frames: enough headroom for Android GC pauses (~300ms at
+    // 15fps = ~5 frames) while providing backpressure to pace the coordinator.
+    let (video_tx, video_rx) = mpsc::channel(8);
+    let (audio_tx, audio_rx) = mpsc::channel(8);
+
+    // Clone tx handles before moving into sinks — we need them later for capacity diagnostics
+    let video_tx_diag = video_tx.clone();
+    let audio_tx_diag = audio_tx.clone();
 
     let video_sink = VideoPlayerSink::new(video_tx);
     let audio_sink = VideoPlayerSink::new(audio_tx); // Same type — just a channel wrapper
@@ -102,7 +113,7 @@ pub unsafe extern "C" fn phalanx_start_playback(
     let (_providers_tx, providers_rx) = mpsc::channel(1);
 
     h.runtime.spawn(async move {
-        eprintln!("[Phalanx FFI] Starting playback for {}", rec_id.as_str());
+        phalanx_log!("[Phalanx FFI] Starting playback for {}", rec_id.as_str());
 
         // Resolve per-recording content key for decryption.
         // Falls back to vault_key for legacy recordings without content keys.
@@ -116,19 +127,120 @@ pub unsafe extern "C" fn phalanx_start_playback(
                 .await;
             match rx.await {
                 Ok(Some(key_bytes)) => {
-                    eprintln!("[Phalanx FFI] Got content key ({} bytes) for {}", key_bytes.len(), rec_id.as_str());
+                    phalanx_log!("[Phalanx FFI] Got content key ({} bytes) for {}", key_bytes.len(), rec_id.as_str());
                     Some(phalanx_proto::crypto::SymmetricKey(key_bytes))
                 }
                 Ok(None) => {
-                    eprintln!("[Phalanx FFI] No content key found, falling back to vault_key");
+                    phalanx_log!("[Phalanx FFI] No content key found, falling back to vault_key");
                     Some((*vault_key).clone())
                 }
                 Err(e) => {
-                    eprintln!("[Phalanx FFI] GetContentKey channel error: {e:?}, falling back to vault_key");
+                    phalanx_log!("[Phalanx FFI] GetContentKey channel error: {e:?}, falling back to vault_key");
                     Some((*vault_key).clone())
                 }
             }
         };
+
+        // Diagnostic: probe storage for shard 1 before starting coordinator
+        {
+            let (probe_tx, probe_rx) = tokio::sync::oneshot::channel();
+            let _ = storage_tx
+                .send(StorageCommand::GetShard {
+                    recording_id: rec_id.clone(),
+                    sequence_id: phalanx_proto::evidence::StorageSequence(1),
+                    reply_to: probe_tx,
+                })
+                .await;
+            match probe_rx.await {
+                Ok(Some(env)) => {
+                    let (etype, payload) = match &env.evidence {
+                        phalanx_proto::evidence::Evidence::Video(v) => ("Video", Some(v.payload.clone())),
+                        phalanx_proto::evidence::Evidence::Audio(a) => ("Audio", Some(a.payload.clone())),
+                        _ => ("Other", None),
+                    };
+                    phalanx_log!("[Phalanx FFI] Probe: shard 1 EXISTS ({})", etype);
+
+                    // Try to decode the payload to verify the full pipeline
+                    if let Some(p) = payload {
+                        let payload_desc = match &p {
+                            phalanx_proto::evidence::DataPayload::Missing => "Missing",
+                            phalanx_proto::evidence::DataPayload::Clear(_) => "Clear",
+                            phalanx_proto::evidence::DataPayload::Compressed(_) => "Compressed",
+                            phalanx_proto::evidence::DataPayload::Encrypted { .. } => "Encrypted",
+                        };
+                        phalanx_log!("[Phalanx FFI] Probe: shard 1 payload = {}", payload_desc);
+
+                        match phalanx_forensics::decode_payload(p, decryption_key.as_ref()) {
+                            Ok(decoded) => {
+                                phalanx_log!("[Phalanx FFI] Probe: decode_payload OK, {} bytes", decoded.len());
+                                if etype == "Video" {
+                                    match postcard::from_bytes::<Vec<Vec<u8>>>(&decoded) {
+                                        Ok(frames) => phalanx_log!("[Phalanx FFI] Probe: postcard deser OK, {} JPEG frames", frames.len()),
+                                        Err(e) => phalanx_log!("[Phalanx FFI] Probe: postcard deser FAILED: {e:?}"),
+                                    }
+                                }
+                            }
+                            Err(e) => phalanx_log!("[Phalanx FFI] Probe: decode_payload FAILED: {e:?}"),
+                        }
+                    }
+                }
+                Ok(None) => phalanx_log!("[Phalanx FFI] Probe: shard 1 NOT FOUND"),
+                Err(e) => phalanx_log!("[Phalanx FFI] Probe: GetShard failed: {e:?}"),
+            }
+
+            // Also probe ListRecordings to see how many the storage actor knows about
+            let (list_tx, list_rx) = tokio::sync::oneshot::channel();
+            let _ = storage_tx
+                .send(StorageCommand::ListRecordings { reply_to: list_tx })
+                .await;
+            match list_rx.await {
+                Ok(ids) => {
+                    phalanx_log!("[Phalanx FFI] Probe: {} recordings known to storage", ids.len());
+                    for id in &ids {
+                        phalanx_log!("[Phalanx FFI] Probe:   recording = {}", id.as_str());
+                    }
+                }
+                Err(e) => phalanx_log!("[Phalanx FFI] Probe: ListRecordings failed: {e:?}"),
+            }
+
+            // Query shard count for this specific recording
+            let (info_tx, info_rx) = tokio::sync::oneshot::channel();
+            let _ = storage_tx
+                .send(StorageCommand::DebugRecordingInfo {
+                    recording_id: rec_id.clone(),
+                    reply_to: info_tx,
+                })
+                .await;
+            match info_rx.await {
+                Ok((shard_count, has_key)) => {
+                    phalanx_log!(
+                        "[Phalanx FFI] Probe: recording {} has {} shards, has_key={}",
+                        rec_id.as_str(), shard_count, has_key
+                    );
+                }
+                Err(e) => phalanx_log!("[Phalanx FFI] Probe: DebugRecordingInfo failed: {e:?}"),
+            }
+
+            // List vault directory contents to see if .recording files exist on disk
+            let (vault_tx, vault_rx) = tokio::sync::oneshot::channel();
+            let _ = storage_tx
+                .send(StorageCommand::DebugVaultListing {
+                    reply_to: vault_tx,
+                })
+                .await;
+            match vault_rx.await {
+                Ok((vault_path, entries)) => {
+                    phalanx_log!("[Phalanx FFI] Probe: vault_path = {}", vault_path);
+                    if entries.is_empty() {
+                        phalanx_log!("[Phalanx FFI] Probe: vault directory is EMPTY");
+                    }
+                    for entry in &entries {
+                        phalanx_log!("[Phalanx FFI] Probe:   {}", entry);
+                    }
+                }
+                Err(e) => phalanx_log!("[Phalanx FFI] Probe: DebugVaultListing failed: {e:?}"),
+            }
+        }
 
         let mut coordinator = PlaybackCoordinator::new(
             storage_tx,
@@ -141,15 +253,31 @@ pub unsafe extern "C" fn phalanx_start_playback(
             identity,
         );
 
-        eprintln!("[Phalanx FFI] PlaybackCoordinator starting run loop");
+        phalanx_log!("[Phalanx FFI] PlaybackCoordinator starting run loop");
         match coordinator.run(rec_id).await {
-            Ok(()) => eprintln!("[Phalanx FFI] PlaybackCoordinator finished normally"),
-            Err(e) => eprintln!("[Phalanx FFI] PlaybackCoordinator FAILED: {e:?}"),
+            Ok(stats) => {
+                let video_buffered = 8u32.saturating_sub(video_tx_diag.capacity() as u32);
+                let audio_buffered = 8u32.saturating_sub(audio_tx_diag.capacity() as u32);
+                phalanx_log!(
+                    "[Phalanx FFI] PlaybackStats: found={}, missing={}, video_sent={}, audio_sent={}, decode_fail={}",
+                    stats.shards_found, stats.shards_missing, stats.video_sent, stats.audio_sent, stats.decode_failures
+                );
+                phalanx_log!(
+                    "[Phalanx FFI] PlaybackCoordinator finished. video_buffered={}, audio_buffered={}",
+                    video_buffered, audio_buffered
+                );
+            }
+            Err(e) => phalanx_log!("[Phalanx FFI] PlaybackCoordinator FAILED: {e:?}"),
         }
     });
 
     // Return opaque session pointer — caller owns this
-    Box::into_raw(Box::new(PlaybackSession { video_rx, audio_rx }))
+    Box::into_raw(Box::new(PlaybackSession {
+        video_rx,
+        audio_rx,
+        video_poll_count: 0,
+        video_hit_count: 0,
+    }))
 }
 
 /// Polls for the next decoded video frame from a playback session.
@@ -175,7 +303,31 @@ pub unsafe extern "C" fn phalanx_poll_video_frame(
         return PhalanxError::NullPointer.code();
     }
 
-    poll_channel(&mut s.video_rx, out_data, out_len)
+    s.video_poll_count += 1;
+
+    // Log first poll to confirm Flutter is calling us
+    if s.video_poll_count == 1 {
+        phalanx_log!("[Phalanx FFI] poll_video_frame: FIRST POLL");
+    }
+
+    let result = poll_channel(&mut s.video_rx, out_data, out_len);
+    if !(*out_data).is_null() {
+        s.video_hit_count += 1;
+        phalanx_log!(
+            "[Phalanx FFI] poll_video_frame: got {} bytes (hit {}/poll {})",
+            *out_len,
+            s.video_hit_count,
+            s.video_poll_count
+        );
+    } else if s.video_poll_count % 100 == 0 {
+        // Periodic heartbeat to confirm we're still polling
+        phalanx_log!(
+            "[Phalanx FFI] poll_video_frame: {} polls, {} hits so far",
+            s.video_poll_count,
+            s.video_hit_count
+        );
+    }
+    result
 }
 
 /// Polls for the next decoded audio frame from a playback session.

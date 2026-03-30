@@ -13,6 +13,8 @@
 // No JNI. No platform channels. Pure C-ABI. dart:ffi on both platforms.
 // ═══════════════════════════════════════════════════════════════════════
 
+pub mod logcat;
+
 pub mod ble_auth;
 pub mod calibrate;
 pub mod capture;

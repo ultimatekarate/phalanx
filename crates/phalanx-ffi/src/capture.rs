@@ -14,6 +14,7 @@
 
 use crate::error::PhalanxError;
 use crate::handle::PhalanxHandle;
+use crate::logcat::phalanx_log;
 
 use phalanx_forensics::reassembler::{compress_frame, create_audio_shard, create_video_shard};
 use phalanx_lens::scalar::ScalarLens;
@@ -195,6 +196,18 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
     recording_id: *const c_char,
     _timestamp_ms: u64,
 ) -> i32 {
+    // DIAGNOSTIC: log first call to confirm Flutter is pushing frames
+    {
+        static LOGGED_ENTRY: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED_ENTRY.swap(true, Ordering::Relaxed) {
+            phalanx_log!(
+                "[Phalanx FFI] push_video_frame CALLED: y_len={}, uv_len={}, {}x{}, handle_null={}, y_null={}, uv_null={}, rec_null={}",
+                y_len, uv_len, width, height, handle.is_null(), y_plane.is_null(), uv_plane.is_null(), recording_id.is_null()
+            );
+        }
+    }
+
     let Some(h) = handle.as_ref() else {
         return PhalanxError::NullPointer.code();
     };
@@ -204,6 +217,12 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
     }
 
     if !h.recording_active.load(Ordering::Relaxed) {
+        // DIAGNOSTIC: log if recording_active is false
+        static LOGGED_INACTIVE: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED_INACTIVE.swap(true, Ordering::Relaxed) {
+            phalanx_log!("[Phalanx FFI] push_video_frame: recording_active=false, rejecting");
+        }
         return PhalanxError::NotRecording.code();
     }
 
@@ -220,10 +239,21 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
         None => return PhalanxError::ChannelClosed.code(),
     };
 
-    // Validate UV plane size: must be width * height / 2 (NV12/NV21 interleaved)
+    // Validate UV plane size: must be width * height / 2 (NV12/NV21 interleaved).
+    // Some Android camera HALs deliver UV planes off by 1 byte (e.g., 460799 vs
+    // 460800 for 1280×720). Pad to expected size — the missing byte is the last
+    // chroma sample, visually imperceptible.
     #[allow(clippy::arithmetic_side_effects)]
     let expected_uv = (width * height) / 2;
-    if uv_len != expected_uv {
+    if uv_len != expected_uv && uv_len + 1 != expected_uv {
+        static LOGGED_UV: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED_UV.swap(true, Ordering::Relaxed) {
+            phalanx_log!(
+                "[Phalanx FFI] push_video_frame: UV size mismatch: expected={}, got={}",
+                expected_uv,
+                uv_len
+            );
+        }
         return PhalanxError::InvalidState.code();
     }
 
@@ -231,7 +261,12 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
     // This is a fast memcpy — the expensive work (JPEG, forensics, shard
     // creation) happens on tokio's blocking thread pool below.
     let y_data = std::slice::from_raw_parts(y_plane, y_len as usize).to_vec();
-    let uv_data = std::slice::from_raw_parts(uv_plane, uv_len as usize).to_vec();
+    let mut uv_data = std::slice::from_raw_parts(uv_plane, uv_len as usize).to_vec();
+    if uv_data.len() < expected_uv as usize {
+        // Pad short UV plane with last byte repeated (nearest-neighbor chroma)
+        let pad = *uv_data.last().unwrap_or(&128);
+        uv_data.resize(expected_uv as usize, pad);
+    }
     let is_nv12 = matches!(pixel_format, PixelFormat::Nv12);
 
     // Claim sequence number now (atomic — no contention with the blocking task).
@@ -252,7 +287,31 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
             );
 
             // Step 2: JPEG compression (YUV→JPEG via turbojpeg)
-            let compressed = compress_frame(&y_data, &uv_data, width, height, is_nv12).ok()?;
+            let compressed = match compress_frame(&y_data, &uv_data, width, height, is_nv12) {
+                Ok(c) => {
+                    // DIAGNOSTIC: log first successful compression
+                    static LOGGED_OK: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if !LOGGED_OK.swap(true, Ordering::Relaxed) {
+                        phalanx_log!(
+                            "[Phalanx FFI] compress_frame OK: {} bytes JPEG from {}x{}",
+                            c.len(),
+                            width,
+                            height
+                        );
+                    }
+                    c
+                }
+                Err(e) => {
+                    // DIAGNOSTIC: log first compression failure
+                    static LOGGED_ERR: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if !LOGGED_ERR.swap(true, Ordering::Relaxed) {
+                        phalanx_log!("[Phalanx FFI] compress_frame FAILED: {}", e);
+                    }
+                    return None;
+                }
+            };
 
             // Step 3: Create video shard with forensic metrics
             let elapsed = SystemTime::now()
@@ -264,21 +323,37 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
                     .saturating_mul(1000)
                     .saturating_add(u64::from(elapsed.subsec_millis())),
             );
-            create_video_shard(
+            match create_video_shard(
                 vec![compressed],
                 sequence,
                 current_fps,
                 rec_id,
                 lens_metrics,
                 now,
-            )
-            .ok()
+            ) {
+                Ok(shard) => Some(shard),
+                Err(e) => {
+                    phalanx_log!("[Phalanx FFI] create_video_shard FAILED: {e:?}");
+                    None
+                }
+            }
         })
         .await;
 
         // Step 4: Non-blocking send to MediaEgressActor
-        if let Ok(Some(shard)) = result {
-            let _ = video_tx.try_send(shard);
+        match &result {
+            Ok(Some(shard)) => {
+                static LOGGED_SEND: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !LOGGED_SEND.swap(true, Ordering::Relaxed) {
+                    phalanx_log!("[Phalanx FFI] video shard created, sending to egress");
+                }
+                let _ = video_tx.try_send(shard.clone());
+            }
+            Ok(None) => {} // spawn_blocking returned None (pipeline failure logged above)
+            Err(e) => {
+                phalanx_log!("[Phalanx FFI] spawn_blocking panicked: {e:?}");
+            }
         }
     });
 
