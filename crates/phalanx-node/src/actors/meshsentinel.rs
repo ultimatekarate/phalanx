@@ -300,6 +300,7 @@ impl<I: IngressPort> MeshSentinel<I> {
                     .as_ref()
                     .map(phalanx_forensics::gate::LensThresholds::new_calibrated)
                     .unwrap_or_default(),
+                storage_tx: storage_tx.clone(),
             },
         )
         .await
