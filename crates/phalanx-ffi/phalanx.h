@@ -286,6 +286,20 @@ int32_t phalanx_push_audio_frame(struct PhalanxHandle *handle,
  int32_t phalanx_get_target_fps(const struct PhalanxHandle *handle) ;
 
 /**
+ * Returns a JSON array of recording IDs as a C string.
+ *
+ * Example output: `["rec-did:key:-123456","rec-did:key:-789012"]`
+ *
+ * The returned string must be freed with `phalanx_free_string`.
+ * Returns an empty array `"[]"` if no recordings exist.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `out_json` must be a valid pointer to receive the C string.
+ */
+ int32_t phalanx_list_recordings(struct PhalanxHandle *handle, char **out_json) ;
+
+/**
  * Generates a `phx://` deep link URI for a recording.
  *
  * Uses the existing `PhalanxLocator` URI scheme:
@@ -317,6 +331,29 @@ int32_t phalanx_get_share_link(const struct PhalanxHandle *handle,
  * * `phx_link` must be a valid null-terminated C string containing a `phx://` URI.
  */
  int32_t phalanx_open_link(struct PhalanxHandle *handle, const char *phx_link) ;
+
+/**
+ * Debug-only: delete a recording without cryptographic revocation.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `recording_id` must be a valid null-terminated C string.
+ */
+ int32_t phalanx_debug_delete_recording(struct PhalanxHandle *handle, const char *recording_id) ;
+
+/**
+ * Debug: returns "shards=N,key=true/false" as a C string for a recording.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `recording_id` must be a valid null-terminated C string.
+ * * `out_info` must be a valid pointer to receive the C string.
+ */
+
+int32_t phalanx_debug_recording_info(struct PhalanxHandle *handle,
+                                     const char *recording_id,
+                                     char **out_info)
+;
 
 /**
  * Import a community membership from a serialized token (deep link payload).

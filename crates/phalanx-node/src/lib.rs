@@ -88,7 +88,7 @@ pub use persistence::journal::FileJournal;
 pub use persistence::vault::Guardian;
 
 // Playback re-exports
-pub use actors::playback::PlaybackCoordinator;
+pub use actors::playback::{PlaybackCoordinator, PlaybackStats};
 pub use playback::sink::{ArtifactSink, VideoPlayerSink};
 
 pub mod prelude {

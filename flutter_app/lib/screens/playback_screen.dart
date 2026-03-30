@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:ffi';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -19,8 +20,10 @@ class PlaybackScreen extends ConsumerStatefulWidget {
 
 class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
   String? _activeRecordingId;
-  Uint8List? _currentFrame;
+  ui.Image? _currentImage;
   Timer? _pollTimer;
+  bool _decoding = false;
+  int _lastTimestampMs = 0;
 
   /// Opaque session pointer returned from Rust. Owns video + audio receivers.
   Pointer<Void>? _session;
@@ -34,19 +37,48 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
         _session = session;
       });
 
-      // Poll for video + audio at ~30fps
-      _pollTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
-        if (_session == null) return;
+      // Poll at 16ms (60Hz check rate). Actual frame rate is governed by
+      // timestamps embedded in each frame — adapts to capture FPS automatically.
+      _pollTimer = Timer.periodic(const Duration(milliseconds: 16), (_) async {
+        if (_session == null || _decoding) return;
 
-        final frame = bridge.pollVideoFrame(_session!);
-        if (frame != null) {
-          setState(() => _currentFrame = frame);
-        }
+        // Acquire immediately — prevents re-entrant callbacks from polling
+        // additional frames while we await the delay or decode below.
+        _decoding = true;
+        try {
+          // Drain audio first (prevents coordinator backpressure stall)
+          bridge.pollAudioFrame(_session!);
 
-        // Poll audio — for now, discard (audio playback output TBD)
-        final audio = bridge.pollAudioFrame(_session!);
-        if (audio != null) {
-          // TODO: feed PCM to audio output sink
+          final data = bridge.pollVideoFrame(_session!);
+          if (data == null || data.length < 9) {
+            _decoding = false;
+            return;
+          }
+
+          // Extract 8-byte LE timestamp prefix from coordinator
+          final tsMs = ByteData.sublistView(data, 0, 8).getUint64(0, Endian.little);
+          final jpeg = Uint8List.sublistView(data, 8);
+
+          // Pace: sleep for the inter-frame delta before displaying
+          if (_lastTimestampMs > 0) {
+            final deltaMs = tsMs - _lastTimestampMs;
+            if (deltaMs > 0 && deltaMs < 1000) {
+              await Future.delayed(Duration(milliseconds: deltaMs));
+            }
+          }
+          _lastTimestampMs = tsMs;
+
+          // Async JPEG decode — runs on Flutter engine worker thread
+          final codec = await ui.instantiateImageCodec(jpeg);
+          final frame = await codec.getNextFrame();
+          if (mounted) {
+            _currentImage?.dispose();
+            setState(() => _currentImage = frame.image);
+          } else {
+            frame.image.dispose();
+          }
+        } finally {
+          _decoding = false;
         }
       });
     } catch (e) {
@@ -64,9 +96,11 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
       _session = null;
     }
 
+    _currentImage?.dispose();
     setState(() {
       _activeRecordingId = null;
-      _currentFrame = null;
+      _currentImage = null;
+      _lastTimestampMs = 0;
     });
   }
 
@@ -152,6 +186,7 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
   @override
   void dispose() {
     _pollTimer?.cancel();
+    _currentImage?.dispose();
     if (_session != null) {
       final bridge = ref.read(phalanxProvider);
       bridge.stopPlayback(_session!);
@@ -177,11 +212,10 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
               child: Container(
                 color: Colors.black,
                 child: Center(
-                  child: _currentFrame != null
-                      ? Image.memory(
-                          _currentFrame!,
+                  child: _currentImage != null
+                      ? RawImage(
+                          image: _currentImage,
                           fit: BoxFit.contain,
-                          gaplessPlayback: true,
                         )
                       : const CircularProgressIndicator(color: Colors.white),
                 ),

@@ -16,6 +16,17 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+/// Diagnostic counters returned after playback completes.
+/// Used by the FFI layer to log stats visible on Android logcat.
+#[derive(Debug, Default)]
+pub struct PlaybackStats {
+    pub shards_found: u32,
+    pub shards_missing: u32,
+    pub video_sent: u32,
+    pub audio_sent: u32,
+    pub decode_failures: u32,
+}
+
 pub struct PlaybackCoordinator<V: PlaybackSink, A: PlaybackSink> {
     storage_tx: mpsc::Sender<StorageCommand>,
     egress_tx: mpsc::Sender<EgressCommand>,
@@ -60,7 +71,8 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
     }
 
     #[allow(clippy::arithmetic_side_effects)] // Sequence arithmetic for playback timing.
-    pub async fn run(&mut self, recording_id: RecordingId) -> Result<()> {
+    pub async fn run(&mut self, recording_id: RecordingId) -> Result<PlaybackStats> {
+        let mut stats = PlaybackStats::default();
         loop {
             // Non-blocking: drain any provider results that arrived since last iteration.
             // Using try_recv() instead of select! to avoid cancelling the oneshot reply_rx
@@ -92,6 +104,7 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                     // Reset gap counters — we found data.
                     self.retry_count = 0;
                     self.consecutive_gaps = 0;
+                    stats.shards_found += 1;
 
                     let evidence_type = match &envelope.evidence {
                         Evidence::Video(_) => "Video",
@@ -105,15 +118,24 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                         self.current_sequence.0, evidence_type
                     );
 
-                    // Demux: extract payload by value — no clone needed.
-                    let (payload, is_audio) = match envelope.evidence {
-                        Evidence::Video(v) => (v.payload, false),
-                        Evidence::Audio(a) => (a.payload, true),
-                        Evidence::Gap(_) | Evidence::Handover(_) | Evidence::Proximity(_) => {
-                            self.current_sequence.0 += 1;
-                            continue;
-                        }
-                    };
+                    // Demux: extract payload + timestamp + fps by value — no clone needed.
+                    let (payload, is_audio, timestamp_ms, frame_interval_ms) =
+                        match envelope.evidence {
+                            Evidence::Video(v) => {
+                                let ts = v.timestamp.as_u64();
+                                let interval = if v.fps.get() > 0 {
+                                    1000u64 / u64::from(v.fps.get())
+                                } else {
+                                    33 // fallback ~30fps
+                                };
+                                (v.payload, false, ts, interval)
+                            }
+                            Evidence::Audio(a) => (a.payload, true, 0u64, 0u64),
+                            Evidence::Gap(_) | Evidence::Handover(_) | Evidence::Proximity(_) => {
+                                self.current_sequence.0 += 1;
+                                continue;
+                            }
+                        };
 
                     // Capture sequence for sink calls, then advance immediately.
                     // If decode/verify/sink fails and run() returns an error,
@@ -141,9 +163,9 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                             ) {
                                 Ok(data) => data,
                                 Err(e) => {
-                                    // eprintln reaches Android logcat even in release builds
                                     eprintln!("[Phalanx Playback] decode_payload FAILED at seq {seq}: {e:?}");
                                     tracing::warn!(seq = seq.0, error = ?e, "Skipping frame: decode_payload failed");
+                                    stats.decode_failures += 1;
                                     continue;
                                 }
                             }
@@ -156,8 +178,9 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                     if is_audio {
                         if let Err(e) = self.audio_sink.handle_chunk(seq, frame_data).await {
                             eprintln!("[Phalanx Playback] audio sink error at seq {seq}: {e:?}");
-                            break Ok(());
+                            break Ok(stats);
                         }
+                        stats.audio_sent += 1;
                     } else {
                         // Video payload is postcard-serialized Vec<Vec<u8>> (list of JPEG frames).
                         // Deserialize and send each JPEG individually to the sink.
@@ -168,20 +191,31 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                                     "[Phalanx Playback] seq {seq}: decoded {} JPEG frames",
                                     jpeg_frames.len()
                                 );
-                                for frame in jpeg_frames {
-                                    if let Err(e) = self.video_sink.handle_chunk(seq, frame).await {
+                                for (i, frame) in jpeg_frames.iter().enumerate() {
+                                    // Prepend 8-byte LE timestamp for playback pacing.
+                                    // Offset each frame within the shard by its index × per-frame interval.
+                                    // This distributes the shard's frames evenly across the capture period.
+                                    let frame_ts = timestamp_ms + (i as u64) * frame_interval_ms;
+                                    let mut timed = Vec::with_capacity(8 + frame.len());
+                                    timed.extend_from_slice(&frame_ts.to_le_bytes());
+                                    timed.extend_from_slice(frame);
+                                    if let Err(e) = self.video_sink.handle_chunk(seq, timed).await {
                                         eprintln!("[Phalanx Playback] video sink error: {e:?}");
                                         break;
                                     }
+                                    stats.video_sent += 1;
                                 }
                             }
                             Err(e) => {
                                 eprintln!("[Phalanx Playback] seq {seq}: postcard deser failed ({e:?}), sending {} raw bytes", frame_data.len());
-                                if let Err(e) = self.video_sink.handle_chunk(seq, frame_data).await
-                                {
+                                let mut timed = Vec::with_capacity(8 + frame_data.len());
+                                timed.extend_from_slice(&timestamp_ms.to_le_bytes());
+                                timed.extend_from_slice(&frame_data);
+                                if let Err(e) = self.video_sink.handle_chunk(seq, timed).await {
                                     eprintln!("[Phalanx Playback] video sink error: {e:?}");
-                                    break Ok(());
+                                    break Ok(stats);
                                 }
+                                stats.video_sent += 1;
                             }
                         }
                     }
@@ -197,6 +231,7 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                             seq = self.current_sequence.0,
                             "Playback: skipping missing sequence after retries"
                         );
+                        stats.shards_missing += 1;
                         self.current_sequence.0 += 1;
                         self.retry_count = 0;
                         self.consecutive_gaps += 1;
@@ -207,7 +242,7 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                             tracing::info!(
                                 "Playback: recording appears complete (20 consecutive gaps)"
                             );
-                            break Ok(());
+                            break Ok(stats);
                         }
                         continue;
                     }

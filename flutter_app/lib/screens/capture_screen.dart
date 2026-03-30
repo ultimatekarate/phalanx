@@ -99,19 +99,20 @@ class _CaptureScreenState extends ConsumerState<CaptureScreen> {
     final recordingId = ref.read(recordingProvider).recordingId;
     if (recordingId == null) return;
 
-    // NV12 on iOS, NV21 on Android — only the chroma byte order differs.
-    final pixelFormat = Platform.isIOS ? 1 : 0;
+    // CameraX (camera_android_camerax) delivers YUV_420_888 where plane[1] is U (Cb).
+    // With pixelStride=2, bytes are U,V,U,V... = NV12 order on both Android and iOS.
+    const pixelFormat = 1; // NV12
 
     _controller?.startImageStream((CameraImage image) {
       // Plane 0: Y (luminance) — width × height bytes
       // Plane 1: UV/VU (interleaved chroma) — width × height/2 bytes
       if (image.planes.length < 2) return;
 
-      // Throttle to ~10 fps on the Dart side. The FFI call itself is non-blocking
-      // (just a memcpy — compression runs on tokio's thread pool), but there's no
-      // point copying 30 frames/sec of raw YUV when the pipeline caps at ~10.
+      // Throttle to ~30 fps on the Dart side. The FFI call itself is non-blocking
+      // (just a memcpy — compression runs on tokio's thread pool).
+      // Actual capture rate is governed by Rust's target_fps() based on power state.
       final nowMs = DateTime.now().millisecondsSinceEpoch;
-      if ((nowMs - _lastFrameMs) < 100) return;
+      if ((nowMs - _lastFrameMs) < 33) return;
       _lastFrameMs = nowMs;
 
       final yPlane = image.planes[0].bytes;

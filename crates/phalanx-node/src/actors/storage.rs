@@ -103,6 +103,10 @@ pub enum StorageCommand {
         recording_id: RecordingId,
         reply_to: oneshot::Sender<(usize, bool)>,
     },
+    /// Debug: list vault directory contents (vault_path, subdirs, .recording files).
+    DebugVaultListing {
+        reply_to: oneshot::Sender<(String, Vec<String>)>,
+    },
 }
 
 impl<J: TransientJournal> StorageActor<J> {
@@ -158,6 +162,17 @@ impl<J: TransientJournal> StorageActor<J> {
                 target: "phalanx::storage",
                 error = %e,
                 "Failed to load content keyring"
+            );
+        }
+
+        // Hydrate recording logs from disk — rebuild in-memory indexes by scanning
+        // .recording files in the vault directory. Without this, playback after an
+        // app restart finds no shards (recording_logs starts empty).
+        if let Err(e) = self.guardian.hydrate_recording_logs().await {
+            tracing::error!(
+                target: "phalanx::storage",
+                error = %e,
+                "Failed to hydrate recording logs from disk"
             );
         }
 
@@ -241,6 +256,53 @@ impl<J: TransientJournal> StorageActor<J> {
                             StorageCommand::DebugRecordingInfo { recording_id, reply_to } => {
                                 let info = self.guardian.debug_recording_info(&recording_id);
                                 let _ = reply_to.send(info);
+                            }
+                            StorageCommand::DebugVaultListing { reply_to } => {
+                                let vault_path = self.guardian.vault_path.clone();
+                                let mut entries = Vec::new();
+
+                                // Report recording_logs state via public API
+                                let log_recordings = self.guardian.list_recordings();
+                                entries.push(format!("RECORDING_LOGS: {} entries", log_recordings.len()));
+                                for rid in &log_recordings {
+                                    let (shards, has_key) = self.guardian.debug_recording_info(rid);
+                                    entries.push(format!("  LOG: {} ({} shards, has_key={})", rid, shards, has_key));
+                                }
+
+                                if let Ok(mut dir) = tokio::fs::read_dir(&vault_path).await {
+                                    while let Ok(Some(entry)) = dir.next_entry().await {
+                                        let p = entry.path();
+                                        let is_dir = p.is_dir();
+                                        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                                        if is_dir {
+                                            // Scan subdirectory for .recording files with sizes
+                                            let mut sub_files = Vec::new();
+                                            if let Ok(mut sub) = tokio::fs::read_dir(&p).await {
+                                                while let Ok(Some(sub_entry)) = sub.next_entry().await {
+                                                    let fname = sub_entry.file_name().to_string_lossy().to_string();
+                                                    let size = sub_entry.metadata().await.map(|m| m.len()).unwrap_or(0);
+                                                    sub_files.push(format!("{}({}B)", fname, size));
+
+                                                    // Read first 16 bytes of first .recording file for diagnosis
+                                                    if fname.ends_with(".recording") && sub_files.len() == 1 {
+                                                        let fpath = sub_entry.path();
+                                                        match tokio::fs::read(&fpath).await {
+                                                            Ok(data) => {
+                                                                let preview: Vec<String> = data.iter().take(16).map(|b| format!("{b:02x}")).collect();
+                                                                entries.push(format!("RAW_BYTES({}): [{}] (total {} bytes)", fname, preview.join(" "), data.len()));
+                                                            }
+                                                            Err(e) => entries.push(format!("RAW_READ_ERR({}): {}", fname, e)),
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            entries.push(format!("DIR: {} -> [{}]", name, sub_files.join(", ")));
+                                        } else {
+                                            entries.push(format!("FILE: {}", name));
+                                        }
+                                    }
+                                }
+                                let _ = reply_to.send((vault_path, entries));
                             }
                         },
                         None => {

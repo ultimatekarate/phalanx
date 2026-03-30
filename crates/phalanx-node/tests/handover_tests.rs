@@ -126,7 +126,7 @@ async fn test_legal_identity_handover() {
     let expected_path = temp_dir
         .path()
         .join(identity_b.did.to_safe_name())
-        .join("handover_stream_01.recording");
+        .join("handover_stream_01.sealed");
 
     assert!(
         expected_path.exists(),

@@ -435,7 +435,13 @@ impl Guardian {
         &self,
         recording: &Recording,
     ) -> Result<(), GuardianError> {
-        let file_name = format!("{}.recording", recording.id);
+        // Use `.sealed` extension to avoid overwriting the append-only `.recording`
+        // log created by `append_shard()`. The `.recording` file uses frame-based
+        // format (plaintext seq_id + payload_len headers) for O(1) random access
+        // during playback. This `.sealed` file is a Crucible-finalized snapshot
+        // for archival/export — a completely different format (full Recording struct
+        // encrypted as a single blob).
+        let file_name = format!("{}.sealed", recording.id);
         let path = std::path::PathBuf::from(&self.vault_path)
             .join(recording.owner_did.to_safe_name())
             .join(file_name);
@@ -452,7 +458,7 @@ impl Guardian {
 
         atomic_encrypted_write(&path, &data, &self.vault_key).await?;
 
-        info!(path = ?path, "DISK_WRITE_SUCCESS: Recording committed");
+        info!(path = ?path, "DISK_WRITE_SUCCESS: Recording committed (sealed)");
         Ok(())
     }
 
