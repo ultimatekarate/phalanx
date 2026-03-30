@@ -124,28 +124,27 @@ class _PeersScreenState extends ConsumerState<PeersScreen> {
           'Trust Level',
           style: TextStyle(color: Colors.white),
         ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: TrustLevel.values.map((level) {
-            return RadioListTile<TrustLevel>(
-              title: Text(
-                level.name[0].toUpperCase() + level.name.substring(1),
-                style: TextStyle(
-                  color: _trustColor(level),
+        content: RadioGroup<TrustLevel>(
+          groupValue: peer.level,
+          onChanged: (val) {
+            if (val == null) return;
+            ref.read(peersProvider.notifier).setTrustLevel(peer.did, val);
+            Navigator.pop(context);
+          },
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: TrustLevel.values.map((level) {
+              return RadioListTile<TrustLevel>(
+                title: Text(
+                  level.name[0].toUpperCase() + level.name.substring(1),
+                  style: TextStyle(
+                    color: _trustColor(level),
+                  ),
                 ),
-              ),
-              value: level,
-              groupValue: peer.level,
-              onChanged: (val) {
-                if (val != null) {
-                  ref
-                      .read(peersProvider.notifier)
-                      .setTrustLevel(peer.did, val);
-                  Navigator.pop(context);
-                }
-              },
-            );
-          }).toList(),
+                value: level,
+              );
+            }).toList(),
+          ),
         ),
       ),
     );

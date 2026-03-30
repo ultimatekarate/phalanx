@@ -36,7 +36,7 @@ class SettingsScreen extends ConsumerWidget {
               style: TextStyle(color: Colors.white),
             ),
             subtitle: Text(
-              nodeDid ?? 'Unknown',
+              nodeDid,
               style: const TextStyle(color: Colors.white54, fontSize: 12),
             ),
             trailing: IconButton(
@@ -64,7 +64,7 @@ class SettingsScreen extends ConsumerWidget {
               style: TextStyle(color: Colors.white54, fontSize: 13),
             ),
             value: emergencyMode,
-            activeColor: Colors.red,
+            activeThumbColor: Colors.red,
             onChanged: (val) {
               ref.read(emergencyModeProvider.notifier).state = val;
             },

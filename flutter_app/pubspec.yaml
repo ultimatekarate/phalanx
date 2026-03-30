@@ -17,11 +17,13 @@ dependencies:
   battery_plus: ^6.0.0
   share_plus: ^7.0.0
   app_links: ^6.0.0
+  flutter_pcm_sound: ^3.3.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.0
+  mocktail: ^1.0.0
   # ffigen: ^9.0.0  # Removed — using hand-written Dart FFI bindings
 
 # Override broken record_linux — it fails to implement startStream from the

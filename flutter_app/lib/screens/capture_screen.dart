@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io' show Platform;
+
 import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
@@ -122,7 +122,7 @@ class _CaptureScreenState extends ConsumerState<CaptureScreen> {
 
       try {
         bridge.pushVideoFrame(
-          yPlane, uvPlane, width, height, pixelFormat, recordingId!, nowMs,
+          yPlane, uvPlane, width, height, pixelFormat, recordingId, nowMs,
         );
       } catch (_) {
         // Frame dropped — the homeostatic integrals will adapt

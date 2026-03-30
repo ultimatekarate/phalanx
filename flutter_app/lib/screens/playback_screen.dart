@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:ffi';
-import 'dart:typed_data';
+
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -8,6 +8,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../providers/phalanx_provider.dart';
+import '../utils/audio_playback.dart';
+import '../utils/recording_utils.dart';
 import '../widgets/forget_dialog.dart';
 
 /// Playback screen — list of recordings with tap-to-play and share.
@@ -23,10 +25,14 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
   ui.Image? _currentImage;
   Timer? _pollTimer;
   bool _decoding = false;
+  bool _drainingAudio = false;
   int _lastTimestampMs = 0;
 
   /// Opaque session pointer returned from Rust. Owns video + audio receivers.
   Pointer<Void>? _session;
+
+  /// Audio output — lazily initialized from first audio frame's metadata.
+  final AudioPlaybackController _audioController = AudioPlaybackController();
 
   void _startPlayback(String recordingId) {
     final bridge = ref.read(phalanxProvider);
@@ -40,36 +46,40 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
       // Poll at 16ms (60Hz check rate). Actual frame rate is governed by
       // timestamps embedded in each frame — adapts to capture FPS automatically.
       _pollTimer = Timer.periodic(const Duration(milliseconds: 16), (_) async {
-        if (_session == null || _decoding) return;
+        if (_session == null) return;
+
+        // Audio: drain all available frames OUTSIDE the _decoding guard.
+        // This ensures audio feeds continuously even during video pacing delays.
+        _drainAudio(bridge);
+
+        if (_decoding) return;
 
         // Acquire immediately — prevents re-entrant callbacks from polling
         // additional frames while we await the delay or decode below.
         _decoding = true;
         try {
-          // Drain audio first (prevents coordinator backpressure stall)
-          bridge.pollAudioFrame(_session!);
 
           final data = bridge.pollVideoFrame(_session!);
-          if (data == null || data.length < 9) {
+          if (data == null) {
             _decoding = false;
             return;
           }
 
-          // Extract 8-byte LE timestamp prefix from coordinator
-          final tsMs = ByteData.sublistView(data, 0, 8).getUint64(0, Endian.little);
-          final jpeg = Uint8List.sublistView(data, 8);
+          final parsed = parseVideoFrame(data);
+          if (parsed == null) {
+            _decoding = false;
+            return;
+          }
 
           // Pace: sleep for the inter-frame delta before displaying
-          if (_lastTimestampMs > 0) {
-            final deltaMs = tsMs - _lastTimestampMs;
-            if (deltaMs > 0 && deltaMs < 1000) {
-              await Future.delayed(Duration(milliseconds: deltaMs));
-            }
+          final delayMs = computeFrameDelay(parsed.timestampMs, _lastTimestampMs);
+          if (delayMs > 0) {
+            await Future.delayed(Duration(milliseconds: delayMs));
           }
-          _lastTimestampMs = tsMs;
+          _lastTimestampMs = parsed.timestampMs;
 
           // Async JPEG decode — runs on Flutter engine worker thread
-          final codec = await ui.instantiateImageCodec(jpeg);
+          final codec = await ui.instantiateImageCodec(parsed.jpeg);
           final frame = await codec.getNextFrame();
           if (mounted) {
             _currentImage?.dispose();
@@ -89,6 +99,7 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
   void _stopPlayback() {
     _pollTimer?.cancel();
     _pollTimer = null;
+    _audioController.dispose();
 
     if (_session != null) {
       final bridge = ref.read(phalanxProvider);
@@ -102,6 +113,27 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
       _currentImage = null;
       _lastTimestampMs = 0;
     });
+  }
+
+  /// Drain all buffered audio frames from Rust and feed to the audio controller.
+  /// Runs outside the _decoding guard so audio is not starved by video pacing.
+  void _drainAudio(dynamic bridge) {
+    final s = _session;
+    if (s == null || _drainingAudio) return;
+    _drainingAudio = true;
+    try {
+      // Channel bounded at 8 frames — loop terminates in ≤8 iterations.
+      while (true) {
+        final audioData = bridge.pollAudioFrame(s);
+        if (audioData == null) break;
+        final frame = parseAudioFrame(audioData);
+        if (frame == null) continue;
+        _audioController.tryInit(frame.sampleRate, frame.channels);
+        _audioController.feed(frame.pcm);
+      }
+    } finally {
+      _drainingAudio = false;
+    }
   }
 
   void _shareRecording(String recordingId) {
@@ -186,6 +218,7 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
   @override
   void dispose() {
     _pollTimer?.cancel();
+    _audioController.dispose();
     _currentImage?.dispose();
     if (_session != null) {
       final bridge = ref.read(phalanxProvider);
@@ -341,18 +374,7 @@ class _RecordingListState extends ConsumerState<_RecordingList> {
     }
   }
 
-  /// Extract a human-readable timestamp from a recording ID like "rec-did:key:-1774832454134"
-  String _formatId(String id) {
-    final parts = id.split('-');
-    if (parts.length >= 3) {
-      final ms = int.tryParse(parts.last);
-      if (ms != null) {
-        final dt = DateTime.fromMillisecondsSinceEpoch(ms.abs());
-        return '${dt.month}/${dt.day} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}';
-      }
-    }
-    return id;
-  }
+  String _formatId(String id) => formatRecordingId(id);
 
   @override
   Widget build(BuildContext context) {
