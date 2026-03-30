@@ -76,20 +76,29 @@ dependencies {}
 //   rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 // =====================================================================
 
-def projectRoot = file("${rootProject.projectDir}/../../..") // -> phalanx/
+def projectRoot = file("${rootProject.projectDir}/../..") // -> phalanx/
 def jniLibsDir = file("${projectDir}/src/main/jniLibs")
 
 // Determine which targets to build based on the active ABI filters.
 // Default: arm64-v8a, armeabi-v7a, x86_64 (covers all modern Android devices + emulator)
+// NOTE: armeabi-v7a (32-bit ARM) disabled — raptorq 2.0.1 uses NEON
+// intrinsics that are unstable on 32-bit ARM (rust-lang/rust#111800).
 def cargoNdkTargets = [
     "arm64-v8a",
-    "armeabi-v7a",
     "x86_64",
 ]
 
 task buildRustFfi(type: Exec) {
     description = "Build phalanx-ffi with cargo-ndk for Android targets"
     workingDir projectRoot
+
+    // Stub for AOSP-internal log/log.h required by fdk-aac-sys.
+    def stubDir = file("${projectRoot}/crates/phalanx-ffi/android-stubs").absolutePath
+    environment "CMAKE_GENERATOR", "Ninja"
+    environment "CFLAGS_aarch64_linux_android", "-I${stubDir}"
+    environment "CXXFLAGS_aarch64_linux_android", "-I${stubDir}"
+    environment "CFLAGS_x86_64_linux_android", "-I${stubDir}"
+    environment "CXXFLAGS_x86_64_linux_android", "-I${stubDir}"
 
     // Build the cargo-ndk command
     def args = ["cargo", "ndk"]

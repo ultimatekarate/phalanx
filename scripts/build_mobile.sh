@@ -20,6 +20,10 @@
 
 set -euo pipefail
 
+# Ensure Flutter and Android SDK CMake/Ninja are on PATH.
+export PATH="$PATH:/c/Users/joevo/git-repo/flutter/bin"
+export PATH="$PATH:$(ls -d $HOME/AppData/Local/Android/Sdk/cmake/*/bin 2>/dev/null | head -1)"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 FFI_CRATE="$PROJECT_ROOT/crates/phalanx-ffi"
@@ -27,6 +31,23 @@ FLUTTER_APP="$PROJECT_ROOT/flutter_app"
 JNI_LIBS="$FLUTTER_APP/android/app/src/main/jniLibs"
 
 PLATFORM="${1:-all}"
+
+# =====================================================================
+# Android SDK / NDK environment
+# =====================================================================
+ANDROID_SDK="${ANDROID_SDK_ROOT:-$HOME/AppData/Local/Android/Sdk}"
+ANDROID_NDK="$(ls -d "$ANDROID_SDK/ndk/"* 2>/dev/null | sort -V | tail -1)"
+ANDROID_CMAKE="$(ls -d "$ANDROID_SDK/cmake/"* 2>/dev/null | sort -V | tail -1)"
+
+if [ -n "$ANDROID_CMAKE" ]; then
+  export PATH="$ANDROID_CMAKE/bin:$PATH"
+fi
+
+if [ -n "$ANDROID_NDK" ]; then
+  export ANDROID_NDK_HOME="$ANDROID_NDK"
+  # Ensure the NDK sysroot is visible to cc-rs for C/C++ dependencies
+  export ANDROID_NDK_ROOT="$ANDROID_NDK"
+fi
 
 echo "=== PHALANX MOBILE BUILD ==="
 echo "Platform: $PLATFORM"
@@ -53,9 +74,26 @@ if [ "$PLATFORM" = "all" ] || [ "$PLATFORM" = "android" ]; then
   echo "[2/5] Building phalanx-ffi for Android..."
   cd "$PROJECT_ROOT"
 
+  # Force Ninja generator — CMake defaults to MSBuild on Windows, which
+  # fails when cross-compiling for Android via cargo-ndk.
+  export CMAKE_GENERATOR=Ninja
+
+  # Stub for AOSP-internal log/log.h required by fdk-aac-sys.
+  # See: https://github.com/mstorsjo/fdk-aac/issues/124
+  # Use Windows-native path — NDK's clang.exe doesn't understand MINGW /c/ paths.
+  STUB_DIR="$(cygpath -w "$FFI_CRATE/android-stubs")"
+  export CFLAGS_aarch64_linux_android="-I${STUB_DIR}"
+  export CFLAGS_armv7_linux_androideabi="-I${STUB_DIR}"
+  export CFLAGS_x86_64_linux_android="-I${STUB_DIR}"
+  export CXXFLAGS_aarch64_linux_android="-I${STUB_DIR}"
+  export CXXFLAGS_armv7_linux_androideabi="-I${STUB_DIR}"
+  export CXXFLAGS_x86_64_linux_android="-I${STUB_DIR}"
+
+  # NOTE: armeabi-v7a (32-bit ARM) disabled — raptorq 2.0.1 uses NEON
+  # intrinsics that are unstable on 32-bit ARM (rust-lang/rust#111800).
+  # Re-enable when raptorq ships a fix or when we pin a compatible version.
   cargo ndk \
     -t arm64-v8a \
-    -t armeabi-v7a \
     -t x86_64 \
     -o "$JNI_LIBS" \
     build --release -p phalanx-ffi
@@ -107,11 +145,11 @@ fi
 echo ""
 echo "[4/5] Generating Dart FFI bindings..."
 cd "$FLUTTER_APP"
-if dart pub deps 2>/dev/null | grep -q ffigen; then
+if grep -q "^  ffigen:" "$FLUTTER_APP/pubspec.yaml" 2>/dev/null; then
   dart run ffigen
   echo "  -> lib/ffi/phalanx_bindings.dart generated"
 else
-  echo "  -> ffigen not in dependencies, skipping (using hand-written bindings)"
+  echo "  -> ffigen not in pubspec.yaml, skipping (using hand-written bindings)"
 fi
 
 # =====================================================================

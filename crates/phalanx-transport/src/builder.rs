@@ -59,20 +59,20 @@ pub fn build_tcp_fallback(
     libp2p::core::transport::Boxed<(PeerId, libp2p::core::muxing::StreamMuxerBox)>,
     Box<dyn Error>,
 > {
-    let noise_config = noise::Config::new(local_key)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let yamux_config = yamux::Config::default();
-
-    let base_transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true));
-    let dns_transport = libp2p::dns::tokio::Transport::system(base_transport)?;
-
     type RawStream = libp2p::tcp::tokio::TcpStream;
     type EncryptedStream = libp2p::pnet::PnetOutput<RawStream>;
 
     let counters = counters.clone();
-    let transport = if let Some(key) = psk {
+
+    if let Some(key) = psk {
+        // PSK path: requires DNS transport for hostname resolution
+        let noise_config = noise::Config::new(local_key)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let yamux_config = yamux::Config::default();
+        let base_transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true));
+        let dns_transport = libp2p::dns::tokio::Transport::system(base_transport)?;
         let pnet_config = pnet::PnetConfig::new(key);
-        dns_transport
+        Ok(dns_transport
             .and_then(move |socket, _| pnet_config.handshake(socket))
             .map(|stream, _| Either::<EncryptedStream, RawStream>::Left(stream))
             .upgrade(Version::V1)
@@ -84,23 +84,50 @@ pub fn build_tcp_fallback(
                 let counting = CountingMuxer::wrap(boxed, &counters);
                 (peer_id, libp2p::core::muxing::StreamMuxerBox::new(counting))
             })
-            .boxed()
+            .boxed())
     } else {
-        dns_transport
-            .map(|stream, _| Either::<EncryptedStream, RawStream>::Right(stream))
-            .upgrade(Version::V1)
-            .authenticate(noise_config)
-            .multiplex(yamux_config)
-            .timeout(Duration::from_secs(20))
-            .map(move |(peer_id, muxer), _| {
-                let boxed = libp2p::core::muxing::StreamMuxerBox::new(muxer);
-                let counting = CountingMuxer::wrap(boxed, &counters);
-                (peer_id, libp2p::core::muxing::StreamMuxerBox::new(counting))
-            })
-            .boxed()
-    };
-
-    Ok(transport)
+        // No-PSK path: try DNS, fall back to plain TCP.
+        // Android lacks /etc/resolv.conf so DNS transport init fails.
+        // All Phalanx multiaddrs use IP addresses, so DNS isn't needed.
+        let base_transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true));
+        match libp2p::dns::tokio::Transport::system(base_transport) {
+            Ok(dns_transport) => {
+                let noise_config = noise::Config::new(local_key)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                let yamux_config = yamux::Config::default();
+                Ok(dns_transport
+                    .map(|stream, _| Either::<EncryptedStream, RawStream>::Right(stream))
+                    .upgrade(Version::V1)
+                    .authenticate(noise_config)
+                    .multiplex(yamux_config)
+                    .timeout(Duration::from_secs(20))
+                    .map(move |(peer_id, muxer), _| {
+                        let boxed = libp2p::core::muxing::StreamMuxerBox::new(muxer);
+                        let counting = CountingMuxer::wrap(boxed, &counters);
+                        (peer_id, libp2p::core::muxing::StreamMuxerBox::new(counting))
+                    })
+                    .boxed())
+            }
+            Err(e) => {
+                tracing::warn!(target: "phalanx::transport", "DNS transport unavailable ({e}), falling back to plain TCP");
+                let plain_tcp = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true));
+                let noise_config = noise::Config::new(local_key)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                let yamux_config = yamux::Config::default();
+                Ok(plain_tcp
+                    .upgrade(Version::V1)
+                    .authenticate(noise_config)
+                    .multiplex(yamux_config)
+                    .timeout(Duration::from_secs(20))
+                    .map(move |(peer_id, muxer), _| {
+                        let boxed = libp2p::core::muxing::StreamMuxerBox::new(muxer);
+                        let counting = CountingMuxer::wrap(boxed, &counters);
+                        (peer_id, libp2p::core::muxing::StreamMuxerBox::new(counting))
+                    })
+                    .boxed())
+            }
+        }
+    }
 }
 
 /// Instantiates the composite network behaviour logic.

@@ -29,6 +29,7 @@ class _CaptureScreenState extends ConsumerState<CaptureScreen> {
   Timer? _fpsTimer;
   AudioRecorder? _audioRecorder;
   StreamSubscription<Uint8List>? _audioSub;
+  int _lastFrameMs = 0;
 
   @override
   void initState() {
@@ -70,15 +71,26 @@ class _CaptureScreenState extends ConsumerState<CaptureScreen> {
 
     if (state.isRecording) {
       // Stop
+      debugPrint('PHALANX: stopping recording');
       _controller?.stopImageStream();
       _fpsTimer?.cancel();
       _stopAudioCapture();
       notifier.stopRecording();
     } else {
       // Start
-      notifier.startRecording();
+      debugPrint('PHALANX: startRecording...');
+      try {
+        notifier.startRecording();
+      } catch (e) {
+        debugPrint('PHALANX: startRecording FAILED: $e');
+        return;
+      }
+      final recId = ref.read(recordingProvider).recordingId;
+      debugPrint('PHALANX: recording started, id=$recId');
       _startFrameStream();
+      debugPrint('PHALANX: frame stream started');
       _startAudioCapture();
+      debugPrint('PHALANX: audio capture started');
     }
   }
 
@@ -95,16 +107,21 @@ class _CaptureScreenState extends ConsumerState<CaptureScreen> {
       // Plane 1: UV/VU (interleaved chroma) — width × height/2 bytes
       if (image.planes.length < 2) return;
 
+      // Throttle to ~10 fps on the Dart side. The FFI call itself is non-blocking
+      // (just a memcpy — compression runs on tokio's thread pool), but there's no
+      // point copying 30 frames/sec of raw YUV when the pipeline caps at ~10.
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      if ((nowMs - _lastFrameMs) < 100) return;
+      _lastFrameMs = nowMs;
+
       final yPlane = image.planes[0].bytes;
       final uvPlane = image.planes[1].bytes;
       final width = image.width;
       final height = image.height;
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
 
-      // Push full YUV to the Rust forensic pipeline — non-blocking, drops on backpressure
       try {
         bridge.pushVideoFrame(
-          yPlane, uvPlane, width, height, pixelFormat, recordingId, timestamp,
+          yPlane, uvPlane, width, height, pixelFormat, recordingId!, nowMs,
         );
       } catch (_) {
         // Frame dropped — the homeostatic integrals will adapt
