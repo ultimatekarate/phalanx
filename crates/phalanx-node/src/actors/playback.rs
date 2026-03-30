@@ -26,6 +26,10 @@ pub struct PlaybackCoordinator<V: PlaybackSink, A: PlaybackSink> {
     providers_rx: mpsc::Receiver<(RecordingId, Vec<NetworkId>)>,
     identity: Arc<PhalanxIdentity>,
     current_sequence: StorageSequence,
+    /// Number of times the current sequence has been retried without success.
+    retry_count: u32,
+    /// Number of consecutive sequences that were gaps (no shard found).
+    consecutive_gaps: u32,
 }
 
 impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
@@ -50,6 +54,8 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
             providers_rx,
             identity,
             current_sequence: StorageSequence(1), // Forensic truth starts at 1
+            retry_count: 0,
+            consecutive_gaps: 0,
         }
     }
 
@@ -83,6 +89,22 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                 .context("StorageActor dropped the response channel")?;
             match shard_opt {
                 Some(envelope) => {
+                    // Reset gap counters — we found data.
+                    self.retry_count = 0;
+                    self.consecutive_gaps = 0;
+
+                    let evidence_type = match &envelope.evidence {
+                        Evidence::Video(_) => "Video",
+                        Evidence::Audio(_) => "Audio",
+                        Evidence::Gap(_) => "Gap",
+                        Evidence::Handover(_) => "Handover",
+                        Evidence::Proximity(_) => "Proximity",
+                    };
+                    eprintln!(
+                        "[Phalanx Playback] seq {}: got {} shard",
+                        self.current_sequence.0, evidence_type
+                    );
+
                     // Demux: extract payload by value — no clone needed.
                     let (payload, is_audio) = match envelope.evidence {
                         Evidence::Video(v) => (v.payload, false),
@@ -99,47 +121,98 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                     let seq = self.current_sequence;
                     self.current_sequence.0 += 1;
 
+                    let payload_desc = match &payload {
+                        DataPayload::Missing => "Missing",
+                        DataPayload::Clear(_) => "Clear",
+                        DataPayload::Compressed(_) => "Compressed",
+                        DataPayload::Encrypted { .. } => "Encrypted",
+                    };
+                    eprintln!(
+                        "[Phalanx Playback] seq {seq}: payload is {payload_desc}, has_key={}",
+                        self.decryption_key.is_some()
+                    );
+
                     let frame_data = match payload {
                         DataPayload::Missing => continue,
                         other => {
-                            phalanx_forensics::decode_payload(other, self.decryption_key.as_ref())
-                                .map_err(|e| {
-                                anyhow::anyhow!("Payload decode failed at seq {seq}: {e}")
-                            })?
+                            match phalanx_forensics::decode_payload(
+                                other,
+                                self.decryption_key.as_ref(),
+                            ) {
+                                Ok(data) => data,
+                                Err(e) => {
+                                    // eprintln reaches Android logcat even in release builds
+                                    eprintln!("[Phalanx Playback] decode_payload FAILED at seq {seq}: {e:?}");
+                                    tracing::warn!(seq = seq.0, error = ?e, "Skipping frame: decode_payload failed");
+                                    continue;
+                                }
+                            }
                         }
                     };
 
-                    // Re-verify sensor provenance from the actual pixels before playback.
-                    // Only for video — audio has no ForensicMetrics.
-                    if !is_audio {
-                        if let Ok(jpeg_frames) = postcard::from_bytes::<Vec<Vec<u8>>>(&frame_data) {
-                            let thresholds = phalanx_forensics::gate::LensThresholds::default();
-                            for frame in &jpeg_frames {
-                                phalanx_forensics::gate::verify_provenance_from_jpeg(
-                                    frame,
-                                    &thresholds,
-                                )
-                                .map_err(|e| {
-                                    anyhow::anyhow!(
-                                        "LensGate re-verification failed during playback: {e}"
-                                    )
-                                })?;
+                    // Route to the correct sink — Rust demuxes, Flutter reads two channels.
+                    // Errors here mean the Flutter receiver was dropped (playback stopped).
+                    // Use match instead of ? to log before terminating.
+                    if is_audio {
+                        if let Err(e) = self.audio_sink.handle_chunk(seq, frame_data).await {
+                            eprintln!("[Phalanx Playback] audio sink error at seq {seq}: {e:?}");
+                            break Ok(());
+                        }
+                    } else {
+                        // Video payload is postcard-serialized Vec<Vec<u8>> (list of JPEG frames).
+                        // Deserialize and send each JPEG individually to the sink.
+                        // Falls back to raw bytes if deserialization fails (legacy format).
+                        match postcard::from_bytes::<Vec<Vec<u8>>>(&frame_data) {
+                            Ok(jpeg_frames) => {
+                                eprintln!(
+                                    "[Phalanx Playback] seq {seq}: decoded {} JPEG frames",
+                                    jpeg_frames.len()
+                                );
+                                for frame in jpeg_frames {
+                                    if let Err(e) = self.video_sink.handle_chunk(seq, frame).await {
+                                        eprintln!("[Phalanx Playback] video sink error: {e:?}");
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[Phalanx Playback] seq {seq}: postcard deser failed ({e:?}), sending {} raw bytes", frame_data.len());
+                                if let Err(e) = self.video_sink.handle_chunk(seq, frame_data).await
+                                {
+                                    eprintln!("[Phalanx Playback] video sink error: {e:?}");
+                                    break Ok(());
+                                }
                             }
                         }
-                        // If postcard deserialization fails, the frame_data may be in a
-                        // different format (e.g., raw JPEG). Continue to sink — the
-                        // re-verification is best-effort until the format is standardized.
-                    }
-
-                    // Route to the correct sink — Rust demuxes, Flutter reads two channels.
-                    if is_audio {
-                        self.audio_sink.handle_chunk(seq, frame_data).await?;
-                    } else {
-                        self.video_sink.handle_chunk(seq, frame_data).await?;
                     }
                 }
                 None => {
-                    // Gap detected, trigger Samson Reflex
+                    self.retry_count += 1;
+
+                    // After 5 retries at the same sequence (~500ms), skip this gap.
+                    // With DHT discovery, providers may still arrive in time;
+                    // for local-only playback, this prevents infinite stalling.
+                    if self.retry_count >= 5 {
+                        tracing::debug!(
+                            seq = self.current_sequence.0,
+                            "Playback: skipping missing sequence after retries"
+                        );
+                        self.current_sequence.0 += 1;
+                        self.retry_count = 0;
+                        self.consecutive_gaps += 1;
+
+                        // After 20 consecutive gap-skips, conclude the recording is finished.
+                        // 20 gaps × 5 retries × 100ms = ~10 seconds of patience.
+                        if self.consecutive_gaps >= 20 {
+                            tracing::info!(
+                                "Playback: recording appears complete (20 consecutive gaps)"
+                            );
+                            break Ok(());
+                        }
+                        continue;
+                    }
+
+                    // Try DHT discovery for the missing shard
                     let _ = self
                         .discovery_tx
                         .try_send((recording_id.clone(), self.current_sequence));

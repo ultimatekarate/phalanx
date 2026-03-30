@@ -14,7 +14,8 @@
 use crate::error::PhalanxError;
 use crate::handle::PhalanxHandle;
 
-use phalanx_node::VideoPlayerSink;
+use phalanx_node::actors::storage::StorageCommand;
+use phalanx_node::{PlaybackCoordinator, VideoPlayerSink};
 use phalanx_proto::prelude::RecordingId;
 
 use std::ffi::CStr;
@@ -84,20 +85,67 @@ pub unsafe extern "C" fn phalanx_start_playback(
     let video_sink = VideoPlayerSink::new(video_tx);
     let audio_sink = VideoPlayerSink::new(audio_tx); // Same type — just a channel wrapper
 
-    // Spawn playback via MeshSentinel
-    let sentinel_ref = match h.sentinel.lock() {
-        Ok(guard) => match guard.as_ref() {
-            Some(s) => s.clone(),
-            None => return std::ptr::null_mut(),
-        },
-        Err(_) => return std::ptr::null_mut(),
-    };
+    // Construct PlaybackCoordinator directly from handle channels.
+    // DO NOT lock the sentinel — engine.run() holds that tokio::sync::Mutex
+    // for its entire lifetime, so sentinel_ref.lock().await would deadlock.
+    let storage_tx = h.storage_tx.clone();
+    let egress_tx = h.egress_tx.clone();
+    let identity = h.identity.clone();
+    let vault_key = h.vault_key.clone();
+
+    // Dummy discovery/providers channels — local playback doesn't need DHT.
+    // When a shard is missing locally the coordinator will try_send to
+    // discovery_tx (silently dropped) and poll providers_rx (always empty).
+    // Remote retrieval requires wiring these through the sentinel, but for
+    // the local-capture demo path this is correct.
+    let (discovery_tx, _discovery_rx) = mpsc::channel(1);
+    let (_providers_tx, providers_rx) = mpsc::channel(1);
 
     h.runtime.spawn(async move {
-        let mut engine = sentinel_ref.lock().await;
-        // Rust demuxes — Evidence::Video → video_sink, Evidence::Audio → audio_sink.
-        // Flutter reads two stateless channels via poll_video_frame / poll_audio_frame.
-        let _task = engine.spawn_playback(rec_id, video_sink, audio_sink).await;
+        eprintln!("[Phalanx FFI] Starting playback for {}", rec_id.as_str());
+
+        // Resolve per-recording content key for decryption.
+        // Falls back to vault_key for legacy recordings without content keys.
+        let decryption_key = {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let _ = storage_tx
+                .send(StorageCommand::GetContentKey {
+                    recording_id: rec_id.clone(),
+                    reply_to: tx,
+                })
+                .await;
+            match rx.await {
+                Ok(Some(key_bytes)) => {
+                    eprintln!("[Phalanx FFI] Got content key ({} bytes) for {}", key_bytes.len(), rec_id.as_str());
+                    Some(phalanx_proto::crypto::SymmetricKey(key_bytes))
+                }
+                Ok(None) => {
+                    eprintln!("[Phalanx FFI] No content key found, falling back to vault_key");
+                    Some((*vault_key).clone())
+                }
+                Err(e) => {
+                    eprintln!("[Phalanx FFI] GetContentKey channel error: {e:?}, falling back to vault_key");
+                    Some((*vault_key).clone())
+                }
+            }
+        };
+
+        let mut coordinator = PlaybackCoordinator::new(
+            storage_tx,
+            egress_tx,
+            decryption_key,
+            video_sink,
+            audio_sink,
+            discovery_tx,
+            providers_rx,
+            identity,
+        );
+
+        eprintln!("[Phalanx FFI] PlaybackCoordinator starting run loop");
+        match coordinator.run(rec_id).await {
+            Ok(()) => eprintln!("[Phalanx FFI] PlaybackCoordinator finished normally"),
+            Err(e) => eprintln!("[Phalanx FFI] PlaybackCoordinator FAILED: {e:?}"),
+        }
     });
 
     // Return opaque session pointer — caller owns this

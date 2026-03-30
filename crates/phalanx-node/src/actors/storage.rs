@@ -89,6 +89,20 @@ pub enum StorageCommand {
         recording_id: RecordingId,
         reply_to: oneshot::Sender<Option<[u8; 32]>>,
     },
+    /// List all recording IDs known to this node (completed + in-progress, excluding revoked).
+    ListRecordings {
+        reply_to: oneshot::Sender<Vec<RecordingId>>,
+    },
+    /// Debug-only: delete a recording's data without cryptographic revocation.
+    DebugDeleteRecording {
+        recording_id: RecordingId,
+        reply_to: oneshot::Sender<Result<(), GuardianError>>,
+    },
+    /// Debug: return (shard_count, has_content_key) for a recording.
+    DebugRecordingInfo {
+        recording_id: RecordingId,
+        reply_to: oneshot::Sender<(usize, bool)>,
+    },
 }
 
 impl<J: TransientJournal> StorageActor<J> {
@@ -215,6 +229,18 @@ impl<J: TransientJournal> StorageActor<J> {
                                 let key = self.guardian.get_content_key(&recording_id)
                                     .map(|k| *k.as_bytes());
                                 let _ = reply_to.send(key);
+                            }
+                            StorageCommand::ListRecordings { reply_to } => {
+                                let ids = self.guardian.list_all_recordings();
+                                let _ = reply_to.send(ids);
+                            }
+                            StorageCommand::DebugDeleteRecording { recording_id, reply_to } => {
+                                let result = self.guardian.debug_delete_recording(&recording_id).await;
+                                let _ = reply_to.send(result);
+                            }
+                            StorageCommand::DebugRecordingInfo { recording_id, reply_to } => {
+                                let info = self.guardian.debug_recording_info(&recording_id);
+                                let _ = reply_to.send(info);
                             }
                         },
                         None => {

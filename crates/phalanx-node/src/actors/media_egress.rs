@@ -45,6 +45,10 @@ pub struct MediaEgressConfig {
     pub clock: Arc<TrustedClock>,
     /// LensGate thresholds — calibrated if sensor setup was performed, defaults otherwise.
     pub lens_thresholds: LensThresholds,
+    /// Storage command sender — for persisting local capture shards to the Guardian.
+    /// Without this, locally-recorded evidence exists only in transit (mesh egress)
+    /// and is lost if the app closes before any peer receives it.
+    pub storage_tx: mpsc::Sender<crate::actors::storage::StorageCommand>,
 }
 
 pub struct MediaEgressActor<E: EgressPort> {
@@ -77,6 +81,8 @@ pub struct MediaEgressActor<E: EgressPort> {
     clock: Arc<TrustedClock>,
     /// LensGate thresholds for capture-time provenance verification.
     lens_thresholds: LensThresholds,
+    /// Storage command sender — persist local captures to Guardian.
+    storage_tx: mpsc::Sender<crate::actors::storage::StorageCommand>,
 }
 
 impl<E: EgressPort> MediaEgressActor<E> {
@@ -101,6 +107,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
             repair_ratio: config.repair_ratio,
             vault_key: config.vault_key,
             content_key_rx: config.content_key_rx,
+            storage_tx: config.storage_tx,
             next_shard_id: 0,
             outbound_queue,
             system_governor: config.system_governor,
@@ -176,6 +183,18 @@ impl<E: EgressPort> MediaEgressActor<E> {
             self.video_prev_hash = Some(new_hash);
         } else {
             self.audio_prev_hash = Some(new_hash);
+        }
+
+        // Persist locally so playback works without network round-trip.
+        // Fire-and-forget — local storage failure doesn't block mesh distribution.
+        {
+            let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+            let _ = self
+                .storage_tx
+                .try_send(crate::actors::storage::StorageCommand::WriteShard {
+                    envelope: envelope.clone(),
+                    reply_to: reply_tx,
+                });
         }
 
         let envelope_bytes = match postcard::to_allocvec(&envelope) {

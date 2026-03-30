@@ -115,6 +115,7 @@ async fn build_media_egress<E: EgressPort + 'static>(
         content_key_rx: tokio::sync::watch::channel(None).1,
         clock: Arc::new(TrustedClock::new()),
         lens_thresholds: phalanx_forensics::gate::LensThresholds::default(),
+        storage_tx: tokio::sync::mpsc::channel(16).0,
     };
 
     let actor = MediaEgressActor::new(egress, identity, local_id, config)

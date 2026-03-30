@@ -125,6 +125,23 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
     }
   }
 
+  void _debugDeleteRecording(String recordingId) {
+    if (_activeRecordingId == recordingId) {
+      _stopPlayback();
+    }
+    try {
+      final bridge = ref.read(phalanxProvider);
+      bridge.debugDeleteRecording(recordingId);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Recording deleted (debug)')),
+        );
+      }
+    } catch (e) {
+      _showError('Delete failed: $e');
+    }
+  }
+
   void _showError(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(
@@ -223,6 +240,7 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
               onPlay: _startPlayback,
               onShare: _shareRecording,
               onForget: _forgetRecording,
+              onDebugDelete: _debugDeleteRecording,
               activeId: _activeRecordingId,
             ),
           ),
@@ -232,53 +250,145 @@ class _PlaybackScreenState extends ConsumerState<PlaybackScreen> {
   }
 }
 
-/// Placeholder recording list.
-/// In production, this queries the storage actor for available recordings.
-class _RecordingList extends StatelessWidget {
+/// Recording list — queries the storage actor for available recordings.
+class _RecordingList extends ConsumerStatefulWidget {
   final void Function(String) onPlay;
   final void Function(String) onShare;
   final void Function(String) onForget;
+  final void Function(String) onDebugDelete;
   final String? activeId;
 
   const _RecordingList({
     required this.onPlay,
     required this.onShare,
     required this.onForget,
+    required this.onDebugDelete,
     this.activeId,
   });
 
   @override
+  ConsumerState<_RecordingList> createState() => _RecordingListState();
+}
+
+class _RecordingListState extends ConsumerState<_RecordingList> {
+  List<String> _recordings = [];
+  Timer? _refreshTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+    // Poll every 3 seconds for new recordings
+    _refreshTimer = Timer.periodic(const Duration(seconds: 3), (_) => _refresh());
+  }
+
+  void _refresh() {
+    try {
+      final bridge = ref.read(phalanxProvider);
+      final ids = bridge.listRecordings();
+      if (mounted) {
+        setState(() => _recordings = ids.reversed.toList()); // newest first
+      }
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  String _debugInfo(String id) {
+    try {
+      final bridge = ref.read(phalanxProvider);
+      return bridge.debugRecordingInfo(id);
+    } catch (_) {
+      return id;
+    }
+  }
+
+  /// Extract a human-readable timestamp from a recording ID like "rec-did:key:-1774832454134"
+  String _formatId(String id) {
+    final parts = id.split('-');
+    if (parts.length >= 3) {
+      final ms = int.tryParse(parts.last);
+      if (ms != null) {
+        final dt = DateTime.fromMillisecondsSinceEpoch(ms.abs());
+        return '${dt.month}/${dt.day} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}';
+      }
+    }
+    return id;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    // TODO: Replace with actual recording list from storage.
-    // Each recording tile should look like:
-    //
-    //   ListTile(
-    //     title: Text(recording.id),
-    //     subtitle: Text(recording.timestamp),
-    //     trailing: PopupMenuButton<String>(
-    //       onSelected: (action) {
-    //         switch (action) {
-    //           case 'play':   onPlay(recording.id);
-    //           case 'share':  onShare(recording.id);
-    //           case 'forget': onForget(recording.id);
-    //         }
-    //       },
-    //       itemBuilder: (_) => [
-    //         const PopupMenuItem(value: 'play',   child: Text('Play')),
-    //         const PopupMenuItem(value: 'share',  child: Text('Share')),
-    //         const PopupMenuItem(
-    //           value: 'forget',
-    //           child: Text('Forget Forever', style: TextStyle(color: Colors.red)),
-    //         ),
-    //       ],
-    //     ),
-    //   )
-    //
-    return const Center(
-      child: Text(
-        'Recordings will appear here after capture.',
-        style: TextStyle(color: Colors.white54, fontSize: 16),
-      ),
+    if (_recordings.isEmpty) {
+      return const Center(
+        child: Text(
+          'No recordings yet.\nPress the red button to start.',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.white54, fontSize: 16),
+        ),
+      );
+    }
+
+    return ListView.builder(
+      itemCount: _recordings.length,
+      itemBuilder: (context, index) {
+        final id = _recordings[index];
+        final isActive = id == widget.activeId;
+
+        return ListTile(
+          leading: Icon(
+            isActive ? Icons.play_circle_filled : Icons.videocam,
+            color: isActive ? Colors.red : Colors.white54,
+          ),
+          title: Text(
+            _formatId(id),
+            style: const TextStyle(color: Colors.white),
+          ),
+          subtitle: Text(
+            _debugInfo(id),
+            style: const TextStyle(color: Colors.white38, fontSize: 11),
+            overflow: TextOverflow.ellipsis,
+          ),
+          trailing: PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert, color: Colors.white54),
+            color: Colors.grey[850],
+            onSelected: (action) {
+              switch (action) {
+                case 'play':
+                  widget.onPlay(id);
+                case 'share':
+                  widget.onShare(id);
+                case 'delete':
+                  widget.onDebugDelete(id);
+                case 'forget':
+                  widget.onForget(id);
+              }
+            },
+            itemBuilder: (_) => [
+              const PopupMenuItem(
+                value: 'play',
+                child: Text('Play', style: TextStyle(color: Colors.white)),
+              ),
+              const PopupMenuItem(
+                value: 'share',
+                child: Text('Share', style: TextStyle(color: Colors.white)),
+              ),
+              const PopupMenuItem(
+                value: 'delete',
+                child: Text('Delete (debug)', style: TextStyle(color: Colors.orange)),
+              ),
+              const PopupMenuItem(
+                value: 'forget',
+                child: Text('Forget Forever', style: TextStyle(color: Colors.red)),
+              ),
+            ],
+          ),
+          onTap: () => widget.onPlay(id),
+        );
+      },
     );
   }
 }

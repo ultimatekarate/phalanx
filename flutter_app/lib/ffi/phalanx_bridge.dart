@@ -165,6 +165,26 @@ typedef _PhalanxPollFrameDart = int Function(
 typedef _PhalanxStopPlaybackC = Void Function(Pointer<Void>);
 typedef _PhalanxStopPlaybackDart = void Function(Pointer<Void>);
 
+// Recording list
+typedef _PhalanxListRecordingsC = Int32 Function(
+  Pointer<Void>, Pointer<Pointer<Utf8>>,
+);
+typedef _PhalanxListRecordingsDart = int Function(
+  Pointer<Void>, Pointer<Pointer<Utf8>>,
+);
+
+// Debug delete
+typedef _PhalanxDebugDeleteC = Int32 Function(Pointer<Void>, Pointer<Utf8>);
+typedef _PhalanxDebugDeleteDart = int Function(Pointer<Void>, Pointer<Utf8>);
+
+// Debug recording info
+typedef _PhalanxDebugInfoC = Int32 Function(
+  Pointer<Void>, Pointer<Utf8>, Pointer<Pointer<Utf8>>,
+);
+typedef _PhalanxDebugInfoDart = int Function(
+  Pointer<Void>, Pointer<Utf8>, Pointer<Pointer<Utf8>>,
+);
+
 // Deep links
 typedef _PhalanxShareLinkC = Int32 Function(
   Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Pointer<Utf8>>,
@@ -239,6 +259,9 @@ class PhalanxBridge {
   late final _PhalanxPollFrameDart _pollVideoFrame;
   late final _PhalanxPollFrameDart _pollAudioFrame;
   late final _PhalanxStopPlaybackDart _stopPlayback;
+  late final _PhalanxListRecordingsDart _listRecordings;
+  late final _PhalanxDebugDeleteDart _debugDelete;
+  late final _PhalanxDebugInfoDart _debugInfo;
   late final _PhalanxShareLinkDart _getShareLink;
   late final _PhalanxOpenLinkDart _openLink;
   late final _PhalanxExportC2paDart _exportC2pa;
@@ -299,6 +322,18 @@ class PhalanxBridge {
         _lib.lookupFunction<_PhalanxI32HandleC, _PhalanxI32HandleDart>(
           'phalanx_stop_recording',
         );
+    _listRecordings = _lib.lookupFunction<
+      _PhalanxListRecordingsC,
+      _PhalanxListRecordingsDart
+    >('phalanx_list_recordings');
+    _debugDelete = _lib.lookupFunction<
+      _PhalanxDebugDeleteC,
+      _PhalanxDebugDeleteDart
+    >('phalanx_debug_delete_recording');
+    _debugInfo = _lib.lookupFunction<
+      _PhalanxDebugInfoC,
+      _PhalanxDebugInfoDart
+    >('phalanx_debug_recording_info');
     _pushFrame = _lib.lookupFunction<_PhalanxPushFrameC, _PhalanxPushFrameDart>(
       'phalanx_push_video_frame',
     );
@@ -500,6 +535,45 @@ class PhalanxBridge {
   /// Stop the current recording.
   void stopRecording() {
     _check(_stopRecording(_handle), 'phalanx_stop_recording');
+  }
+
+  /// List all recording IDs on this node (completed + in-progress, excluding revoked).
+  List<String> listRecordings() {
+    final out = calloc<Pointer<Utf8>>();
+    try {
+      _check(_listRecordings(_handle, out), 'phalanx_list_recordings');
+      final json = out.value.toDartString();
+      _freeString(out.value);
+      final List<dynamic> ids = jsonDecode(json) as List<dynamic>;
+      return ids.cast<String>();
+    } finally {
+      calloc.free(out);
+    }
+  }
+
+  /// Debug-only: delete a recording without cryptographic revocation.
+  void debugDeleteRecording(String recordingId) {
+    final idPtr = recordingId.toNativeUtf8();
+    try {
+      _check(_debugDelete(_handle, idPtr), 'phalanx_debug_delete_recording');
+    } finally {
+      calloc.free(idPtr);
+    }
+  }
+
+  /// Debug: return "shards=N,key=true/false" for a recording.
+  String debugRecordingInfo(String recordingId) {
+    final idPtr = recordingId.toNativeUtf8();
+    final out = calloc<Pointer<Utf8>>();
+    try {
+      _check(_debugInfo(_handle, idPtr, out), 'phalanx_debug_recording_info');
+      final info = out.value.toDartString();
+      _freeString(out.value);
+      return info;
+    } finally {
+      calloc.free(idPtr);
+      calloc.free(out);
+    }
   }
 
   /// Push a raw YUV video frame through the forensic pipeline.

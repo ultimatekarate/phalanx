@@ -35,9 +35,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// Static forensic lens — L1-cache optimized, no allocation needed.
 static LENS: ScalarLens = ScalarLens;
 
-/// Sequence counter for video shards within a recording.
+/// Unified sequence counter for all evidence (video + audio) within a recording.
+/// Shared counter prevents sequence collisions in the recording log index.
+/// Starts at 1 — `PlaybackCoordinator` starts at `StorageSequence(1)`.
 /// Reset on each `phalanx_start_recording`.
-static SEQUENCE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static SEQUENCE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
 
 // =====================================================================
 // PIXEL FORMAT
@@ -95,9 +97,8 @@ pub unsafe extern "C" fn phalanx_start_recording(
         &h.node_did[..8.min(h.node_did.len())],
         timestamp
     );
-    // Reset sequence counters
-    SEQUENCE.store(0, Ordering::Relaxed);
-    AUDIO_SEQUENCE.store(0, Ordering::Relaxed);
+    // Reset unified sequence counter (starts at 1 to match PlaybackCoordinator)
+    SEQUENCE.store(1, Ordering::Relaxed);
 
     // Request per-recording content key from StorageActor.
     // Uses channels cloned onto the handle — no sentinel lock needed.
@@ -284,9 +285,7 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
     PhalanxError::Ok.code()
 }
 
-/// Sequence counter for audio shards within a recording.
-/// Reset on each `phalanx_start_recording`.
-static AUDIO_SEQUENCE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+// Audio uses the shared SEQUENCE counter above — no separate counter needed.
 
 /// Pushes a raw PCM audio frame through the forensic pipeline.
 ///
@@ -338,7 +337,7 @@ pub unsafe extern "C" fn phalanx_push_audio_frame(
     let pcm = std::slice::from_raw_parts(pcm_data, pcm_len as usize).to_vec();
 
     // Create audio shard (LZ4 compressed internally)
-    let sequence = StorageSequence(AUDIO_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+    let sequence = StorageSequence(SEQUENCE.fetch_add(1, Ordering::Relaxed));
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0));
@@ -389,6 +388,66 @@ pub unsafe extern "C" fn phalanx_get_target_fps(handle: *const PhalanxHandle) ->
 
     let fps = target_fps(Fps::new(30), h.governor.current_power_state());
     fps.get().cast_signed()
+}
+
+// =====================================================================
+// RECORDING LIST
+// =====================================================================
+
+/// Returns a JSON array of recording IDs as a C string.
+///
+/// Example output: `["rec-did:key:-123456","rec-did:key:-789012"]`
+///
+/// The returned string must be freed with `phalanx_free_string`.
+/// Returns an empty array `"[]"` if no recordings exist.
+///
+/// # Safety
+/// * `handle` must be a valid pointer from `phalanx_create`.
+/// * `out_json` must be a valid pointer to receive the C string.
+#[no_mangle]
+pub unsafe extern "C" fn phalanx_list_recordings(
+    handle: *mut PhalanxHandle,
+    out_json: *mut *mut c_char,
+) -> i32 {
+    let Some(h) = handle.as_ref() else {
+        return PhalanxError::NullPointer.code();
+    };
+
+    if out_json.is_null() {
+        return PhalanxError::NullPointer.code();
+    }
+
+    if !h.is_running() {
+        return PhalanxError::NotRunning.code();
+    }
+
+    let storage_tx = h.storage_tx.clone();
+
+    let result = h.runtime.block_on(async {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        storage_tx
+            .send(StorageCommand::ListRecordings { reply_to: tx })
+            .await
+            .map_err(|_| ())?;
+        rx.await.map_err(|_| ())
+    });
+
+    let ids = match result {
+        Ok(ids) => ids,
+        Err(()) => vec![],
+    };
+
+    // Serialize as JSON array of strings
+    let json_parts: Vec<String> = ids.iter().map(|id| format!("\"{}\"", id)).collect();
+    let json = format!("[{}]", json_parts.join(","));
+
+    match CString::new(json) {
+        Ok(cstr) => {
+            *out_json = cstr.into_raw();
+            PhalanxError::Ok.code()
+        }
+        Err(_) => PhalanxError::InvalidUtf8.code(),
+    }
 }
 
 // =====================================================================
@@ -499,6 +558,102 @@ pub unsafe extern "C" fn phalanx_open_link(
     });
 
     PhalanxError::Ok.code()
+}
+
+/// Debug-only: delete a recording without cryptographic revocation.
+///
+/// # Safety
+/// * `handle` must be a valid pointer from `phalanx_create`.
+/// * `recording_id` must be a valid null-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn phalanx_debug_delete_recording(
+    handle: *mut PhalanxHandle,
+    recording_id: *const c_char,
+) -> i32 {
+    let Some(h) = handle.as_ref() else {
+        return PhalanxError::NullPointer.code();
+    };
+    if recording_id.is_null() {
+        return PhalanxError::NullPointer.code();
+    }
+    let id_str = match CStr::from_ptr(recording_id).to_str() {
+        Ok(s) => s,
+        Err(_) => return PhalanxError::InvalidUtf8.code(),
+    };
+
+    let rec_id = RecordingId::new(id_str);
+    let storage_tx = h.storage_tx.clone();
+
+    let result = h.runtime.block_on(async {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        storage_tx
+            .send(
+                phalanx_node::actors::storage::StorageCommand::DebugDeleteRecording {
+                    recording_id: rec_id,
+                    reply_to: tx,
+                },
+            )
+            .await
+            .map_err(|_| ())?;
+        rx.await.map_err(|_| ())?.map_err(|_| ())?;
+        Ok::<(), ()>(())
+    });
+
+    match result {
+        Ok(()) => PhalanxError::Ok.code(),
+        Err(()) => PhalanxError::InvalidState.code(),
+    }
+}
+
+/// Debug: returns "shards=N,key=true/false" as a C string for a recording.
+///
+/// # Safety
+/// * `handle` must be a valid pointer from `phalanx_create`.
+/// * `recording_id` must be a valid null-terminated C string.
+/// * `out_info` must be a valid pointer to receive the C string.
+#[no_mangle]
+pub unsafe extern "C" fn phalanx_debug_recording_info(
+    handle: *mut PhalanxHandle,
+    recording_id: *const c_char,
+    out_info: *mut *mut c_char,
+) -> i32 {
+    let Some(h) = handle.as_ref() else {
+        return PhalanxError::NullPointer.code();
+    };
+    if recording_id.is_null() || out_info.is_null() {
+        return PhalanxError::NullPointer.code();
+    }
+    let id_str = match CStr::from_ptr(recording_id).to_str() {
+        Ok(s) => s,
+        Err(_) => return PhalanxError::InvalidUtf8.code(),
+    };
+
+    let rec_id = RecordingId::new(id_str);
+    let storage_tx = h.storage_tx.clone();
+
+    let result = h.runtime.block_on(async {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        storage_tx
+            .send(
+                phalanx_node::actors::storage::StorageCommand::DebugRecordingInfo {
+                    recording_id: rec_id,
+                    reply_to: tx,
+                },
+            )
+            .await
+            .map_err(|_| ())?;
+        rx.await.map_err(|_| ())
+    });
+
+    let (shards, has_key) = result.unwrap_or((0, false));
+    let info = format!("shards={shards},key={has_key}");
+    match std::ffi::CString::new(info) {
+        Ok(cstr) => {
+            *out_info = cstr.into_raw();
+            PhalanxError::Ok.code()
+        }
+        Err(_) => PhalanxError::InvalidState.code(),
+    }
 }
 
 /// Simple pseudo-random u64 from system time for sharing secrets.

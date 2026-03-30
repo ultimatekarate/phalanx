@@ -166,6 +166,58 @@ impl Guardian {
             || self.crucible.contexts.contains_key(recording_id)
     }
 
+    /// Returns all recording IDs known to this node — completed (on disk),
+    /// in-progress reassembly (Crucible contexts), and locally-initiated
+    /// recordings (content_keyring entries from StartRecording).
+    /// Excludes revoked recordings.
+    pub fn list_all_recordings(&self) -> Vec<RecordingId> {
+        let mut ids: Vec<RecordingId> = self
+            .recording_logs
+            .keys()
+            .chain(self.crucible.contexts.keys())
+            .chain(self.content_keyring.keys())
+            .filter(|id| !self.revoked_recordings.contains(id))
+            .cloned()
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    /// Debug: return shard count + has_key for a recording.
+    pub fn debug_recording_info(&self, recording_id: &RecordingId) -> (usize, bool) {
+        let shard_count = self
+            .recording_logs
+            .get(recording_id)
+            .map(|log| log.index.len())
+            .unwrap_or(0);
+        let has_key = self.content_keyring.contains_key(recording_id);
+        (shard_count, has_key)
+    }
+
+    /// Debug-only: delete a recording's data without cryptographic revocation.
+    /// Removes the recording log file, crucible context, and keyring entry.
+    /// NOT forensically sound — skips revocation token generation/verification.
+    pub async fn debug_delete_recording(
+        &mut self,
+        recording_id: &RecordingId,
+    ) -> Result<(), GuardianError> {
+        // Remove recording log (in-memory + disk file)
+        if let Some(log) = self.recording_logs.remove(recording_id) {
+            if let Err(e) = tokio::fs::remove_file(&log.path).await {
+                tracing::warn!(error = %e, "debug_delete: failed to remove recording file");
+            }
+        }
+        // Remove crucible context
+        self.crucible.contexts.remove(recording_id);
+        // Remove content key
+        self.content_keyring.remove(recording_id);
+        // Persist updated keyring
+        self.persist_keyring().await?;
+        tracing::info!(recording = %recording_id, "debug_delete: recording deleted");
+        Ok(())
+    }
+
     // ── Content keyring (per-recording DEKs) ──────────────────────────
 
     /// Generate and store a new random content key for a recording.
