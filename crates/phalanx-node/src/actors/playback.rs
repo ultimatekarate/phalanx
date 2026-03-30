@@ -118,8 +118,10 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                         self.current_sequence.0, evidence_type
                     );
 
-                    // Demux: extract payload + timestamp + fps by value — no clone needed.
-                    let (payload, is_audio, timestamp_ms, frame_interval_ms) =
+                    // Demux: extract payload + timestamp + fps + audio metadata by value.
+                    // Video arm sets sample_rate/channels to 0 (unused); audio arm sets
+                    // timestamp/interval to 0 (unused). No Option, no unwrap.
+                    let (payload, is_audio, timestamp_ms, frame_interval_ms, sample_rate, channels) =
                         match envelope.evidence {
                             Evidence::Video(v) => {
                                 let ts = v.timestamp.as_u64();
@@ -128,9 +130,13 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                                 } else {
                                     33 // fallback ~30fps
                                 };
-                                (v.payload, false, ts, interval)
+                                (v.payload, false, ts, interval, 0u32, 0u8)
                             }
-                            Evidence::Audio(a) => (a.payload, true, 0u64, 0u64),
+                            Evidence::Audio(a) => {
+                                let sr = a.sample_rate.get();
+                                let ch = a.channels.get();
+                                (a.payload, true, 0u64, 0u64, sr, ch)
+                            }
                             Evidence::Gap(_) | Evidence::Handover(_) | Evidence::Proximity(_) => {
                                 self.current_sequence.0 += 1;
                                 continue;
@@ -176,7 +182,19 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                     // Errors here mean the Flutter receiver was dropped (playback stopped).
                     // Use match instead of ? to log before terminating.
                     if is_audio {
-                        if let Err(e) = self.audio_sink.handle_chunk(seq, frame_data).await {
+                        // Prepend 6-byte metadata header so Dart can configure AudioTrack.
+                        // bytes 0..4: sample_rate (u32 LE)
+                        // byte 4:    channels (u8)
+                        // byte 5:    reserved (0u8, alignment)
+                        // bytes 6..: raw PCM
+                        #[allow(clippy::arithmetic_side_effects)]
+                        // 6 + PCM len cannot overflow usize
+                        let mut prefixed = Vec::with_capacity(6 + frame_data.len());
+                        prefixed.extend_from_slice(&sample_rate.to_le_bytes());
+                        prefixed.push(channels);
+                        prefixed.push(0u8);
+                        prefixed.extend_from_slice(&frame_data);
+                        if let Err(e) = self.audio_sink.handle_chunk(seq, prefixed).await {
                             eprintln!("[Phalanx Playback] audio sink error at seq {seq}: {e:?}");
                             break Ok(stats);
                         }

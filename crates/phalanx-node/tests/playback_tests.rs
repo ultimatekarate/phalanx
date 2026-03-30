@@ -9,9 +9,24 @@
 use tempfile::tempdir;
 
 /// Strip the 8-byte LE timestamp prefix that the coordinator prepends to video frames.
-/// Audio frames are NOT prefixed — only use this for video channel assertions.
 fn video_payload(frame: &[u8]) -> &[u8] {
     &frame[8..]
+}
+
+/// Strip the 6-byte metadata header (sample_rate u32 LE + channels u8 + reserved u8)
+/// that the coordinator prepends to audio frames.
+fn audio_payload(frame: &[u8]) -> &[u8] {
+    &frame[6..]
+}
+
+/// Extract sample_rate (u32 LE) from the audio frame's 6-byte header.
+fn audio_sample_rate(frame: &[u8]) -> u32 {
+    u32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]])
+}
+
+/// Extract channels (u8) from the audio frame's 6-byte header.
+fn audio_channels(frame: &[u8]) -> u8 {
+    frame[4]
 }
 use tokio::sync::mpsc;
 
@@ -1154,14 +1169,25 @@ async fn test_production_format_audio_video_interleaved() {
         "First video frame must be jpeg_1"
     );
 
-    // Audio channel should get the raw decompressed PCM
+    // Audio channel should get 6-byte metadata header + raw decompressed PCM
     let a1 = tokio::time::timeout(timeout, audio_rx.recv())
         .await
         .expect("Timed out on audio")
         .expect("Audio channel closed before audio frame");
     assert_eq!(
-        a1, audio_pcm,
-        "Audio frame must be raw PCM (no postcard wrapping)"
+        audio_payload(&a1),
+        audio_pcm,
+        "Audio frame payload must be raw PCM (after stripping 6-byte header)"
+    );
+    assert_eq!(
+        audio_sample_rate(&a1),
+        16000,
+        "Audio header must carry sample_rate"
+    );
+    assert_eq!(
+        audio_channels(&a1),
+        1,
+        "Audio header must carry channel count"
     );
 
     // Second video frame
