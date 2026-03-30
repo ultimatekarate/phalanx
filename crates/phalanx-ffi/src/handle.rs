@@ -14,7 +14,9 @@ use crate::error::PhalanxError;
 use crate::probe::MobileProbe;
 
 use phalanx_forensics::PeerEvaluator;
+use phalanx_node::actors::egress::EgressCommand;
 use phalanx_node::actors::meshsentinel::SentinelDependencies;
+use phalanx_node::actors::storage::StorageCommand;
 use phalanx_node::actors::trust_actor::TrustCommand;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
@@ -75,6 +77,12 @@ pub struct PhalanxHandle {
     pub(crate) probe: Arc<MobileProbe>,
     /// Trust command channel — dispatch trust operations to the TrustActor.
     pub(crate) trust_tx: mpsc::Sender<TrustCommand>,
+    /// Storage command channel — recording start/stop, export requests.
+    pub(crate) storage_tx: mpsc::Sender<StorageCommand>,
+    /// Egress command channel — DHT provider lookups, mesh distribution.
+    pub(crate) egress_tx: mpsc::Sender<EgressCommand>,
+    /// Content key broadcast — per-recording encryption key for MediaEgressActor.
+    pub(crate) content_key_tx: tokio::sync::watch::Sender<Option<SymmetricKey>>,
     /// Video shard sender — FFI pushes processed frames here.
     pub(crate) video_tx: Option<mpsc::Sender<VideoShard>>,
     /// Audio shard sender — FFI pushes PCM audio here.
@@ -200,33 +208,64 @@ pub unsafe extern "C" fn phalanx_create(
 /// mnemonic phrase when a new identity was generated (genesis). `None` when
 /// loading an existing identity from disk.
 async fn bootstrap(
-    config: NodeConfig,
+    mut config: NodeConfig,
     storage_path: &str,
     passphrase: &str,
 ) -> Result<(PhalanxHandle, Option<String>), PhalanxError> {
+    // Override vault_path to match the mobile storage directory.
+    // The default config points to ./sim_vault which doesn't exist on Android.
+    let vault_dir = Path::new(storage_path).join("vault");
+    config.storage.vault_path = vault_dir.to_string_lossy().into_owned();
+    // Diagnostic: write boot log to a file since stderr doesn't reach logcat
+    let log = |msg: &str| {
+        let log_path = Path::new(storage_path).join("boot.log");
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            let _ = writeln!(f, "{msg}");
+        }
+    };
+
     // Identity
+    log(&format!("storage_path={storage_path}"));
     let identity_path = Path::new(storage_path).join("identity.bin");
     let (identity, genesis_phrase) =
-        PhalanxIdentity::init(&identity_path, passphrase).map_err(|_| PhalanxError::BootFailed)?;
+        PhalanxIdentity::init(&identity_path, passphrase).map_err(|e| {
+            log(&format!("identity init failed: {e:?}"));
+            PhalanxError::BootFailed
+        })?;
 
     let node_did = identity.did.as_str().to_string();
+    log(&format!("identity OK: {node_did}"));
 
     // Vault
     let vault_path = Path::new(storage_path).join("vault");
     let vault_str = vault_path.to_str().ok_or(PhalanxError::BootFailed)?;
-    let vault_salt = load_or_create_vault_salt(vault_str).map_err(|_| PhalanxError::BootFailed)?;
+    let vault_salt = load_or_create_vault_salt(vault_str).map_err(|e| {
+        log(&format!("vault salt failed: {e:?}"));
+        PhalanxError::BootFailed
+    })?;
     let vault_key = derive_vault_key(&identity, &vault_salt);
+    log("vault OK");
 
     // Journal (WAL)
     let wal_path = Path::new(storage_path).join("sentinel_transient_wal.bin");
     let wal_str = wal_path.to_str().ok_or(PhalanxError::BootFailed)?;
     let journal = FileJournal::new(wal_str, vault_key.clone())
         .await
-        .map_err(|_| PhalanxError::BootFailed)?;
+        .map_err(|e| {
+            log(&format!("journal failed: {e:?}"));
+            PhalanxError::BootFailed
+        })?;
+    log("journal OK");
 
     // Trust
     let trust_registry = TrustRegistry::build(&config).await;
     let reputation_projection = trust_registry.projection_handle();
+    log("trust OK");
 
     // Mobile hardware probe (atomics-based).
     // RAM=0: falls back to reference device default (4GB).
@@ -234,13 +273,31 @@ async fn bootstrap(
     let probe = Arc::new(MobileProbe::new(ThermalThresholds::default(), 0));
 
     // Network
+    // Ensure vault directory exists for DHT store
+    let vault_for_dht = Path::new(&config.storage.vault_path);
+    log(&format!(
+        "vault_path for DHT: {}",
+        config.storage.vault_path
+    ));
+    log(&format!("vault_path exists: {}", vault_for_dht.exists()));
+    if !vault_for_dht.exists() {
+        std::fs::create_dir_all(vault_for_dht).map_err(|e| {
+            log(&format!("vault dir create failed: {e:?}"));
+            PhalanxError::BootFailed
+        })?;
+        log("vault dir created");
+    }
     let (ingress, egress) = setup_transport(
         &identity,
         &config,
         None, // PSK: None for public swarm on mobile (can be extended later)
         Arc::new(reputation_projection) as Arc<dyn PeerEvaluator>,
     )
-    .map_err(|_| PhalanxError::BootFailed)?;
+    .map_err(|e| {
+        log(&format!("transport failed: {e:?}"));
+        PhalanxError::BootFailed
+    })?;
+    log("transport OK");
 
     // Wire socket-level I/O counters from the egress port into the governor
     // for Volterra integral sampling. Drops and ops are sampled together so
@@ -285,8 +342,14 @@ async fn bootstrap(
         .await
         .map_err(|_| PhalanxError::BootFailed)?;
 
-    // Extract channels before wrapping in Arc<Mutex>
+    // Extract channels before wrapping in Arc<Mutex>.
+    // These clones live on the handle so FFI calls never need to lock the sentinel.
+    // The sentinel run loop holds its tokio::sync::Mutex for its entire lifetime,
+    // so any FFI call that tried sentinel_ref.lock().await would deadlock.
     let trust_tx = engine.trust_tx.clone();
+    let storage_tx = engine.storage_tx.clone();
+    let egress_tx = engine.egress_tx.clone();
+    let content_key_tx = engine.content_key_tx.clone();
     let video_tx = Some(engine.video_tx.clone());
     let audio_tx = Some(engine.audio_tx.clone());
 
@@ -304,6 +367,9 @@ async fn bootstrap(
             governor,
             probe,
             trust_tx,
+            storage_tx,
+            egress_tx,
+            content_key_tx,
             video_tx,
             audio_tx,
             sentinel: Mutex::new(Some(sentinel)),

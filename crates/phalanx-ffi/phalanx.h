@@ -11,6 +11,24 @@
 #include <stdlib.h>
 
 /**
+ * Pixel format of the interleaved chroma plane from the camera.
+ *
+ * Android's Camera2 API delivers NV21 (VU interleaved).
+ * iOS AVFoundation delivers NV12 (UV interleaved).
+ * Both share the same Y plane — only the chroma byte order differs.
+ */
+typedef enum PixelFormat {
+  /**
+   * NV21: V then U interleaved. Android default.
+   */
+  NV21 = 0,
+  /**
+   * NV12: U then V interleaved. iOS default.
+   */
+  NV12 = 1,
+} PixelFormat;
+
+/**
  * FFI error codes returned by all `extern "C"` functions.
  *
  * Contract: every public FFI function returns `PhalanxError as i32`.
@@ -69,6 +87,10 @@ enum PhalanxError {
    * No active recording to stop or push frames to.
    */
   NOT_RECORDING = -12,
+  /**
+   * Cryptographic Forgetting: revocation failed (bad mnemonic, key mismatch, or storage error).
+   */
+  REVOCATION_FAILED = -13,
 };
 typedef int32_t PhalanxError;
 
@@ -80,6 +102,103 @@ typedef int32_t PhalanxError;
  * FFI access from arbitrary Dart isolates.
  */
 typedef struct PhalanxHandle PhalanxHandle;
+
+/**
+ * Opaque playback session — owns the video + audio receivers.
+ *
+ * Flutter holds a `Pointer<Void>` to this. Each poll is a pure `try_recv()`
+ * on the session's receiver. No Mutex. Single-owner (Flutter's main isolate).
+ */
+typedef struct PlaybackSession PlaybackSession;
+
+/**
+ * Sign a BLE auth challenge from a remote peer.
+ *
+ * Flutter calls this when it receives a BLE challenge. Rust signs with the node's
+ * Ed25519 key. Flutter sends the resulting signature back over BLE.
+ *
+ * # Parameters
+ * * `handle` — valid PhalanxHandle pointer
+ * * `challenger_did_ptr/len` — the remote peer's DID (UTF-8 bytes)
+ * * `nonce_ptr` — pointer to exactly 32 bytes of challenge nonce
+ * * `out_signature` — pointer to 64-byte buffer for the Ed25519 signature output
+ *
+ * # Safety
+ * All pointers must be valid. `out_signature` must point to at least 64 writable bytes.
+ */
+
+int32_t phalanx_sign_ble_challenge(const struct PhalanxHandle *handle,
+                                   const uint8_t *challenger_did_ptr,
+                                   uintptr_t challenger_did_len,
+                                   const uint8_t *nonce_ptr,
+                                   uint8_t *out_signature)
+;
+
+/**
+ * Verify a BLE auth response from a remote peer.
+ *
+ * Flutter calls this after receiving a BLE auth response. Rust verifies the
+ * Ed25519 signature. Returns 0 if verified, negative error code if not.
+ *
+ * # Parameters
+ * * `handle` — valid PhalanxHandle pointer
+ * * `responder_did_ptr/len` — the remote peer's DID (UTF-8 bytes)
+ * * `our_nonce_ptr` — pointer to the 32-byte nonce we sent in our challenge
+ * * `signature_ptr` — pointer to the 64-byte Ed25519 signature from the remote peer
+ *
+ * # Safety
+ * All pointers must be valid with the specified lengths.
+ */
+
+int32_t phalanx_verify_ble_peer(const struct PhalanxHandle *handle,
+                                const uint8_t *responder_did_ptr,
+                                uintptr_t responder_did_len,
+                                const uint8_t *our_nonce_ptr,
+                                const uint8_t *signature_ptr)
+;
+
+/**
+ * Starts PRNU calibration. Allocates the frame buffer.
+ *
+ * Call this before pushing calibration frames. Returns error if calibration
+ * is already in progress.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ */
+ int32_t phalanx_calibration_start(const struct PhalanxHandle *handle) ;
+
+/**
+ * Pushes a calibration frame. Runs ForensicLens on the Y-plane and stores
+ * the resulting metrics.
+ *
+ * Call this for each calibration frame (minimum 10, maximum 100).
+ * Returns error if calibration is not in progress or buffer is full.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `y_plane` must point to `y_len` valid bytes of Y-plane data.
+ */
+
+int32_t phalanx_calibration_push_frame(const struct PhalanxHandle *handle,
+                                       const uint8_t *y_plane,
+                                       uint32_t y_len,
+                                       uint32_t width,
+                                       uint32_t height)
+;
+
+/**
+ * Finishes calibration, computes the PRNU floor, and writes it to `out_prnu_floor`.
+ *
+ * Clears the calibration buffer regardless of success/failure.
+ * On success, the calibrated floor is stored — the caller (Flutter) should
+ * persist it to the device config.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `out_prnu_floor` must be a valid pointer to receive the f32 result.
+ */
+ int32_t phalanx_calibration_finish(const struct PhalanxHandle *handle, float *out_prnu_floor) ;
 
 /**
  * Starts a new recording session.
@@ -102,11 +221,11 @@ typedef struct PhalanxHandle PhalanxHandle;
  int32_t phalanx_stop_recording(struct PhalanxHandle *handle) ;
 
 /**
- * Pushes a raw Y-plane video frame through the forensic pipeline.
+ * Pushes a raw YUV video frame through the forensic pipeline.
  *
  * Pipeline:
- * 1. `ForensicLens::analyze()` — PRNU variance, Moiré detection, Laplacian energy (256x256 center crop, 64KB, fits L1)
- * 2. `compress_frame()` — JPEG compression
+ * 1. `ForensicLens::analyze()` — PRNU variance, Moiré detection, Laplacian energy (Y-plane only, 256×256 center crop, 64KB, fits L1)
+ * 2. `compress_frame()` — full-color YUV→JPEG via turbojpeg (no RGB conversion)
  * 3. `create_video_shard()` — shard with forensic metrics
  * 4. `try_send` to video channel → `MediaEgressActor` handles mesh distribution
  *
@@ -115,16 +234,44 @@ typedef struct PhalanxHandle PhalanxHandle;
  *
  * # Safety
  * * `handle` must be a valid pointer from `phalanx_create`.
- * * `y_plane` must point to `y_len` valid bytes of raw luma data.
- * * `y_len` must equal `width * height`.
+ * * `y_plane` must point to `y_len` valid bytes of raw luma data (`width * height`).
+ * * `uv_plane` must point to `uv_len` valid bytes of interleaved chroma (`width * height / 2`).
+ * * `recording_id` must be a valid null-terminated C string (returned from `phalanx_start_recording`).
  */
 
 int32_t phalanx_push_video_frame(struct PhalanxHandle *handle,
                                  const uint8_t *y_plane,
                                  uint32_t y_len,
+                                 const uint8_t *uv_plane,
+                                 uint32_t uv_len,
                                  uint32_t width,
                                  uint32_t height,
+                                 enum PixelFormat pixel_format,
+                                 const char *recording_id,
                                  uint64_t _timestamp_ms)
+;
+
+/**
+ * Pushes a raw PCM audio frame through the forensic pipeline.
+ *
+ * Pipeline:
+ * 1. `create_audio_shard()` — wraps PCM data with LZ4 compression
+ * 2. `try_send` to audio channel → `MediaEgressActor` encrypts + handles mesh distribution
+ *
+ * Uses `try_send` — returns immediately, drops on backpressure.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `pcm_data` must point to `pcm_len` valid bytes of 16-bit LE PCM audio.
+ * * `recording_id` must be a valid null-terminated C string.
+ */
+
+int32_t phalanx_push_audio_frame(struct PhalanxHandle *handle,
+                                 const uint8_t *pcm_data,
+                                 uint32_t pcm_len,
+                                 uint32_t sample_rate,
+                                 uint8_t channels,
+                                 const char *recording_id)
 ;
 
 /**
@@ -172,16 +319,60 @@ int32_t phalanx_get_share_link(const struct PhalanxHandle *handle,
  int32_t phalanx_open_link(struct PhalanxHandle *handle, const char *phx_link) ;
 
 /**
- * Exports a recording frame as a C2PA-compliant JPEG with embedded forensic metadata.
+ * Import a community membership from a serialized token (deep link payload).
  *
- * Reads the most recent shard for the given recording ID from storage,
- * decrypts it, and writes a JPEG with a C2PA manifest containing:
- *   - Sensor provenance assertions (PRNU, Moiré, Laplacian)
+ * The token is a postcard-serialized `Community` struct, typically received
+ * via QR code or deep link during the pre-event vouching ceremony.
+ *
+ * # Safety
+ * * `handle` must be a valid `PhalanxHandle` pointer.
+ * * `token_ptr` and `token_len` must describe a valid byte slice.
+ */
+
+int32_t phalanx_import_community(const struct PhalanxHandle *handle,
+                                 const uint8_t *token_ptr,
+                                 uintptr_t token_len)
+;
+
+/**
+ * Set the active recording state on the MeshSentinel.
+ *
+ * Called by Flutter when recording starts (recording_id not null) or stops (null).
+ * When active, MeshSentinel captures ProximityWitness entries and auto-seals
+ * grants to the community Stronghold.
+ *
+ * # Safety
+ * * `handle` must be a valid `PhalanxHandle` pointer.
+ * * `recording_id` must be a valid null-terminated C string, or null to stop.
+ */
+ int32_t phalanx_set_recording_state(const struct PhalanxHandle *handle, const char *recording_id) ;
+
+/**
+ * Manually dissolve a community (panic button).
+ *
+ * Zeroes all membership data for the specified community. Does not affect
+ * other members — each phone holds only its own credential.
+ *
+ * # Safety
+ * * `handle` must be a valid `PhalanxHandle` pointer.
+ * * `community_id_ptr` must point to exactly 32 bytes.
+ */
+
+int32_t phalanx_dissolve_community(const struct PhalanxHandle *handle,
+                                   const uint8_t *community_id_ptr)
+;
+
+/**
+ * Exports a recording as a C2PA-compliant MP4 with embedded forensic metadata.
+ *
+ * Retrieves all shards for the given recording ID from storage,
+ * encodes them into H.264+AAC, muxes into MP4, and embeds a C2PA manifest:
+ *   - Sensor provenance assertions (PRNU, Moiré, Laplacian) per-frame
  *   - Author DID
- *   - Timestamp
+ *   - Recording duration, frame count
  *   - Self-signed with the node's Ed25519 key
  *
- * The output file is a standard JPEG that any C2PA validator can inspect.
+ * The output file is a standard MP4 that any C2PA validator can inspect.
  * Self-signed certificates will show as "untrusted" — that's honest.
  * The forensic data speaks for itself.
  *
@@ -214,6 +405,26 @@ int32_t phalanx_get_c2pa_export_path(const struct PhalanxHandle *handle,
 ;
 
 /**
+ * Cryptographically forget a recording. Destroys all local evidence and
+ * propagates the revocation to the mesh via gossipsub and DHT.
+ *
+ * Requires the user's 12-word BIP39 mnemonic — the revocation private key
+ * is derived from `seed[32..64]` and never stored on the device.
+ *
+ * Returns `PhalanxError::Ok` (0) on success, negative error code on failure.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `recording_id` must be a valid null-terminated C string.
+ * * `mnemonic_phrase` must be a valid null-terminated C string (12 BIP39 words).
+ */
+
+int32_t phalanx_forget_recording(const struct PhalanxHandle *handle,
+                                 const char *recording_id,
+                                 const char *mnemonic_phrase)
+;
+
+/**
  * Creates a new PhalanxHandle by bootstrapping the full engine stack.
  *
  * Mirrors `sentinel.rs` lines 24-91:
@@ -229,7 +440,8 @@ int32_t phalanx_get_c2pa_export_path(const struct PhalanxHandle *handle,
 
 struct PhalanxHandle *phalanx_create(const char *config_path,
                                      const char *storage_path,
-                                     const char *passphrase)
+                                     const char *passphrase,
+                                     char **out_genesis_phrase)
 ;
 
 /**
@@ -369,44 +581,68 @@ int32_t phalanx_local_mesh_poll_outbound(struct PhalanxHandle *handle,
  void phalanx_free_bytes(uint8_t *ptr, uint32_t len) ;
 
 /**
- * Starts playback of a recording by ID.
+ * Starts playback of a recording by ID. Returns an opaque PlaybackSession pointer.
  *
  * Spawns a `PlaybackCoordinator` that retrieves shards from storage,
- * decrypts them, and feeds decoded frames to an internal mpsc channel.
- * Flutter polls this channel via `phalanx_poll_playback_frame`.
+ * decrypts them, and feeds decoded frames to internal mpsc channels.
+ * Flutter polls these channels via `phalanx_poll_video_frame` / `phalanx_poll_audio_frame`.
+ *
+ * Returns null on failure.
  *
  * # Safety
  * * `handle` must be a valid pointer from `phalanx_create`.
  * * `recording_id` must be a valid null-terminated C string.
  */
- int32_t phalanx_start_playback(struct PhalanxHandle *handle, const char *recording_id) ;
+
+struct PlaybackSession *phalanx_start_playback(struct PhalanxHandle *handle,
+                                               const char *recording_id)
+;
 
 /**
- * Polls for the next decoded playback frame.
+ * Polls for the next decoded video frame from a playback session.
  *
  * Returns the frame data through `out_data` and `out_len`.
  * If no frame is available yet, `*out_data` is set to null and returns Ok.
  * Caller must free the returned bytes with `phalanx_free_bytes`.
  *
  * # Safety
- * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `session` must be a valid pointer from `phalanx_start_playback`.
  * * `out_data` and `out_len` must be valid pointers.
  */
 
-int32_t phalanx_poll_playback_frame(struct PhalanxHandle *handle,
-                                    uint8_t **out_data,
-                                    uint32_t *out_len)
+int32_t phalanx_poll_video_frame(struct PlaybackSession *session,
+                                 uint8_t **out_data,
+                                 uint32_t *out_len)
 ;
 
 /**
- * Stops active playback by dropping the receiver channel.
+ * Polls for the next decoded audio frame from a playback session.
  *
- * The `PlaybackCoordinator` will detect the closed channel and terminate.
+ * Returns the audio data through `out_data` and `out_len`.
+ * If no audio is available yet, `*out_data` is set to null and returns Ok.
+ * Caller must free the returned bytes with `phalanx_free_bytes`.
  *
  * # Safety
- * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `session` must be a valid pointer from `phalanx_start_playback`.
+ * * `out_data` and `out_len` must be valid pointers.
  */
- int32_t phalanx_stop_playback(struct PhalanxHandle *handle) ;
+
+int32_t phalanx_poll_audio_frame(struct PlaybackSession *session,
+                                 uint8_t **out_data,
+                                 uint32_t *out_len)
+;
+
+/**
+ * Stops playback by destroying the session.
+ *
+ * Dropping the session closes both receivers, which signals the
+ * `PlaybackCoordinator` to terminate.
+ *
+ * # Safety
+ * * `session` must be a valid pointer from `phalanx_start_playback`.
+ * * Must be called exactly once per session. Null is a safe no-op.
+ */
+ void phalanx_stop_playback(struct PlaybackSession *session) ;
 
 /**
  * Returns the current power state as an integer.

@@ -90,27 +90,12 @@ pub unsafe extern "C" fn phalanx_export_c2pa(
     let rec_id = rec_str.to_string();
     let out = path_str.to_string();
 
-    // Extract storage_tx from the sentinel
-    let storage_tx = {
-        let Ok(sentinel_guard) = h.sentinel.lock() else {
-            return PhalanxError::InvalidState.code();
-        };
-        let Some(sentinel_ref) = sentinel_guard.as_ref() else {
-            return PhalanxError::InvalidState.code();
-        };
-        // We need to get storage_tx from MeshSentinel. Since it's behind a
-        // tokio::sync::Mutex, we must do a try_lock or spawn on the runtime.
-        // Clone the Arc so we can move it into the async block.
-        sentinel_ref.clone()
-    };
+    // Use storage_tx directly from the handle — no sentinel lock needed.
+    let stx = h.storage_tx.clone();
 
     let (result_tx, result_rx) = oneshot::channel();
 
     h.runtime.spawn(async move {
-        let engine = storage_tx.lock().await;
-        let stx = engine.storage_tx.clone();
-        drop(engine); // Release the sentinel lock immediately
-
         let res = build_c2pa_export(&stx, &vault_key, &identity, &node_did, &rec_id, &out).await;
         let _ = result_tx.send(res);
     });

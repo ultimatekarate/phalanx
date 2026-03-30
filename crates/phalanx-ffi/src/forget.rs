@@ -83,26 +83,14 @@ pub unsafe extern "C" fn phalanx_forget_recording(
     let token = create_revocation_token(rec_id.clone(), &signing_key, timestamp);
     // signing_key drops here — not actively zeroized (see module doc)
 
-    // 7. Extract storage_tx and egress_tx from the sentinel
-    let sentinel_ref = {
-        let Ok(sentinel_guard) = h.sentinel.lock() else {
-            return PhalanxError::InvalidState.code();
-        };
-        let Some(sentinel_ref) = sentinel_guard.as_ref() else {
-            return PhalanxError::InvalidState.code();
-        };
-        sentinel_ref.clone()
-    };
+    // 7. Use channels directly from the handle — no sentinel lock needed.
+    let stx = h.storage_tx.clone();
+    let etx = h.egress_tx.clone();
 
     // 8. Spawn async task: local destruction + network propagation
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
     h.runtime.spawn(async move {
-        let engine = sentinel_ref.lock().await;
-        let stx = engine.storage_tx.clone();
-        let etx = engine.egress_tx.clone();
-        drop(engine); // Release sentinel lock
-
         // 9. Local destruction via StorageActor (critical path)
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         if stx

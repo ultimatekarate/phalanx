@@ -18,6 +18,7 @@ use crate::handle::PhalanxHandle;
 use phalanx_forensics::reassembler::{compress_frame, create_audio_shard, create_video_shard};
 use phalanx_lens::scalar::ScalarLens;
 use phalanx_lens::ForensicLens;
+use phalanx_node::actors::egress::EgressCommand;
 use phalanx_node::actors::storage::StorageCommand;
 use phalanx_node::hardware::camera::target_fps;
 use phalanx_proto::crypto::SymmetricKey;
@@ -99,24 +100,14 @@ pub unsafe extern "C" fn phalanx_start_recording(
     AUDIO_SEQUENCE.store(0, Ordering::Relaxed);
 
     // Request per-recording content key from StorageActor.
-    // block_on is acceptable here — recording start is user-initiated (button press),
-    // sub-millisecond key generation, not on the camera HAL path.
+    // Uses channels cloned onto the handle — no sentinel lock needed.
+    // block_on is acceptable: user-initiated, sub-millisecond key generation.
     let recording_id = RecordingId::from(id_str.clone());
-    let sentinel_ref = {
-        let Ok(guard) = h.sentinel.lock() else {
-            return PhalanxError::InvalidState.code();
-        };
-        match guard.as_ref() {
-            Some(s) => s.clone(),
-            None => return PhalanxError::NotRunning.code(),
-        }
-    };
+    let storage_tx = h.storage_tx.clone();
 
     let key_result = h.runtime.block_on(async {
-        let sentinel = sentinel_ref.lock().await;
         let (tx, rx) = tokio::sync::oneshot::channel();
-        sentinel
-            .storage_tx
+        storage_tx
             .send(StorageCommand::StartRecording {
                 recording_id: recording_id.clone(),
                 reply_to: tx,
@@ -128,15 +119,9 @@ pub unsafe extern "C" fn phalanx_start_recording(
 
     match key_result {
         Ok(Ok(key_bytes)) => {
-            // Push content key to MediaEgressActor via watch channel
-            h.runtime.block_on(async {
-                let sentinel = sentinel_ref.lock().await;
-                let _ = sentinel.content_key_tx.send(Some(SymmetricKey(key_bytes)));
-            });
+            let _ = h.content_key_tx.send(Some(SymmetricKey(key_bytes)));
         }
         Ok(Err(_)) | Err(()) => {
-            // Content key generation failed — fall back to vault_key.
-            // Recording still starts; encryption uses vault_key via watch channel's None.
             tracing::warn!(
                 target: "phalanx::ffi",
                 "Content key generation failed — falling back to vault_key"
@@ -175,16 +160,7 @@ pub unsafe extern "C" fn phalanx_stop_recording(handle: *mut PhalanxHandle) -> i
     h.recording_active.store(false, Ordering::Relaxed);
 
     // Clear per-recording content key — MediaEgressActor reverts to vault_key (None).
-    if let Ok(guard) = h.sentinel.lock() {
-        if let Some(sentinel_ref) = guard.as_ref() {
-            let sentinel_ref = sentinel_ref.clone();
-            drop(guard);
-            h.runtime.block_on(async {
-                let sentinel = sentinel_ref.lock().await;
-                let _ = sentinel.content_key_tx.send(None);
-            });
-        }
-    }
+    let _ = h.content_key_tx.send(None);
 
     PhalanxError::Ok.code()
 }
@@ -239,78 +215,73 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
 
     // Get video sender
     let video_tx = match &h.video_tx {
-        Some(tx) => tx,
+        Some(tx) => tx.clone(),
         None => return PhalanxError::ChannelClosed.code(),
     };
 
     // Validate UV plane size: must be width * height / 2 (NV12/NV21 interleaved)
     #[allow(clippy::arithmetic_side_effects)]
-    // width * height cannot overflow u32 for mobile frames
     let expected_uv = (width * height) / 2;
     if uv_len != expected_uv {
         return PhalanxError::InvalidState.code();
     }
 
-    // Borrow directly from Flutter's memory — no copies until compress_frame
-    // needs to build the planar buffer internally.
-    let y_slice = std::slice::from_raw_parts(y_plane, y_len as usize);
-    let uv_slice = std::slice::from_raw_parts(uv_plane, uv_len as usize);
-
-    // Step 1: ForensicLens — sensor provenance analysis (Y-plane only)
-    // PRNU, Moiré, and Laplacian operate on luminance exclusively.
-    let lens_metrics = LENS.analyze(
-        y_slice,
-        width as usize,
-        height as usize,
-        BlackLevel::default(),
-    );
-
-    // Step 2: Compress full-color frame (YUV→JPEG via turbojpeg)
+    // Copy raw YUV from Flutter's memory NOW (caller frees after we return).
+    // This is a fast memcpy — the expensive work (JPEG, forensics, shard
+    // creation) happens on tokio's blocking thread pool below.
+    let y_data = std::slice::from_raw_parts(y_plane, y_len as usize).to_vec();
+    let uv_data = std::slice::from_raw_parts(uv_plane, uv_len as usize).to_vec();
     let is_nv12 = matches!(pixel_format, PixelFormat::Nv12);
-    let compressed = match compress_frame(y_slice, uv_slice, width, height, is_nv12) {
-        Ok(data) => data,
-        Err(_) => return PhalanxError::InvalidState.code(),
-    };
 
-    // Step 3: Create video shard with forensic metrics
+    // Claim sequence number now (atomic — no contention with the blocking task).
     let sequence = StorageSequence(SEQUENCE.fetch_add(1, Ordering::Relaxed));
     let current_fps = target_fps(Fps::new(30), h.governor.current_power_state());
 
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0));
-    let now = PhalanxTimestamp::from_millis(
-        elapsed
-            .as_secs()
-            .saturating_mul(1000)
-            .saturating_add(u64::from(elapsed.subsec_millis())),
-    );
-    let shard = match create_video_shard(
-        vec![compressed],
-        sequence,
-        current_fps,
-        rec_id,
-        lens_metrics,
-        now,
-    ) {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidState.code(),
-    };
+    // Dispatch the heavy pipeline to tokio's blocking thread pool.
+    // The FFI call returns immediately — Flutter's UI thread is never blocked
+    // by JPEG compression, forensic analysis, or shard serialization.
+    h.runtime.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Option<_> {
+            // Step 1: ForensicLens — PRNU, Moiré, Laplacian (Y-plane only)
+            let lens_metrics = LENS.analyze(
+                &y_data,
+                width as usize,
+                height as usize,
+                BlackLevel::default(),
+            );
 
-    // Step 4: Non-blocking send to MediaEgressActor
-    // Encryption deferred to MediaEgressActor (async thread) — see media_egress.rs.
-    // try_send returns immediately — drops frame on backpressure (by design)
-    match video_tx.try_send(shard) {
-        Ok(()) => PhalanxError::Ok.code(),
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-            // Backpressure: frame dropped silently. This is correct behavior —
-            // the homeostatic integrals will adapt the duty cycle.
-            PhalanxError::Ok.code()
+            // Step 2: JPEG compression (YUV→JPEG via turbojpeg)
+            let compressed = compress_frame(&y_data, &uv_data, width, height, is_nv12).ok()?;
+
+            // Step 3: Create video shard with forensic metrics
+            let elapsed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::from_secs(0));
+            let now = PhalanxTimestamp::from_millis(
+                elapsed
+                    .as_secs()
+                    .saturating_mul(1000)
+                    .saturating_add(u64::from(elapsed.subsec_millis())),
+            );
+            create_video_shard(
+                vec![compressed],
+                sequence,
+                current_fps,
+                rec_id,
+                lens_metrics,
+                now,
+            )
+            .ok()
+        })
+        .await;
+
+        // Step 4: Non-blocking send to MediaEgressActor
+        if let Ok(Some(shard)) = result {
+            let _ = video_tx.try_send(shard);
         }
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-            PhalanxError::ChannelClosed.code()
-        }
-    }
+    });
+
+    PhalanxError::Ok.code()
 }
 
 /// Sequence counter for audio shards within a recording.
@@ -519,23 +490,11 @@ pub unsafe extern "C" fn phalanx_open_link(
     };
 
     // Trigger DHT provider discovery for this recording
-    let sentinel_ref = match h.sentinel.lock() {
-        Ok(guard) => match guard.as_ref() {
-            Some(s) => s.clone(),
-            None => return PhalanxError::InvalidState.code(),
-        },
-        Err(_) => return PhalanxError::InvalidState.code(),
-    };
-
     let recording_id = locator.id.clone();
+    let egress_tx = h.egress_tx.clone();
     h.runtime.spawn(async move {
-        let engine = sentinel_ref.lock().await;
-        // Trigger FindProviders via the egress channel
-        let _ = engine
-            .egress_tx
-            .send(phalanx_node::actors::egress::EgressCommand::FindProviders(
-                recording_id,
-            ))
+        let _ = egress_tx
+            .send(EgressCommand::FindProviders(recording_id))
             .await;
     });
 

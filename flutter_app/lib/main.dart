@@ -54,6 +54,11 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
     try {
       // Storage path: app documents directory
       final storagePath = _getStoragePath();
+      // Ensure storage directory exists before Rust bootstrap
+      final dir = Directory(storagePath);
+      if (!dir.existsSync()) {
+        dir.createSync(recursive: true);
+      }
       // TODO: In production, prompt user for passphrase on first run,
       // store in secure keychain. For now, use environment or default.
       const passphrase = 'phalanx-mobile-dev';
