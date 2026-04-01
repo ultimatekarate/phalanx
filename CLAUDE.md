@@ -2,14 +2,7 @@
 
 ## Architecture
 
-Phalanx is a distributed forensic evidence provenance system. The codebase follows a linguistic model documented in `linguistic-code-model.md` at the repo root. Read it before making architectural decisions.
-
-Key crates:
-
-- **phalanx-proto** (Dictionary): Nouns — data types, traits/contracts, error types. No IO.
-- **phalanx-forensics** (Laboratory): Verbs — verification, validation, state machines. No tokio::fs.
-- **phalanx-transport** (Post Office): Network adapters, routing, peer mapping.
-- **phalanx-node** (Sentence): Actors, persistence, orchestration. Environment-dependent.
+Phalanx is a distributed forensic evidence provenance system. The codebase follows a linguistic model documented in `linguistic-code-model.md` at the repo root. Read it before making architectural decisions. The full crate inventory and role mapping is in [`README.md` § Architecture](README.md#architecture) and [`linguistic-code-model.md` § VIII](linguistic-code-model.md#viii-crate-reference). The key partition: **phalanx-proto** (Dictionary/Nouns, no IO) → **phalanx-forensics** (Laboratory/Verbs, no tokio::fs) → **phalanx-transport** (Post Office) → **phalanx-node** (Sentence, environment-dependent).
 
 ## Conventions
 

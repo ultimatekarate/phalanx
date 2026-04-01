@@ -165,22 +165,7 @@ Peer scoring, offense tracking, reputation decay, community membership, and web-
 
 ### Actor Systems & Orchestration
 
-Tokio actor lifecycle, message passing, event loop design, and inter-actor coordination.
-
-| File | What it does |
-| ------ | ------------- |
-| `phalanx-node/src/actors/meshsentinel.rs` | `MeshSentinel` — top-level event loop, network event dispatch |
-| `phalanx-node/src/actors/ingestion.rs` | `IngestionActor` — inbound chunk verification and vault storage |
-| `phalanx-node/src/actors/egress.rs` | `EgressActor` — outbound dispatch, DHT announces, retry with backoff |
-| `phalanx-node/src/actors/media_egress.rs` | `MediaEgressActor` — media encryption, sealing, fountain encoding, publishing |
-| `phalanx-node/src/actors/retrieval.rs` | `RetrievalActor` — secure retrieval with rate limiting and egress policy |
-| `phalanx-node/src/actors/storage.rs` | `StorageActor` — shard writes, recording finalization, vault maintenance |
-| `phalanx-node/src/actors/playback.rs` | `PlaybackCoordinator` — decryption and media sink during replay |
-| `phalanx-node/src/actors/trust_actor.rs` | `TrustActor` — trust ledger management |
-| `phalanx-node/src/bin/sentinel.rs` | Node binary entry point |
-| `phalanx-stronghold/src/actors/aggregation.rs` | Stronghold ingestion and storage orchestration |
-| `phalanx-stronghold/src/sentinel.rs` | Stronghold event loop |
-| `phalanx-stronghold/src/bin/stronghold.rs` | Stronghold binary entry point |
+Tokio actor lifecycle, message passing, event loop design, and inter-actor coordination. See [`docs/actors.md`](docs/actors.md) for the full actor reference (topology, commands, state, design rationale) and [`linguistic-code-model.md` § VIII](linguistic-code-model.md#viii-crate-reference) for the module inventory. Key entry points: `phalanx-node/src/actors/meshsentinel.rs` (orchestrator), `phalanx-node/src/bin/sentinel.rs` (node binary), `phalanx-stronghold/src/bin/stronghold.rs` (stronghold binary).
 
 ### Simulation & Testing
 

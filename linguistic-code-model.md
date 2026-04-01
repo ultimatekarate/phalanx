@@ -30,12 +30,29 @@ This model is not a metaphor, a style guide, or a set of suggestions. It is stru
 
 **Workspace governance lints.** The root `Cargo.toml` defines strict clippy lints at the `deny` level, and every crate inherits them via `[lints] workspace = true`:
 
+*Reliability:*
 - `unwrap_used = "deny"` — No infallible unwrapping. Handle the error or fail secure.
 - `expect_used = "deny"` — Same. If you need an exception, add `#[allow]` with a justification comment.
 - `panic = "deny"` — No panics in production code. The system must degrade, not crash.
 - `indexing_slicing = "deny"` — No unchecked indexing. Use `.get()` and handle the `None`.
+
+*Data Integrity:*
 - `arithmetic_side_effects = "deny"` — No unchecked arithmetic. Overflow is a data integrity violation.
 - `cast_possible_truncation = "deny"` — No silent truncation. If a cast is safe, prove it in a comment.
+- `cast_sign_loss = "deny"` — No silent sign loss in casts.
+- `cast_possible_wrap = "deny"` — No silent wrapping in casts.
+- `float_cmp = "deny"` — No direct float equality. Use epsilon or `ulps_eq!`.
+
+*Concurrency:*
+- `await_holding_lock = "deny"` — No holding locks across `.await` points.
+
+*Safety:*
+- `undocumented_unsafe_blocks = "deny"` — Every `unsafe` block requires a `// SAFETY:` comment.
+
+*Quality (warn, not deny):*
+- `cognitive_complexity = "warn"` — Functions exceeding complexity 20 trigger a warning.
+- `large_futures = "warn"` — Large futures that risk stack overflow.
+- `todo = "warn"` — TODOs are visible in CI output.
 
 Every `#[allow(clippy::...)]` in the codebase has a comment explaining why the suppression is safe. The suppression is the exception. The denial is the rule.
 

@@ -84,17 +84,7 @@ Phalanx assumes zero trust at every boundary. No peer, device, or network path i
 
 ## Lint Governance
 
-The workspace enforces deny-level clippy lints across all crates:
-
-**Reliability** — `unwrap_used`, `expect_used`, `panic`, `indexing_slicing`
-
-**Data Integrity** — `cast_possible_truncation`, `arithmetic_side_effects`, `cast_sign_loss`, `cast_possible_wrap`, `float_cmp`
-
-**Concurrency** — `await_holding_lock`
-
-**Safety** — `undocumented_unsafe_blocks`
-
-See `Cargo.toml` workspace lints for the full configuration.
+The workspace enforces deny-level clippy lints across all crates — `unwrap_used`, `expect_used`, `panic`, `indexing_slicing`, `arithmetic_side_effects`, `cast_possible_truncation`, `cast_sign_loss`, `cast_possible_wrap`, `float_cmp`, `await_holding_lock`, and `undocumented_unsafe_blocks`. See [`linguistic-code-model.md` § II](linguistic-code-model.md#ii-structural-enforcement) for the full annotated list and `Cargo.toml` for the source of truth.
 
 ## License
 
