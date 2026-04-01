@@ -47,6 +47,10 @@ jobs:
           CXX_aarch64_linux_android: ${{ steps.ndk.outputs.toolchain }}/bin/aarch64-linux-android24-clang++
           AR_aarch64_linux_android: ${{ steps.ndk.outputs.toolchain }}/bin/llvm-ar
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.ndk.outputs.toolchain }}/bin/aarch64-linux-android24-clang
+          # Stub for AOSP-internal log/log.h required by fdk-aac-sys.
+          # See: crates/phalanx-ffi/android-stubs/log/log.h
+          CFLAGS_aarch64_linux_android: -I${{ github.workspace }}/crates/phalanx-ffi/android-stubs
+          CXXFLAGS_aarch64_linux_android: -I${{ github.workspace }}/crates/phalanx-ffi/android-stubs
         run: cargo build --release --target aarch64-linux-android -p phalanx-ffi
 
       - name: Upload Android Artifact
