@@ -927,8 +927,11 @@ impl<I: IngressPort> MeshSentinel<I> {
     /// imported the same community can derive the decryption key.
     async fn broadcast_canary_alert(&mut self, silent_count: usize) {
         let detected_at = self.clock.now().unwrap_or_default();
+        // Mesh peer count is structurally bounded well below u32::MAX.
+        #[allow(clippy::cast_possible_truncation)]
+        let silent_count_u32 = silent_count as u32;
         let alert = phalanx_proto::network::CanaryAlert {
-            silent_count: phalanx_proto::network::SilentCount(silent_count as u32),
+            silent_count: phalanx_proto::network::SilentCount(silent_count_u32),
             detected_at,
         };
 

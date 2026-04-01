@@ -256,7 +256,10 @@ pub unsafe extern "C" fn phalanx_start_playback(
         phalanx_log!("[Phalanx FFI] PlaybackCoordinator starting run loop");
         match coordinator.run(rec_id).await {
             Ok(stats) => {
+                // Channel capacity is bounded at 8, well within u32 range.
+                #[allow(clippy::cast_possible_truncation)]
                 let video_buffered = 8u32.saturating_sub(video_tx_diag.capacity() as u32);
+                #[allow(clippy::cast_possible_truncation)]
                 let audio_buffered = 8u32.saturating_sub(audio_tx_diag.capacity() as u32);
                 phalanx_log!(
                     "[Phalanx FFI] PlaybackStats: found={}, missing={}, video_sent={}, audio_sent={}, decode_fail={}",
@@ -303,7 +306,7 @@ pub unsafe extern "C" fn phalanx_poll_video_frame(
         return PhalanxError::NullPointer.code();
     }
 
-    s.video_poll_count += 1;
+    s.video_poll_count = s.video_poll_count.saturating_add(1);
 
     // Log first poll to confirm Flutter is calling us
     if s.video_poll_count == 1 {
@@ -312,7 +315,7 @@ pub unsafe extern "C" fn phalanx_poll_video_frame(
 
     let result = poll_channel(&mut s.video_rx, out_data, out_len);
     if !(*out_data).is_null() {
-        s.video_hit_count += 1;
+        s.video_hit_count = s.video_hit_count.saturating_add(1);
         phalanx_log!(
             "[Phalanx FFI] poll_video_frame: got {} bytes (hit {}/poll {})",
             *out_len,

@@ -397,7 +397,7 @@ impl Guardian {
             drop(log);
             // Overwrite with zeros before delete (defense-in-depth)
             if let Ok(metadata) = fs::metadata(&path).await {
-                let zeros = vec![0u8; metadata.len() as usize];
+                let zeros = vec![0u8; usize::try_from(metadata.len()).unwrap_or(0)];
                 let _ = fs::write(&path, &zeros).await;
             }
             let _ = fs::remove_file(&path).await;

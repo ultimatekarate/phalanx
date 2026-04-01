@@ -245,7 +245,7 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
     // chroma sample, visually imperceptible.
     #[allow(clippy::arithmetic_side_effects)]
     let expected_uv = (width * height) / 2;
-    if uv_len != expected_uv && uv_len + 1 != expected_uv {
+    if uv_len != expected_uv && uv_len.saturating_add(1) != expected_uv {
         static LOGGED_UV: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !LOGGED_UV.swap(true, Ordering::Relaxed) {
             phalanx_log!(
@@ -507,10 +507,7 @@ pub unsafe extern "C" fn phalanx_list_recordings(
         rx.await.map_err(|_| ())
     });
 
-    let ids = match result {
-        Ok(ids) => ids,
-        Err(()) => vec![],
-    };
+    let ids: Vec<phalanx_proto::identity::RecordingId> = result.unwrap_or_default();
 
     // Serialize as JSON array of strings
     let json_parts: Vec<String> = ids.iter().map(|id| format!("\"{}\"", id)).collect();

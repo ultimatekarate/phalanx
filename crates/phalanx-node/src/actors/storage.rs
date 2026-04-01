@@ -112,7 +112,30 @@ pub enum StorageCommand {
 impl<J: TransientJournal> StorageActor<J> {
     pub async fn run(mut self, mut command_rx: mpsc::Receiver<StorageCommand>) {
         tracing::info!(target: "phalanx::storage", "StorageActor: Entering pure vault mode");
+        self.bootstrap().await;
 
+        let mut maintenance_timer = interval(Duration::from_millis(1000));
+
+        loop {
+            tokio::select! {
+                res = command_rx.recv() => {
+                    match res {
+                        Some(cmd) => self.handle_command(cmd).await,
+                        None => {
+                            tracing::info!(target: "phalanx::storage", "Sentinel dropped channel. Vault shutting down.");
+                            break;
+                        }
+                    }
+                }
+                _ = maintenance_timer.tick() => {
+                    self.replay_filter.rotate();
+                    let _ = self.guardian.check_and_finalize_recording(self.current_tolerance).await;
+                }
+            }
+        }
+    }
+
+    async fn bootstrap(&mut self) {
         // Hydrate the Reassembler state from the TransientJournal (WAL)
         match self
             .reassembler
@@ -176,13 +199,16 @@ impl<J: TransientJournal> StorageActor<J> {
             );
         }
 
-        // Ghost key cleanup: destroy any content keys for revoked recordings.
-        // Handles partial crash where revocation was journaled but key survived.
+        self.cleanup_ghost_keys().await;
+    }
+
+    /// Destroy content keys for revoked recordings that survived a partial crash.
+    async fn cleanup_ghost_keys(&mut self) {
         let revoked: Vec<RecordingId> = self.guardian.revoked_recordings.iter().cloned().collect();
         let mut ghost_keys_cleaned = 0u32;
         for rid in &revoked {
             if self.guardian.destroy_content_key(rid) {
-                ghost_keys_cleaned += 1;
+                ghost_keys_cleaned = ghost_keys_cleaned.saturating_add(1);
             }
         }
         if ghost_keys_cleaned > 0 {
@@ -200,123 +226,164 @@ impl<J: TransientJournal> StorageActor<J> {
                 );
             }
         }
+    }
 
-        let mut maintenance_timer = interval(Duration::from_millis(1000));
+    async fn handle_command(&mut self, cmd: StorageCommand) {
+        match cmd {
+            StorageCommand::Ingest {
+                unit,
+                reply_to,
+                ttl,
+            } => {
+                self.current_tolerance = ttl;
+                let result = self.handle_ingest(unit).await;
+                let _ = reply_to.send(result);
+            }
+            StorageCommand::Retrieval {
+                recording_id,
+                owner_did,
+                reply_to,
+            } => {
+                self.handle_retrieval(recording_id, owner_did, reply_to)
+                    .await;
+            }
+            StorageCommand::GetShard {
+                recording_id,
+                sequence_id,
+                reply_to,
+            } => {
+                let result = self
+                    .guardian
+                    .read_shard(&recording_id, sequence_id, None)
+                    .await
+                    .ok();
+                let _ = reply_to.send(result);
+            }
+            StorageCommand::WriteShard { envelope, reply_to } => {
+                let result = self.handle_write_shard(envelope).await;
+                let _ = reply_to.send(result);
+            }
+            StorageCommand::IngestEnvelope {
+                state,
+                reply_to,
+                ttl,
+            } => {
+                let _ = reply_to.send(self.guardian.ingest_envelope(state, ttl).await);
+            }
+            StorageCommand::EmergencySalvage(pending) => {
+                self.handle_salvage(pending).await;
+            }
+            StorageCommand::Revoke { token, reply_to } => {
+                let result = self.handle_revoke(token).await;
+                let _ = reply_to.send(result);
+            }
+            StorageCommand::StartRecording {
+                recording_id,
+                reply_to,
+            } => {
+                let result = self.handle_start_recording(&recording_id).await;
+                let _ = reply_to.send(result);
+            }
+            StorageCommand::GetContentKey {
+                recording_id,
+                reply_to,
+            } => {
+                let key = self
+                    .guardian
+                    .get_content_key(&recording_id)
+                    .map(|k| *k.as_bytes());
+                let _ = reply_to.send(key);
+            }
+            StorageCommand::ListRecordings { reply_to } => {
+                let ids = self.guardian.list_all_recordings();
+                let _ = reply_to.send(ids);
+            }
+            StorageCommand::DebugDeleteRecording {
+                recording_id,
+                reply_to,
+            } => {
+                let result = self.guardian.debug_delete_recording(&recording_id).await;
+                let _ = reply_to.send(result);
+            }
+            StorageCommand::DebugRecordingInfo {
+                recording_id,
+                reply_to,
+            } => {
+                let info = self.guardian.debug_recording_info(&recording_id);
+                let _ = reply_to.send(info);
+            }
+            StorageCommand::DebugVaultListing { reply_to } => {
+                self.handle_debug_vault_listing(reply_to).await;
+            }
+        }
+    }
 
-        loop {
-            tokio::select! {
-                // FIX: Explicitly handle the None case to break the loop
-                res = command_rx.recv() => {
-                    match res {
-                        Some(cmd) => match cmd {
-                            StorageCommand::Ingest { unit, reply_to, ttl } => {
-                                self.current_tolerance = ttl;
-                                let result = self.handle_ingest(unit).await;
-                                let _ = reply_to.send(result);
-                            }
-                            StorageCommand::Retrieval { recording_id, owner_did, reply_to } => {
-                                self.handle_retrieval(recording_id, owner_did, reply_to).await;
-                            }
-                            StorageCommand::GetShard { recording_id, sequence_id, reply_to } => {
-                                let result = self.guardian.read_shard(&recording_id, sequence_id, None).await.ok();
-                                let _ = reply_to.send(result);
-                            }
-                            StorageCommand::WriteShard { envelope, reply_to } => {
-                                let result = self.handle_write_shard(envelope).await;
-                                let _ = reply_to.send(result);
-                            }
-                            StorageCommand::IngestEnvelope { state, reply_to, ttl } => {
-                                let _ = reply_to.send(self.guardian.ingest_envelope(state, ttl).await);
-                            }
-                            StorageCommand::EmergencySalvage(pending) => {
-                                // This handles the BrokenJournal error internally and continues
-                                self.handle_salvage(pending).await;
-                            }
-                            StorageCommand::Revoke { token, reply_to } => {
-                                let result = self.handle_revoke(token).await;
-                                let _ = reply_to.send(result);
-                            }
-                            StorageCommand::StartRecording { recording_id, reply_to } => {
-                                let result = self.handle_start_recording(&recording_id).await;
-                                let _ = reply_to.send(result);
-                            }
-                            StorageCommand::GetContentKey { recording_id, reply_to } => {
-                                let key = self.guardian.get_content_key(&recording_id)
-                                    .map(|k| *k.as_bytes());
-                                let _ = reply_to.send(key);
-                            }
-                            StorageCommand::ListRecordings { reply_to } => {
-                                let ids = self.guardian.list_all_recordings();
-                                let _ = reply_to.send(ids);
-                            }
-                            StorageCommand::DebugDeleteRecording { recording_id, reply_to } => {
-                                let result = self.guardian.debug_delete_recording(&recording_id).await;
-                                let _ = reply_to.send(result);
-                            }
-                            StorageCommand::DebugRecordingInfo { recording_id, reply_to } => {
-                                let info = self.guardian.debug_recording_info(&recording_id);
-                                let _ = reply_to.send(info);
-                            }
-                            StorageCommand::DebugVaultListing { reply_to } => {
-                                let vault_path = self.guardian.vault_path.clone();
-                                let mut entries = Vec::new();
+    async fn handle_debug_vault_listing(
+        &mut self,
+        reply_to: oneshot::Sender<(String, Vec<String>)>,
+    ) {
+        let vault_path = self.guardian.vault_path.clone();
+        let mut entries = Vec::new();
 
-                                // Report recording_logs state via public API
-                                let log_recordings = self.guardian.list_recordings();
-                                entries.push(format!("RECORDING_LOGS: {} entries", log_recordings.len()));
-                                for rid in &log_recordings {
-                                    let (shards, has_key) = self.guardian.debug_recording_info(rid);
-                                    entries.push(format!("  LOG: {} ({} shards, has_key={})", rid, shards, has_key));
-                                }
+        // Report recording_logs state via public API
+        let log_recordings = self.guardian.list_recordings();
+        entries.push(format!("RECORDING_LOGS: {} entries", log_recordings.len()));
+        for rid in &log_recordings {
+            let (shards, has_key) = self.guardian.debug_recording_info(rid);
+            entries.push(format!(
+                "  LOG: {} ({} shards, has_key={})",
+                rid, shards, has_key
+            ));
+        }
 
-                                if let Ok(mut dir) = tokio::fs::read_dir(&vault_path).await {
-                                    while let Ok(Some(entry)) = dir.next_entry().await {
-                                        let p = entry.path();
-                                        let is_dir = p.is_dir();
-                                        let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                                        if is_dir {
-                                            // Scan subdirectory for .recording files with sizes
-                                            let mut sub_files = Vec::new();
-                                            if let Ok(mut sub) = tokio::fs::read_dir(&p).await {
-                                                while let Ok(Some(sub_entry)) = sub.next_entry().await {
-                                                    let fname = sub_entry.file_name().to_string_lossy().to_string();
-                                                    let size = sub_entry.metadata().await.map(|m| m.len()).unwrap_or(0);
-                                                    sub_files.push(format!("{}({}B)", fname, size));
+        if let Ok(mut dir) = tokio::fs::read_dir(&vault_path).await {
+            while let Ok(Some(entry)) = dir.next_entry().await {
+                let p = entry.path();
+                let is_dir = p.is_dir();
+                let name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if is_dir {
+                    // Scan subdirectory for .recording files with sizes
+                    let mut sub_files = Vec::new();
+                    if let Ok(mut sub) = tokio::fs::read_dir(&p).await {
+                        while let Ok(Some(sub_entry)) = sub.next_entry().await {
+                            let fname = sub_entry.file_name().to_string_lossy().to_string();
+                            let size = sub_entry.metadata().await.map(|m| m.len()).unwrap_or(0);
+                            sub_files.push(format!("{}({}B)", fname, size));
 
-                                                    // Read first 16 bytes of first .recording file for diagnosis
-                                                    if fname.ends_with(".recording") && sub_files.len() == 1 {
-                                                        let fpath = sub_entry.path();
-                                                        match tokio::fs::read(&fpath).await {
-                                                            Ok(data) => {
-                                                                let preview: Vec<String> = data.iter().take(16).map(|b| format!("{b:02x}")).collect();
-                                                                entries.push(format!("RAW_BYTES({}): [{}] (total {} bytes)", fname, preview.join(" "), data.len()));
-                                                            }
-                                                            Err(e) => entries.push(format!("RAW_READ_ERR({}): {}", fname, e)),
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            entries.push(format!("DIR: {} -> [{}]", name, sub_files.join(", ")));
-                                        } else {
-                                            entries.push(format!("FILE: {}", name));
-                                        }
+                            // Read first 16 bytes of first .recording file for diagnosis
+                            if fname.ends_with(".recording") && sub_files.len() == 1 {
+                                let fpath = sub_entry.path();
+                                match tokio::fs::read(&fpath).await {
+                                    Ok(data) => {
+                                        let preview: Vec<String> = data
+                                            .iter()
+                                            .take(16)
+                                            .map(|b| format!("{b:02x}"))
+                                            .collect();
+                                        entries.push(format!(
+                                            "RAW_BYTES({}): [{}] (total {} bytes)",
+                                            fname,
+                                            preview.join(" "),
+                                            data.len()
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        entries.push(format!("RAW_READ_ERR({}): {}", fname, e))
                                     }
                                 }
-                                let _ = reply_to.send((vault_path, entries));
                             }
-                        },
-                        None => {
-                            tracing::info!(target: "phalanx::storage", "Sentinel dropped channel. Vault shutting down.");
-                            break;
                         }
                     }
-                }
-                _ = maintenance_timer.tick() => {
-                    self.replay_filter.rotate();
-                    let _ = self.guardian.check_and_finalize_recording(self.current_tolerance).await;
+                    entries.push(format!("DIR: {} -> [{}]", name, sub_files.join(", ")));
+                } else {
+                    entries.push(format!("FILE: {}", name));
                 }
             }
         }
+        let _ = reply_to.send((vault_path, entries));
     }
 
     /// Handles data ingestion purely from a forensic and storage perspective.

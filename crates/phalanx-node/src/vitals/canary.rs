@@ -108,7 +108,7 @@ impl CanaryMonitor {
         }
 
         let count = self.stale_counts.entry(peer_id.clone()).or_insert(0);
-        *count += 1;
+        *count = count.saturating_add(1);
 
         if *count >= self.confirmation_required {
             Some(self.evaluate())

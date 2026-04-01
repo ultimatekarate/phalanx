@@ -71,6 +71,7 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
     }
 
     #[allow(clippy::arithmetic_side_effects)] // Sequence arithmetic for playback timing.
+    #[allow(clippy::cognitive_complexity)] // Linear state-machine loop; splitting would obscure flow.
     pub async fn run(&mut self, recording_id: RecordingId) -> Result<PlaybackStats> {
         let mut stats = PlaybackStats::default();
         loop {
