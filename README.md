@@ -37,13 +37,13 @@ Phalanx assumes zero trust at every boundary. No peer, device, or network path i
 
 ## Emergent Properties
 
-The coupled integral system produces behaviors that are not explicitly programmed:
+The adaptive control system produces behaviors that were never explicitly programmed:
 
-- **Self-healing** — No recovery logic exists. When load drops, exponential decay drains the integrals, scalers recover, and throughput returns. Recovery is a consequence of `exp(-λt)`.
-- **Natural load shedding order** — Untrusted peers shed first (hyperbolic endowment gate), then bandwidth-gated work, then memory, then storage, then CPU. This priority falls out of the Jacobian coupling coefficients, not from an explicit rule.
-- **Sybil resistance with diminishing returns** — The endowment gate `ψ = ψ_max / (1 + k·e)` means each additional attacker contributes less pressure than the last. Flooding requires overwhelming bandwidth, not just peer count.
-- **Phantom memory pressure** — Positive coupling `j[M,W]` causes memory to rise when storage backs up, even without direct allocation. Writes queue because they can't flush. The coupling coefficient creates this, not application logic.
-- **Thermal throttling as a natural consequence** — Heat is an impulse into the system integral, which gates everything downstream. A phone throttles itself the same way it throttles a Sybil attack — by raising pressure in the coupled system.
+- **Self-healing** — There is no recovery logic. When load drops, the system naturally returns to full throughput on its own. Recovery is a side effect of how pressure decays over time.
+- **Natural load shedding order** — Under stress, untrusted peers are shed first, then bandwidth-heavy work, then memory, then storage, then CPU. Nobody wrote this priority list — it falls out of how the resource signals are coupled to each other.
+- **Sybil resistance with diminishing returns** — Each additional fake peer an attacker adds is less effective than the last. Overwhelming the system requires flooding bandwidth, not just creating identities.
+- **Anticipatory memory pressure** — When storage backs up, memory pressure rises even before anything new is allocated. The system senses that writes are queuing and preemptively constrains upstream work.
+- **Thermal throttling as a natural consequence** — Heat enters the same pressure system that governs everything else. A phone that overheats throttles itself the same way it throttles a network attack.
 
 ## Architecture
 
