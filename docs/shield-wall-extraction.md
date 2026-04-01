@@ -100,6 +100,7 @@ volterra-stability/
 | Test `test_gershgorin_analysis` | 2952-2998 | Extract to `pub fn gershgorin_analysis(matrix: &DMatrix<f64>) -> GershgorinReport` | Currently only exists as a test. Promote to a first-class utility. Computes disc centers, radii, diagonal dominance margins per row. |
 
 **New struct:**
+
 ```rust
 pub struct GershgorinDisc {
     pub row: usize,
@@ -134,6 +135,7 @@ pub struct GershgorinReport {
 | `compute_lyapunov_exponent()` | 1700-1790 | Refactor to accept `&dyn DynamicalSystem` | Extract Benettin's algorithm: warmup, co-evolution of state + perturbation, periodic renormalization, accumulation of stretching factor. Phalanx provides `NonlinearSystem` as the `DynamicalSystem` impl. |
 
 **Generic signature:**
+
 ```rust
 pub fn compute_lyapunov_exponent(
     system: &dyn DynamicalSystem,
@@ -153,6 +155,7 @@ pub fn compute_lyapunov_exponent(
 | `evolve()` | 749-843 | `pub fn evolve(j: &DMatrix<f64>, threats: &[ThreatProfile], x0: &[f64], t_final: f64, dt: f64) -> TimeSeries` | Generalize from `[f64; DIM]` to `&[f64]`. Exponential integrator using pre-computed `mat_exp(J * dt)`. |
 
 **Generic signatures:**
+
 ```rust
 pub fn rk4_step(
     system: &dyn DynamicalSystem,
@@ -272,6 +275,7 @@ spectral-guard/
 | `SpectralObserver` | vitals.rs | 1072-1213 | Rename to `BehavioralObserver<Id: PeerId>`. Replace `HashMap<NetworkId, ...>` with `HashMap<Id, ...>`. Methods: `record_heartbeat()`, `record_data_volume()`, `evaluate()`, `remove_peer()`. |
 
 **Generic struct:**
+
 ```rust
 pub struct PeerObservation {
     heartbeat_times: VecDeque<Instant>,
@@ -300,6 +304,7 @@ pub struct BehavioralObserver<Id: PeerId> {
 | Passive Contradiction | vitals.rs ~1185-1195 | Claims passive/leaf role but sends significant data volume. Returns 1.0 squared error. | Yes — any system with passive/active roles. |
 
 **Residual computation:**
+
 ```rust
 /// Computes the L2 residual across all consistency checks.
 /// Returns None if insufficient observations.
@@ -318,6 +323,7 @@ pub fn compute_residual(
 | `DecayingIntegral` | vitals.rs | 310-330 | Verbatim. `value = impulse + value * exp(-lambda * dt)`. |
 
 **Generic wrapper:**
+
 ```rust
 pub struct DecayingIntegral {
     pub value: f64,

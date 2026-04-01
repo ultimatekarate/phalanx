@@ -147,6 +147,8 @@ async fn test_legal_identity_handover() {
         saved_recording.owner_did, identity_b.did,
         "Recording ownership did not transfer to Identity B"
     );
+
+    let _ = std::fs::remove_dir_all("logs");
 }
 
 #[tokio::test]
@@ -239,4 +241,6 @@ async fn test_illegal_identity_swap_rejected() {
         1,
         "Crucible state should only contain the first valid frame"
     );
+
+    let _ = std::fs::remove_dir_all("logs");
 }

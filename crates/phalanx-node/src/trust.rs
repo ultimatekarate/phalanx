@@ -755,5 +755,7 @@ mod tests {
         // If score is i32: 75 - 101 = -26. If u32 saturating: 0.
         assert!(record.reputation.score <= 0);
         assert!(record.reputation.is_blacklisted);
+
+        let _ = std::fs::remove_dir_all("logs");
     }
 }
