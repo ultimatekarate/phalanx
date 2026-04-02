@@ -44,10 +44,15 @@ The adaptive control system produces behaviors that were never explicitly progra
 - **Sybil resistance with diminishing returns** — Each additional fake peer an attacker adds is less effective than the last. Overwhelming the system requires flooding bandwidth, not just creating identities.
 - **Anticipatory memory pressure** — When storage backs up, memory pressure rises even before anything new is allocated. The system senses that writes are queuing and preemptively constrains upstream work.
 - **Thermal throttling as a natural consequence** — Heat enters the same pressure system that governs everything else. A phone that overheats throttles itself the same way it throttles a network attack.
+- **Load balancing without a balancer** — When a node is under stress, it processes incoming work more slowly. Peers observe the latency, score it lower, and naturally route traffic toward healthier nodes. No node ever announces that it is overloaded — the network reorganizes around the pressure.
+- **Honesty is cheap, dishonesty is expensive** — Sensor fingerprints are verified before encryption on the capture path. A real camera always passes. A forged frame must carry fabricated metrics that survive re-verification from the actual pixels at every downstream node. The cost of forgery compounds with every recipient.
+- **Rejections regulate throughput** — When verification gates reject incoming data, the rejection itself registers as resource pressure. A burst of bad traffic doesn't just get filtered — it raises system stress, which lowers capture rate, which reduces the volume of new work. The gates are simultaneously filters and throttle valves.
+- **Smooth Byzantine ejection** — Dishonest peers are not kicked after a fixed number of violations. Anomaly signals accumulate gradually in a per-peer reputation score that decays over time. A borderline-suspicious peer slowly loses standing; a blatantly dishonest one is isolated quickly. The transition is continuous, not a cliff — and reversible if the peer starts behaving honestly.
+- **Peer loss identifies at-risk data** — When community members go dark, the system automatically knows which recordings those peers contributed to. That set is implicitly the under-replicated data. No separate durability monitor exists — failure detection doubles as a replication priority signal.
 
 ## Architecture
 
-The codebase is governed by a [Linguistic Code Model](linguistic-code-model.md) that partitions all code by linguistic role. It's essentially what happens when you combine functional core, imperative shell with Apollo-era DSKY applied to architecture — and use the Rust compiler to give it actual teeth. Crate boundaries are structural — the compiler enforces them, not convention.
+The codebase is governed by a [Linguistic Code Model](linguistic-code-model.md) that partitions all code by linguistic role. It's essentially what happens when you combine functional core, imperative shell with Apollo-era DSKY applied to architecture — and use the Rust compiler to give it actual teeth. Crate boundaries are structural — the compiler enforces them, not convention. The system is composed of [35 subsystems](docs/subsystems.md) spanning evidence lifecycle, cryptography, trust, adaptive control, corroboration, and infrastructure.
 
 | Crate | Role | Description |
 | --- | --- | --- |
