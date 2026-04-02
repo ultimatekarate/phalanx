@@ -157,24 +157,25 @@ pub fn transcode_to_mp4(
     // Encode H.264
     let h264_nals = encode_h264(&yuv_frames, width, height, fps)?;
 
-    // Encode AAC (if audio present)
-    let aac_frames = if !audio_shards.is_empty() {
-        Some(encode_aac(&audio_shards)?)
+    // Encode AAC (if audio present) and bundle with metadata for muxing
+    let aac_bundle = if let Some(first) = audio_shards.first() {
+        let sr = first.sample_rate;
+        let ch = first.channels;
+        let (frames, frame_len) = encode_aac(&audio_shards)?;
+        Some((frames, frame_len, sr, ch))
     } else {
         None
     };
 
     // Mux into MP4
-    let sample_rate = audio_shards.first().map(|a| a.sample_rate);
-    let channels = audio_shards.first().map(|a| a.channels);
     let mp4_bytes = mux_mp4(
         &h264_nals,
-        aac_frames.as_deref(),
+        aac_bundle
+            .as_ref()
+            .map(|(f, fl, sr, ch)| (f.as_slice(), *fl, *sr, *ch)),
         width,
         height,
         fps,
-        sample_rate,
-        channels,
     )?;
 
     let duration_ms = (total_frames as u64 * 1000) / fps.get() as u64;
@@ -290,7 +291,7 @@ fn encode_h264(
 
 // Indices governed by chunks_exact(2) iterator and non-empty input guard.
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
-fn encode_aac(audio_shards: &[DecodedAudioShard]) -> Result<Vec<u8>, TranscodeError> {
+fn encode_aac(audio_shards: &[DecodedAudioShard]) -> Result<(Vec<Vec<u8>>, u32), TranscodeError> {
     use fdk_aac::enc::{Encoder, EncoderParams};
 
     let first = &audio_shards[0];
@@ -327,8 +328,9 @@ fn encode_aac(audio_shards: &[DecodedAudioShard]) -> Result<Vec<u8>, TranscodeEr
     let info = encoder
         .info()
         .map_err(|e| TranscodeError::AacEncoderError(format!("{e:?}")))?;
-    let frame_size = info.frameLength as usize * channels as usize;
-    let mut aac_output = Vec::new();
+    let frame_length = info.frameLength;
+    let frame_size = frame_length as usize * channels as usize;
+    let mut aac_frames: Vec<Vec<u8>> = Vec::new();
     let mut output_buf = vec![0u8; 8192]; // AAC frame output buffer
 
     for chunk in samples.chunks(frame_size) {
@@ -350,11 +352,49 @@ fn encode_aac(audio_shards: &[DecodedAudioShard]) -> Result<Vec<u8>, TranscodeEr
             .map_err(|e| TranscodeError::AacEncoderError(format!("{e:?}")))?;
 
         if encode_result.output_size > 0 {
-            aac_output.extend_from_slice(&output_buf[..encode_result.output_size]);
+            aac_frames.push(output_buf[..encode_result.output_size].to_vec());
         }
     }
 
-    Ok(aac_output)
+    Ok((aac_frames, frame_length))
+}
+
+// ── AAC ↔ MP4 Type Mapping ─────────────────────────────────────────────
+
+fn sample_rate_to_freq_index(rate: SampleRate) -> Result<mp4::SampleFreqIndex, TranscodeError> {
+    match rate.get() {
+        96_000 => Ok(mp4::SampleFreqIndex::Freq96000),
+        88_200 => Ok(mp4::SampleFreqIndex::Freq88200),
+        64_000 => Ok(mp4::SampleFreqIndex::Freq64000),
+        48_000 => Ok(mp4::SampleFreqIndex::Freq48000),
+        44_100 => Ok(mp4::SampleFreqIndex::Freq44100),
+        32_000 => Ok(mp4::SampleFreqIndex::Freq32000),
+        24_000 => Ok(mp4::SampleFreqIndex::Freq24000),
+        22_050 => Ok(mp4::SampleFreqIndex::Freq22050),
+        16_000 => Ok(mp4::SampleFreqIndex::Freq16000),
+        12_000 => Ok(mp4::SampleFreqIndex::Freq12000),
+        11_025 => Ok(mp4::SampleFreqIndex::Freq11025),
+        8_000 => Ok(mp4::SampleFreqIndex::Freq8000),
+        7_350 => Ok(mp4::SampleFreqIndex::Freq7350),
+        other => Err(TranscodeError::AacEncoderError(format!(
+            "unsupported sample rate for MP4 AAC: {other} Hz"
+        ))),
+    }
+}
+
+fn channel_count_to_config(ch: ChannelCount) -> Result<mp4::ChannelConfig, TranscodeError> {
+    match ch.get() {
+        1 => Ok(mp4::ChannelConfig::Mono),
+        2 => Ok(mp4::ChannelConfig::Stereo),
+        3 => Ok(mp4::ChannelConfig::Three),
+        4 => Ok(mp4::ChannelConfig::Four),
+        5 => Ok(mp4::ChannelConfig::Five),
+        6 => Ok(mp4::ChannelConfig::FiveOne),
+        7 | 8 => Ok(mp4::ChannelConfig::SevenOne),
+        other => Err(TranscodeError::AacEncoderError(format!(
+            "unsupported channel count for MP4 AAC: {other}"
+        ))),
+    }
 }
 
 // ── MP4 Muxing ──────────────────────────────────────────────────────────
@@ -362,12 +402,10 @@ fn encode_aac(audio_shards: &[DecodedAudioShard]) -> Result<Vec<u8>, TranscodeEr
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // MP4 container byte offset arithmetic and dimension casts.
 fn mux_mp4(
     h264_nals: &[Vec<u8>],
-    aac_data: Option<&[u8]>,
+    aac: Option<(&[Vec<u8>], u32, SampleRate, ChannelCount)>,
     width: u32,
     height: u32,
     fps: Fps,
-    _sample_rate: Option<SampleRate>,
-    _channels: Option<ChannelCount>,
 ) -> Result<Vec<u8>, TranscodeError> {
     use mp4::{Mp4Config, Mp4Writer, TrackConfig};
     // Governance: Cursor<Vec<u8>> is in-memory byte assembly, permitted per Command #2.
@@ -431,11 +469,41 @@ fn mux_mp4(
             .map_err(|e| TranscodeError::Mp4MuxError(e.to_string()))?;
     }
 
-    // TODO: Add AAC audio track when audio muxing is validated.
-    // The AAC encoding is done above; muxing into a second MP4 track
-    // requires careful alignment of audio/video timescales.
-    // For the initial export, video-only MP4 is sufficient for the demo.
-    let _ = aac_data;
+    // Add AAC audio track (track 2) when audio data is present
+    if let Some((frames, frame_len, rate, ch)) = aac {
+        let freq_index = sample_rate_to_freq_index(rate)?;
+        let chan_conf = channel_count_to_config(ch)?;
+
+        let audio_track_config = TrackConfig {
+            track_type: mp4::TrackType::Audio,
+            timescale: rate.get(),
+            language: String::from("und"),
+            media_conf: mp4::MediaConfig::AacConfig(mp4::AacConfig {
+                bitrate: 0, // VBR — bitrate not signaled in esds
+                profile: mp4::AudioObjectType::AacLowComplexity,
+                freq_index,
+                chan_conf,
+            }),
+        };
+
+        writer
+            .add_track(&audio_track_config)
+            .map_err(|e| TranscodeError::Mp4MuxError(e.to_string()))?;
+
+        for (i, frame_bytes) in frames.iter().enumerate() {
+            let sample = mp4::Mp4Sample {
+                start_time: i as u64 * frame_len as u64,
+                duration: frame_len,
+                rendering_offset: 0,
+                is_sync: true, // all AAC-LC frames are random-access
+                bytes: mp4::Bytes::copy_from_slice(frame_bytes),
+            };
+
+            writer
+                .write_sample(2, &sample)
+                .map_err(|e| TranscodeError::Mp4MuxError(e.to_string()))?;
+        }
+    }
 
     writer
         .write_end()
