@@ -158,10 +158,10 @@ pub fn transcode_to_mp4(
     let h264_nals = encode_h264(&yuv_frames, width, height, fps)?;
 
     // Encode AAC (if audio present) and bundle with metadata for muxing
-    let aac_bundle = if !audio_shards.is_empty() {
+    let aac_bundle = if let Some(first) = audio_shards.first() {
+        let sr = first.sample_rate;
+        let ch = first.channels;
         let (frames, frame_len) = encode_aac(&audio_shards)?;
-        let sr = audio_shards[0].sample_rate;
-        let ch = audio_shards[0].channels;
         Some((frames, frame_len, sr, ch))
     } else {
         None
