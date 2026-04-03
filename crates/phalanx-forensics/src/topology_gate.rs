@@ -180,6 +180,11 @@ impl TopologyGate {
         self.peers.contains_key(peer)
     }
 
+    /// Transport class of an admitted peer, if present.
+    pub fn transport_class(&self, peer: &NetworkId) -> Option<TransportClass> {
+        self.peers.get(peer).map(|slot| slot.transport)
+    }
+
     /// Admit a peer, enforcing subnet diversity, transport quotas, and IWFQ preemption.
     /// Returns an `AdmissionTicket` (proof of admission) or a typed error.
     /// If a lower-trust peer was evicted to make room, the second element is `Some(evicted)`.
@@ -680,5 +685,116 @@ mod tests {
 
         g.release(&net_id(1));
         assert_eq!(g.subnet_counts().get(&bucket), None); // cleaned up
+    }
+
+    // ── Adversarial: Eclipse resistance ─────────────────────────────────
+
+    /// Eclipse attack: an attacker controlling many nodes in one subnet
+    /// tries to fill all connection slots. Subnet quota should cap them.
+    #[test]
+    fn eclipse_attack_capped_by_subnet_quota() {
+        let mut g = TopologyGate::new(50, SubnetQuota::DEFAULT, 4);
+        let attacker_bucket = SubnetBucket::test_bucket(66);
+
+        let mut admitted = 0u8;
+        let mut denied = 0u8;
+
+        for i in 0..50u8 {
+            match g.try_admit(
+                net_id(i),
+                TrustLevel::Ignored,
+                attacker_bucket,
+                TransportClass::Internet,
+                TransportBalance::DEFAULT,
+            ) {
+                Ok(_) => admitted += 1,
+                Err(AdmissionDenied::SubnetQuotaExceeded { .. }) => denied += 1,
+                Err(other) => panic!("Unexpected denial: {:?}", other),
+            }
+        }
+
+        // SubnetQuota::DEFAULT is 8 — attacker should never get more than 8 slots
+        assert!(
+            admitted <= 8,
+            "Eclipse attacker got {} slots, expected <= 8",
+            admitted
+        );
+        assert!(denied > 0, "Some eclipse attempts must be denied");
+        // Legitimate peers from other subnets should still have 42+ slots available
+        assert!(g.peer_count() <= 8);
+    }
+
+    /// Eclipse mitigation: after attacker fills their subnet quota,
+    /// legitimate peers from diverse subnets can still join.
+    #[test]
+    fn diverse_peers_admitted_after_eclipse_attempt() {
+        let mut g = TopologyGate::new(50, SubnetQuota::DEFAULT, 4);
+        let attacker_bucket = SubnetBucket::test_bucket(66);
+
+        // Attacker fills their subnet quota
+        for i in 0..20u8 {
+            let _ = g.try_admit(
+                net_id(i),
+                TrustLevel::Ignored,
+                attacker_bucket,
+                TransportClass::Internet,
+                TransportBalance::DEFAULT,
+            );
+        }
+        let attacker_count = g.peer_count();
+
+        // Legitimate peers from diverse subnets should all succeed
+        for i in 100..120u8 {
+            let bucket = SubnetBucket::test_bucket(i);
+            g.try_admit(
+                net_id(i),
+                TrustLevel::Verified,
+                bucket,
+                TransportClass::Internet,
+                TransportBalance::DEFAULT,
+            )
+            .expect("Legitimate peer from unique subnet should be admitted");
+        }
+
+        assert!(
+            g.peer_count() >= attacker_count + 20,
+            "All 20 diverse peers should be admitted"
+        );
+    }
+
+    /// Higher-trust peers should preempt lower-trust attacker peers
+    /// even when the transport quota is full.
+    #[test]
+    fn high_trust_preempts_attacker_at_capacity() {
+        // gate(10) → Internet quota = ceil(10 * 0.75) = 7
+        let mut g = gate(10);
+
+        // Fill 7 Internet slots with Ignored-trust peers
+        for i in 0..7u8 {
+            g.try_admit(
+                net_id(i),
+                TrustLevel::Ignored,
+                SubnetBucket::test_bucket(i),
+                TransportClass::Internet,
+                TransportBalance::DEFAULT,
+            )
+            .unwrap();
+        }
+        assert_eq!(g.peer_count(), 7);
+
+        // Ally-trust peer arrives — should evict one Ignored peer
+        let (_, evicted) = g
+            .try_admit(
+                net_id(99),
+                TrustLevel::Ally,
+                SubnetBucket::test_bucket(99),
+                TransportClass::Internet,
+                TransportBalance::DEFAULT,
+            )
+            .unwrap();
+
+        assert!(evicted.is_some(), "Ally should evict an Ignored peer");
+        assert!(g.is_admitted(&net_id(99)));
+        assert_eq!(g.peer_count(), 7); // Still at quota
     }
 }

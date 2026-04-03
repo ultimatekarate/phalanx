@@ -19,6 +19,9 @@ use crate::{trust::TrustRegistry, StorageActor};
 use phalanx_forensics::eclipse::{self, EclipseProbe, MeshFingerprint};
 use phalanx_forensics::policy::{IngressGovernor, TrafficGovernor};
 use phalanx_forensics::prelude::*;
+use phalanx_forensics::trust::{
+    evaluate_reciprocity, PeerContribution, ReciprocityParams, ReciprocityVerdict,
+};
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::network::{EgressPort, IngressPort, LocalMeshPort};
 use phalanx_proto::prelude::*;
@@ -146,6 +149,13 @@ pub struct MeshSentinel<I: IngressPort> {
     /// Peers we have already replayed revocation tokens to in this session.
     /// Prevents redundant gossipsub floods on peer reconnect.
     revocation_synced_peers: std::collections::HashSet<NetworkId>,
+
+    // ── Reciprocity Floor ────────────────────────────────────────────
+    /// First-seen timestamp (epoch seconds) per peer. Used to compute
+    /// connection age for the reciprocity grace period.
+    /// Never cleared on disconnect (prevents grace-period-reset attacks).
+    /// Capped at 10,000 entries; oldest evicted on overflow.
+    peer_first_seen: std::collections::HashMap<NetworkId, u64>,
 }
 
 impl<I: IngressPort> MeshSentinel<I> {
@@ -384,6 +394,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             canary: CanaryMonitor::new(2), // 2 consecutive stale ticks to confirm
             community_ids,
             revocation_synced_peers: std::collections::HashSet::new(),
+            peer_first_seen: std::collections::HashMap::new(),
         })
     }
 
@@ -734,6 +745,30 @@ impl<I: IngressPort> MeshSentinel<I> {
                 self.system_governor.record_peer_discovery(source);
                 self.system_governor.record_connection_gauge();
 
+                // Reciprocity floor: record first-seen time. or_insert() preserves
+                // the original timestamp on reconnection (prevents grace-period-reset).
+                {
+                    const MAX_PEER_FIRST_SEEN: usize = 10_000;
+                    if self.peer_first_seen.len() >= MAX_PEER_FIRST_SEEN
+                        && !self.peer_first_seen.contains_key(&peer)
+                    {
+                        // Evict oldest entry to make room.
+                        if let Some(oldest_peer) = self
+                            .peer_first_seen
+                            .iter()
+                            .min_by_key(|(_, &ts)| ts)
+                            .map(|(k, _)| k.clone())
+                        {
+                            self.peer_first_seen.remove(&oldest_peer);
+                        }
+                    }
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    self.peer_first_seen.entry(peer.clone()).or_insert(now_secs);
+                }
+
                 // Silent Canary: cancel any pending dark-peer confirmation.
                 self.canary.on_peer_reconnected(&peer);
 
@@ -908,8 +943,20 @@ impl<I: IngressPort> MeshSentinel<I> {
         use phalanx_proto::trust::TrustLevel;
 
         // Always populate the peer identity cache (memory-only).
-        self.peer_did_cache
-            .insert(origin.clone(), envelope.did.clone());
+        // R3-3 FIX: Cap cache size to prevent memory exhaustion from
+        // an attacker sending shards with many distinct NetworkIds.
+        const MAX_PEER_DID_CACHE: usize = 10_000;
+        if self.peer_did_cache.len() >= MAX_PEER_DID_CACHE
+            && !self.peer_did_cache.contains_key(origin)
+        {
+            tracing::debug!(
+                target: "phalanx::mesh",
+                "peer_did_cache at capacity, skipping new entry"
+            );
+        } else {
+            self.peer_did_cache
+                .insert(origin.clone(), envelope.did.clone());
+        }
 
         // Only register canary contributions during an active recording.
         if self.active_recording_id.is_none() {
@@ -1185,5 +1232,79 @@ impl<I: IngressPort> MeshSentinel<I> {
             }
             _ => {} // EclipseRisk::None — all clear
         }
+
+        // 3. Reciprocity floor sweep: detect black hole peers.
+        // Only active during recording — passive witnesses have nothing to forward.
+        if self.active_recording_id.is_some() {
+            let power_state = self.system_governor.current_power_state();
+            // Don't judge peers when we're in Leaf/Dormant — we're not contributing enough ourselves.
+            if !matches!(
+                power_state,
+                phalanx_proto::types::PowerState::Leaf | phalanx_proto::types::PowerState::Dormant
+            ) {
+                let params = ReciprocityParams::default();
+                let mesh_peer_count = self.topology_gate.peer_count();
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                let admitted_peers: Vec<NetworkId> =
+                    self.topology_gate.peer_ids().cloned().collect();
+
+                for peer_id in &admitted_peers {
+                    let first_seen = self
+                        .peer_first_seen
+                        .get(peer_id)
+                        .copied()
+                        .unwrap_or(now_secs);
+                    let connected_secs = now_secs.saturating_sub(first_seen);
+                    let contribution = self.system_governor.peer_contribution_value(&peer_id.0);
+                    let is_local_mesh = self
+                        .topology_gate
+                        .transport_class(peer_id)
+                        .is_some_and(|tc| tc == TransportClass::LocalMesh);
+
+                    let snapshot = PeerContribution {
+                        connected_secs,
+                        contribution_integral: contribution,
+                        is_local_mesh,
+                    };
+
+                    if let ReciprocityVerdict::NonReciprocal { deficit } =
+                        evaluate_reciprocity(&snapshot, &params, mesh_peer_count)
+                    {
+                        // Always: smooth reputation degradation via spectral anomaly.
+                        self.system_governor
+                            .record_spectral_anomaly(&peer_id.0, deficit * 5.0);
+
+                        // Severe deficit + known DID → formal offense for blacklist escalation.
+                        if deficit > 0.8 {
+                            if let Some(did) = self.peer_did_cache.get(peer_id) {
+                                let _ = self
+                                    .trust_tx
+                                    .send(TrustCommand::RecordOffense {
+                                        did: did.clone(),
+                                        offense: Offense::NonReciprocal,
+                                    })
+                                    .await;
+                            }
+                        }
+
+                        tracing::debug!(
+                            target: "phalanx::shield_wall",
+                            event = "reciprocity_deficit",
+                            peer = %peer_id,
+                            deficit = deficit,
+                            connected_secs = connected_secs,
+                            "Black hole detection: peer below reciprocity floor"
+                        );
+                    }
+                }
+            }
+        }
+
+        // 4. Prune stale r_integrals entries (bounds memory for all namespaced keys).
+        self.system_governor.prune_stale_integrals();
     }
 }

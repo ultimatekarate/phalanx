@@ -16,6 +16,7 @@ pub enum Offense {
     TemporalSkew,
     SpectralAnomaly,
     EclipseAttempt,
+    NonReciprocal,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
