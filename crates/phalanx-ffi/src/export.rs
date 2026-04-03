@@ -35,7 +35,7 @@ use phalanx_forensics::reassembler::decompress_payload;
 use phalanx_forensics::transcode::{transcode_to_mp4, DecodedAudioShard, DecodedVideoShard};
 use phalanx_node::actors::storage::StorageCommand;
 use phalanx_proto::evidence::{Evidence, MediaType};
-use phalanx_proto::identity::RecordingId;
+use phalanx_proto::identity::{Did, RecordingId};
 use phalanx_proto::prelude::PhalanxIdentity;
 use phalanx_proto::types::Fps;
 
@@ -163,9 +163,12 @@ async fn build_c2pa_export(
 
     let (reply_tx, reply_rx) = oneshot::channel();
     storage_tx
+        // R2-4 FIX: Pass local DID for C1 ownership consistency.
+        // Export is always local (vault_key holder), so the check passes,
+        // but the code path now exercises the ownership guard.
         .send(StorageCommand::Retrieval {
             recording_id: rec_id,
-            owner_did: None,
+            owner_did: Some(Did::new(node_did)),
             reply_to: reply_tx,
         })
         .await
