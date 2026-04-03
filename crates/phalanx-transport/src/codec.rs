@@ -20,8 +20,11 @@ impl request_response::Codec for PhalanxRetrievalProtocol {
         T: AsyncRead + Unpin + Send,
     {
         let payload = self.read_length_prefixed(io).await?;
-        postcard::from_bytes(&payload)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        // H3 FIX: Enforce wire bounds on inbound requests (matches read_response pattern).
+        let mut request: RecordingRequest = postcard::from_bytes(&payload)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        request.enforce_wire_bounds();
+        Ok(request)
     }
 
     async fn read_response<T>(

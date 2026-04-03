@@ -203,6 +203,21 @@ impl<J: TransientJournal> StorageActor<J> {
             );
         }
 
+        // C2 FIX: Seed the replay filter from recently persisted evidence hashes.
+        // Prevents post-crash replay attacks by pre-populating the Bloom filter
+        // with hashes from the most recent shards per recording.
+        let seed_hashes = self.guardian.collect_recent_evidence_hashes(50).await;
+        for hash in &seed_hashes {
+            self.replay_filter.insert(hash);
+        }
+        if !seed_hashes.is_empty() {
+            tracing::info!(
+                target: "phalanx::storage",
+                count = seed_hashes.len(),
+                "C2: Replay filter seeded from persisted evidence"
+            );
+        }
+
         self.cleanup_ghost_keys().await;
     }
 

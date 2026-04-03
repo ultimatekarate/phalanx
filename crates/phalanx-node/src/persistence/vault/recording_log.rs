@@ -143,11 +143,16 @@ impl Guardian {
     }
 
     /// Read a single shard from the recording log by sequence_id. O(1) via index lookup.
+    ///
+    /// When `owner_did` is `Some`, the caller asserts the recording belongs to that
+    /// DID. The Guardian rejects the read if the actual owner does not match
+    /// (defense-in-depth — the retrieval actor already verifies signatures, but the
+    /// storage layer should not blindly trust its callers).
     pub async fn read_shard(
         &mut self,
         recording_id: &RecordingId,
         sequence_id: StorageSequence,
-        _owner_did: Option<&Did>,
+        owner_did: Option<&Did>,
     ) -> Result<WitnessEnvelope, GuardianError> {
         // Resolve decryption key before taking mutable borrow on recording_logs
         let key = self.resolve_encryption_key(recording_id);
@@ -155,6 +160,22 @@ impl Guardian {
         let log = self.recording_logs.get_mut(recording_id).ok_or_else(|| {
             GuardianError::StorageFailure(format!("No recording log for {}", recording_id))
         })?;
+
+        // C1 FIX: Defense-in-depth ownership check at the storage layer.
+        if let Some(claimed) = owner_did {
+            if *claimed != log.owner_did {
+                tracing::warn!(
+                    target: "phalanx::guardian",
+                    recording = %recording_id,
+                    claimed = %claimed,
+                    actual = %log.owner_did,
+                    "C1: Ownership mismatch — read rejected"
+                );
+                return Err(GuardianError::StorageFailure(
+                    "Ownership mismatch".to_string(),
+                ));
+            }
+        }
 
         let &offset = log.index.get(&sequence_id).ok_or_else(|| {
             GuardianError::StorageFailure(format!(
@@ -204,10 +225,13 @@ impl Guardian {
     }
 
     /// Read all shards from a recording log. Linear scan, returns sorted by sequence_id.
+    ///
+    /// When `owner_did` is `Some`, rejects the read if the actual recording owner
+    /// does not match (C1 defense-in-depth).
     pub async fn read_all_shards(
         &mut self,
         recording_id: &RecordingId,
-        _owner_did: Option<&Did>,
+        owner_did: Option<&Did>,
     ) -> Result<Vec<WitnessEnvelope>, GuardianError> {
         // Resolve decryption key before taking mutable borrow on recording_logs
         let key = self.resolve_encryption_key(recording_id);
@@ -216,6 +240,22 @@ impl Guardian {
             Some(l) => l,
             None => return Ok(vec![]),
         };
+
+        // C1 FIX: Defense-in-depth ownership check at the storage layer.
+        if let Some(claimed) = owner_did {
+            if *claimed != log.owner_did {
+                tracing::warn!(
+                    target: "phalanx::guardian",
+                    recording = %recording_id,
+                    claimed = %claimed,
+                    actual = %log.owner_did,
+                    "C1: Ownership mismatch — bulk read rejected"
+                );
+                return Err(GuardianError::StorageFailure(
+                    "Ownership mismatch".to_string(),
+                ));
+            }
+        }
 
         log.file
             .seek(SeekFrom::Start(0))
@@ -283,12 +323,83 @@ impl Guardian {
         self.recording_logs.keys().cloned().collect()
     }
 
+    /// C2 FIX: Collect evidence_hash values from persisted recording logs to seed
+    /// the replay filter on startup. Decrypts at most `budget_per_recording`
+    /// recent frames per recording to extract real evidence_hash values.
+    ///
+    /// This prevents post-crash replay attacks where an adversary re-submits
+    /// previously-seen evidence while the Bloom filter is empty.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    pub async fn collect_recent_evidence_hashes(
+        &mut self,
+        budget_per_recording: usize,
+    ) -> Vec<[u8; 32]> {
+        let recording_ids: Vec<RecordingId> = self.recording_logs.keys().cloned().collect();
+        let mut hashes = Vec::new();
+
+        for rid in &recording_ids {
+            let key = self.resolve_encryption_key(rid);
+            let Some(log) = self.recording_logs.get_mut(rid) else {
+                continue;
+            };
+
+            // Read the last `budget_per_recording` offsets (most recent shards).
+            let offsets: Vec<u64> = log
+                .index
+                .values()
+                .rev()
+                .take(budget_per_recording)
+                .copied()
+                .collect();
+
+            for offset in offsets {
+                if log.file.seek(SeekFrom::Start(offset)).await.is_err() {
+                    continue;
+                }
+                let mut header = [0u8; RECORDING_FRAME_HEADER_LEN];
+                if log.file.read_exact(&mut header).await.is_err() {
+                    continue;
+                }
+                let payload_len = u32::from_le_bytes(
+                    header
+                        .get(4..8)
+                        .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                        .unwrap_or([0; 4]),
+                ) as usize;
+                if payload_len < AEAD_NONCE_LEN || payload_len > MAX_WAL_CHUNK_BYTES as usize {
+                    continue;
+                }
+                let mut payload = vec![0u8; payload_len];
+                if log.file.read_exact(&mut payload).await.is_err() {
+                    continue;
+                }
+                let (nonce, ciphertext) = payload.split_at(AEAD_NONCE_LEN);
+                let Ok(plaintext) = decrypt_bytes(&key, nonce, ciphertext) else {
+                    continue;
+                };
+                if let Ok(env) = postcard::from_bytes::<WitnessEnvelope>(&plaintext) {
+                    hashes.push(env.evidence_hash);
+                }
+            }
+        }
+
+        // Restore file positions to end for future appends.
+        for log in self.recording_logs.values_mut() {
+            let _ = log.file.seek(SeekFrom::End(0)).await;
+        }
+
+        hashes
+    }
+
     /// Rebuild recording log indexes on startup by scanning vault for .recording files.
     pub async fn hydrate_recording_logs(&mut self) -> Result<(), GuardianError> {
         let vault_dir = PathBuf::from(&self.vault_path);
         if !vault_dir.exists() {
             return Ok(());
         }
+
+        // M3 FIX: Clean up orphaned .tmp files from interrupted atomic writes.
+        Self::cleanup_orphaned_tmp_files(&vault_dir).await;
 
         let mut dir_entries = fs::read_dir(&vault_dir)
             .await
@@ -365,6 +476,39 @@ impl Guardian {
             }
         }
         Ok(())
+    }
+
+    /// M3 FIX: Remove orphaned `.tmp` files left by interrupted atomic writes.
+    /// Scans the vault root and all DID subdirectories.
+    async fn cleanup_orphaned_tmp_files(vault_dir: &std::path::Path) {
+        let mut cleaned = 0u32;
+        let Ok(mut entries) = fs::read_dir(vault_dir).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                if fs::remove_file(&path).await.is_ok() {
+                    cleaned = cleaned.saturating_add(1);
+                }
+            } else if path.is_dir() {
+                // Recurse into DID subdirectories (one level only).
+                let Ok(mut sub) = fs::read_dir(&path).await else {
+                    continue;
+                };
+                while let Ok(Some(sub_entry)) = sub.next_entry().await {
+                    let sub_path = sub_entry.path();
+                    if sub_path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                        if fs::remove_file(&sub_path).await.is_ok() {
+                            cleaned = cleaned.saturating_add(1);
+                        }
+                    }
+                }
+            }
+        }
+        if cleaned > 0 {
+            tracing::info!(count = cleaned, "M3: Cleaned up orphaned .tmp files");
+        }
     }
 
     /// Rebuild the in-memory index from a recording log file. Tolerates corrupt tail frames.

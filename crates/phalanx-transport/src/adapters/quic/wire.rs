@@ -3,6 +3,7 @@
 // Wire protocol types and length-prefixed framing for the QUIC transport.
 
 use phalanx_proto::retrieval::{RecordingRequest, RecordingResponse};
+use phalanx_proto::wire::WireBound;
 use phalanx_proto::MAX_PAYLOAD_SIZE;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -96,5 +97,15 @@ pub(crate) async fn read_frame(
     let mut payload = vec![0u8; payload_len];
     stream.read_exact(&mut payload).await?;
 
-    postcard::from_bytes(&payload).map_err(|e| QuicError::Codec(e.to_string()))
+    let mut msg: QuicWireMessage =
+        postcard::from_bytes(&payload).map_err(|e| QuicError::Codec(e.to_string()))?;
+
+    // H3 FIX: Enforce wire bounds on inbound request/response payloads.
+    match &mut msg {
+        QuicWireMessage::Request { request, .. } => request.enforce_wire_bounds(),
+        QuicWireMessage::Response { response, .. } => response.enforce_wire_bounds(),
+        _ => {}
+    }
+
+    Ok(msg)
 }

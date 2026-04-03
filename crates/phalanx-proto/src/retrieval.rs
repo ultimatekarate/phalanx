@@ -13,6 +13,47 @@ pub struct RecordingRequest {
     pub signature: Vec<u8>,        // Proof of requester identity
 }
 
+impl RecordingRequest {
+    /// H1: Maximum byte length for the Ed25519 signature field.
+    const MAX_SIGNATURE_LEN: usize = 64;
+}
+
+/// H3: Wire-bound enforcement for inbound retrieval requests.
+/// Truncates oversized string identifiers and signature fields to prevent
+/// amplification via multi-megabyte DIDs or RecordingIds.
+impl crate::wire::WireBound for RecordingRequest {
+    fn enforce_wire_bounds(&mut self) {
+        if self.target_did.0.len() > Did::MAX_WIRE_LEN {
+            tracing::warn!(
+                len = self.target_did.0.len(),
+                limit = Did::MAX_WIRE_LEN,
+                "H1: Wire bound — target_did truncated"
+            );
+            self.target_did.0.truncate(Did::MAX_WIRE_LEN);
+        }
+        if self.recording_id.0.len() > RecordingId::MAX_WIRE_LEN {
+            tracing::warn!(
+                len = self.recording_id.0.len(),
+                limit = RecordingId::MAX_WIRE_LEN,
+                "H1: Wire bound — recording_id truncated"
+            );
+            self.recording_id.0.truncate(RecordingId::MAX_WIRE_LEN);
+        }
+        if self.locator.recipient.0.len() > Did::MAX_WIRE_LEN {
+            self.locator.recipient.0.truncate(Did::MAX_WIRE_LEN);
+        }
+        if self.locator.sender.0.len() > Did::MAX_WIRE_LEN {
+            self.locator.sender.0.truncate(Did::MAX_WIRE_LEN);
+        }
+        if self.locator.target.0.len() > RecordingId::MAX_WIRE_LEN {
+            self.locator.target.0.truncate(RecordingId::MAX_WIRE_LEN);
+        }
+        if self.signature.len() > Self::MAX_SIGNATURE_LEN {
+            self.signature.truncate(Self::MAX_SIGNATURE_LEN);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RecordingResponse {
     Success(Vec<ForensicUnit<WitnessEnvelope, Sealed>>),
