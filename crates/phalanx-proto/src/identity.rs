@@ -16,6 +16,9 @@ pub struct ShardId(pub u64);
 pub struct RecordingId(pub String);
 
 impl RecordingId {
+    /// H1: Maximum byte length for a RecordingId on the wire.
+    pub const MAX_WIRE_LEN: usize = 256;
+
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
@@ -55,6 +58,10 @@ impl From<&str> for RecordingId {
 pub struct Did(pub String);
 
 impl Did {
+    /// H1: Maximum byte length for a DID on the wire.
+    /// A valid `did:key:z...` with Ed25519 is ~60 bytes; 512 is generous.
+    pub const MAX_WIRE_LEN: usize = 512;
+
     pub fn new<S: Into<String>>(val: S) -> Self {
         Self(val.into())
     }
@@ -109,14 +116,23 @@ impl Did {
             })
             .collect();
 
-        // Verify no traversal components survived (defense-in-depth)
-        debug_assert!(
-            !std::path::Path::new(&sanitized)
-                .components()
-                .any(|c| !matches!(c, std::path::Component::Normal(_))),
-            "to_safe_name produced a traversal path: {}",
-            sanitized
-        );
+        // M1 FIX: Runtime traversal check (promoted from debug_assert).
+        // The character-level sanitization above should make traversal impossible,
+        // but if it ever fails, fall back to a hash-based name rather than
+        // silently producing a traversal path in production.
+        if std::path::Path::new(&sanitized)
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            // Should be unreachable given the sanitization above, but fail safe.
+            return format!("_hash_{:08x}", {
+                let mut h: u32 = 5381;
+                for b in self.0.as_bytes() {
+                    h = h.wrapping_mul(33).wrapping_add(u32::from(*b));
+                }
+                h
+            });
+        }
 
         // Final guard: if empty after sanitization, return a fixed placeholder
         if sanitized.is_empty() {
@@ -166,6 +182,8 @@ impl AsRef<str> for Did {
 pub struct NetworkId(pub String);
 
 impl NetworkId {
+    /// H1: Maximum byte length for a NetworkId on the wire.
+    pub const MAX_WIRE_LEN: usize = 256;
     /// Returns the forensic identifier as a Base58 string.
     /// In the Dictionary layer, this is an identity operation as the
     /// representation is already encoded.
