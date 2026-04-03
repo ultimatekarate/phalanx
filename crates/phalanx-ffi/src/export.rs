@@ -281,15 +281,14 @@ fn create_identity_signer(identity: &PhalanxIdentity) -> CallbackSigner {
     use ed25519_dalek::Signer;
 
     let signing_key = identity.keypair.clone();
-    let verifying_key = signing_key.verifying_key();
-    let cert_der = generate_self_signed_cert(&verifying_key);
+    let cert_pem = generate_self_signed_cert(&signing_key);
 
     let callback = move |_context: *const (), data: &[u8]| -> c2pa::Result<Vec<u8>> {
         let signature = signing_key.sign(data);
         Ok(signature.to_bytes().to_vec())
     };
 
-    CallbackSigner::new(callback, SigningAlg::Ed25519, cert_der)
+    CallbackSigner::new(callback, SigningAlg::Ed25519, cert_pem)
 }
 
 #[cfg(test)]

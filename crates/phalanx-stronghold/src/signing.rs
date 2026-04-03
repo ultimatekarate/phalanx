@@ -31,10 +31,9 @@ pub fn create_stronghold_signer(
     }
 
     // Self-signed path: use the Stronghold's identity keypair.
-    let verifying_key = identity.keypair.verifying_key();
-    let cert_der = generate_self_signed_cert(&verifying_key);
+    let cert_pem = generate_self_signed_cert(&identity.keypair);
 
-    if cert_der.is_empty() {
+    if cert_pem.is_empty() {
         return Err(StrongholdError::Export(
             "Failed to generate self-signed certificate".to_string(),
         ));
@@ -49,6 +48,6 @@ pub fn create_stronghold_signer(
         Ok(signature.to_bytes().to_vec())
     };
 
-    let signer = CallbackSigner::new(callback, SigningAlg::Ed25519, cert_der);
+    let signer = CallbackSigner::new(callback, SigningAlg::Ed25519, cert_pem);
     Ok(Box::new(signer))
 }

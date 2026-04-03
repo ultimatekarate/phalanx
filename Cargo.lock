@@ -3732,6 +3732,7 @@ dependencies = [
  "rand_core 0.6.4",
  "raptorq",
  "rcgen",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "sha2",
