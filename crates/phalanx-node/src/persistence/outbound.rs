@@ -47,6 +47,12 @@ pub struct OutboundQueue {
 /// Maximum number of failed attempts before an entry is abandoned.
 const MAX_ATTEMPTS: u32 = 10;
 
+/// R2-3 FIX: Hard capacity limit for the outbound queue (16 MiB).
+/// The integral regulator provides soft backpressure via storage_pressure,
+/// but a burst of failed publishes can outpace the signal. This prevents
+/// unbounded memory growth.
+const MAX_QUEUE_BYTES: u64 = 16 * 1024 * 1024;
+
 impl OutboundQueue {
     /// Create a new OutboundQueue, recovering any entries from disk.
     pub async fn new(wal_dir: PathBuf) -> std::io::Result<Self> {
@@ -70,10 +76,24 @@ impl OutboundQueue {
         envelope_bytes: Vec<u8>,
         captured_at: PhalanxTimestamp,
     ) -> std::io::Result<OutboundEntryId> {
+        let byte_len = envelope_bytes.len() as u64;
+
+        // R2-3 FIX: Reject if queue is at capacity.
+        if self.total_bytes.0.saturating_add(byte_len) > MAX_QUEUE_BYTES {
+            tracing::warn!(
+                event = "outbound_queue_full",
+                total_bytes = self.total_bytes.0,
+                entry_bytes = byte_len,
+                "OutboundQueue: capacity limit reached, dropping entry"
+            );
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Outbound queue capacity exceeded",
+            ));
+        }
+
         let id = OutboundEntryId(self.next_id);
         self.next_id += 1;
-
-        let byte_len = envelope_bytes.len() as u64;
 
         let entry = OutboundEntry {
             id,

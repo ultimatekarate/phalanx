@@ -276,6 +276,9 @@ impl AggregationActor {
             None => return,
         };
 
+        // R2-2 FIX: Save claimed DID before chunk is consumed by shard_crucible.
+        let claimed_did = chunk.owner_did.clone();
+
         // 5. Feed into shard_crucible. On decode -> WitnessEnvelope.
         let envelope = match self.shard_crucible.process(chunk) {
             Ok(Some(env)) => env,
@@ -302,6 +305,18 @@ impl AggregationActor {
             warn!(
                 did = %envelope.did,
                 "AggregationActor: envelope signature verification failed, dropping"
+            );
+            return;
+        }
+
+        // R2-2 FIX: Assert chunk.owner_did matches the verified envelope signer.
+        // Prevents an attacker from routing evidence into communities they don't belong to
+        // by spoofing owner_did in the ShardChunk while signing as a different DID.
+        if claimed_did != envelope.did {
+            warn!(
+                claimed = %claimed_did,
+                actual = %envelope.did,
+                "AggregationActor: chunk owner_did does not match envelope signer, dropping"
             );
             return;
         }
