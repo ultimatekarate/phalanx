@@ -1,15 +1,11 @@
 // crates/phalanx-stronghold/src/ops/export.rs
 //
 // One-shot export: re-decrypt with grants, re-verify gate bindings (zero trust),
-// serialize proof + decrypted evidence to disk as postcard files.
+// write postcard binaries (machine-readable archive) and C2PA manifest
+// (court-facing artifact, failure is fatal).
 //
 // Hands layer — owns IO. Keys are zeroized on drop (SymmetricKey
 // derives ZeroizeOnDrop). No persistent decrypted state.
-//
-// TODO: C2PA manifest building. For v1, we write postcard-serialized
-// proof + evidence binaries. The C2PA packaging path (c2pa_ext.rs)
-// will be wired in once the Builder API is stabilized for multi-asset
-// manifests with embedded forensic assertions.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,7 +17,7 @@ use phalanx_proto::crypto::{SealedLocator, SymmetricKey};
 use phalanx_proto::evidence::Evidence;
 use phalanx_proto::identity::{PhalanxIdentity, RecordingId};
 
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::config::CorroborationConfig;
 use crate::error::StrongholdError;
@@ -125,7 +121,8 @@ fn decrypt_recordings(
 ///
 /// Loads a previously-stored proof, re-decrypts the contributing recordings
 /// with grants (zero trust — never cache decrypted state), and writes
-/// postcard-serialized evidence files to `output_dir`.
+/// postcard binaries + C2PA manifest to a content-addressed subdirectory
+/// under `output_dir`.
 ///
 /// Returns the paths of all files written.
 #[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]
@@ -171,15 +168,17 @@ pub async fn run_export(
 
     // ── 6. Write export files ──────────────────────────────────────────
     //
-    // For v1: postcard-serialized binary files.
-    // TODO: Build C2PA manifest with embedded forensic assertions.
-    //       Wire through C2paOrchestrator::build_manifest_with_lens()
-    //       once multi-asset manifest signing is stabilized.
+    // Postcard binaries are the machine-readable archive.
+    // C2PA manifest is the court-facing artifact (fatal on failure).
 
-    tokio::fs::create_dir_all(output_dir).await.map_err(|e| {
+    // Content-addressed subdirectory: first 8 bytes (16 hex chars) of proof hash.
+    let hash_prefix = &hex_hash(proof_hash)[..16];
+    let export_dir = output_dir.join(hash_prefix);
+
+    tokio::fs::create_dir_all(&export_dir).await.map_err(|e| {
         StrongholdError::Export(format!(
-            "Failed to create output directory {}: {e}",
-            output_dir.display()
+            "Failed to create export directory {}: {e}",
+            export_dir.display()
         ))
     })?;
 
@@ -188,7 +187,7 @@ pub async fn run_export(
     // Write each recording's decrypted envelopes
     for rec in &recordings {
         let filename = format!("{}.evidence.bin", rec.id.as_str());
-        let path = output_dir.join(&filename);
+        let path = export_dir.join(&filename);
 
         let bytes = postcard::to_allocvec(&rec.artifacts).map_err(|e| {
             StrongholdError::Serialization(format!(
@@ -206,7 +205,7 @@ pub async fn run_export(
     }
 
     // Write the proof itself
-    let proof_path = output_dir.join("proof.bin");
+    let proof_path = export_dir.join("proof.bin");
     let proof_bytes = postcard::to_allocvec(&proof)
         .map_err(|e| StrongholdError::Serialization(format!("Failed to serialize proof: {e}")))?;
 
@@ -218,22 +217,16 @@ pub async fn run_export(
 
     written_paths.push(proof_path);
 
-    // ── 7. Build and sign C2PA sidecar manifest ─────────────────────
+    // ── 7. Build and sign C2PA manifest ──────────────────────────────
     //
-    // The C2PA sidecar is the court-facing artifact. Readable by any
+    // The C2PA manifest is the court-facing artifact. Readable by any
     // C2PA-compatible verification tool (Adobe CAI, Truepic, etc.).
+    // Failure is fatal — an export without C2PA has no standards-compliant
+    // verification path.
 
-    match build_c2pa_sidecar(identity, config, &proof, output_dir).await {
-        Ok(c2pa_path) => {
-            info!(path = %c2pa_path.display(), "C2PA sidecar manifest written");
-            written_paths.push(c2pa_path);
-        }
-        Err(e) => {
-            // C2PA sidecar is supplementary — don't fail the entire export.
-            // The binary evidence and proof files are the primary output.
-            warn!(error = %e, "C2PA sidecar generation failed — binary export is still valid");
-        }
-    }
+    let c2pa_path = build_c2pa_sidecar(identity, config, &proof, &export_dir).await?;
+    info!(path = %c2pa_path.display(), "C2PA manifest written");
+    written_paths.push(c2pa_path);
 
     info!(
         files = written_paths.len(),
@@ -245,11 +238,15 @@ pub async fn run_export(
     Ok(written_paths)
 }
 
-/// Build and sign a C2PA sidecar manifest for the corroboration proof.
+/// Build and sign a C2PA manifest for the corroboration proof.
 ///
-/// The sidecar embeds the proof's forensic assertions (event window, device
-/// attestations, sensor divergences, proximity count) as structured C2PA claims.
-/// Readable by any C2PA-compatible verification tool.
+/// Embeds the proof's forensic assertions (event window, device attestations,
+/// sensor divergences, proximity count, ingredient references) as structured
+/// C2PA claims. Readable by any C2PA-compatible verification tool.
+///
+/// The source asset is a minimal 1x1 JPEG carrier. C2PA requires a supported
+/// media format for signing; the forensic data lives entirely in the manifest
+/// assertions, not in the carrier pixels.
 #[allow(clippy::cast_possible_truncation)] // Overlap duration millis — bounded by event window.
 async fn build_c2pa_sidecar(
     identity: &PhalanxIdentity,
@@ -267,32 +264,54 @@ async fn build_c2pa_sidecar(
     // Create the signer (Hands — wiring).
     let signer = create_stronghold_signer(identity, config)?;
 
-    // Create a JSON summary as the "source" asset for the sidecar.
-    let proof_summary = serde_json::json!({
-        "type": "PhalanxCorroborationProof",
-        "version": 1,
-        "proof_hash": hex_hash(&proof.proof_hash),
-        "producer": identity.did.as_ref(),
-        "device_count": proof.attestations.len(),
-        "overlap_duration_ms": proof.event_window.overlap_duration().as_millis() as u64,
-    });
-    let source_bytes = serde_json::to_vec_pretty(&proof_summary).map_err(|e| {
-        StrongholdError::Serialization(format!("Failed to serialize proof summary: {e}"))
-    })?;
+    // Minimal 1x1 white JPEG — carrier asset for C2PA signing.
+    // The forensic data lives in manifest assertions, not in the pixels.
+    #[rustfmt::skip]
+    const CARRIER_JPEG: &[u8] = &[
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+        0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43,
+        0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08, 0x07, 0x07, 0x07, 0x09,
+        0x09, 0x08, 0x0A, 0x0C, 0x14, 0x0D, 0x0C, 0x0B, 0x0B, 0x0C, 0x19, 0x12,
+        0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D, 0x1A, 0x1C, 0x1C, 0x20,
+        0x24, 0x2E, 0x27, 0x20, 0x22, 0x2C, 0x23, 0x1C, 0x1C, 0x28, 0x37, 0x29,
+        0x2C, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1F, 0x27, 0x39, 0x3D, 0x38, 0x32,
+        0x3C, 0x2E, 0x33, 0x34, 0x32, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01,
+        0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00, 0x1F, 0x00, 0x00,
+        0x01, 0x05, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0A, 0x0B, 0xFF, 0xC4, 0x00, 0xB5, 0x10, 0x00, 0x02, 0x01, 0x03,
+        0x03, 0x02, 0x04, 0x03, 0x05, 0x05, 0x04, 0x04, 0x00, 0x00, 0x01, 0x7D,
+        0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06,
+        0x13, 0x51, 0x61, 0x07, 0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xA1, 0x08,
+        0x23, 0x42, 0xB1, 0xC1, 0x15, 0x52, 0xD1, 0xF0, 0x24, 0x33, 0x62, 0x72,
+        0x82, 0x09, 0x0A, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x25, 0x26, 0x27, 0x28,
+        0x29, 0x2A, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x43, 0x44, 0x45,
+        0x46, 0x47, 0x48, 0x49, 0x4A, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59,
+        0x5A, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x73, 0x74, 0x75,
+        0x76, 0x77, 0x78, 0x79, 0x7A, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,
+        0x8A, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0xA2, 0xA3,
+        0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6,
+        0xB7, 0xB8, 0xB9, 0xBA, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9,
+        0xCA, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xE1, 0xE2,
+        0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xF1, 0xF2, 0xF3, 0xF4,
+        0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01,
+        0x00, 0x00, 0x3F, 0x00, 0x7B, 0x94, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xD9,
+    ];
 
-    // Sign the manifest, producing the C2PA sidecar bytes.
-    let mut source = Cursor::new(&source_bytes);
+    // Sign the manifest into the JPEG carrier, producing C2PA-embedded output.
+    let mut source = Cursor::new(CARRIER_JPEG);
     let mut dest = Cursor::new(Vec::new());
 
     builder
-        .sign(signer.as_ref(), "application/json", &mut source, &mut dest)
+        .sign(signer.as_ref(), "image/jpeg", &mut source, &mut dest)
         .map_err(|e| StrongholdError::Export(format!("C2PA signing failed: {e}")))?;
 
-    // Write the sidecar to disk.
+    // Write the signed manifest to disk.
     let c2pa_path = output_dir.join("proof.c2pa");
     tokio::fs::write(&c2pa_path, dest.into_inner())
         .await
-        .map_err(|e| StrongholdError::Export(format!("Failed to write C2PA sidecar: {e}")))?;
+        .map_err(|e| StrongholdError::Export(format!("Failed to write C2PA manifest: {e}")))?;
 
     Ok(c2pa_path)
 }

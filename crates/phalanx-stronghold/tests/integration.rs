@@ -31,6 +31,7 @@ use phalanx_forensics::witness::WitnessAuthority;
 
 use phalanx_stronghold::config::CorroborationConfig;
 use phalanx_stronghold::ops::corroborate::run_corroboration;
+use phalanx_stronghold::ops::export::run_export;
 use phalanx_stronghold::persistence::evidence_store::EvidenceStore;
 use phalanx_stronghold::persistence::proof_store::ProofStore;
 
@@ -764,4 +765,233 @@ async fn community_concurrent_imports() {
     let _ = handle.await;
 
     assert_eq!(errors, 0, "All concurrent imports should succeed");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Test 9: End-to-end export with C2PA manifest, ingredient references,
+//         and content-addressed filenames
+// ═══════════════════════════════════════════════════════════════════════
+
+fn hex_hash(hash: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in hash {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+#[tokio::test]
+async fn export_end_to_end_c2pa() {
+    // ── 1. Create identities ────────────────────────────────────────
+    let alice_id = PhalanxIdentity::new_ephemeral();
+    let bob_id = PhalanxIdentity::new_ephemeral();
+    let stronghold_id = PhalanxIdentity::new_ephemeral();
+
+    // ── 2. Community with real vouches ──────────────────────────────
+    let community = make_community_with_real_vouches(
+        50,
+        &[&alice_id, &bob_id],
+        &[&alice_id, &bob_id],
+        "Export Test Community",
+    );
+    let community_id = community.fingerprint;
+
+    // ── 3. Signed+encrypted video envelopes ─────────────────────────
+    let alice_key = SymmetricKey([0x33u8; 32]);
+    let bob_key = SymmetricKey([0x44u8; 32]);
+
+    let alice_rec_id = RecordingId::new("rec-alice-export");
+    let bob_rec_id = RecordingId::new("rec-bob-export");
+
+    let frame_count = 30u32;
+    let alice_envelopes: Vec<WitnessEnvelope> = (0..frame_count)
+        .map(|seq| {
+            make_signed_encrypted_envelope(seq, &alice_rec_id, &alice_id, &alice_key, 150.0, 1000)
+        })
+        .collect();
+
+    let bob_envelopes: Vec<WitnessEnvelope> = (0..frame_count)
+        .map(|seq| make_signed_encrypted_envelope(seq, &bob_rec_id, &bob_id, &bob_key, 220.0, 1100))
+        .collect();
+
+    // ── 4. Store envelopes in EvidenceStore ──────────────────────────
+    let dir = tempdir().unwrap();
+    let evidence_store = EvidenceStore::new(dir.path().to_path_buf());
+    let proof_store = ProofStore::new(dir.path().join("proofs"));
+
+    for env in &alice_envelopes {
+        evidence_store
+            .append_envelope(&community_id, &alice_rec_id, env)
+            .await
+            .unwrap();
+    }
+    for env in &bob_envelopes {
+        evidence_store
+            .append_envelope(&community_id, &bob_rec_id, env)
+            .await
+            .unwrap();
+    }
+
+    // ── 5. Create grant files ───────────────────────────────────────
+    let alice_locator = SealedLocator::seal(
+        alice_rec_id.clone(),
+        alice_key.as_bytes(),
+        &alice_id,
+        stronghold_id.did.clone(),
+        GrantPermissions {
+            export: true,
+            playback: false,
+        },
+    )
+    .expect("Alice grant seal failed");
+
+    let bob_locator = SealedLocator::seal(
+        bob_rec_id.clone(),
+        bob_key.as_bytes(),
+        &bob_id,
+        stronghold_id.did.clone(),
+        GrantPermissions {
+            export: true,
+            playback: false,
+        },
+    )
+    .expect("Bob grant seal failed");
+
+    let grants_dir = dir.path().join("grants");
+    tokio::fs::create_dir_all(&grants_dir).await.unwrap();
+
+    let alice_grant_path = grants_dir.join("alice.grant");
+    let bob_grant_path = grants_dir.join("bob.grant");
+
+    tokio::fs::write(
+        &alice_grant_path,
+        postcard::to_allocvec(&alice_locator).unwrap(),
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        &bob_grant_path,
+        postcard::to_allocvec(&bob_locator).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    // ── 6. Run corroboration to produce a proof ─────────────────────
+    let config = CorroborationConfig {
+        min_overlap_ms: 100,
+        divergence_alpha: 0.05,
+        c2pa_cert_path: None,
+        c2pa_key_path: None,
+    };
+
+    let grant_paths = vec![alice_grant_path, bob_grant_path];
+    let recording_ids = vec![alice_rec_id.clone(), bob_rec_id.clone()];
+
+    let proof = run_corroboration(
+        &stronghold_id,
+        &evidence_store,
+        &proof_store,
+        &config,
+        &community_id,
+        &grant_paths,
+        &recording_ids,
+    )
+    .await
+    .expect("run_corroboration should succeed");
+
+    // ── 7. Run export ───────────────────────────────────────────────
+    let export_output = tempdir().unwrap();
+    let written = run_export(
+        &stronghold_id,
+        &evidence_store,
+        &proof_store,
+        &config,
+        &community_id,
+        &proof.proof_hash,
+        &grant_paths,
+        export_output.path(),
+    )
+    .await
+    .expect("export should succeed");
+
+    // ── 8. Assertions ───────────────────────────────────────────────
+
+    // 8a. Content-addressed subdirectory exists
+    let hash_prefix = hex_hash(&proof.proof_hash)[..16].to_string();
+    let export_dir = export_output.path().join(&hash_prefix);
+    assert!(
+        export_dir.is_dir(),
+        "Content-addressed subdirectory should exist: {}",
+        export_dir.display()
+    );
+
+    // 8b. Correct file count: 2 evidence + 1 proof + 1 C2PA = 4
+    assert_eq!(
+        written.len(),
+        4,
+        "Expected 4 files (2 evidence + proof + C2PA), got {}",
+        written.len()
+    );
+
+    // 8c. All files are inside the content-addressed subdirectory
+    for path in &written {
+        assert!(
+            path.starts_with(&export_dir),
+            "All files should be under {}: got {}",
+            export_dir.display(),
+            path.display()
+        );
+    }
+
+    // 8d. Evidence files exist and are non-empty
+    let alice_evidence = export_dir.join("rec-alice-export.evidence.bin");
+    let bob_evidence = export_dir.join("rec-bob-export.evidence.bin");
+    assert!(alice_evidence.exists(), "Alice evidence file should exist");
+    assert!(bob_evidence.exists(), "Bob evidence file should exist");
+    assert!(
+        tokio::fs::metadata(&alice_evidence).await.unwrap().len() > 0,
+        "Alice evidence should be non-empty"
+    );
+    assert!(
+        tokio::fs::metadata(&bob_evidence).await.unwrap().len() > 0,
+        "Bob evidence should be non-empty"
+    );
+
+    // 8e. Proof file exists and round-trips via postcard
+    let proof_path = export_dir.join("proof.bin");
+    let proof_bytes = tokio::fs::read(&proof_path).await.unwrap();
+    let loaded_proof: CorroborationProof =
+        postcard::from_bytes(&proof_bytes).expect("proof.bin should deserialize");
+    assert_eq!(loaded_proof.proof_hash, proof.proof_hash);
+    assert_eq!(loaded_proof.attestations.len(), 2);
+
+    // 8f. C2PA manifest exists and is non-empty (proves fatal-on-failure works)
+    let c2pa_path = export_dir.join("proof.c2pa");
+    assert!(
+        c2pa_path.exists(),
+        "C2PA manifest must exist (fatal on failure)"
+    );
+    assert!(
+        tokio::fs::metadata(&c2pa_path).await.unwrap().len() > 0,
+        "C2PA manifest should be non-empty"
+    );
+
+    // 8g. Re-export is idempotent (same directory, no error)
+    let written2 = run_export(
+        &stronghold_id,
+        &evidence_store,
+        &proof_store,
+        &config,
+        &community_id,
+        &proof.proof_hash,
+        &grant_paths,
+        export_output.path(),
+    )
+    .await
+    .expect("re-export should succeed (idempotent)");
+    assert_eq!(
+        written2.len(),
+        4,
+        "Re-export should produce same file count"
+    );
 }

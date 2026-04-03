@@ -61,7 +61,7 @@ impl C2paOrchestrator {
         proof: &CorroborationProof,
     ) -> Result<Builder, c2pa::Error> {
         let mut builder = Builder::new();
-        builder.set_format("application/json");
+        builder.set_format("image/jpeg");
 
         // Producer identity
         builder.add_assertion("phalanx.corroboration.producer", &producer_did)?;
@@ -134,6 +134,20 @@ impl C2paOrchestrator {
             &proof.proximity_evidence.len(),
         )?;
 
+        // Each contributing recording is a C2PA ingredient, referenced by its
+        // encrypted evidence hash chain. This establishes the provenance link:
+        // device capture → encrypted shard → corroboration proof → C2PA manifest.
+        for attestation in &proof.attestations {
+            let mut ingredient = c2pa::Ingredient::new_v2(
+                format!("phalanx:recording:{}", attestation.recording_id.as_str()),
+                "application/octet-stream",
+            );
+            ingredient
+                .set_hash(hex::encode(attestation.chain_head))
+                .set_relationship(c2pa::Relationship::ComponentOf);
+            builder.add_ingredient(ingredient);
+        }
+
         Ok(builder)
     }
 }
@@ -142,27 +156,56 @@ impl C2paOrchestrator {
 
 /// Generate a self-signed X.509 certificate for C2PA signing.
 ///
+/// Returns the certificate in PEM format (what `CallbackSigner` expects).
+/// The certificate's public key matches the provided signing key, so C2PA
+/// validators can verify the signature chain.
+///
 /// Pure crypto — no IO. Caller wraps in `CallbackSigner` (Hands).
 /// Used by both phalanx-ffi (mobile export) and phalanx-stronghold (proof export).
-pub fn generate_self_signed_cert(verifying_key: &ed25519_dalek::VerifyingKey) -> Vec<u8> {
-    use rcgen::{CertificateParams, KeyPair, PKCS_ED25519};
+pub fn generate_self_signed_cert(signing_key: &ed25519_dalek::SigningKey) -> Vec<u8> {
+    use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, KeyUsagePurpose, PKCS_ED25519};
 
-    let Ok(params) = CertificateParams::new(vec!["phalanx-stronghold.local".to_string()]) else {
+    let Ok(mut params) = CertificateParams::new(vec!["phalanx-stronghold.local".to_string()])
+    else {
         return Vec::new();
     };
 
-    // Generate a fresh keypair for the cert. The cert's public key won't match
-    // the signer — this is acceptable for self-signed forensic provenance.
-    // The forensic data (PRNU, proof hash) is what matters, not the CA chain.
-    let Ok(key_pair) = KeyPair::generate_for(&PKCS_ED25519) else {
+    // C2PA §14.5 requires: digitalSignature key usage, an allowed EKU
+    // (email_protection is the first checked by c2pa-rs), and an
+    // AuthorityKeyIdentifier extension.
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::EmailProtection];
+    params.use_authority_key_identifier_extension = true;
+
+    // Wrap the identity's Ed25519 secret key in PKCS8 DER so rcgen can use it.
+    // Ed25519 PKCS8 format: fixed ASN.1 prefix (16 bytes) + 34-byte octet string
+    // wrapping the 32-byte secret key.
+    let secret_bytes = signing_key.to_bytes();
+    let mut pkcs8_der = Vec::with_capacity(48);
+    // SEQUENCE { SEQUENCE { OID 1.3.101.112 } OCTET STRING { OCTET STRING (32 bytes) } }
+    pkcs8_der.extend_from_slice(&[
+        0x30, 0x2E, // SEQUENCE, 46 bytes
+        0x02, 0x01, 0x00, // INTEGER 0 (version)
+        0x30, 0x05, // SEQUENCE, 5 bytes
+        0x06, 0x03, 0x2B, 0x65, 0x70, // OID 1.3.101.112 (Ed25519)
+        0x04, 0x22, // OCTET STRING, 34 bytes
+        0x04, 0x20, // OCTET STRING, 32 bytes (the actual key)
+    ]);
+    pkcs8_der.extend_from_slice(&secret_bytes);
+
+    let pkcs8_key = rcgen::KeyPair::from_der_and_sign_algo(
+        &rustls_pki_types::PrivateKeyDer::Pkcs8(rustls_pki_types::PrivatePkcs8KeyDer::from(
+            pkcs8_der,
+        )),
+        &PKCS_ED25519,
+    );
+
+    let Ok(key_pair) = pkcs8_key else {
         return Vec::new();
     };
     let Ok(cert) = params.self_signed(&key_pair) else {
         return Vec::new();
     };
 
-    // verifying_key will be used when we integrate proper cert binding.
-    let _ = verifying_key;
-
-    cert.der().to_vec()
+    cert.pem().into_bytes()
 }
