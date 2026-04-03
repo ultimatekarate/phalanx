@@ -107,6 +107,10 @@ pub enum StorageCommand {
     DebugVaultListing {
         reply_to: oneshot::Sender<(String, Vec<String>)>,
     },
+    /// Revocation Replay: return all persisted revocation tokens for peer handshake.
+    GetRevocationTokens {
+        reply_to: oneshot::Sender<Vec<RevocationToken>>,
+    },
 }
 
 impl<J: TransientJournal> StorageActor<J> {
@@ -314,6 +318,14 @@ impl<J: TransientJournal> StorageActor<J> {
             }
             StorageCommand::DebugVaultListing { reply_to } => {
                 self.handle_debug_vault_listing(reply_to).await;
+            }
+            StorageCommand::GetRevocationTokens { reply_to } => {
+                let tokens = self
+                    .journal
+                    .read_all_revocations()
+                    .await
+                    .unwrap_or_default();
+                let _ = reply_to.send(tokens);
             }
         }
     }

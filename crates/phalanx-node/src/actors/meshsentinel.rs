@@ -141,6 +141,11 @@ pub struct MeshSentinel<I: IngressPort> {
     /// Community IDs for canary key derivation. Snapshot taken at construction;
     /// only members who imported the community can derive the alert decryption key.
     community_ids: Vec<phalanx_proto::community::CommunityId>,
+
+    // ── Revocation Replay ─────────────────────────────────────────────
+    /// Peers we have already replayed revocation tokens to in this session.
+    /// Prevents redundant gossipsub floods on peer reconnect.
+    revocation_synced_peers: std::collections::HashSet<NetworkId>,
 }
 
 impl<I: IngressPort> MeshSentinel<I> {
@@ -378,6 +383,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             peer_did_cache: std::collections::HashMap::new(),
             canary: CanaryMonitor::new(2), // 2 consecutive stale ticks to confirm
             community_ids,
+            revocation_synced_peers: std::collections::HashSet::new(),
         })
     }
 
@@ -747,6 +753,12 @@ impl<I: IngressPort> MeshSentinel<I> {
                     }
                 }
 
+                // Replay persisted revocation tokens to newly-connected peers
+                // so partitioned devices catch up on deletions they missed.
+                if self.revocation_synced_peers.insert(peer.clone()) {
+                    self.replay_revocation_tokens().await;
+                }
+
                 if let Some(evicted_peer) = evicted {
                     tracing::debug!(
                         event = "topology_eviction",
@@ -772,6 +784,36 @@ impl<I: IngressPort> MeshSentinel<I> {
                     .send(EgressCommand::DisconnectPeer(peer))
                     .await;
             }
+        }
+    }
+
+    /// Re-broadcast all persisted revocation tokens via gossipsub so that
+    /// newly-connected (or previously-partitioned) peers catch up on deletions
+    /// they missed while offline.
+    async fn replay_revocation_tokens(&mut self) {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if self
+            .storage_tx
+            .send(StorageCommand::GetRevocationTokens { reply_to: reply_tx })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        match reply_rx.await {
+            Ok(tokens) if !tokens.is_empty() => {
+                tracing::info!(
+                    count = tokens.len(),
+                    "Revocation replay: re-broadcasting to mesh"
+                );
+                for token in tokens {
+                    let _ = self
+                        .egress_tx
+                        .send(EgressCommand::PublishRevocation(token))
+                        .await;
+                }
+            }
+            _ => {}
         }
     }
 
