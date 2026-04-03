@@ -242,6 +242,20 @@ async fn perform_identity_handshake(connection: &mut s2n_quic::Connection) -> Op
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64;
+
+            // R3-2 FIX: Reject future timestamps. saturating_sub masks
+            // future-dated timestamps as age=0, allowing pre-computed
+            // Identify frames. Check both directions explicitly.
+            if timestamp_ms > now_ms.saturating_add(5_000) {
+                tracing::warn!(
+                    target: "phalanx::quic",
+                    claimed_id = %network_id,
+                    timestamp_ms,
+                    now_ms,
+                    "Identify timestamp in the future (>5s), rejecting"
+                );
+                return None;
+            }
             let age_ms = now_ms.saturating_sub(timestamp_ms);
             if age_ms > 30_000 {
                 tracing::warn!(

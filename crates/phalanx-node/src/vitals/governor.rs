@@ -242,6 +242,16 @@ impl SystemGovernor {
                 .entry(peer_id.to_string())
                 .or_insert_with(|| DecayingIntegral::new(self.config.lambda_rep))
                 .record(delta);
+
+            // Also record to the contribution integral (separate key, separate decay).
+            // Only positive contributions count — invalid evidence doesn't earn credit.
+            if is_valid {
+                let contrib_key = format!("contrib:{}", peer_id);
+                s.r_integrals
+                    .entry(contrib_key)
+                    .or_insert_with(|| DecayingIntegral::new(self.config.lambda_contrib))
+                    .record(1.0);
+            }
         });
     }
 
@@ -310,6 +320,28 @@ impl SystemGovernor {
                 .entry(peer_id.to_string())
                 .or_insert_with(|| DecayingIntegral::new(self.config.lambda_rep))
                 .record(-residual);
+        });
+    }
+
+    /// Read the contribution integral for a peer (reciprocity floor).
+    ///
+    /// Reads from the `"contrib:{peer_id}"` key in `r_integrals`, which is
+    /// written by `record_peer_evidence` and never touched by penalty paths.
+    pub fn peer_contribution_value(&self, peer_id: &str) -> f64 {
+        let key = format!("contrib:{}", peer_id);
+        self.with_state(|s| s.r_integrals.get(&key).map_or(0.0, |r| r.current_value()))
+    }
+
+    /// Remove `r_integrals` entries that have decayed to near-zero.
+    ///
+    /// Bounds unbounded growth of per-peer reputation, bandwidth, and
+    /// contribution keys. Safe because `entry().or_insert_with()` recreates
+    /// entries on the next impulse.
+    pub fn prune_stale_integrals(&self) {
+        const EPSILON: f64 = 0.001;
+        self.with_state_mut(|s| {
+            s.r_integrals
+                .retain(|_, integral| integral.current_value().abs() > EPSILON);
         });
     }
 

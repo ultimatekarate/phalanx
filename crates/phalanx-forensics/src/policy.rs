@@ -320,6 +320,10 @@ const HALF_LIFE_REP: f64 = 69.0;
 const HALF_LIFE_ENTRY: f64 = 7.0;
 /// Network RTT changes rapidly — ~700ms memory.
 const HALF_LIFE_LAT: f64 = 0.7;
+/// Contribution tracking — 5-minute half-life matches the maintenance tick interval.
+/// Longer than λ_rep (69s) to resist end-of-tick burst attacks.
+/// Does NOT enter composite stress — lives in a feedforward path only.
+const HALF_LIFE_CONTRIB: f64 = 300.0;
 
 // --- Scaler Newtypes ---
 
@@ -427,6 +431,7 @@ pub struct HomeostaticConfig {
     pub lambda_conn: f64,                 // Connection pressure decay rate
     pub c_crit: f64,                      // Connection critical ratio (0.0-1.0)
     pub lambda_lat: f64,                  // Latency pressure decay rate (independent of lambda_sys)
+    pub lambda_contrib: f64,              // Contribution tracking decay rate (reciprocity floor)
     pub max_temporal_tolerance: Duration, // Hard clamp on temporal_tolerance (T2 fix)
     /// Composite stress weights [s, d, m, w, b]. Sum = 1.0.
     pub stress_weights: [f64; 5],
@@ -456,6 +461,7 @@ impl Default for HomeostaticConfig {
             lambda_rep: LN_2 / HALF_LIFE_REP,
             lambda_entry: LN_2 / HALF_LIFE_ENTRY,
             lambda_lat: LN_2 / HALF_LIFE_LAT,
+            lambda_contrib: LN_2 / HALF_LIFE_CONTRIB,
             // Critical thresholds: derived from tick interval and physical parameters
             s_crit: 2.0 * NORMAL_TICK_SECS,
             d_crit: 5.0 * NORMAL_TICK_SECS,
