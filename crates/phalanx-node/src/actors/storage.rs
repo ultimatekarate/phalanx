@@ -6,6 +6,7 @@ use phalanx_forensics::bloom::RotatingBloomFilter;
 use phalanx_forensics::crucible::EvidenceExt;
 use phalanx_forensics::prelude::*;
 use phalanx_proto::evidence::EnvelopeState;
+use phalanx_proto::evidence::PrnuPosterior;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::PhalanxIdentity;
@@ -111,6 +112,9 @@ pub enum StorageCommand {
     GetRevocationTokens {
         reply_to: oneshot::Sender<Vec<RevocationToken>>,
     },
+    /// Persist the Bayesian PRNU posterior to the vault.
+    /// Fire-and-forget from the capture path (every 100 frames).
+    PersistPosterior(PrnuPosterior),
 }
 
 impl<J: TransientJournal> StorageActor<J> {
@@ -341,6 +345,15 @@ impl<J: TransientJournal> StorageActor<J> {
                     .await
                     .unwrap_or_default();
                 let _ = reply_to.send(tokens);
+            }
+            StorageCommand::PersistPosterior(posterior) => {
+                if let Err(e) = self.guardian.persist_prnu_posterior(&posterior).await {
+                    tracing::warn!(
+                        target: "phalanx::storage",
+                        error = %e,
+                        "Failed to persist PRNU posterior"
+                    );
+                }
             }
         }
     }

@@ -575,6 +575,9 @@ impl SimulationHarness {
             system_governor: governor,
             vault_key,
             local_mesh: None,
+            prnu_posterior: std::sync::Arc::new(std::sync::Mutex::new(
+                phalanx_proto::evidence::PrnuPosterior::new_uninformed(),
+            )),
         };
 
         let mut sentinel = MeshSentinel::new(deps).await.map_err(
@@ -756,6 +759,9 @@ impl SimulationHarness {
             system_governor: governor,
             vault_key,
             local_mesh: Some(Box::new(local_mesh_adapter)),
+            prnu_posterior: std::sync::Arc::new(std::sync::Mutex::new(
+                phalanx_proto::evidence::PrnuPosterior::new_uninformed(),
+            )),
         };
 
         let mut sentinel = MeshSentinel::new(deps).await.map_err(

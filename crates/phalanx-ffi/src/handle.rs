@@ -26,7 +26,7 @@ use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::{HomeostaticConfig, SystemGovernor, ThermalThresholds};
 use phalanx_node::{FileJournal, MeshSentinel};
 use phalanx_proto::crypto::SymmetricKey;
-use phalanx_proto::evidence::{AudioShard, ForensicMetrics, VideoShard};
+use phalanx_proto::evidence::{AudioShard, ForensicMetrics, PrnuPosterior, VideoShard};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::PhalanxIdentity;
 use phalanx_transport::adapters::local_mesh::{LocalMeshAdapter, OutboundLocalPacket};
@@ -114,6 +114,10 @@ pub struct PhalanxHandle {
     /// `None` = idle. Capped at `MAX_CALIBRATION_FRAMES` to prevent
     /// unbounded allocation from rogue FFI calls.
     pub(crate) calibration_metrics: Mutex<Option<Vec<ForensicMetrics>>>,
+    /// Bayesian PRNU posterior — shared with MediaEgressActor via Arc.
+    /// Updated on every video frame (capture path), read by the egress gate.
+    /// 44 bytes of payload; lock held for nanoseconds (6 f64 additions).
+    pub(crate) prnu_posterior: Arc<Mutex<PrnuPosterior>>,
 }
 
 /// Type-erased reference to the running MeshSentinel.
@@ -251,6 +255,31 @@ async fn bootstrap(
     let vault_key = derive_vault_key(&identity, &vault_salt);
     log("vault OK");
 
+    // Load Bayesian PRNU posterior from encrypted vault (if persisted).
+    // Guardian doesn't exist yet — read the file directly with the vault key.
+    let prnu_posterior = {
+        let posterior_path = vault_path.join("prnu_posterior.bin");
+        match phalanx_node::persistence::vault::read_encrypted_file(&posterior_path, &vault_key)
+            .await
+        {
+            Ok(bytes) => match postcard::from_bytes::<PrnuPosterior>(&bytes) {
+                Ok(p) => {
+                    log(&format!("PRNU posterior loaded: n={}", p.n));
+                    p
+                }
+                Err(_) => {
+                    log("PRNU posterior: corrupt data, starting uninformed");
+                    PrnuPosterior::new_uninformed()
+                }
+            },
+            Err(_) => {
+                log("PRNU posterior: cold start (no persisted file)");
+                PrnuPosterior::new_uninformed()
+            }
+        }
+    };
+    let prnu_posterior = Arc::new(Mutex::new(prnu_posterior));
+
     // Journal (WAL)
     let wal_path = Path::new(storage_path).join("sentinel_transient_wal.bin");
     let wal_str = wal_path.to_str().ok_or(PhalanxError::BootFailed)?;
@@ -336,6 +365,7 @@ async fn bootstrap(
         system_governor: governor.clone(),
         vault_key,
         local_mesh: Some(Box::new(local_mesh_adapter)),
+        prnu_posterior: prnu_posterior.clone(),
     };
 
     let engine = MeshSentinel::new(deps)
@@ -381,6 +411,7 @@ async fn bootstrap(
             vault_key: handle_vault_key,
             identity: handle_identity,
             calibration_metrics: Mutex::new(None),
+            prnu_posterior,
         },
         genesis_phrase,
     ))

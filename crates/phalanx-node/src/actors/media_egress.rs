@@ -2,16 +2,18 @@ use crate::clock::TrustedClock;
 use crate::persistence::outbound::OutboundQueue;
 use crate::vitals::{Homeostasis, SystemGovernor};
 use phalanx_forensics::crucible::EnvelopeHashExt;
-use phalanx_forensics::gate::{LensGate, LensThresholds, WitnessGate};
+use phalanx_forensics::gate::{self, WitnessGate};
 use phalanx_forensics::judge::PayloadCipher;
 use phalanx_forensics::reassembler::FountainChunkifier;
 use phalanx_proto::crypto::SymmetricKey;
-use phalanx_proto::evidence::{AudioShard, ChunkType, Evidence, SignatureHash, VideoShard};
+use phalanx_proto::evidence::{
+    AudioShard, ChunkType, Evidence, PrnuPosterior, SignatureHash, VideoShard,
+};
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId};
 use phalanx_proto::network::EgressPort;
 use phalanx_proto::prelude::*;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -43,8 +45,9 @@ pub struct MediaEgressConfig {
     pub content_key_rx: tokio::sync::watch::Receiver<Option<SymmetricKey>>,
     /// Trusted clock for forensic timestamps.
     pub clock: Arc<TrustedClock>,
-    /// LensGate thresholds — calibrated if sensor setup was performed, defaults otherwise.
-    pub lens_thresholds: LensThresholds,
+    /// Bayesian PRNU posterior — shared with the capture path (FFI).
+    /// Updated on every video frame; MediaEgressActor reads for gate checks.
+    pub prnu_posterior: Arc<Mutex<PrnuPosterior>>,
     /// Storage command sender — for persisting local capture shards to the Guardian.
     /// Without this, locally-recorded evidence exists only in transit (mesh egress)
     /// and is lost if the app closes before any peer receives it.
@@ -79,8 +82,8 @@ pub struct MediaEgressActor<E: EgressPort> {
     max_storage_bytes: u64,
     /// Trusted clock for forensic timestamps.
     clock: Arc<TrustedClock>,
-    /// LensGate thresholds for capture-time provenance verification.
-    lens_thresholds: LensThresholds,
+    /// Bayesian PRNU posterior for luminance-conditioned provenance verification.
+    prnu_posterior: Arc<Mutex<PrnuPosterior>>,
     /// Storage command sender — persist local captures to Guardian.
     storage_tx: mpsc::Sender<crate::actors::storage::StorageCommand>,
 }
@@ -113,7 +116,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
             system_governor: config.system_governor,
             max_storage_bytes: config.max_storage_bytes,
             clock: config.clock,
-            lens_thresholds: config.lens_thresholds,
+            prnu_posterior: config.prnu_posterior,
         })
     }
 
@@ -236,9 +239,19 @@ impl<E: EgressPort> MediaEgressActor<E> {
     /// encryption failure — plaintext MUST NOT reach the mesh).
     fn gate_and_encrypt(&self, evidence: &mut Evidence) -> bool {
         // LensGate: verify sensor provenance BEFORE encryption.
-        // Rejects synthetic/deepfake frames at the source.
+        // Uses Bayesian posterior for luminance-conditioned PRNU floor.
         if let Evidence::Video(ref v) = evidence {
-            if let Err(e) = v.lens_metrics.check_provenance(&self.lens_thresholds) {
+            let posterior = self
+                .prnu_posterior
+                .lock()
+                .map(|p| *p)
+                .unwrap_or_else(|_| PrnuPosterior::new_uninformed());
+            if let Err(e) = gate::check_provenance_bayesian(
+                &v.lens_metrics,
+                &posterior,
+                gate::MOIRE_NATURAL_UPPER_BOUND * gate::MOIRE_SAFETY_FACTOR,
+                phalanx_forensics::calibrate::PRNU_CONFIDENCE_SIGMA,
+            ) {
                 tracing::error!(event = "lens_gate_local_rejection", error = %e);
                 return false;
             }

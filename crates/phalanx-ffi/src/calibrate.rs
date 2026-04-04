@@ -13,9 +13,10 @@
 use crate::error::PhalanxError;
 use crate::handle::PhalanxHandle;
 
-use phalanx_forensics::calibrate::{calibrate_prnu, MAX_CALIBRATION_FRAMES};
+use phalanx_forensics::calibrate::{calibrate_prnu, posterior_from_batch, MAX_CALIBRATION_FRAMES};
 use phalanx_lens::scalar::ScalarLens;
 use phalanx_lens::ForensicLens;
+use phalanx_node::actors::storage::StorageCommand;
 use phalanx_proto::types::BlackLevel;
 
 /// Static forensic lens — same instance used in capture.rs.
@@ -127,6 +128,18 @@ pub unsafe extern "C" fn phalanx_calibration_finish(
     let Some(metrics) = guard.take() else {
         return PhalanxError::InvalidState.code();
     };
+
+    // Build Bayesian posterior from the calibration batch (warm-start).
+    // This replaces whatever the online path has accumulated so far with
+    // a posterior built from controlled calibration frames.
+    let batch_posterior = posterior_from_batch(&metrics);
+    if let Ok(mut post) = h.prnu_posterior.lock() {
+        *post = batch_posterior;
+    }
+    // Persist the warm-started posterior through the actor channel.
+    let _ = h
+        .storage_tx
+        .try_send(StorageCommand::PersistPosterior(batch_posterior));
 
     match calibrate_prnu(&metrics) {
         Ok(calibration) => {

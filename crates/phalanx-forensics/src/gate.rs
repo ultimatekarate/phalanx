@@ -5,7 +5,7 @@
 
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{
-    Evidence, ForensicMetrics, SensorCalibration, SignatureHash, WitnessEnvelope,
+    Evidence, ForensicMetrics, PrnuPosterior, SensorCalibration, SignatureHash, WitnessEnvelope,
 };
 use phalanx_proto::prelude::*;
 use phalanx_proto::time::TrustedClock;
@@ -194,14 +194,14 @@ impl PrivacyGate for Evidence {
 /// Upper bound of Moiré energy per unit luminance for natural scenes.
 /// Natural textures have 1/f spectral falloff; Laplacian emphasizes high
 /// frequencies but natural content is low-energy there. Measured range: 5–40.
-pub(crate) const MOIRE_NATURAL_UPPER_BOUND: f32 = 40.0;
+pub const MOIRE_NATURAL_UPPER_BOUND: f32 = 40.0;
 
 /// Moiré ceiling safety factor above natural upper bound.
 /// 2.5× provides margin for highly textured scenes and color filter array
 /// aliasing, while staying 400× below recapture floor (40000).
 /// Tight threshold maximizes detection — accepting a deepfake is unrecoverable;
 /// rejecting a legitimate frame just means the next frame passes.
-pub(crate) const MOIRE_SAFETY_FACTOR: f32 = 2.5;
+pub const MOIRE_SAFETY_FACTOR: f32 = 2.5;
 
 /// Per-device calibrated thresholds for the LensGate.
 ///
@@ -388,6 +388,94 @@ impl LensGate for ForensicMetrics {
 
         Ok(())
     }
+}
+
+/// Luminance-conditioned provenance check using the Bayesian PRNU posterior.
+///
+/// Replaces the fixed-threshold `LensGate::check_provenance()` with a
+/// regression-based floor that adapts to the current frame's brightness.
+/// The floor is derived from the posterior predictive interval of the
+/// linear model `prnu_var = α · luminance + β + ε`.
+///
+/// Rules:
+/// - Rule 1 (all-zero bypass): unchanged from `LensGate`
+/// - Rule 2 (low luminance guard): unchanged
+/// - Rule 3 (PRNU): `prnu_var < posterior_prnu_floor(posterior, luminance, sigma)` → reject
+/// - Rule 4 (Moiré): `max(h, v) > moire_ceiling × luminance` → reject (unchanged)
+pub fn check_provenance_bayesian(
+    metrics: &ForensicMetrics,
+    posterior: &PrnuPosterior,
+    moire_ceiling: f32,
+    confidence_sigma: f32,
+) -> Result<(), ShardError> {
+    // Rule 1: All-zero metrics → bypass attempt.
+    if metrics.h_energy == 0.0
+        && metrics.v_energy == 0.0
+        && metrics.prnu_var == 0.0
+        && metrics.mean_luminance == 0.0
+    {
+        warn!(
+            event = "lens_gate_rejection",
+            reason = "all_zero_metrics",
+            "LensGate (Bayesian): All-zero metrics — possible bypass attempt"
+        );
+        return Err(ShardError::InvalidConfiguration(
+            "LensGate: All-zero forensic metrics — evidence lacks sensor fingerprint".into(),
+        ));
+    }
+
+    // Rule 2: Low luminance guard.
+    if metrics.mean_luminance < 1.0 {
+        warn!(
+            event = "lens_gate_low_luminance",
+            mean_luminance = metrics.mean_luminance,
+            "LensGate (Bayesian): Very low luminance — threshold scaling unreliable"
+        );
+        return Ok(());
+    }
+
+    // Rule 3: PRNU variance below luminance-conditioned floor.
+    let prnu_floor =
+        crate::calibrate::posterior_prnu_floor(posterior, metrics.mean_luminance, confidence_sigma);
+    if metrics.prnu_var < prnu_floor {
+        warn!(
+            event = "lens_gate_rejection",
+            reason = "low_prnu",
+            prnu_var = metrics.prnu_var,
+            threshold = prnu_floor,
+            mean_luminance = metrics.mean_luminance,
+            posterior_n = posterior.n,
+            "LensGate (Bayesian): PRNU below posterior floor — possible synthetic image"
+        );
+        return Err(ShardError::InvalidConfiguration(
+            "LensGate: PRNU variance below threshold — possible synthetic/AI-generated image"
+                .into(),
+        ));
+    }
+
+    // Rule 4: Moiré energy above threshold (physics-derived, not calibrated).
+    let scaled_moire_ceiling = moire_ceiling * metrics.mean_luminance;
+    let max_moire = if metrics.h_energy > metrics.v_energy {
+        metrics.h_energy
+    } else {
+        metrics.v_energy
+    };
+    if max_moire > scaled_moire_ceiling {
+        warn!(
+            event = "lens_gate_rejection",
+            reason = "high_moire",
+            h_energy = metrics.h_energy,
+            v_energy = metrics.v_energy,
+            threshold = scaled_moire_ceiling,
+            mean_luminance = metrics.mean_luminance,
+            "LensGate (Bayesian): Moiré above threshold — possible screen recapture"
+        );
+        return Err(ShardError::InvalidConfiguration(
+            "LensGate: Moiré energy above threshold — possible screen recapture".into(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Gate 5: The Memory Buffer Gate

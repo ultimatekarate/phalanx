@@ -106,14 +106,11 @@ pub struct ForensicMetrics {
     pub mean_luminance: f32,
 }
 
-/// Per-device sensor calibration result.
+/// Per-device sensor calibration result (legacy).
 ///
-/// Produced by the PRNU calibration pipeline during explicit device setup.
-/// Binds the PRNU detection threshold to the physical sensor — a stolen
-/// identity cannot replicate the noise profile of a different camera.
-///
-/// Stored in `NodeConfig::hardware.sensor_calibration`. If absent,
-/// LensGate falls back to conservative default thresholds.
+/// Produced by the batch PRNU calibration pipeline during explicit device setup.
+/// Superseded by `PrnuPosterior` for online Bayesian calibration, but retained
+/// for backward compatibility with existing serialized configs.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct SensorCalibration {
     /// Calibrated PRNU floor: `mean(prnu_var/luminance) − 3σ`, clamped
@@ -122,6 +119,52 @@ pub struct SensorCalibration {
     pub prnu_floor: f32,
     /// Number of valid frames used in calibration (after dark-frame filtering).
     pub frame_count: u16,
+}
+
+/// Bayesian linear regression sufficient statistics for online PRNU calibration.
+///
+/// Models `prnu_var = α · luminance + β + ε` where α is the shot noise
+/// coefficient (device-specific) and β is the read noise floor. Six f64
+/// sufficient statistics enable O(1) online updates and luminance-conditioned
+/// threshold derivation.
+///
+/// Every video frame updates the posterior automatically — no explicit
+/// calibration step required. The threshold tightens as the posterior converges.
+///
+/// Persisted in the vault, encrypted at rest alongside the content keyring.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct PrnuPosterior {
+    /// Number of valid frames observed (after dark/degenerate filtering).
+    pub n: u32,
+    /// Σ luminance_i — accumulated mean luminance values.
+    pub sum_x: f64,
+    /// Σ prnu_var_i — accumulated PRNU variance values.
+    pub sum_y: f64,
+    /// Σ luminance_i² — for computing S_xx (luminance spread).
+    pub sum_xx: f64,
+    /// Σ luminance_i · prnu_var_i — for computing S_xy (cross term).
+    pub sum_xy: f64,
+    /// Σ prnu_var_i² — for computing residual sum of squares.
+    pub sum_yy: f64,
+}
+
+impl PrnuPosterior {
+    /// Create an uninformed (empty) posterior with no observations.
+    ///
+    /// All sufficient statistics are zero. The system falls back to
+    /// `PRNU_FLOOR_MINIMUM × luminance` until at least 3 frames are observed
+    /// (minimum for linear regression).
+    #[must_use]
+    pub fn new_uninformed() -> Self {
+        Self {
+            n: 0,
+            sum_x: 0.0,
+            sum_y: 0.0,
+            sum_xx: 0.0,
+            sum_xy: 0.0,
+            sum_yy: 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
