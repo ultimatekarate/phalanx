@@ -79,6 +79,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         vault_key,
         local_mesh: None, // NoOp — BLE/WiFi Direct injected during mobile integration
         egress,
+        prnu_posterior: std::sync::Arc::new(std::sync::Mutex::new(
+            phalanx_proto::evidence::PrnuPosterior::new_uninformed(),
+        )),
     };
 
     let mut engine = MeshSentinel::new(deps).await?;

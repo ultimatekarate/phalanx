@@ -18,6 +18,7 @@ use phalanx_forensics::crucible::RecordingAmalgam;
 use phalanx_forensics::crucible::{EnvelopeHashExt, EvidenceExt};
 use phalanx_forensics::gate::PromotionGate;
 use phalanx_proto::crypto::SymmetricKey;
+use phalanx_proto::evidence::PrnuPosterior;
 use phalanx_proto::evidence::Recording;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::WitnessEnvelope;
@@ -272,6 +273,30 @@ impl Guardian {
         self.content_keyring = postcard::from_bytes(&plaintext)
             .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
         Ok(())
+    }
+
+    /// Persist the Bayesian PRNU posterior to disk, encrypted with vault_key.
+    /// Called periodically from the capture path (every 100 frames) and on
+    /// calibration finish. 44 bytes of payload — negligible IO.
+    pub async fn persist_prnu_posterior(
+        &self,
+        posterior: &PrnuPosterior,
+    ) -> Result<(), GuardianError> {
+        let path = Path::new(&self.vault_path).join("prnu_posterior.bin");
+        let plaintext = postcard::to_allocvec(posterior)
+            .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
+        atomic_encrypted_write(&path, &plaintext, &self.vault_key).await
+    }
+
+    /// Load the Bayesian PRNU posterior from disk. Returns `None` if no
+    /// posterior has been persisted yet (cold start → use uninformed prior).
+    pub async fn load_prnu_posterior(&self) -> Option<PrnuPosterior> {
+        let path = Path::new(&self.vault_path).join("prnu_posterior.bin");
+        if !path.exists() {
+            return None;
+        }
+        let plaintext = read_encrypted_file(&path, &self.vault_key).await.ok()?;
+        postcard::from_bytes(&plaintext).ok()
     }
 
     // ── Data promotion ──────────────────────────────────────────────────

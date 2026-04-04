@@ -16,11 +16,13 @@ use crate::error::PhalanxError;
 use crate::handle::PhalanxHandle;
 use crate::logcat::phalanx_log;
 
+use phalanx_forensics::calibrate::update_prnu_posterior;
 use phalanx_forensics::reassembler::{compress_frame, create_audio_shard, create_video_shard};
 use phalanx_lens::scalar::ScalarLens;
 use phalanx_lens::ForensicLens;
 use phalanx_node::actors::egress::EgressCommand;
 use phalanx_node::actors::storage::StorageCommand;
+
 use phalanx_node::hardware::camera::target_fps;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::StorageSequence;
@@ -273,6 +275,10 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
     let sequence = StorageSequence(SEQUENCE.fetch_add(1, Ordering::Relaxed));
     let current_fps = target_fps(Fps::new(30), h.governor.current_power_state());
 
+    // Clone shared state for the async closure.
+    let posterior = h.prnu_posterior.clone();
+    let persist_tx = h.storage_tx.clone();
+
     // Dispatch the heavy pipeline to tokio's blocking thread pool.
     // The FFI call returns immediately — Flutter's UI thread is never blocked
     // by JPEG compression, forensic analysis, or shard serialization.
@@ -285,6 +291,26 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
                 height as usize,
                 BlackLevel::default(),
             );
+
+            // Step 1.5: Online Bayesian PRNU update.
+            // update_prnu_posterior internally filters dark/degenerate frames.
+            // Lock held for nanoseconds (6 f64 additions). No contention —
+            // MediaEgressActor reads a snapshot via lock-copy-unlock.
+            let updated_n = if let Ok(mut post) = posterior.lock() {
+                *post = update_prnu_posterior(&post, &lens_metrics);
+                post.n
+            } else {
+                0
+            };
+
+            // Persist posterior every 100 frames — sends through the actor
+            // channel so FFI never touches Guardian directly.
+            if updated_n > 0 && updated_n % 100 == 0 {
+                if let Ok(snapshot) = posterior.lock().map(|p| *p) {
+                    // Fire-and-forget: try_send avoids blocking if channel is full.
+                    let _ = persist_tx.try_send(StorageCommand::PersistPosterior(snapshot));
+                }
+            }
 
             // Step 2: JPEG compression (YUV→JPEG via turbojpeg)
             let compressed = match compress_frame(&y_data, &uv_data, width, height, is_nv12) {

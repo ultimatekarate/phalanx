@@ -114,7 +114,9 @@ async fn build_media_egress<E: EgressPort + 'static>(
         vault_key: SymmetricKey([0u8; 32]),
         content_key_rx: tokio::sync::watch::channel(None).1,
         clock: Arc::new(TrustedClock::new()),
-        lens_thresholds: phalanx_forensics::gate::LensThresholds::default(),
+        prnu_posterior: std::sync::Arc::new(std::sync::Mutex::new(
+            phalanx_proto::evidence::PrnuPosterior::new_uninformed(),
+        )),
         storage_tx: tokio::sync::mpsc::channel(16).0,
     };
 

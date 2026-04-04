@@ -35,8 +35,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use phalanx_proto::crypto::SymmetricKey;
-use phalanx_proto::evidence::{AudioShard, StorageSequence, VideoShard};
+use phalanx_proto::evidence::{AudioShard, PrnuPosterior, StorageSequence, VideoShard};
 use std::error::Error;
+use std::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
 
@@ -53,6 +54,9 @@ pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJourn
     /// Default: `None` (desktop/non-BLE platforms).
     /// When `Some`, MeshSentinel polls for local mesh events alongside network ingress.
     pub local_mesh: Option<Box<dyn LocalMeshPort>>,
+    /// Bayesian PRNU posterior — shared with the FFI capture path.
+    /// MediaEgressActor reads this for luminance-conditioned provenance checks.
+    pub prnu_posterior: Arc<Mutex<PrnuPosterior>>,
 }
 
 pub struct MeshSentinel<I: IngressPort> {
@@ -308,13 +312,7 @@ impl<I: IngressPort> MeshSentinel<I> {
                 vault_key: deps.vault_key.clone(),
                 content_key_rx,
                 clock: clock_handle.clone(),
-                lens_thresholds: deps
-                    .config
-                    .hardware
-                    .sensor_calibration
-                    .as_ref()
-                    .map(phalanx_forensics::gate::LensThresholds::new_calibrated)
-                    .unwrap_or_default(),
+                prnu_posterior: deps.prnu_posterior.clone(),
                 storage_tx: storage_tx.clone(),
             },
         )
