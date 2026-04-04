@@ -80,11 +80,62 @@ Phalanx is conceptually dense. I have gone to great lengths to ensure that you d
 
 ## Build
 
+Minimum Rust version: **1.93.1**
+
+### Rust Workspace (desktop, Stronghold, tests)
+
 ```bash
+# System dependency — required by crypto assembly optimizations
+# Ubuntu/Debian:
+sudo apt-get install nasm
+# macOS:
+brew install nasm
+
 cargo build --workspace
+cargo test --workspace
 ```
 
-Minimum Rust version: **1.93.1**
+The Stronghold server binary:
+
+```bash
+cargo build -p phalanx-stronghold --bin stronghold --release
+```
+
+### Mobile (Android + iOS + Flutter)
+
+The full mobile pipeline — Rust FFI cross-compilation, native library placement, header generation, and Flutter APK/iOS build — is handled by a single script:
+
+```bash
+./scripts/build_mobile.sh           # Both platforms
+./scripts/build_mobile.sh android   # Android only
+./scripts/build_mobile.sh ios       # iOS only (macOS required)
+```
+
+Prerequisites:
+
+```bash
+# Rust cross-compilation targets
+cargo install cargo-ndk
+rustup target add aarch64-linux-android x86_64-linux-android
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim   # macOS only
+cargo install cbindgen                                       # C header generation
+
+# Android SDK + NDK (the script auto-detects the latest installed NDK)
+# Flutter SDK ≥3.16.0 in PATH
+```
+
+The script handles the details that are easy to get wrong: NDK toolchain detection, AOSP log stub headers for `fdk-aac-sys`, Ninja generator override on Windows, copying `.so` files into `flutter_app/android/app/src/main/jniLibs/`, copying `.a` files into `flutter_app/ios/Frameworks/`, and generating `phalanx.h` for Swift bridging.
+
+Note: 32-bit ARM (`armeabi-v7a`) is disabled — `raptorq` 2.0.1 uses NEON intrinsics that are unstable on 32-bit ARM (`rust-lang/rust#111800`).
+
+### Lean 4 Proofs (optional)
+
+The `proofs/` directory contains Lean 4 formal verification of fountain code reconstruction. Not required for runtime — verification only.
+
+```bash
+cd proofs
+lake build
+```
 
 ## Test
 
