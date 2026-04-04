@@ -90,6 +90,10 @@ Minimum Rust version: **1.93.1**
 sudo apt-get install nasm
 # macOS:
 brew install nasm
+# Windows (scoop):
+scoop install nasm
+# Windows (choco):
+choco install nasm
 
 cargo build --workspace
 cargo test --workspace
