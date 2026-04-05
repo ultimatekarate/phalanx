@@ -1,7 +1,6 @@
 # Phalanx
 
-[![Android](https://github.com/ultimatekarate/phalanx/actions/workflows/android-build.yml/badge.svg)](https://github.com/ultimatekarate/phalanx/actions/workflows/android-build.yml)
-[![iOS](https://github.com/ultimatekarate/phalanx/actions/workflows/ios-build.yml/badge.svg)](https://github.com/ultimatekarate/phalanx/actions/workflows/ios-build.yml)
+[![CI](https://github.com/ultimatekarate/phalanx/actions/workflows/ci.yml/badge.svg)](https://github.com/ultimatekarate/phalanx/actions/workflows/ci.yml)
 
 Phalanx is a mobile app that records video, proves it hasn't been tampered with, and distributes it so it can't be destroyed — without trusting any server, any network, or any other person. That problem touches cryptography, distributed systems, control theory, signal processing, and adversarial security simultaneously. You can't drop any of them and still solve it. Every subsystem exists because the problem required it. Nothing here is for show.
 
