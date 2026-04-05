@@ -1,4 +1,4 @@
-name: Android pipeline
+name: CI
 
 on:
   push:
@@ -25,6 +25,7 @@ jobs:
         run: cargo test --workspace
 
   build-android:
+    needs: lint-and-test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +38,6 @@ jobs:
       - name: Locate NDK Toolchain
         id: ndk
         run: |
-          # GitHub runners pre-install the NDK at $ANDROID_NDK_HOME
           TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
           echo "toolchain=$TOOLCHAIN" >> "$GITHUB_OUTPUT"
 
@@ -47,8 +47,6 @@ jobs:
           CXX_aarch64_linux_android: ${{ steps.ndk.outputs.toolchain }}/bin/aarch64-linux-android24-clang++
           AR_aarch64_linux_android: ${{ steps.ndk.outputs.toolchain }}/bin/llvm-ar
           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: ${{ steps.ndk.outputs.toolchain }}/bin/aarch64-linux-android24-clang
-          # Stub for AOSP-internal log/log.h required by fdk-aac-sys.
-          # See: crates/phalanx-ffi/android-stubs/log/log.h
           CFLAGS_aarch64_linux_android: -I${{ github.workspace }}/crates/phalanx-ffi/android-stubs
           CXXFLAGS_aarch64_linux_android: -I${{ github.workspace }}/crates/phalanx-ffi/android-stubs
         run: cargo build --release --target aarch64-linux-android -p phalanx-ffi
@@ -58,3 +56,36 @@ jobs:
         with:
           name: phalanx-android-lib
           path: target/aarch64-linux-android/release/libphalanx_ffi.so
+
+  build-ios:
+    needs: lint-and-test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: brew install nasm
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios, x86_64-apple-ios
+
+      - name: Install cbindgen
+        run: cargo install cbindgen
+
+      - name: Generate C Headers
+        run: cbindgen --config cbindgen.toml --crate phalanx-ffi --output phalanx-ffi/phalanx.h
+
+      - name: Build iOS Static Library (Release)
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+        run: cargo build --release --target aarch64-apple-ios -p phalanx-ffi
+
+      - name: Upload iOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: phalanx-ios-lib
+          path: |
+            target/aarch64-apple-ios/release/libphalanx_ffi.a
+            phalanx-ffi/phalanx.h
