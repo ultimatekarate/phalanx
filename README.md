@@ -82,22 +82,55 @@ Phalanx is conceptually dense. I have gone to great lengths to ensure that you d
 
 Minimum Rust version: **1.93.1**
 
-### Rust Workspace (desktop, Stronghold, tests)
+### Dev Container (recommended)
+
+The fastest way to build — especially on Windows. Everything is pre-installed: Rust, nasm, CMake, Android NDK, Flutter, cargo-ndk, cbindgen.
+
+Open this repo in [VS Code with the Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) or in [GitHub Codespaces](https://codespaces.new). The container builds, `cargo fetch` runs, and you're ready:
 
 ```bash
-# System dependency — required by crypto assembly optimizations
-# Ubuntu/Debian:
-sudo apt-get install nasm
-# macOS:
-brew install nasm
-# Windows (scoop):
-scoop install nasm
-# Windows (choco):
-choco install nasm
-
 cargo build --workspace
 cargo test --workspace
 ```
+
+### Native Build
+
+Three crates (`turbojpeg`, `openh264`, `fdk-aac`) compile C/C++ from source. This requires a C compiler toolchain, CMake, and NASM.
+
+**Windows:**
+
+Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the "Desktop development with C++" workload. This provides the MSVC compiler, linker, and Windows SDK. Then install CMake and NASM:
+
+```bash
+# scoop:
+scoop install cmake nasm
+# or choco:
+choco install cmake nasm
+```
+
+Ensure `cmake` and `nasm` are on your PATH. You may need to open a new terminal after installation. Build from a **Developer Command Prompt** or a terminal where `cl.exe` is on PATH (e.g., via `vcvarsall.bat`).
+
+**macOS:**
+
+```bash
+xcode-select --install   # provides clang
+brew install cmake nasm
+```
+
+**Ubuntu/Debian:**
+
+```bash
+sudo apt-get install build-essential cmake nasm
+```
+
+**Then build:**
+
+```bash
+cargo build --workspace
+cargo test --workspace
+```
+
+If `turbojpeg-sys` fails, it is almost always CMake not finding the C compiler. Run `cmake --version` and `cl --version` (Windows) or `cc --version` (Linux/macOS) to verify they're reachable.
 
 The Stronghold server binary:
 
