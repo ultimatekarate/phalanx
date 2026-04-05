@@ -12,6 +12,7 @@ use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct NodeConfig {
     pub storage: StorageConfig,
     pub network: NetworkConfig,
@@ -25,6 +26,7 @@ pub struct IdentityConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkConfig {
     #[serde(default = "default_protocol_version")]
     pub protocol_version: String,
@@ -81,6 +83,7 @@ impl std::error::Error for ConfigError {}
 
 /// The Root Configuration for the Phalanx Engine.
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct StorageConfig {
     pub vault_path: String,
     pub max_video_buffer: usize,
@@ -107,6 +110,7 @@ pub struct StorageConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct HardwareConfig {
     pub camera_fps: Fps,
     pub audio_sample_rate: SampleRate,
@@ -226,20 +230,26 @@ impl NodeConfig {
         Ok(config)
     }
 
-    /// Loads the configuration.
-    /// REFACTOR: Removed .expect() to satisfy Forensic Integrity standards.
-    #[allow(clippy::missing_errors_doc)]
-    pub fn load_default() -> Result<Self, ConfigError> {
-        // Attempt to load the file
-        // Return the Result directly instead of unwrapping/expecting
-        Self::load("phalanx.toml")
-            .map_err(|e| ConfigError::NotFound(format!("Critical: Missing phalanx.toml - {e}")))
-    }
-
+    /// Load configuration from the `PHALANX_CONFIG` environment variable.
+    ///
+    /// - If `PHALANX_CONFIG` is set, the file **must** parse successfully —
+    ///   a warning is emitted and compiled defaults are used on failure.
+    /// - If `PHALANX_CONFIG` is not set, compiled defaults are used directly.
+    ///   This is the normal path on mobile (Flutter provides config via FFI).
     #[must_use]
     pub fn load_from_env() -> Self {
-        let path = env::var("PHALANX_CONFIG").unwrap_or_else(|_| "phalanx.toml".to_string());
-        Self::load(path).unwrap_or_else(|_| Self::default())
+        match env::var("PHALANX_CONFIG") {
+            Ok(path) => Self::load(&path).unwrap_or_else(|e| {
+                tracing::warn!(
+                    target: "phalanx::config",
+                    path = %path,
+                    error = %e,
+                    "PHALANX_CONFIG set but failed to load — falling back to compiled defaults"
+                );
+                Self::default()
+            }),
+            Err(_) => Self::default(),
+        }
     }
 
     /// Restored: Specifically for simulation environments (src/sim.rs).
