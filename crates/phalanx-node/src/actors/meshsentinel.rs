@@ -1142,7 +1142,14 @@ impl<I: IngressPort> MeshSentinel<I> {
 
     /// Periodic tick: anchor promotion, eclipse fingerprinting, re-bootstrap check.
     async fn topology_maintenance_tick(&mut self) {
-        // 1. Anchor promotion: promote long-lived high-reputation peers.
+        self.promote_anchor_candidates();
+        self.evaluate_eclipse_risk().await;
+        self.sweep_reciprocity_floor().await;
+        self.system_governor.prune_stale_integrals();
+    }
+
+    /// Promote long-lived high-reputation peers to anchor status.
+    fn promote_anchor_candidates(&mut self) {
         let peer_ids: Vec<NetworkId> = self.topology_gate.peer_ids().cloned().collect();
         for peer_id in &peer_ids {
             if self.topology_gate.is_anchored(peer_id) {
@@ -1160,8 +1167,10 @@ impl<I: IngressPort> MeshSentinel<I> {
                 }
             }
         }
+    }
 
-        // 2. Eclipse fingerprinting: snapshot the current peer set topology.
+    /// Snapshot the peer set topology and evaluate eclipse risk.
+    async fn evaluate_eclipse_risk(&mut self) {
         let mut peer_ids: Vec<&NetworkId> = self.health_tracker.heartbeats.keys().collect();
         let peer_set_hash = eclipse::hash_peer_set(&mut peer_ids);
         let peer_count = peer_ids.len();
@@ -1201,16 +1210,14 @@ impl<I: IngressPort> MeshSentinel<I> {
                     "Eclipse probe: CRITICAL risk — Sybil pressure injected, triggering re-bootstrap"
                 );
 
-                // Record EclipseAttempt offense against concentrated-subnet peers.
                 let _ = self
                     .trust_tx
                     .send(TrustCommand::RecordOffense {
-                        did: self.identity.did.clone(), // Self-report — TrustActor handles routing
+                        did: self.identity.did.clone(),
                         offense: Offense::EclipseAttempt,
                     })
                     .await;
 
-                // Trigger re-bootstrap if peer count is below half capacity.
                 if self.topology_gate.peer_count() < 96 {
                     let bootstrap_peers: Vec<String> = self
                         .config
@@ -1228,81 +1235,79 @@ impl<I: IngressPort> MeshSentinel<I> {
                     }
                 }
             }
-            _ => {} // EclipseRisk::None — all clear
+            _ => {}
+        }
+    }
+
+    /// Detect black hole peers that consume resources without contributing.
+    /// Only active during recording when we're not in Leaf/Dormant.
+    async fn sweep_reciprocity_floor(&mut self) {
+        if self.active_recording_id.is_none() {
+            return;
+        }
+        let power_state = self.system_governor.current_power_state();
+        if matches!(
+            power_state,
+            phalanx_proto::types::PowerState::Leaf | phalanx_proto::types::PowerState::Dormant
+        ) {
+            return;
         }
 
-        // 3. Reciprocity floor sweep: detect black hole peers.
-        // Only active during recording — passive witnesses have nothing to forward.
-        if self.active_recording_id.is_some() {
-            let power_state = self.system_governor.current_power_state();
-            // Don't judge peers when we're in Leaf/Dormant — we're not contributing enough ourselves.
-            if !matches!(
-                power_state,
-                phalanx_proto::types::PowerState::Leaf | phalanx_proto::types::PowerState::Dormant
-            ) {
-                let params = ReciprocityParams::default();
-                let mesh_peer_count = self.topology_gate.peer_count();
-                let now_secs = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
+        let params = ReciprocityParams::default();
+        let mesh_peer_count = self.topology_gate.peer_count();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
 
-                let admitted_peers: Vec<NetworkId> =
-                    self.topology_gate.peer_ids().cloned().collect();
+        let admitted_peers: Vec<NetworkId> = self.topology_gate.peer_ids().cloned().collect();
 
-                for peer_id in &admitted_peers {
-                    let first_seen = self
-                        .peer_first_seen
-                        .get(peer_id)
-                        .copied()
-                        .unwrap_or(now_secs);
-                    let connected_secs = now_secs.saturating_sub(first_seen);
-                    let contribution = self.system_governor.peer_contribution_value(&peer_id.0);
-                    let is_local_mesh = self
-                        .topology_gate
-                        .transport_class(peer_id)
-                        .is_some_and(|tc| tc == TransportClass::LocalMesh);
+        for peer_id in &admitted_peers {
+            let first_seen = self
+                .peer_first_seen
+                .get(peer_id)
+                .copied()
+                .unwrap_or(now_secs);
+            let connected_secs = now_secs.saturating_sub(first_seen);
+            let contribution = self.system_governor.peer_contribution_value(&peer_id.0);
+            let is_local_mesh = self
+                .topology_gate
+                .transport_class(peer_id)
+                .is_some_and(|tc| tc == TransportClass::LocalMesh);
 
-                    let snapshot = PeerContribution {
-                        connected_secs,
-                        contribution_integral: contribution,
-                        is_local_mesh,
-                    };
+            let snapshot = PeerContribution {
+                connected_secs,
+                contribution_integral: contribution,
+                is_local_mesh,
+            };
 
-                    if let ReciprocityVerdict::NonReciprocal { deficit } =
-                        evaluate_reciprocity(&snapshot, &params, mesh_peer_count)
-                    {
-                        // Always: smooth reputation degradation via spectral anomaly.
-                        self.system_governor
-                            .record_spectral_anomaly(&peer_id.0, deficit * 5.0);
+            if let ReciprocityVerdict::NonReciprocal { deficit } =
+                evaluate_reciprocity(&snapshot, &params, mesh_peer_count)
+            {
+                self.system_governor
+                    .record_spectral_anomaly(&peer_id.0, deficit * 5.0);
 
-                        // Severe deficit + known DID → formal offense for blacklist escalation.
-                        if deficit > 0.8 {
-                            if let Some(did) = self.peer_did_cache.get(peer_id) {
-                                let _ = self
-                                    .trust_tx
-                                    .send(TrustCommand::RecordOffense {
-                                        did: did.clone(),
-                                        offense: Offense::NonReciprocal,
-                                    })
-                                    .await;
-                            }
-                        }
-
-                        tracing::debug!(
-                            target: "phalanx::shield_wall",
-                            event = "reciprocity_deficit",
-                            peer = %peer_id,
-                            deficit = deficit,
-                            connected_secs = connected_secs,
-                            "Black hole detection: peer below reciprocity floor"
-                        );
+                if deficit > 0.8 {
+                    if let Some(did) = self.peer_did_cache.get(peer_id) {
+                        let _ = self
+                            .trust_tx
+                            .send(TrustCommand::RecordOffense {
+                                did: did.clone(),
+                                offense: Offense::NonReciprocal,
+                            })
+                            .await;
                     }
                 }
+
+                tracing::debug!(
+                    target: "phalanx::shield_wall",
+                    event = "reciprocity_deficit",
+                    peer = %peer_id,
+                    deficit = deficit,
+                    connected_secs = connected_secs,
+                    "Black hole detection: peer below reciprocity floor"
+                );
             }
         }
-
-        // 4. Prune stale r_integrals entries (bounds memory for all namespaced keys).
-        self.system_governor.prune_stale_integrals();
     }
 }

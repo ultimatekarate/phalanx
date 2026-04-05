@@ -144,7 +144,15 @@ impl<J: TransientJournal> StorageActor<J> {
     }
 
     async fn bootstrap(&mut self) {
-        // Hydrate the Reassembler state from the TransientJournal (WAL)
+        self.recover_reassembler_state().await;
+        self.recover_revocations().await;
+        self.load_keyring_and_logs().await;
+        self.seed_replay_filter().await;
+        self.cleanup_ghost_keys().await;
+    }
+
+    /// Hydrate the Reassembler state from the TransientJournal (WAL).
+    async fn recover_reassembler_state(&mut self) {
         match self
             .reassembler
             .recover_from_journal(&mut self.journal)
@@ -161,8 +169,10 @@ impl<J: TransientJournal> StorageActor<J> {
                 tracing::error!(target: "phalanx::storage", error = %e, "CRITICAL: Bootstrap recovery failed.");
             }
         }
+    }
 
-        // Recover revoked recordings from journal
+    /// Recover revoked recordings from journal and insert into guardian state.
+    async fn recover_revocations(&mut self) {
         match self.journal.read_all_revocations().await {
             Ok(tokens) => {
                 for token in &tokens {
@@ -186,8 +196,10 @@ impl<J: TransientJournal> StorageActor<J> {
                 );
             }
         }
+    }
 
-        // Load per-recording content keyring
+    /// Load per-recording content keyring and hydrate recording logs from disk.
+    async fn load_keyring_and_logs(&mut self) {
         if let Err(e) = self.guardian.load_keyring().await {
             tracing::error!(
                 target: "phalanx::storage",
@@ -196,9 +208,9 @@ impl<J: TransientJournal> StorageActor<J> {
             );
         }
 
-        // Hydrate recording logs from disk — rebuild in-memory indexes by scanning
-        // .recording files in the vault directory. Without this, playback after an
-        // app restart finds no shards (recording_logs starts empty).
+        // Rebuild in-memory indexes by scanning .recording files in the vault
+        // directory. Without this, playback after an app restart finds no shards
+        // (recording_logs starts empty).
         if let Err(e) = self.guardian.hydrate_recording_logs().await {
             tracing::error!(
                 target: "phalanx::storage",
@@ -206,10 +218,13 @@ impl<J: TransientJournal> StorageActor<J> {
                 "Failed to hydrate recording logs from disk"
             );
         }
+    }
 
-        // C2 FIX: Seed the replay filter from recently persisted evidence hashes.
-        // Prevents post-crash replay attacks by pre-populating the Bloom filter
-        // with hashes from the most recent shards per recording.
+    /// Seed the replay filter from recently persisted evidence hashes.
+    ///
+    /// Prevents post-crash replay attacks by pre-populating the Bloom filter
+    /// with hashes from the most recent shards per recording.
+    async fn seed_replay_filter(&mut self) {
         let seed_hashes = self.guardian.collect_recent_evidence_hashes(50).await;
         for hash in &seed_hashes {
             self.replay_filter.insert(hash);
@@ -221,8 +236,6 @@ impl<J: TransientJournal> StorageActor<J> {
                 "C2: Replay filter seeded from persisted evidence"
             );
         }
-
-        self.cleanup_ghost_keys().await;
     }
 
     /// Destroy content keys for revoked recordings that survived a partial crash.
