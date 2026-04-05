@@ -131,11 +131,11 @@ DID resolution, Ed25519 key management, AEAD payload encryption, signature verif
 
 | File | What it does |
 | ------ | ------------- |
-| `phalanx-proto/src/crypto.rs` | `SymmetricKey` with zeroization on drop, cryptographic error types |
-| `phalanx-proto/src/identity.rs` | `Did`, `NetworkId`, `PhalanxIdentity`, `RecordingId`, `ShardId` |
+| `phalanx-proto/src/identity/crypto.rs` | `SymmetricKey` with zeroization on drop, cryptographic error types |
+| `phalanx-proto/src/identity/did.rs` | `Did`, `NetworkId`, `PhalanxIdentity`, `RecordingId`, `ShardId` |
 | `phalanx-forensics/src/identity.rs` | DID resolution — extracting Ed25519 public keys from `did:key` URIs |
-| `phalanx-forensics/src/witness.rs` | `WitnessAuthority` — signing, verifying, and chunking evidence envelopes |
-| `phalanx-forensics/src/judge.rs` | Shard and recording amalgam causality validation |
+| `phalanx-forensics/src/pipeline/witness.rs` | `WitnessAuthority` — signing, verifying, and chunking evidence envelopes |
+| `phalanx-forensics/src/verification/judge.rs` | Shard and recording amalgam causality validation |
 | `phalanx-node/src/identity.rs` | `PhalanxNodeIdentityExt` — node-level identity and retrieval authorization |
 | `phalanx-node/src/psk.rs` | Pre-shared key management |
 | `phalanx-transport/src/identity_ext.rs` | Converts `PhalanxIdentity` to libp2p keypairs and `NetworkId`s |
@@ -161,8 +161,8 @@ libp2p swarm management, gossipsub, Kademlia DHT, QUIC transport, mDNS discovery
 | `phalanx-transport/src/io.rs` | Async length-prefixed I/O with size validation |
 | `phalanx-transport/src/kademlia.rs` | `KademliaGovernor` — reputation-weighted provider insertion with temporal decay |
 | `phalanx-transport/src/routing.rs` | Central switchboard routing `NetworkEvent`s to actors |
-| `phalanx-proto/src/network.rs` | `NetworkEvent`, `IngressPort`, `EgressPort`, `LocalMeshPort` trait contracts |
-| `phalanx-proto/src/kademlia.rs` | DHT payload kinds and provider data structures |
+| `phalanx-proto/src/network/events.rs` | `NetworkEvent`, `IngressPort`, `EgressPort`, `LocalMeshPort` trait contracts |
+| `phalanx-proto/src/network/kademlia.rs` | DHT payload kinds and provider data structures |
 | `phalanx-forensics/src/kademlia.rs` | DHT timestamp conversion and expiration verification |
 | `phalanx-node/src/network/orchestrator.rs` | Transport stack factory for swarm construction |
 | `phalanx-node/src/persistence/kademlia.rs` | redb-backed `RecordStore` for persistent DHT records |
@@ -174,13 +174,13 @@ Eclipse attack detection, topology-aware peer admission, traffic governance, and
 
 | File | What it does |
 | ------ | ------------- |
-| `phalanx-forensics/src/eclipse.rs` | Passive eclipse attack detection via `MeshFingerprint` and peer set analysis |
-| `phalanx-forensics/src/topology_gate.rs` | Per-peer admission control enforcing subnet diversity and transport quotas |
-| `phalanx-forensics/src/bloom.rs` | `RotatingBloomFilter` — probabilistic replay protection |
+| `phalanx-forensics/src/trust/eclipse.rs` | Passive eclipse attack detection via `MeshFingerprint` and peer set analysis |
+| `phalanx-forensics/src/verification/topology_gate.rs` | Per-peer admission control enforcing subnet diversity and transport quotas |
+| `phalanx-forensics/src/verification/bloom.rs` | `RotatingBloomFilter` — probabilistic replay protection |
 | `phalanx-forensics/src/policy.rs` | `IngressGovernor`, `TrafficGovernor`, `EgressGovernor` — traffic shaping |
-| `phalanx-forensics/src/gate.rs` | Monadic gate combinators — `LensGate`, `IntegrityGate` |
-| `phalanx-proto/src/topology.rs` | `SubnetBucket`, `TransportClass`, eclipse risk types |
-| `phalanx-proto/src/trust.rs` | `TrustLevel`, `Offense`, `OffenseSeverity` |
+| `phalanx-forensics/src/verification/gate.rs` | Monadic gate combinators — `LensGate`, `IntegrityGate` |
+| `phalanx-proto/src/network/topology.rs` | `SubnetBucket`, `TransportClass`, eclipse risk types |
+| `phalanx-proto/src/identity/trust.rs` | `TrustLevel`, `Offense`, `OffenseSeverity` |
 
 ### Media & Codecs
 
@@ -188,10 +188,10 @@ JPEG/PCM capture, MP4 transcoding, fountain code encoding/reassembly, C2PA conte
 
 | File | What it does |
 | ------ | ------------- |
-| `phalanx-forensics/src/transcode.rs` | JPEG frames + PCM audio → MP4 container |
-| `phalanx-forensics/src/reassembler.rs` | Fountain-coded chunk reassembly into complete envelopes |
-| `phalanx-forensics/src/c2pa_ext.rs` | C2PA manifest builder embedding Phalanx forensic assertions |
-| `phalanx-proto/src/evidence.rs` | `WitnessEnvelope`, `ShardChunk`, `VideoShard`, `AudioShard`, `Evidence` |
+| `phalanx-forensics/src/pipeline/transcode.rs` | JPEG frames + PCM audio → MP4 container |
+| `phalanx-forensics/src/pipeline/reassembler.rs` | Fountain-coded chunk reassembly into complete envelopes |
+| `phalanx-forensics/src/pipeline/c2pa_ext.rs` | C2PA manifest builder embedding Phalanx forensic assertions |
+| `phalanx-proto/src/evidence/envelope.rs` | `WitnessEnvelope`, `ShardChunk`, `VideoShard`, `AudioShard`, `Evidence` |
 | `phalanx-node/src/playback/sink.rs` | Media sink for forensic evidence replay |
 | `phalanx-node/src/actors/media_egress.rs` | Encrypts, seals, fountain-encodes, and publishes video/audio evidence |
 | `phalanx-ffi/src/playback.rs` | FFI playback bridge to Flutter UI |
@@ -219,12 +219,11 @@ PRNU sensor fingerprinting, Kolmogorov-Smirnov testing, spectral analysis, and c
 
 | File | What it does |
 | ------ | ------------- |
-| `phalanx-forensics/src/calibrate.rs` | PRNU calibration — deriving per-sensor fingerprint thresholds |
-| `phalanx-forensics/src/corroboration.rs` | Gate 8 multi-device proof generation with K-S statistical testing |
-| `phalanx-proto/src/corroboration.rs` | Corroboration proof types and temporal event windows |
+| `phalanx-forensics/src/pipeline/calibrate.rs` | PRNU calibration — deriving per-sensor fingerprint thresholds |
+| `phalanx-forensics/src/trust/corroboration.rs` | Gate 8 multi-device proof generation with K-S statistical testing |
+| `phalanx-proto/src/evidence/corroboration.rs` | Corroboration proof types and temporal event windows |
 | `phalanx-node/src/vitals/spectral.rs` | Spectral analysis for vitals frequency-domain monitoring |
-| `phalanx-lens/src/neon.rs` | NEON SIMD-accelerated PRNU computation |
-| `phalanx-lens/src/scalar.rs` | Scalar fallback PRNU computation |
+| `phalanx-lens/src/scalar.rs` | Scalar PRNU computation |
 | `phalanx-transport/src/counting.rs` | Statistical counting utilities |
 | `phalanx-ffi/src/calibrate.rs` | FFI bridge for sensor calibration |
 | `phalanx-stronghold/src/ops/corroborate.rs` | Stronghold-side corroboration proof assembly |
@@ -268,9 +267,9 @@ Peer scoring, offense tracking, reputation decay, community membership, and web-
 
 | File | What it does |
 | ------ | ------------- |
-| `phalanx-proto/src/trust.rs` | `TrustLevel`, `PetName`, `Offense`, `OffenseSeverity` |
-| `phalanx-proto/src/community.rs` | Web-of-trust community types with quorum-based membership voting |
-| `phalanx-forensics/src/trust.rs` | Offense penalty assessment and reputation scoring traits |
+| `phalanx-proto/src/identity/trust.rs` | `TrustLevel`, `PetName`, `Offense`, `OffenseSeverity` |
+| `phalanx-proto/src/identity/community.rs` | Web-of-trust community types with quorum-based membership voting |
+| `phalanx-forensics/src/trust/evaluation.rs` | Offense penalty assessment and reputation scoring traits |
 | `phalanx-node/src/trust.rs` | `TrustRegistry`, `ReputationProjection` — peer scoring with fail-secure locks |
 | `phalanx-node/src/actors/trust_actor.rs` | `TrustActor` — offense recording, reputation scoring, blacklisting |
 | `phalanx-stronghold/src/actors/community.rs` | Community membership actor |
@@ -282,12 +281,11 @@ Tokio actor lifecycle, message passing, event loop design, and inter-actor coord
 
 ### Simulation & Testing
 
-Deterministic simulation harness, chaos injection, virtual clocks, and test fixture construction.
+Deterministic simulation harness, virtual clocks, and test fixture construction.
 
 | File | What it does |
 | ------ | ------------- |
 | `phalanx-sim/src/harness.rs` | `SimulationHarness` — deterministic multi-node simulation |
-| `phalanx-sim/src/chaos.rs` | Chaos injection — partition, delay, corruption scenarios |
 | `phalanx-sim/src/clock.rs` | `VirtualClock` — deterministic time for reproducible simulations |
 | `phalanx-sim/src/physics.rs` | Simulated network physics — latency, bandwidth, loss |
 | `phalanx-sim/src/world.rs` | World state management for simulation scenarios |

@@ -1,4 +1,3 @@
-pub mod chaos;
 pub mod clock; // The "Tense Control": Management of virtual time
 pub mod harness; // The "Pen": Your API for writing simulation scripts
 pub mod physics; // The Physical Laws of the Simulation

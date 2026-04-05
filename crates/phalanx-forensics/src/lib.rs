@@ -1,27 +1,44 @@
 // crates/phalanx-forensics/src/lib.rs
-pub mod bloom;
-pub mod c2pa_ext;
-pub mod calibrate;
-pub mod corroboration;
-pub mod crucible;
+
+// ─── Domain modules ──────────────────────────────────────────────────
 pub mod cryptography;
-pub mod eclipse;
+pub mod pipeline; // Evidence Assembly — crucible, reassembler, witness, transcode, calibrate, c2pa
+pub mod trust; // Integrity — evaluation, corroboration, eclipse, revocation
+pub mod verification; // The Gates — gate, topology_gate, judge, bloom // Crypto primitives — encrypt, decrypt, grants, bridge
+
+// ─── Cross-cutting ───────────────────────────────────────────────────
 pub mod errors;
-pub mod gate;
 pub mod identity;
-pub mod judge;
 pub mod kademlia;
 pub mod policy;
-pub mod reassembler;
-pub mod revocation;
 pub mod test_utils;
-pub mod topology_gate;
-pub mod transcode;
-pub mod trust;
-pub mod witness;
 pub mod storage {
     pub mod handover;
 }
+
+// ─── Backward-compatible re-exports ──────────────────────────────────
+// Every module that moved into a subdirectory is re-exported at the old
+// path so that `crate::gate::X` still resolves. New code should prefer
+// the grouped paths (e.g. `crate::verification::gate::X`).
+
+// verification/*
+pub use verification::bloom;
+pub use verification::gate;
+pub use verification::judge;
+pub use verification::topology_gate;
+
+// pipeline/*
+pub use pipeline::c2pa_ext;
+pub use pipeline::calibrate;
+pub use pipeline::crucible;
+pub use pipeline::reassembler;
+pub use pipeline::transcode;
+pub use pipeline::witness;
+
+// trust/*
+pub use trust::corroboration;
+pub use trust::eclipse;
+pub use trust::revocation;
 
 // Re-export primary structures for ergonomic use
 

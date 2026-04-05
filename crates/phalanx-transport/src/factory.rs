@@ -63,7 +63,7 @@ where
     if config.require_psk && psk.is_none() {
         return Err(TransportError::Protocol(
             "require_psk is set but no Pre-Shared Key was provided. \
-             The node cannot start without transport-layer encryption."
+            The node cannot start without transport-layer encryption."
                 .to_string(),
         ));
     }

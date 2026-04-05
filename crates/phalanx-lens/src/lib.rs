@@ -5,9 +5,6 @@
 
 pub mod scalar;
 
-#[cfg(all(target_arch = "aarch64", feature = "neon"))]
-pub mod neon;
-
 use phalanx_proto::evidence::ForensicMetrics;
 use phalanx_proto::types::BlackLevel;
 
