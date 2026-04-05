@@ -33,9 +33,6 @@ libp2p = { version = "0.56", features = ["gossipsub", "kad", "tcp", "noise", "ya
 postcard = { version = "1.1.3", features = ["alloc"] }
 tracing = "0.1.44"
 
-[patch.crates-io]
-gear-dlmalloc = { path = "./patches/gear-dlmalloc" }
-
 [workspace.lints.clippy]
 # Disable style warnings
 pedantic = { level = "allow", priority = -1 }
