@@ -24,7 +24,6 @@ phalanx-forensics = { path = "crates/phalanx-forensics" }
 phalanx-transport = { path = "crates/phalanx-transport" }
 phalanx-node = { path = "crates/phalanx-node" }
 phalanx-ffi = { path = "crates/phalanx-ffi" }
-phalanx-ui = { path = "crates/phalanx-ui" }
 phalanx-lens = { path = "crates/phalanx-lens" }
 phalanx-test-fixtures = { path = "crates/phalanx-test-fixtures" }
 serde = { version = "1.0", features = ["derive"] }
