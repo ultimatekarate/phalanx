@@ -1,6 +1,6 @@
 # Phalanx Subsystem Map
 
-Phalanx is built from 35 subsystems. Each one does exactly one thing. The [Linguistic Code Model](../linguistic-code-model.md) prevents them from growing into each other — crate boundaries make entanglement a compiler error, not a code review finding. This document maps every subsystem, what it does, and where it lives.
+Phalanx is built from 34 subsystems. Each one does exactly one thing. The [Linguistic Code Model](../linguistic-code-model.md) prevents them from growing into each other — crate boundaries make entanglement a compiler error, not a code review finding. This document maps every subsystem, what it does, and where it lives.
 
 ---
 
@@ -12,31 +12,25 @@ How evidence moves from camera sensor to encrypted storage to shared proof.
 
 Analyzes raw camera pixels for sensor fingerprint (PRNU variance) and screen recapture artifacts (Moiré energy). Runs on a 256×256 center crop that fits in L1 cache. Benchmarked at 150μs per frame.
 
-**Files:** `phalanx-lens/src/scalar.rs`, `phalanx-lens/src/neon.rs`
+**Files:** `phalanx-lens/src/scalar.rs`
 
 ### Witness Authority
 
 Signs evidence into envelopes with Ed25519 and chains them via signature hashes. Every envelope carries a cryptographic proof of who created it and what came before it.
 
-**Files:** `phalanx-forensics/src/witness.rs`
-
-### Chronos Authority
-
-Maintains the causality chain during a recording session. Each envelope is sealed with the signature hash of the previous one, enforcing a linear ordering that survives network reordering.
-
-**Files:** `phalanx-forensics/src/timeline/session.rs`
+**Files:** `phalanx-forensics/src/pipeline/witness.rs`
 
 ### Reassembler
 
 Fountain code reconstruction. Collects RaptorQ symbols from the network and decodes them into complete evidence envelopes. Symbols are self-describing — the decoder initializes from any received symbol with no ordering dependency.
 
-**Files:** `phalanx-forensics/src/reassembler.rs`
+**Files:** `phalanx-forensics/src/pipeline/reassembler.rs`
 
 ### Crucible
 
 Generic streaming accumulator. Holds a map of keys to work contexts and delegates all domain logic to a `Mold` strategy. Used twice in series: `Crucible<ShardMold>` reassembles symbols into envelopes, `Crucible<RecordingAmalgam>` assembles envelopes into recordings with ownership tracking.
 
-**Files:** `phalanx-forensics/src/crucible.rs`
+**Files:** `phalanx-forensics/src/pipeline/crucible.rs`
 
 ### Guardian Vault
 
@@ -48,13 +42,13 @@ Encrypted disk storage for forensic evidence. Manages per-recording encryption k
 
 Cryptographic forgetting. A 12-word mnemonic derives a one-time revocation signing key that is never stored. The signed token triggers destruction of the per-recording encryption key before the data is removed. Propagates across the mesh.
 
-**Files:** `phalanx-forensics/src/revocation.rs`
+**Files:** `phalanx-forensics/src/trust/revocation.rs`
 
 ### Media Transcoding
 
 Converts JPEG video frames and PCM audio into H.264+AAC MP4 containers with aggregated forensic metrics. Pure computation — no IO.
 
-**Files:** `phalanx-forensics/src/transcode.rs`
+**Files:** `phalanx-forensics/src/pipeline/transcode.rs`
 
 ---
 
@@ -84,7 +78,7 @@ Seals per-recording encryption keys for specific recipients using ECDH over Curv
 
 Symmetric encryption and decryption of evidence payloads. XChaCha20-Poly1305 with idempotent application — already-encrypted payloads are passed through unchanged.
 
-**Files:** `phalanx-forensics/src/judge.rs`
+**Files:** `phalanx-forensics/src/verification/judge.rs`
 
 ---
 
@@ -96,7 +90,7 @@ Who to believe, who to reject, and how to tell the difference.
 
 Composable verification pipeline. Each gate makes a single accept/reject decision. Gates chain monadically — if any gate rejects, the pipeline short-circuits. LensGate checks sensor provenance. IntegrityGate verifies signatures and timestamps. PromotionGate advances evidence through the `Unverified → Verified` typestate. ContinuityGate validates the hash chain.
 
-**Files:** `phalanx-forensics/src/gate.rs`
+**Files:** `phalanx-forensics/src/verification/gate.rs`
 
 ### Traffic Governors
 
@@ -108,25 +102,25 @@ Three governors that make per-request policy decisions. IngressGovernor allocate
 
 Per-peer admission control for eclipse attack defense. Enforces subnet diversity and transport class quotas so no single network region can dominate the peer set.
 
-**Files:** `phalanx-forensics/src/topology_gate.rs`
+**Files:** `phalanx-forensics/src/verification/topology_gate.rs`
 
 ### Bloom Filter
 
 Rotating probabilistic replay protection. Two-generation window with bounded memory (~250KB). Evidence hashes are checked after reassembly — retransmitting the same envelope is rejected without storing every hash forever.
 
-**Files:** `phalanx-forensics/src/bloom.rs`
+**Files:** `phalanx-forensics/src/verification/bloom.rs`
 
 ### Eclipse Detection
 
 Passive mesh fingerprint consistency checking. Detects when an attacker is trying to partition a node from the honest network by monitoring the peer set for suspicious changes.
 
-**Files:** `phalanx-forensics/src/eclipse.rs`
+**Files:** `phalanx-forensics/src/trust/eclipse.rs`
 
 ### Offense and Reputation
 
 Fixed penalty matrix mapping protocol violations to score reductions. Quota exceeded costs 25 points. Invalid signature costs 101 — enough to blacklist in one shot. Feeds into the Trust Registry and the per-peer reputation integrals.
 
-**Files:** `phalanx-forensics/src/trust.rs`
+**Files:** `phalanx-forensics/src/trust/evaluation.rs`
 
 ### Trust Registry
 
@@ -180,19 +174,19 @@ Proving that independent devices observed the same event.
 
 Derives a per-sensor fingerprint threshold from calibration frames. Statistical filter with three-sigma confidence margin. Rejects mixed-sensor calibration sets. The threshold gates all subsequent authenticity checks.
 
-**Files:** `phalanx-forensics/src/calibrate.rs`
+**Files:** `phalanx-forensics/src/pipeline/calibrate.rs`
 
 ### Corroboration Gate
 
 Multi-device independence verification using Kolmogorov-Smirnov statistical testing. Compares PRNU profiles across recordings to confirm they came from different physical sensors observing the same event within a temporal window. Pure laboratory logic — no IO.
 
-**Files:** `phalanx-forensics/src/corroboration.rs`
+**Files:** `phalanx-forensics/src/trust/corroboration.rs`
 
 ### C2PA Extensions
 
 Embeds Phalanx forensic assertions — node identity, lens metrics, corroboration proof — into C2PA content authenticity manifests. Three tiers: basic, with-lens, with-corroboration.
 
-**Files:** `phalanx-forensics/src/c2pa_ext.rs`
+**Files:** `phalanx-forensics/src/pipeline/c2pa_ext.rs`
 
 ### Handover Authority
 
@@ -240,7 +234,7 @@ Eight node-side actors and three stronghold-side actors communicating via bounde
 
 Quorum-based membership with Ed25519 vouches. Community identity is deterministic — a SHA-256 hash of the membership graph, not a central keypair. k-of-n existing members must vouch for each new member. Communities expire automatically and dissolve with zeroization.
 
-**Files:** `phalanx-proto/src/community.rs`, `phalanx-stronghold/src/actors/community.rs`
+**Files:** `phalanx-proto/src/identity/community.rs`, `phalanx-stronghold/src/actors/community.rs`
 
 ### Stronghold Operations
 
@@ -250,7 +244,7 @@ Server-side one-shot operations for grant decryption, corroboration proof assemb
 
 ### Simulation Harness
 
-Spawns real MeshSentinel instances with virtual transport, deterministic clock, and chaos injection. Tests run against the actual actor system with in-memory channels replacing libp2p. Reproducible by design.
+Spawns real MeshSentinel instances with virtual transport and deterministic clock. Tests run against the actual actor system with in-memory channels replacing libp2p. Reproducible by design.
 
 **Files:** `phalanx-sim/src/harness.rs`, `sim/src/world.rs`, `sim/src/clock.rs`, `sim/src/physics.rs`
 
