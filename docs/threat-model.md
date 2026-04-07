@@ -38,7 +38,7 @@ Every evidence envelope is Ed25519-signed at creation and verified unconditional
 
 - **Hash chain.** Each envelope carries `prev_hash`, the signature hash of the preceding envelope. The Continuity Gate (Gate 8) verifies this chain, detecting dropped, reordered, or injected envelopes. A break in the chain is a hard rejection.
 
-- **Evidence hash binding.** Gate 7 (Coasting Gate) recomputes the SHA-256 of the serialized evidence and compares it to the embedded `evidence_hash`. Any modification to the payload invalidates the hash.
+- **Evidence hash binding.** Gate 7 (Coasting Gate) recomputes the BLAKE3 hash of the serialized evidence and compares it to the embedded `evidence_hash`. Any modification to the payload invalidates the hash.
 
 **Files:** `phalanx-forensics/src/verification/gate.rs` (lines 110-170, 529-578), `phalanx-proto/src/evidence/envelope.rs`
 
@@ -309,7 +309,7 @@ Wire bytes
   -> Gate 0:  Trust standing (blacklist check)
   -> Gate 2:  Ed25519 signature + temporal freshness
   -> Gate 3:  PRNU sensor fingerprint + Moire screen recapture
-  -> Gate 7:  SHA-256 evidence hash recomputation
+  -> Gate 7:  BLAKE3 evidence hash recomputation
   -> Gate 8:  Hash chain causality verification
   -> Gate 9:  Typestate promotion (Unverified -> Verified)
   -> Bloom:   Replay filter
