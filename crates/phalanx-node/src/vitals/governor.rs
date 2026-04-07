@@ -22,6 +22,9 @@ pub struct SystemGovernor {
     pub config: HomeostaticConfig,
     pub integrals: RwLock<IntegralState>,
     pub recommended_state: RwLock<PowerState>,
+    /// Monotonic epoch for DecayingIntegral time domain.
+    /// Uses tokio::time::Instant so paused virtual time (sim) is respected.
+    epoch: Instant,
     // Socket-level I/O counters from the transport layer.
     // Sampled on the vitals tick to feed Volterra integrals.
     io_bytes_sent: Option<Arc<AtomicU64>>,
@@ -45,6 +48,12 @@ impl SystemGovernor {
         Self::with_config(HomeostaticConfig::default())
     }
 
+    /// Monotonic seconds since this governor's epoch.
+    /// Uses tokio::time::Instant so sim virtual time is respected.
+    pub fn now_secs(&self) -> f64 {
+        self.epoch.elapsed().as_secs_f64()
+    }
+
     /// Create with a custom hardware probe (for mobile platforms).
     /// Overrides m_crit from actual device RAM if the probe provides it.
     pub fn with_probe(mut config: HomeostaticConfig, probe: Arc<dyn HardwareProbe>) -> Self {
@@ -52,13 +61,15 @@ impl SystemGovernor {
             let ram_mib = ram_bytes as f64 / 1_048_576.0;
             config.m_crit = ram_mib * phalanx_forensics::policy::MEMORY_CRITICAL_FRACTION;
         }
-        let integrals = IntegralState::from_config(&config);
+        let epoch = Instant::now();
+        let integrals = IntegralState::from_config(&config, 0.0);
         Self {
             current_state: RwLock::new(SystemStress::Nominal),
             probe,
             integrals: RwLock::new(integrals),
             config,
             recommended_state: RwLock::new(PowerState::Normal),
+            epoch,
             io_bytes_sent: None,
             io_bytes_received: None,
             io_ops: None,
@@ -88,13 +99,15 @@ impl SystemGovernor {
     }
 
     pub fn with_config(config: HomeostaticConfig) -> Self {
-        let integrals = IntegralState::from_config(&config);
+        let epoch = Instant::now();
+        let integrals = IntegralState::from_config(&config, 0.0);
         Self {
             current_state: RwLock::new(SystemStress::Nominal),
             probe: Arc::new(SysfsProbe::new()),
             integrals: RwLock::new(integrals),
             config,
             recommended_state: RwLock::new(PowerState::Normal),
+            epoch,
             io_bytes_sent: None,
             io_bytes_received: None,
             io_ops: None,
@@ -167,7 +180,8 @@ impl SystemGovernor {
         };
 
         if heat_penalty > 0.0 {
-            self.with_state_mut(|s| s.s.record(heat_penalty));
+            let now = self.now_secs();
+            self.with_state_mut(|s| s.s.record(heat_penalty, now));
         }
 
         // Sample socket-level I/O counters from the transport layer.
@@ -226,9 +240,10 @@ impl SystemGovernor {
         };
 
         if ops_delta > 0 && drops_delta > 0 {
+            let now = self.now_secs();
             self.with_state_mut(|s| {
                 let ratio = (drops_delta as f64 / ops_delta as f64).min(1.0);
-                s.c.record(ratio);
+                s.c.record(ratio, now);
             });
         }
     }
@@ -236,12 +251,13 @@ impl SystemGovernor {
     // --- Immune Integral (Reputation) ---
 
     pub fn record_peer_evidence(&self, peer_id: &str, is_valid: bool) {
+        let now = self.now_secs();
         self.with_state_mut(|s| {
             let delta = if is_valid { 1.0 } else { -self.config.omega };
             s.r_integrals
                 .entry(peer_id.to_string())
-                .or_insert_with(|| DecayingIntegral::new(self.config.lambda_rep))
-                .record(delta);
+                .or_insert_with(|| DecayingIntegral::new(self.config.lambda_rep, now))
+                .record(delta, now);
 
             // Also record to the contribution integral (separate key, separate decay).
             // Only positive contributions count — invalid evidence doesn't earn credit.
@@ -249,17 +265,18 @@ impl SystemGovernor {
                 let contrib_key = format!("contrib:{}", peer_id);
                 s.r_integrals
                     .entry(contrib_key)
-                    .or_insert_with(|| DecayingIntegral::new(self.config.lambda_contrib))
-                    .record(1.0);
+                    .or_insert_with(|| DecayingIntegral::new(self.config.lambda_contrib, now))
+                    .record(1.0, now);
             }
         });
     }
 
     pub fn is_peer_coupled(&self, peer_id: &str) -> bool {
+        let now = self.now_secs();
         self.with_state(|s| {
             s.r_integrals
                 .get(peer_id)
-                .is_none_or(|r| r.current_value() >= 0.0)
+                .is_none_or(|r| r.current_value(now) >= 0.0)
         })
     }
 
@@ -267,44 +284,48 @@ impl SystemGovernor {
     /// Peers accumulate +1.0 per event under a "bw:{peer_id}" key.
     /// Returns false when accumulated bandwidth pressure exceeds the sybil ceiling.
     pub fn is_peer_bandwidth_ok(&self, peer_id: &str) -> bool {
+        let now = self.now_secs();
         let key = format!("bw:{}", peer_id);
         self.with_state(|s| {
             s.r_integrals
                 .get(&key)
-                .is_none_or(|r| r.current_value() < self.config.psi_max)
+                .is_none_or(|r| r.current_value(now) < self.config.psi_max)
         })
     }
 
     /// Records per-peer bandwidth event into the r_integrals namespace.
     pub fn record_peer_bandwidth(&self, peer_id: &str) {
+        let now = self.now_secs();
         let key = format!("bw:{}", peer_id);
         self.with_state_mut(|s| {
             s.r_integrals
                 .entry(key)
-                .or_insert_with(|| DecayingIntegral::new(self.config.lambda_rep))
-                .record(1.0);
+                .or_insert_with(|| DecayingIntegral::new(self.config.lambda_rep, now))
+                .record(1.0, now);
         });
     }
 
     /// Per-recording retrieval rate limit.
     /// Returns false if this recording has been requested too frequently.
     pub fn is_retrieval_rate_ok(&self, recording_id: &str) -> bool {
+        let now = self.now_secs();
         let key = format!("ret:{}", recording_id);
         self.with_state(|s| {
             s.r_integrals
                 .get(&key)
-                .is_none_or(|r| r.current_value() < self.config.psi_max)
+                .is_none_or(|r| r.current_value(now) < self.config.psi_max)
         })
     }
 
     /// Record a retrieval attempt for rate limiting.
     pub fn record_retrieval_attempt(&self, recording_id: &str) {
+        let now = self.now_secs();
         let key = format!("ret:{}", recording_id);
         self.with_state_mut(|s| {
             s.r_integrals
                 .entry(key)
-                .or_insert_with(|| DecayingIntegral::new(self.config.lambda_rep))
-                .record(1.0);
+                .or_insert_with(|| DecayingIntegral::new(self.config.lambda_rep, now))
+                .record(1.0, now);
         });
     }
 
@@ -315,11 +336,12 @@ impl SystemGovernor {
     /// the ingestion pipeline will reject the peer when the integral
     /// goes below zero.
     pub fn record_spectral_anomaly(&self, peer_id: &str, residual: f64) {
+        let now = self.now_secs();
         self.with_state_mut(|s| {
             s.r_integrals
                 .entry(peer_id.to_string())
-                .or_insert_with(|| DecayingIntegral::new(self.config.lambda_rep))
-                .record(-residual);
+                .or_insert_with(|| DecayingIntegral::new(self.config.lambda_rep, now))
+                .record(-residual, now);
         });
     }
 
@@ -328,8 +350,13 @@ impl SystemGovernor {
     /// Reads from the `"contrib:{peer_id}"` key in `r_integrals`, which is
     /// written by `record_peer_evidence` and never touched by penalty paths.
     pub fn peer_contribution_value(&self, peer_id: &str) -> f64 {
+        let now = self.now_secs();
         let key = format!("contrib:{}", peer_id);
-        self.with_state(|s| s.r_integrals.get(&key).map_or(0.0, |r| r.current_value()))
+        self.with_state(|s| {
+            s.r_integrals
+                .get(&key)
+                .map_or(0.0, |r| r.current_value(now))
+        })
     }
 
     /// Remove `r_integrals` entries that have decayed to near-zero.
@@ -339,9 +366,10 @@ impl SystemGovernor {
     /// entries on the next impulse.
     pub fn prune_stale_integrals(&self) {
         const EPSILON: f64 = 0.001;
+        let now = self.now_secs();
         self.with_state_mut(|s| {
             s.r_integrals
-                .retain(|_, integral| integral.current_value().abs() > EPSILON);
+                .retain(|_, integral| integral.current_value(now).abs() > EPSILON);
         });
     }
 
@@ -349,13 +377,14 @@ impl SystemGovernor {
     /// Returns 0.0 (idle) to 1.0+ (saturated).
     pub fn composite_stress(&self) -> f64 {
         let w = &self.config.stress_weights;
+        let now = self.now_secs();
         self.with_state(|s| {
             let normalized = [
-                s.s.current_value() / self.config.s_crit,
-                s.d.current_value() / self.config.d_crit,
-                s.m.current_value() / self.config.m_crit,
-                s.w.current_value() / self.config.w_crit,
-                s.b.current_value() / self.config.b_crit,
+                s.s.current_value(now) / self.config.s_crit,
+                s.d.current_value(now) / self.config.d_crit,
+                s.m.current_value(now) / self.config.m_crit,
+                s.w.current_value(now) / self.config.w_crit,
+                s.b.current_value(now) / self.config.b_crit,
             ];
             w.iter()
                 .zip(normalized.iter())
@@ -603,53 +632,63 @@ impl SystemGovernor {
 
 impl Homeostasis for SystemGovernor {
     fn record_metabolic_pressure(&self, duration: Duration) {
-        self.with_state_mut(|s| s.s.record(duration.as_secs_f64()));
+        let now = self.now_secs();
+        self.with_state_mut(|s| s.s.record(duration.as_secs_f64(), now));
     }
 
     fn record_latency_pressure(&self, duration: Duration) {
-        self.with_state_mut(|s| s.l.record(duration.as_secs_f64()));
+        let now = self.now_secs();
+        self.with_state_mut(|s| s.l.record(duration.as_secs_f64(), now));
     }
 
     fn record_io_pressure(&self, duration: Duration) {
-        self.with_state_mut(|s| s.d.record(duration.as_secs_f64()));
+        let now = self.now_secs();
+        self.with_state_mut(|s| s.d.record(duration.as_secs_f64(), now));
     }
 
     fn record_entry_pressure(&self) {
-        self.with_state_mut(|s| s.e.record(1.0));
+        let now = self.now_secs();
+        self.with_state_mut(|s| s.e.record(1.0, now));
     }
 
     /// Eclipse remediation: inject a scaled impulse into the Sybil integral.
     /// Eclipse is a topological Sybil signal — same integral, different input.
     fn record_eclipse_impulse(&self, magnitude: f64) {
-        self.with_state_mut(|s| s.e.record(magnitude));
+        let now = self.now_secs();
+        self.with_state_mut(|s| s.e.record(magnitude, now));
     }
 
     #[allow(clippy::arithmetic_side_effects)] // Duration addition — base + expansion, clamped by min().
     fn temporal_tolerance(&self) -> Duration {
+        let now = self.now_secs();
         self.with_state(|s| {
             let base = self.config.base_temporal_drift;
-            let expansion = Duration::from_secs_f64(s.l.current_value());
+            let expansion = Duration::from_secs_f64(s.l.current_value(now));
             let total = base + expansion;
             total.min(self.config.max_temporal_tolerance) // T2: Hard clamp
         })
     }
 
     fn ingestion_scaler(&self) -> IngestionScale {
+        let now = self.now_secs();
         self.with_state(|s| {
-            IngestionScale((1.0 - (s.s.current_value() / self.config.s_crit)).max(0.0))
+            IngestionScale((1.0 - (s.s.current_value(now) / self.config.s_crit)).max(0.0))
         })
     }
 
     fn finalization_scaler(&self) -> FinalizationScale {
+        let now = self.now_secs();
         self.with_state(|s| {
-            FinalizationScale((1.0 - (s.d.current_value() / self.config.d_crit)).max(0.0))
+            FinalizationScale((1.0 - (s.d.current_value(now) / self.config.d_crit)).max(0.0))
         })
     }
 
     fn sybil_endowment(&self) -> SybilEndowment {
+        let now = self.now_secs();
         self.with_state(|s| {
             SybilEndowment(
-                self.config.psi_max / (1.0 + (self.config.k_sybil * s.e.current_value()).powi(2)),
+                self.config.psi_max
+                    / (1.0 + (self.config.k_sybil * s.e.current_value(now)).powi(2)),
             )
         })
     }
@@ -657,64 +696,72 @@ impl Homeostasis for SystemGovernor {
     // --- Resource Pressure Recording (Volterra second-kind convolution) ---
 
     fn record_memory_pressure(&self, bytes_held: usize) {
+        let now = self.now_secs();
         self.with_state_mut(|s| {
             let mib = bytes_held as f64 / 1_048_576.0;
-            s.m.record(mib);
+            s.m.record(mib, now);
         });
     }
 
     fn record_storage_pressure(&self, used_bytes: u64, max_bytes: u64) {
+        let now = self.now_secs();
         self.with_state_mut(|s| {
             let ratio = if max_bytes > 0 {
                 used_bytes as f64 / max_bytes as f64
             } else {
                 1.0
             };
-            s.w.record(ratio);
+            s.w.record(ratio, now);
         });
     }
 
     fn record_bandwidth_pressure(&self, bytes: usize) {
+        let now = self.now_secs();
         self.with_state_mut(|s| {
             let mib = bytes as f64 / 1_048_576.0;
-            s.b.record(mib);
+            s.b.record(mib, now);
         });
     }
 
     fn record_connection_pressure(&self, active: usize, max: usize) {
+        let now = self.now_secs();
         self.with_state_mut(|s| {
             let ratio = if max > 0 {
                 active as f64 / max as f64
             } else {
                 1.0
             };
-            s.c.record(ratio);
+            s.c.record(ratio, now);
         });
     }
 
     // --- Resource Scalers (1.0 = nominal, 0.0 = saturated) ---
 
     fn memory_scaler(&self) -> MemoryScale {
+        let now = self.now_secs();
         self.with_state(|s| {
-            MemoryScale((1.0 - (s.m.current_value() / self.config.m_crit)).max(0.0))
+            MemoryScale((1.0 - (s.m.current_value(now) / self.config.m_crit)).max(0.0))
         })
     }
 
     fn storage_scaler(&self) -> StorageScale {
+        let now = self.now_secs();
         self.with_state(|s| {
-            StorageScale((1.0 - (s.w.current_value() / self.config.w_crit)).max(0.0))
+            StorageScale((1.0 - (s.w.current_value(now) / self.config.w_crit)).max(0.0))
         })
     }
 
     fn bandwidth_scaler(&self) -> BandwidthScale {
+        let now = self.now_secs();
         self.with_state(|s| {
-            BandwidthScale((1.0 - (s.b.current_value() / self.config.b_crit)).max(0.0))
+            BandwidthScale((1.0 - (s.b.current_value(now) / self.config.b_crit)).max(0.0))
         })
     }
 
     fn connection_scaler(&self) -> ConnectionScale {
+        let now = self.now_secs();
         self.with_state(|s| {
-            ConnectionScale((1.0 - (s.c.current_value() / self.config.c_crit)).max(0.0))
+            ConnectionScale((1.0 - (s.c.current_value(now) / self.config.c_crit)).max(0.0))
         })
     }
 }
@@ -1488,7 +1535,8 @@ mod tests {
 
         gov.update_vitals();
 
-        let b_value = gov.with_state(|s| s.b.current_value());
+        let now = gov.now_secs();
+        let b_value = gov.with_state(|s| s.b.current_value(now));
         assert!(
             b_value > 0.0,
             "Bandwidth integral should reflect wire bytes, got {}",
@@ -1496,9 +1544,11 @@ mod tests {
         );
 
         // Second tick with no new traffic → delta = 0, no additional pressure
-        let b_before = gov.with_state(|s| s.b.current_value());
+        let now = gov.now_secs();
+        let b_before = gov.with_state(|s| s.b.current_value(now));
         gov.update_vitals();
-        let b_after = gov.with_state(|s| s.b.current_value());
+        let now = gov.now_secs();
+        let b_after = gov.with_state(|s| s.b.current_value(now));
         assert!(
             b_after <= b_before,
             "Bandwidth integral should not increase without new traffic (before={}, after={})",
@@ -1525,7 +1575,8 @@ mod tests {
         // First tick: last-values were seeded, so delta should be 0
         gov.update_vitals();
 
-        let b_value = gov.with_state(|s| s.b.current_value());
+        let now = gov.now_secs();
+        let b_value = gov.with_state(|s| s.b.current_value(now));
         assert!(
             b_value < 0.001,
             "First tick should see zero bandwidth delta (seeded), got {}",
@@ -1553,7 +1604,8 @@ mod tests {
 
         gov.update_vitals();
 
-        let c_value = gov.with_state(|s| s.c.current_value());
+        let now = gov.now_secs();
+        let c_value = gov.with_state(|s| s.c.current_value(now));
         assert!(
             c_value > 0.0,
             "Connection integral should reflect drop ratio, got {}",
@@ -1561,10 +1613,12 @@ mod tests {
         );
 
         // No drops with ops → no connection pressure
-        let c_before = gov.with_state(|s| s.c.current_value());
+        let now = gov.now_secs();
+        let c_before = gov.with_state(|s| s.c.current_value(now));
         io_ops.fetch_add(1000, Ordering::Relaxed);
         gov.update_vitals();
-        let c_after = gov.with_state(|s| s.c.current_value());
+        let now = gov.now_secs();
+        let c_after = gov.with_state(|s| s.c.current_value(now));
         assert!(
             c_after <= c_before,
             "Connection integral should not increase without drops (before={}, after={})",

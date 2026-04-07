@@ -55,20 +55,20 @@ impl std::ops::DerefMut for IntegralState {
     }
 }
 
-impl Default for IntegralState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl IntegralState {
     pub fn new() -> Self {
-        Self::from_config(&phalanx_forensics::policy::HomeostaticConfig::default())
+        Self::from_config(
+            &phalanx_forensics::policy::HomeostaticConfig::default(),
+            0.0,
+        )
     }
 
-    pub fn from_config(config: &phalanx_forensics::policy::HomeostaticConfig) -> Self {
+    pub fn from_config(
+        config: &phalanx_forensics::policy::HomeostaticConfig,
+        now_secs: f64,
+    ) -> Self {
         Self {
-            integrals: RI::from_config(config),
+            integrals: RI::from_config(config, now_secs),
             conserving_trigger_count: 0,
             leaf_trigger_count: 0,
             normal_trigger_count: 0,

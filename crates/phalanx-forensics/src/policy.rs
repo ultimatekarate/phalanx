@@ -366,43 +366,41 @@ impl IngestionScale {
 
 // --- DecayingIntegral ---
 
-use tokio::time::Instant;
-
 /// A single Volterra second-kind integral with its own time cursor.
 /// Each integral decays independently: I(t+dt) = impulse + I(t) · exp(-λ·dt)
 /// where dt is measured from THIS integral's last update, not a shared clock.
 ///
-/// Before this fix, all integrals shared a single `last_sys_tick`. High-frequency
-/// updates to one integral (e.g., bandwidth) would suppress decay in all others,
-/// causing phantom cross-coupling and ~10x pressure inflation under load.
+/// Clock-agnostic: callers supply monotonic `now_secs` from whatever clock
+/// they own (tokio virtual clock in sim, wall clock in production).
+/// dt is clamped to max(0.0, …) so a stale or misordered timestamp
+/// cannot cause exponential growth.
 #[derive(Debug)]
 pub struct DecayingIntegral {
     value: f64,
     lambda: f64,
-    last_update: Instant,
+    last_update_secs: f64,
 }
 
 impl DecayingIntegral {
-    pub fn new(lambda: f64) -> Self {
+    pub fn new(lambda: f64, now_secs: f64) -> Self {
         Self {
             value: 0.0,
             lambda,
-            last_update: Instant::now(),
+            last_update_secs: now_secs,
         }
     }
 
     /// Record an impulse, applying exponential decay since this integral's last update.
-    pub fn record(&mut self, impulse: f64) {
-        let now = Instant::now();
-        let dt = now.duration_since(self.last_update).as_secs_f64();
-        self.last_update = now;
+    pub fn record(&mut self, impulse: f64, now_secs: f64) {
+        let dt = (now_secs - self.last_update_secs).max(0.0);
+        self.last_update_secs = now_secs;
         self.value = impulse + self.value * (-self.lambda * dt).exp();
     }
 
     /// Read the current decayed value without mutating state.
     /// Applies lazy decay based on elapsed time since last update.
-    pub fn current_value(&self) -> f64 {
-        let dt = self.last_update.elapsed().as_secs_f64();
+    pub fn current_value(&self, now_secs: f64) -> f64 {
+        let dt = (now_secs - self.last_update_secs).max(0.0);
         self.value * (-self.lambda * dt).exp()
     }
 }
@@ -516,27 +514,21 @@ pub struct ResourceIntegrals {
     pub r_integrals: HashMap<String, DecayingIntegral>,
 }
 
-impl Default for ResourceIntegrals {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ResourceIntegrals {
-    pub fn new() -> Self {
-        Self::from_config(&HomeostaticConfig::default())
+    pub fn new(now_secs: f64) -> Self {
+        Self::from_config(&HomeostaticConfig::default(), now_secs)
     }
 
-    pub fn from_config(config: &HomeostaticConfig) -> Self {
+    pub fn from_config(config: &HomeostaticConfig, now_secs: f64) -> Self {
         Self {
-            s: DecayingIntegral::new(config.lambda_sys),
-            d: DecayingIntegral::new(config.lambda_io),
-            e: DecayingIntegral::new(config.lambda_entry),
-            l: DecayingIntegral::new(config.lambda_lat),
-            m: DecayingIntegral::new(config.lambda_mem),
-            w: DecayingIntegral::new(config.lambda_wal),
-            b: DecayingIntegral::new(config.lambda_bw),
-            c: DecayingIntegral::new(config.lambda_conn),
+            s: DecayingIntegral::new(config.lambda_sys, now_secs),
+            d: DecayingIntegral::new(config.lambda_io, now_secs),
+            e: DecayingIntegral::new(config.lambda_entry, now_secs),
+            l: DecayingIntegral::new(config.lambda_lat, now_secs),
+            m: DecayingIntegral::new(config.lambda_mem, now_secs),
+            w: DecayingIntegral::new(config.lambda_wal, now_secs),
+            b: DecayingIntegral::new(config.lambda_bw, now_secs),
+            c: DecayingIntegral::new(config.lambda_conn, now_secs),
             r_integrals: HashMap::new(),
         }
     }

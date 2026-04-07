@@ -5,7 +5,7 @@
 // No battery gate. No thermal probe. No mobile power state transitions.
 
 use std::sync::RwLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use phalanx_forensics::policy::{
     BandwidthScale, ConnectionScale, DecayingIntegral, FinalizationScale, Homeostasis,
@@ -17,6 +17,9 @@ use phalanx_forensics::policy::{
 pub struct StrongholdGovernor {
     integrals: RwLock<ResourceIntegrals>,
     pub config: HomeostaticConfig,
+    /// Monotonic epoch for DecayingIntegral time domain.
+    /// Uses std::time::Instant (not tokio) — stronghold tests are `#[test]`.
+    epoch: Instant,
 }
 
 impl StrongholdGovernor {
@@ -24,11 +27,18 @@ impl StrongholdGovernor {
         Self::with_config(Self::server_config())
     }
 
+    /// Monotonic seconds since this governor's epoch.
+    fn now_secs(&self) -> f64 {
+        self.epoch.elapsed().as_secs_f64()
+    }
+
     pub fn with_config(config: HomeostaticConfig) -> Self {
-        let integrals = ResourceIntegrals::from_config(&config);
+        let epoch = Instant::now();
+        let integrals = ResourceIntegrals::from_config(&config, 0.0);
         Self {
             integrals: RwLock::new(integrals),
             config,
+            epoch,
         }
     }
 
@@ -67,36 +77,39 @@ impl StrongholdGovernor {
 
     /// Per-peer bandwidth check via r_integrals.
     pub fn is_peer_bandwidth_ok(&self, peer_id: &str) -> bool {
+        let now = self.now_secs();
         let key = format!("bw:{}", peer_id);
         self.with_state(|s| {
             s.r_integrals
                 .get(&key)
-                .is_none_or(|r| r.current_value() < self.config.psi_max)
+                .is_none_or(|r| r.current_value(now) < self.config.psi_max)
         })
     }
 
     /// Record per-peer bandwidth event.
     pub fn record_peer_bandwidth(&self, peer_id: &str) {
+        let now = self.now_secs();
         let key = format!("bw:{}", peer_id);
         self.with_state_mut(|s| {
             s.r_integrals
                 .entry(key)
-                .or_insert_with(|| DecayingIntegral::new(self.config.lambda_rep))
-                .record(1.0);
+                .or_insert_with(|| DecayingIntegral::new(self.config.lambda_rep, now))
+                .record(1.0, now);
         });
     }
 
     /// Weighted composite of all integral pressures.
     /// Returns 0.0 (idle) to 1.0+ (saturated).
     pub fn composite_stress(&self) -> f64 {
+        let now = self.now_secs();
         let w = &self.config.stress_weights;
         self.with_state(|s| {
             let normalized = [
-                s.s.current_value() / self.config.s_crit,
-                s.d.current_value() / self.config.d_crit,
-                s.m.current_value() / self.config.m_crit,
-                s.w.current_value() / self.config.w_crit,
-                s.b.current_value() / self.config.b_crit,
+                s.s.current_value(now) / self.config.s_crit,
+                s.d.current_value(now) / self.config.d_crit,
+                s.m.current_value(now) / self.config.m_crit,
+                s.w.current_value(now) / self.config.w_crit,
+                s.b.current_value(now) / self.config.b_crit,
             ];
             w.iter()
                 .zip(normalized.iter())
@@ -115,111 +128,129 @@ impl Default for StrongholdGovernor {
 impl Homeostasis for StrongholdGovernor {
     #[allow(clippy::arithmetic_side_effects)] // Duration addition — base + expansion, clamped by min().
     fn temporal_tolerance(&self) -> Duration {
+        let now = self.now_secs();
         self.with_state(|s| {
             let base = self.config.base_temporal_drift;
-            let expansion = Duration::from_secs_f64(s.l.current_value());
+            let expansion = Duration::from_secs_f64(s.l.current_value(now));
             let total = base + expansion;
             total.min(self.config.max_temporal_tolerance)
         })
     }
 
     fn record_metabolic_pressure(&self, duration: Duration) {
-        self.with_state_mut(|s| s.s.record(duration.as_secs_f64()));
+        let now = self.now_secs();
+        self.with_state_mut(|s| s.s.record(duration.as_secs_f64(), now));
     }
 
     fn record_latency_pressure(&self, duration: Duration) {
-        self.with_state_mut(|s| s.l.record(duration.as_secs_f64()));
+        let now = self.now_secs();
+        self.with_state_mut(|s| s.l.record(duration.as_secs_f64(), now));
     }
 
     fn record_io_pressure(&self, duration: Duration) {
-        self.with_state_mut(|s| s.d.record(duration.as_secs_f64()));
+        let now = self.now_secs();
+        self.with_state_mut(|s| s.d.record(duration.as_secs_f64(), now));
     }
 
     fn record_entry_pressure(&self) {
-        self.with_state_mut(|s| s.e.record(1.0));
+        let now = self.now_secs();
+        self.with_state_mut(|s| s.e.record(1.0, now));
     }
 
     fn record_eclipse_impulse(&self, magnitude: f64) {
-        self.with_state_mut(|s| s.e.record(magnitude));
+        let now = self.now_secs();
+        self.with_state_mut(|s| s.e.record(magnitude, now));
     }
 
     fn ingestion_scaler(&self) -> IngestionScale {
+        let now = self.now_secs();
         self.with_state(|s| {
-            IngestionScale((1.0 - (s.s.current_value() / self.config.s_crit)).max(0.0))
+            IngestionScale((1.0 - (s.s.current_value(now) / self.config.s_crit)).max(0.0))
         })
     }
 
     fn finalization_scaler(&self) -> FinalizationScale {
+        let now = self.now_secs();
         self.with_state(|s| {
-            FinalizationScale((1.0 - (s.d.current_value() / self.config.d_crit)).max(0.0))
+            FinalizationScale((1.0 - (s.d.current_value(now) / self.config.d_crit)).max(0.0))
         })
     }
 
     fn sybil_endowment(&self) -> SybilEndowment {
+        let now = self.now_secs();
         self.with_state(|s| {
             SybilEndowment(
-                self.config.psi_max / (1.0 + (self.config.k_sybil * s.e.current_value()).powi(2)),
+                self.config.psi_max
+                    / (1.0 + (self.config.k_sybil * s.e.current_value(now)).powi(2)),
             )
         })
     }
 
     fn record_memory_pressure(&self, bytes_held: usize) {
+        let now = self.now_secs();
         self.with_state_mut(|s| {
             let mib = bytes_held as f64 / 1_048_576.0;
-            s.m.record(mib);
+            s.m.record(mib, now);
         });
     }
 
     fn record_storage_pressure(&self, used_bytes: u64, max_bytes: u64) {
+        let now = self.now_secs();
         self.with_state_mut(|s| {
             let ratio = if max_bytes > 0 {
                 used_bytes as f64 / max_bytes as f64
             } else {
                 1.0
             };
-            s.w.record(ratio);
+            s.w.record(ratio, now);
         });
     }
 
     fn record_bandwidth_pressure(&self, bytes: usize) {
+        let now = self.now_secs();
         self.with_state_mut(|s| {
             let mib = bytes as f64 / 1_048_576.0;
-            s.b.record(mib);
+            s.b.record(mib, now);
         });
     }
 
     fn record_connection_pressure(&self, active: usize, max: usize) {
+        let now = self.now_secs();
         self.with_state_mut(|s| {
             let ratio = if max > 0 {
                 active as f64 / max as f64
             } else {
                 1.0
             };
-            s.c.record(ratio);
+            s.c.record(ratio, now);
         });
     }
 
     fn memory_scaler(&self) -> MemoryScale {
+        let now = self.now_secs();
         self.with_state(|s| {
-            MemoryScale((1.0 - (s.m.current_value() / self.config.m_crit)).max(0.0))
+            MemoryScale((1.0 - (s.m.current_value(now) / self.config.m_crit)).max(0.0))
         })
     }
 
     fn storage_scaler(&self) -> StorageScale {
+        let now = self.now_secs();
         self.with_state(|s| {
-            StorageScale((1.0 - (s.w.current_value() / self.config.w_crit)).max(0.0))
+            StorageScale((1.0 - (s.w.current_value(now) / self.config.w_crit)).max(0.0))
         })
     }
 
     fn bandwidth_scaler(&self) -> BandwidthScale {
+        let now = self.now_secs();
         self.with_state(|s| {
-            BandwidthScale((1.0 - (s.b.current_value() / self.config.b_crit)).max(0.0))
+            BandwidthScale((1.0 - (s.b.current_value(now) / self.config.b_crit)).max(0.0))
         })
     }
 
     fn connection_scaler(&self) -> ConnectionScale {
+        let now = self.now_secs();
         self.with_state(|s| {
-            ConnectionScale((1.0 - (s.c.current_value() / self.config.c_crit)).max(0.0))
+            ConnectionScale((1.0 - (s.c.current_value(now) / self.config.c_crit)).max(0.0))
         })
     }
 }

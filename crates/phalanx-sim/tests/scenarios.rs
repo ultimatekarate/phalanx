@@ -555,13 +555,14 @@ async fn scenario_8_full_recovery_from_critical() {
         let state = governor.recommended_power_state();
 
         // Read individual integral values for the decay curve
+        let now = governor.now_secs();
         let (s_val, d_val, m_val, w_val, b_val) = governor.with_state(|s| {
             (
-                s.s.current_value(),
-                s.d.current_value(),
-                s.m.current_value(),
-                s.w.current_value(),
-                s.b.current_value(),
+                s.s.current_value(now),
+                s.d.current_value(now),
+                s.m.current_value(now),
+                s.w.current_value(now),
+                s.b.current_value(now),
             )
         });
 
