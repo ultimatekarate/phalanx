@@ -226,14 +226,14 @@ impl Guardian {
         let mut key_bytes = [0u8; 32];
         OsRng.fill_bytes(&mut key_bytes);
         self.content_keyring.insert(recording_id.clone(), key_bytes);
-        SymmetricKey(key_bytes)
+        SymmetricKey::from_bytes(key_bytes)
     }
 
     /// Retrieve the content key for a recording, if it exists.
     pub fn get_content_key(&self, recording_id: &RecordingId) -> Option<SymmetricKey> {
         self.content_keyring
             .get(recording_id)
-            .map(|b| SymmetricKey(*b))
+            .map(|b| SymmetricKey::from_bytes(*b))
     }
 
     /// Destroy the content key for a recording (crypto-shredding moment).

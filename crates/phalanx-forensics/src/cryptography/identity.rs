@@ -18,7 +18,12 @@ use super::{decrypt_bytes, encrypt_bytes};
 /// m=19 MiB, t=2 iterations, p=1 lane, 32-byte output.
 /// Mobile-appropriate. Compile-time constants prevent silent changes
 /// on dependency updates from making existing identity files unreadable.
-/// Returns None only if the hardcoded constants are invalid (impossible in practice).
+///
+/// At these parameters, a GPU attacker can test ~thousands of passphrases/sec.
+/// This protects local disk against casual access, not targeted seizure with
+/// a weak PIN. The identity file assumes a high-entropy passphrase (6+ random
+/// words or equivalent). If the mobile UX enforces a short PIN, the real
+/// protection is device-level encryption (iOS/Android FDE), not this layer.
 pub fn identity_argon2() -> Argon2<'static> {
     // These are compile-time-known constants; Params::new cannot fail for these values.
     #[allow(clippy::expect_used)]
@@ -48,13 +53,15 @@ pub fn seal_identity(identity: &PhalanxIdentity, passphrase: &str) -> Result<Vec
     argon2
         .hash_password_into(passphrase.as_bytes(), &salt, &mut key_bytes)
         .map_err(|_| CryptoError::EncryptionFailure)?;
-    let key = SymmetricKey(key_bytes);
+    let key = SymmetricKey::from_bytes(key_bytes);
 
     // Encrypt. encrypt_bytes returns (nonce_vec, ciphertext_vec).
     let (nonce, ciphertext) =
         encrypt_bytes(&key, &plaintext).map_err(|_| CryptoError::EncryptionFailure)?;
 
-    // Zeroize the derived key.
+    // Defense-in-depth: wipes the stack copy of the key bytes. The
+    // SymmetricKey wrapper wipes its own copy via ZeroizeOnDrop. Both
+    // are intentional — two copies exist briefly on the stack.
     key_bytes.zeroize();
 
     // Assemble: [salt][nonce][ciphertext]
@@ -89,12 +96,14 @@ pub fn unseal_identity(
     argon2
         .hash_password_into(passphrase.as_bytes(), salt, &mut key_bytes)
         .map_err(|_| CryptoError::DecryptionFailure)?;
-    let key = SymmetricKey(key_bytes);
+    let key = SymmetricKey::from_bytes(key_bytes);
 
     // Decrypt. AEAD tag validation catches wrong passphrases and corrupt files.
     let plaintext = decrypt_bytes(&key, nonce, ciphertext)?;
 
-    // Zeroize the derived key.
+    // Defense-in-depth: wipes the stack copy of the key bytes. The
+    // SymmetricKey wrapper wipes its own copy via ZeroizeOnDrop. Both
+    // are intentional — two copies exist briefly on the stack.
     key_bytes.zeroize();
 
     // Deserialize.

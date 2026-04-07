@@ -288,7 +288,7 @@ mod tests {
                     unit,
                     &TrustLevel::Ally,
                     &SystemStress::Nominal,
-                    &SymmetricKey([0u8; 32]),
+                    &SymmetricKey::from_bytes([0u8; 32]),
                 );
                 assert!(
                     sealed_result.is_err(),

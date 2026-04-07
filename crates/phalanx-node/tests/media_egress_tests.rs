@@ -111,7 +111,7 @@ async fn build_media_egress<E: EgressPort + 'static>(
         wal_dir: temp.path().to_path_buf(),
         system_governor: gov,
         max_storage_bytes: 100_000_000,
-        vault_key: SymmetricKey([0u8; 32]),
+        vault_key: SymmetricKey::from_bytes([0u8; 32]),
         content_key_rx: tokio::sync::watch::channel(None).1,
         clock: Arc::new(TrustedClock::new()),
         prnu_posterior: std::sync::Arc::new(std::sync::Mutex::new(

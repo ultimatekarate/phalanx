@@ -34,7 +34,7 @@ async fn wal_workbench_state_crash_recovery() {
     // encrypted state survives journal reopen.
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let journal_path = temp_dir.path().join("test_journal.wal");
-    let vault_key = SymmetricKey([0x42; 32]);
+    let vault_key = SymmetricKey::from_bytes([0x42; 32]);
 
     let state_data = b"crucible_snapshot_with_3_active_recordings".to_vec();
 

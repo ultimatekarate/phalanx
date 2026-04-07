@@ -24,9 +24,13 @@ pub enum CryptoError {
 /// M5 FIX: Removed Serialize/Deserialize to prevent accidental key leakage.
 /// Added Zeroize + ZeroizeOnDrop so key material is wiped from memory on drop.
 #[derive(Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
-pub struct SymmetricKey(pub [u8; 32]);
+pub struct SymmetricKey([u8; 32]);
 
 impl SymmetricKey {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }

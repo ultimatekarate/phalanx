@@ -312,7 +312,7 @@ async fn test_sentinel_egress_promotion_logic() {
     let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
 
     let promotion_result =
-        EgressGovernor::authorize(unit, &trust, &stress, &SymmetricKey([0u8; 32]));
+        EgressGovernor::authorize(unit, &trust, &stress, &SymmetricKey::from_bytes([0u8; 32]));
 
     // 4. VERIFICATION: Result MUST be a Sealed ForensicUnit
     assert!(promotion_result.is_ok());
@@ -348,7 +348,8 @@ async fn test_sentinel_blocks_untrusted_egress() {
     let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
 
     // ACT: Attempt promotion
-    let result = EgressGovernor::authorize(unit, &trust, &stress, &SymmetricKey([0u8; 32]));
+    let result =
+        EgressGovernor::authorize(unit, &trust, &stress, &SymmetricKey::from_bytes([0u8; 32]));
 
     // ASSERT: Policy Gate must catch the untrusted requester
     assert!(result.is_err());

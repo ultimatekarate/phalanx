@@ -471,8 +471,8 @@ async fn end_to_end_corroboration() {
     let community_id = community.fingerprint;
 
     // ── 3. Create signed, encrypted video envelopes ──────────────────
-    let alice_key = SymmetricKey([0x11u8; 32]);
-    let bob_key = SymmetricKey([0x22u8; 32]);
+    let alice_key = SymmetricKey::from_bytes([0x11u8; 32]);
+    let bob_key = SymmetricKey::from_bytes([0x22u8; 32]);
 
     let alice_rec_id = RecordingId::new("rec-alice-e2e");
     let bob_rec_id = RecordingId::new("rec-bob-e2e");
@@ -797,8 +797,8 @@ async fn export_end_to_end_c2pa() {
     let community_id = community.fingerprint;
 
     // ── 3. Signed+encrypted video envelopes ─────────────────────────
-    let alice_key = SymmetricKey([0x33u8; 32]);
-    let bob_key = SymmetricKey([0x44u8; 32]);
+    let alice_key = SymmetricKey::from_bytes([0x33u8; 32]);
+    let bob_key = SymmetricKey::from_bytes([0x44u8; 32]);
 
     let alice_rec_id = RecordingId::new("rec-alice-export");
     let bob_rec_id = RecordingId::new("rec-bob-export");

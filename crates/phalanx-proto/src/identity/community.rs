@@ -17,7 +17,10 @@ use crate::trust::{PetName, TrustLevel};
 // ── Community Identity ──────────────────────────────────────────────────
 
 /// Deterministic community identity — no keypair.
-/// SHA-256(name || quorum || sorted founding member DIDs).
+/// Hash of (name || quorum || sorted founding member DIDs).
+/// The hash algorithm is determined by the mobile client; Rust receives
+/// the opaque 32-byte result. Canary alert key derivation depends on
+/// this being high-entropy — do not replace with human-readable strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CommunityId(pub [u8; 32]);
 

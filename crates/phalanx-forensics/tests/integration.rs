@@ -600,8 +600,8 @@ fn decrypt_wrong_key_fails() {
     )
     .expect("create shard should not fail");
 
-    let key_a = SymmetricKey([0x42; 32]);
-    let key_b = SymmetricKey([0x99; 32]);
+    let key_a = SymmetricKey::from_bytes([0x42; 32]);
+    let key_b = SymmetricKey::from_bytes([0x99; 32]);
 
     shard
         .payload

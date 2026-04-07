@@ -44,7 +44,7 @@ fn build_retrieval_actor(
 
     let identity = Arc::new(PhalanxIdentity::new_ephemeral());
     let clock = Arc::new(TrustedClock::new());
-    let network_key = Arc::new(SymmetricKey([0u8; 32]));
+    let network_key = Arc::new(SymmetricKey::from_bytes([0u8; 32]));
 
     let actor = RetrievalActor::new(
         identity,
@@ -224,7 +224,7 @@ async fn test_storage_closed_sends_not_found() {
         egress_tx,
         ReputationProjection::default(),
         trust_tx,
-        Arc::new(SymmetricKey([0u8; 32])),
+        Arc::new(SymmetricKey::from_bytes([0u8; 32])),
         retrieval_rx,
     );
     let handle = tokio::spawn(actor.run());

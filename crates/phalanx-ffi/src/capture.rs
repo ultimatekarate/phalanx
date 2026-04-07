@@ -123,7 +123,9 @@ pub unsafe extern "C" fn phalanx_start_recording(
 
     match key_result {
         Ok(Ok(key_bytes)) => {
-            let _ = h.content_key_tx.send(Some(SymmetricKey(key_bytes)));
+            let _ = h
+                .content_key_tx
+                .send(Some(SymmetricKey::from_bytes(key_bytes)));
         }
         Ok(Err(_)) | Err(()) => {
             tracing::warn!(

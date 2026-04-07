@@ -128,7 +128,7 @@ pub unsafe extern "C" fn phalanx_start_playback(
             match rx.await {
                 Ok(Some(key_bytes)) => {
                     phalanx_log!("[Phalanx FFI] Got content key ({} bytes) for {}", key_bytes.len(), rec_id.as_str());
-                    Some(phalanx_proto::crypto::SymmetricKey(key_bytes))
+                    Some(phalanx_proto::crypto::SymmetricKey::from_bytes(key_bytes))
                 }
                 Ok(None) => {
                     phalanx_log!("[Phalanx FFI] No content key found, falling back to vault_key");

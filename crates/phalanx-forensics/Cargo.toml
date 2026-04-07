@@ -17,7 +17,7 @@ postcard = "1.0"
 
 # Cryptographic Verbs (The "Judge" needs these)
 # These live here so the proto crate stays lightweight
-ed25519-dalek = { version = "2.1", features = ["serde"] }
+ed25519-dalek = { version = "2.1", features = ["serde", "zeroize"] }
 rand_core = { version = "0.6", features = ["std"] }
 
 # Utilities

@@ -811,7 +811,7 @@ async fn test_encrypted_playback_wrong_key_fails() {
 
     let vault_key = derive_vault_key(&identity, &[0u8; 32]);
     let correct_key = phalanx_forensics::generate_session_key();
-    let wrong_key = SymmetricKey([0xBB; 32]);
+    let wrong_key = SymmetricKey::from_bytes([0xBB; 32]);
 
     let identity_clone = identity.clone();
     tokio::spawn(async move {
@@ -1222,7 +1222,7 @@ async fn test_coordinator_survives_decode_failure() {
     let vault_path = temp_dir.path().to_string_lossy().to_string();
     let (identity, _) = PhalanxIdentity::generate().unwrap();
     let correct_key = phalanx_forensics::generate_session_key();
-    let wrong_key = SymmetricKey([0xDD; 32]);
+    let wrong_key = SymmetricKey::from_bytes([0xDD; 32]);
 
     let storage_tx = spawn_disk_guardian_actor(&identity, vault_path);
     let recording_id = RecordingId::new("v_survive_failure");

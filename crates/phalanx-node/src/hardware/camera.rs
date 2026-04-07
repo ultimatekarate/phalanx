@@ -389,8 +389,9 @@ impl PhalanxCameraThread {
                         Ok(mut actual_shard) => {
                             // Encryption
                             if let Some(key) = secret_key {
-                                if let Err(e) =
-                                    actual_shard.payload.apply_encryption(&SymmetricKey(key))
+                                if let Err(e) = actual_shard
+                                    .payload
+                                    .apply_encryption(&SymmetricKey::from_bytes(key))
                                 {
                                     error!("Encryption failed for seq {}: {}", sequence_id, e);
                                     continue; // Skip secure frames if encryption fails
