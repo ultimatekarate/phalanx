@@ -23,7 +23,7 @@ pub fn derive_vault_key(identity: &PhalanxIdentity, salt: &[u8; 32]) -> Symmetri
     let mut context_input = Vec::with_capacity(key_bytes.len() + salt.len());
     context_input.extend_from_slice(&*key_bytes);
     context_input.extend_from_slice(salt);
-    SymmetricKey(blake3::derive_key(
+    SymmetricKey::from_bytes(blake3::derive_key(
         "phalanx.vault.v1.disk-encryption",
         &context_input,
     ))

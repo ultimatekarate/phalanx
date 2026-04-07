@@ -67,7 +67,7 @@ async fn load_grants(
         })?;
 
         debug!(recording = %locator.target.as_str(), "Grant unlocked for export");
-        key_map.insert(locator.target, SymmetricKey(raw_key));
+        key_map.insert(locator.target, SymmetricKey::from_bytes(raw_key));
     }
 
     Ok(key_map)

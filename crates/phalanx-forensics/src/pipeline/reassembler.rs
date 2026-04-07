@@ -675,7 +675,7 @@ mod tests {
     use phalanx_proto::storage::PendingEgress;
 
     fn get_test_key() -> SymmetricKey {
-        SymmetricKey([0x42; 32])
+        SymmetricKey::from_bytes([0x42; 32])
     }
 
     struct MockJournal;

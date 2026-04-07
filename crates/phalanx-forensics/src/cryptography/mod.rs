@@ -9,7 +9,7 @@ use chacha20poly1305::{
 use phalanx_proto::crypto::{CryptoError, SymmetricKey};
 
 pub fn generate_session_key() -> SymmetricKey {
-    SymmetricKey(XChaCha20Poly1305::generate_key(&mut OsRng).into())
+    SymmetricKey::from_bytes(XChaCha20Poly1305::generate_key(&mut OsRng).into())
 }
 
 pub fn encrypt_bytes(
@@ -31,6 +31,10 @@ pub fn decrypt_bytes(
     nonce: &[u8],
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
+    if nonce.len() != 24 {
+        return Err(CryptoError::DecryptionFailure);
+    }
+
     let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
     let xnonce = XNonce::from_slice(nonce);
 

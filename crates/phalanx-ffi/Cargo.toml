@@ -30,7 +30,7 @@ postcard = { workspace = true }
 c2pa = { version = "0.78", default-features = false, features = ["rust_native_crypto", "file_io"] }
 
 # Ed25519 signing (for C2PA signer)
-ed25519-dalek = { version = "2.1", features = ["serde"] }
+ed25519-dalek = { version = "2.1", features = ["serde", "zeroize"] }
 rand = "0.8"
 
 # Secure memory wiping for mnemonic strings in FFI

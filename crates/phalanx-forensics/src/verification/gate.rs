@@ -18,8 +18,6 @@ use crate::judge::{PayloadCipher, TimeJudge};
 use crate::trust::ReputationGate;
 use crate::witness::WitnessAuthority;
 
-use sha2::{Digest, Sha256};
-
 /// S2 FIX: Maximum input size for deserialization.
 /// Prevents amplification attacks where an attacker submits enormous byte buffers
 /// to exhaust memory during postcard deserialization.
@@ -538,9 +536,7 @@ impl CoastingGate for WitnessEnvelope {
         // Serialize evidence to compute actual hash
         let actual_bytes = postcard::to_allocvec(&self.evidence)?;
 
-        let mut hasher = Sha256::new();
-        sha2::Digest::update(&mut hasher, &actual_bytes);
-        let computed_hash: [u8; 32] = hasher.finalize().into();
+        let computed_hash: [u8; 32] = blake3::hash(&actual_bytes).into();
 
         if computed_hash != self.evidence_hash {
             tracing::error!(

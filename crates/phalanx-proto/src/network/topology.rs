@@ -20,13 +20,10 @@ impl SubnetBucket {
     }
 
     /// Construct from an IPv6 /48 by hashing to two bytes.
+    #[allow(clippy::indexing_slicing)] // BLAKE3 always produces 32 bytes — [0] and [1] are always valid.
     pub fn from_ipv6_prefix(prefix_bytes: &[u8]) -> Self {
-        use sha2::{Digest, Sha256};
-        let hash = Sha256::digest(prefix_bytes);
-        // SHA-256 always produces 32 bytes — indices 0 and 1 are always valid.
-        let a = hash.first().copied().unwrap_or(0);
-        let b = hash.get(1).copied().unwrap_or(0);
-        Self([a, b])
+        let hash: [u8; 32] = blake3::hash(prefix_bytes).into();
+        Self([hash[0], hash[1]])
     }
 
     /// Sentinel bucket for local mesh (BLE/WiFi Direct) peers — no IP to bucket.

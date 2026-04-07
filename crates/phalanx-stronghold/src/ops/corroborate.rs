@@ -79,7 +79,7 @@ pub async fn run_corroboration(
         })?;
 
         debug!(recording = %locator.target.as_str(), "Grant unlocked");
-        key_map.insert(locator.target, SymmetricKey(raw_key));
+        key_map.insert(locator.target, SymmetricKey::from_bytes(raw_key));
     }
 
     // ── 2. Load recordings ────────────────────────────────────────────

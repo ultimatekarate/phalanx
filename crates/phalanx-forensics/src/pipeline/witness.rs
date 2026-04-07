@@ -4,7 +4,6 @@ use ed25519_dalek::{Signature, Signer};
 use phalanx_proto::evidence::{ChunkType, Evidence, ShardChunk, SignatureHash, WitnessEnvelope};
 use phalanx_proto::prelude::ShardError;
 use phalanx_proto::prelude::*;
-use sha2::{Digest, Sha256};
 
 pub trait WitnessAuthority {
     /// The Verb "To Sign": Anchors evidence into a signed envelope.
@@ -40,9 +39,7 @@ impl WitnessAuthority for WitnessEnvelope {
         let data_to_sign = postcard::to_allocvec(&evidence)?;
 
         // Compute the fast hash
-        let mut hasher = sha2::Sha256::new();
-        sha2::Digest::update(&mut hasher, &data_to_sign);
-        let evidence_hash: [u8; 32] = hasher.finalize().into();
+        let evidence_hash: [u8; 32] = blake3::hash(&data_to_sign).into();
 
         // Sign the hash (or data_to_sign)
         let signature = identity.keypair.sign(&data_to_sign);
@@ -74,9 +71,7 @@ impl WitnessAuthority for WitnessEnvelope {
         // Without this, an attacker can modify evidence_hash (used for replay
         // detection in the Bloom filter) without invalidating the signature,
         // allowing the same evidence to bypass deduplication.
-        let mut hasher = sha2::Sha256::new();
-        sha2::Digest::update(&mut hasher, &data_bytes);
-        let computed_hash: [u8; 32] = hasher.finalize().into();
+        let computed_hash: [u8; 32] = blake3::hash(&data_bytes).into();
         if computed_hash != self.evidence_hash {
             return false;
         }
@@ -91,13 +86,7 @@ impl WitnessAuthority for WitnessEnvelope {
     }
 
     fn calculate_anchor(&self) -> SignatureHash {
-        let mut hasher = Sha256::new();
-        hasher.update(&self.witness_signature);
-        let result = hasher.finalize();
-
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&result);
-        SignatureHash(hash)
+        SignatureHash(blake3::hash(&self.witness_signature).into())
     }
 
     #[allow(clippy::cast_possible_truncation)] // Chunk index as u32 — bounded by MAX_SYMBOLS_PER_CONTEXT.
@@ -222,14 +211,12 @@ mod tests {
         assert!(!env.verify_envelope(), "Envelope with wrong DID must fail");
     }
 
-    /// The evidence_hash field should match SHA256(serialized evidence).
+    /// The evidence_hash field should match BLAKE3(serialized evidence).
     #[test]
-    fn evidence_hash_is_sha256_of_serialized_evidence() {
+    fn evidence_hash_is_blake3_of_serialized_evidence() {
         let (env, _) = make_signed_envelope();
         let serialized = postcard::to_allocvec(&env.evidence).unwrap();
-        let mut hasher = Sha256::new();
-        hasher.update(&serialized);
-        let expected: [u8; 32] = hasher.finalize().into();
+        let expected: [u8; 32] = blake3::hash(&serialized).into();
         assert_eq!(env.evidence_hash, expected);
     }
 

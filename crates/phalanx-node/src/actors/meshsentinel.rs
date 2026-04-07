@@ -1031,8 +1031,12 @@ impl<I: IngressPort> MeshSentinel<I> {
         };
 
         // Broadcast once per community (each derives its own canary key).
+        // CommunityId is [u8; 32] derived from a hash of (name || quorum ||
+        // sorted founding DIDs) — high entropy. Canary alert confidentiality
+        // depends on this; if CommunityId ever becomes human-readable, this
+        // derivation must include a shared secret.
         for cid in &self.community_ids {
-            let canary_key = SymmetricKey(blake3::derive_key(
+            let canary_key = SymmetricKey::from_bytes(blake3::derive_key(
                 "phalanx.canary.v1.community-alert",
                 &cid.0,
             ));
@@ -1104,7 +1108,9 @@ impl<I: IngressPort> MeshSentinel<I> {
                 })
                 .await;
             match rx.await {
-                Ok(Some(key_bytes)) => Some(phalanx_proto::crypto::SymmetricKey(key_bytes)),
+                Ok(Some(key_bytes)) => {
+                    Some(phalanx_proto::crypto::SymmetricKey::from_bytes(key_bytes))
+                }
                 _ => Some((*self.network_key).clone()), // fallback for legacy
             }
         };

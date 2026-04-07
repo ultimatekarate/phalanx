@@ -327,17 +327,6 @@ impl IdentityDiskFormat {
     }
 }
 
-/// Generate a unique 32-byte nonce from DID + peer + current time.
-/// Uses SHA-256 for uniform distribution. No external RNG needed.
-pub fn generate_nonce(did: &Did, peer: &NetworkId) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(did.as_ref().as_bytes());
-    hasher.update(peer.0.as_bytes());
-    hasher.update(crate::time::PhalanxTimestamp::now().0.to_le_bytes());
-    hasher.finalize().into()
-}
-
 impl std::fmt::Debug for PhalanxIdentity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PhalanxIdentity")

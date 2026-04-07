@@ -39,6 +39,12 @@ impl RevocationKey {
 /// A signed intent to destroy all evidence for a recording.
 /// The signature is produced by the revocation keypair, which is derived
 /// from the BIP39 mnemonic and never stored on the device.
+///
+/// Revocation is permanent and irreversible by design. Once a valid token
+/// is broadcast, no mechanism exists to cancel it — even the mnemonic
+/// holder cannot un-revoke. The threat model prioritizes the user's right
+/// to destroy their own evidence over recoverability from accidental
+/// revocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevocationToken {
     pub recording_id: RecordingId,

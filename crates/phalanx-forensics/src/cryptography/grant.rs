@@ -42,11 +42,13 @@ impl GrantAuthority for SealedLocator {
         // Convert Sender Private Key to X25519
         let sender_x = ed_to_x25519_sk(&sender.keypair)?;
 
-        // Derive Shared Secret (ECDH)
+        // Derive Shared Secret (ECDH) and run through KDF
         let shared_secret = sender_x.diffie_hellman(&recipient_pub);
+        let derived_key =
+            blake3::derive_key("phalanx.grant.v1.ecdh-seal", shared_secret.as_bytes());
 
         // Authenticated Encryption (AEAD)
-        let cipher = XChaCha20Poly1305::new(shared_secret.as_bytes().into());
+        let cipher = XChaCha20Poly1305::new((&derived_key).into());
         let mut nonce_bytes = [0u8; 24];
         OsRng.fill_bytes(&mut nonce_bytes);
         let nonce = XNonce::from_slice(&nonce_bytes);
@@ -92,8 +94,10 @@ impl GrantAuthority for SealedLocator {
         // Convert My Private Key to X25519
         let my_x = ed_to_x25519_sk(&me.keypair)?;
 
-        // Re-derive the identical Shared Secret (ECDH)
+        // Re-derive the identical Shared Secret (ECDH) and run through KDF
         let shared_secret = my_x.diffie_hellman(&sender_pub);
+        let derived_key =
+            blake3::derive_key("phalanx.grant.v1.ecdh-seal", shared_secret.as_bytes());
 
         // Rebuild AAD: sender DID + serialized permissions (must match seal).
         let permissions_bytes =
@@ -102,7 +106,7 @@ impl GrantAuthority for SealedLocator {
         aad.extend_from_slice(&permissions_bytes);
 
         // Decrypt and Verify Integrity (AAD mismatch = tampered permissions)
-        let cipher = XChaCha20Poly1305::new(shared_secret.as_bytes().into());
+        let cipher = XChaCha20Poly1305::new((&derived_key).into());
         let nonce = XNonce::from_slice(&self.nonce);
 
         let plaintext = cipher
