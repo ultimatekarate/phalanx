@@ -26,6 +26,9 @@ pub mod sentinel;
 pub mod signing;
 pub mod swarm;
 
+#[cfg(feature = "gui")]
+pub mod gui;
+
 pub use config::StrongholdConfig;
 pub use error::StrongholdError;
 pub use governor::StrongholdGovernor;

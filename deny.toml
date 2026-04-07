@@ -3,11 +3,58 @@
 multiple-versions = "deny"
 
 # ENFORCEMENT: Forbidden crates in the Lab/Dictionary
-[[bans.skip-tree]]
-name = "tokio"
-# Allow tokio in the Hands, but ban it from Forensics
-unless = ["phalanx-node", "phalanx-transport"] 
+# tokio and libp2p belong in the Hands only — never in proto or forensics.
+deny = [
+    { crate = "tokio", wrappers = [
+        "phalanx-node",
+        "phalanx-transport",
+        "phalanx-ffi",
+        "phalanx-stronghold",
+        "phalanx-sim",
+    ]},
+    { crate = "libp2p", wrappers = [
+        "phalanx-transport",
+    ]},
+]
 
-[[bans.skip-tree]]
-name = "libp2p"
-unless = ["phalanx-node", "phalanx-transport"]
+# Transitive duplicates pulled in by c2pa, libp2p, and s2n-quic.
+# We can't control these — skip them so the duplicate check stays
+# useful for crates we DO control.
+skip = [
+    "anstream",
+    "anstyle-parse",
+    "chacha20",
+    "cpufeatures",
+    "foldhash",
+    "getrandom",
+    "hashbrown",
+    "hashlink",
+    "miniz_oxide",
+    "nix",
+    "r-efi",
+    "rand",
+    "rand_chacha",
+    "rand_core",
+    "serde_spanned",
+    "socket2",
+    "syn",
+    "thiserror",
+    "thiserror-impl",
+    "toml",
+    "toml_datetime",
+    "unsigned-varint",
+    "untrusted",
+    "wasi",
+    "windows-sys",
+    "windows-targets",
+    "windows_aarch64_gnullvm",
+    "windows_aarch64_msvc",
+    "windows_i686_gnu",
+    "windows_i686_gnullvm",
+    "windows_i686_msvc",
+    "windows_x86_64_gnu",
+    "windows_x86_64_gnullvm",
+    "windows_x86_64_msvc",
+    "x509-parser",
+    "yamux",
+]
