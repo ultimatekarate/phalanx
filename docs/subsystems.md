@@ -232,7 +232,7 @@ Eight node-side actors and three stronghold-side actors communicating via bounde
 
 ### Trusted Communities
 
-Quorum-based membership with Ed25519 vouches. Community identity is deterministic — a SHA-256 hash of the membership graph, not a central keypair. k-of-n existing members must vouch for each new member. Communities expire automatically and dissolve with zeroization.
+Quorum-based membership with Ed25519 vouches. Community identity is deterministic — a hash of the membership graph, not a central keypair. k-of-n existing members must vouch for each new member. Communities expire automatically and dissolve with zeroization.
 
 **Files:** `phalanx-proto/src/identity/community.rs`, `phalanx-stronghold/src/actors/community.rs`
 
