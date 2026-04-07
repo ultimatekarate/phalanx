@@ -12,6 +12,11 @@ path = "src/lib.rs"
 name = "stronghold"
 path = "src/bin/stronghold.rs"
 
+[[bin]]
+name = "stronghold-gui"
+path = "src/bin/stronghold_gui.rs"
+required-features = ["gui"]
+
 [dependencies]
 # The Linguistic Foundation
 phalanx-proto = { path = "../phalanx-proto" }
@@ -53,6 +58,14 @@ serde_json = "1"
 
 # System
 ctrlc = "3.5.2"
+
+# GUI (optional, feature-gated)
+eframe = { version = "0.30", optional = true, default-features = false, features = ["glow", "default_fonts"] }
+rfd = { version = "0.15", optional = true }
+
+[features]
+default = []
+gui = ["eframe", "rfd"]
 
 [dev-dependencies]
 tempfile = "3.26.0"
