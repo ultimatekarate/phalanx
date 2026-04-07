@@ -18,6 +18,15 @@ jobs:
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Supply chain check
+        run: cargo deny check bans
+
       - name: Clippy (workspace)
         run: cargo clippy --workspace -- -D warnings
 
@@ -34,6 +43,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
+
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: android-aarch64
 
       - name: Locate NDK Toolchain
         id: ndk
@@ -70,6 +84,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios, x86_64-apple-ios
+
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ios-aarch64
 
       - name: Install cbindgen
         run: cargo install cbindgen
