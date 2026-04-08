@@ -85,9 +85,6 @@ pub enum Evidence {
     /// Captured by MeshSentinel during recording, flows through the standard
     /// evidence pipeline (signed, sharded, distributed) to the Stronghold.
     Proximity(crate::corroboration::ProximityWitness),
-    /// Device integrity scan result from detection tools (MVT, AndroidQF, etc.).
-    /// Reporter identity is derived from the signing envelope's `did`, not the payload.
-    DeviceIntegrity(crate::evidence::integrity::DeviceIntegrityReport),
 }
 
 /// Sensor fingerprint metrics computed by the ForensicLens pipeline.

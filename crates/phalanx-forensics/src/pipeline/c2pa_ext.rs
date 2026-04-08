@@ -134,24 +134,6 @@ impl C2paOrchestrator {
             &proof.proximity_evidence.len(),
         )?;
 
-        // Device integrity attestations (advisory — third-party claims, not Stronghold-verified)
-        if !proof.integrity_attestations.is_empty() {
-            let integrity: Vec<serde_json::Value> = proof
-                .integrity_attestations
-                .iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "device_did": r.device_did.as_ref(),
-                        "claimed_verdict": format!("{:?}", r.verdict),
-                        "tool": format!("{:?}", r.tool),
-                        "scanned_at": r.scanned_at.0,
-                        "indicator_count": r.indicators.len(),
-                    })
-                })
-                .collect();
-            builder.add_assertion("phalanx.corroboration.integrity_attestations", &integrity)?;
-        }
-
         // Each contributing recording is a C2PA ingredient, referenced by its
         // encrypted evidence hash chain. This establishes the provenance link:
         // device capture → encrypted shard → corroboration proof → C2PA manifest.
