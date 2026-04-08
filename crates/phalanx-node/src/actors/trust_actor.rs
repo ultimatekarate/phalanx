@@ -157,11 +157,54 @@ impl TrustActor {
                 let _ = reply_to.send(result);
             }
             TrustCommand::ImportCommunity { community } => {
+                // Defense-in-depth: verify vouch signatures and expiration on import.
+                // The creation side validates at assembly time; this catches tampered tokens.
+                {
+                    use phalanx_proto::time::TrustedClock;
+                    let now = phalanx_proto::time::SystemClock.now();
+                    if community.is_expired(now) {
+                        tracing::warn!(
+                            target: "phalanx::trust",
+                            community = %community.name,
+                            "Rejecting expired community on import"
+                        );
+                        return true;
+                    }
+                    let mut vouch_valid = true;
+                    for member in &community.members {
+                        for vouch in member.vouches() {
+                            if phalanx_forensics::identity::verify_vouch(
+                                vouch,
+                                member.did(),
+                                &community.fingerprint,
+                                member.joined(),
+                            )
+                            .is_err()
+                            {
+                                tracing::warn!(
+                                    target: "phalanx::trust",
+                                    member = %member.did(),
+                                    voucher = %vouch.voucher_did,
+                                    "Vouch verification failed on import — rejecting community"
+                                );
+                                vouch_valid = false;
+                                break;
+                            }
+                        }
+                        if !vouch_valid {
+                            break;
+                        }
+                    }
+                    if !vouch_valid {
+                        return true;
+                    }
+                }
+
                 tracing::info!(
                     target: "phalanx::trust",
                     community = %community.name,
                     members = community.members.len(),
-                    "Importing community into TrustRegistry"
+                    "Importing verified community into TrustRegistry"
                 );
                 // Sync community data to ReputationProjection for lock-free effective_trust reads
                 let community_data: Vec<_> = std::iter::once((

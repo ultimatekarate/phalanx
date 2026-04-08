@@ -1,5 +1,5 @@
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use phalanx_proto::community::{CommunityId, Vouch};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use phalanx_proto::community::{CommunityId, Vouch, VouchSignature};
 use phalanx_proto::crypto::CryptoError;
 use phalanx_proto::network::{BleChallenge, BleResponse};
 use phalanx_proto::prelude::*;
@@ -67,6 +67,29 @@ pub fn verify_vouch(
         .map_err(|_| CryptoError::DecryptionFailure)
 }
 
+// ── Vouch Signing ──────────────────────────────────────────────────────
+
+/// Sign a vouch: Ed25519 signature over (member_did || community_fingerprint || joined_at).
+/// Pure logic — no IO. The inverse of [`verify_vouch`].
+pub fn sign_vouch(
+    signer: &SigningKey,
+    signer_did: &Did,
+    member_did: &Did,
+    community_id: &CommunityId,
+    joined_at: PhalanxTimestamp,
+) -> Vouch {
+    let mut message = Vec::new();
+    message.extend_from_slice(member_did.as_ref().as_bytes());
+    message.extend_from_slice(&community_id.0);
+    message.extend_from_slice(&joined_at.0.to_le_bytes());
+
+    let signature = signer.sign(&message);
+    Vouch {
+        voucher_did: signer_did.clone(),
+        signature: VouchSignature::new(signature.to_bytes()),
+    }
+}
+
 // ── BLE Challenge-Response Verification ─────────────────────────────────
 
 /// Build the message that must be signed for a BLE auth response.
@@ -114,8 +137,6 @@ pub fn verify_ble_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::SigningKey;
-    use phalanx_proto::community::VouchSignature;
     use phalanx_proto::identity::Did;
     use rand_core::OsRng;
 
@@ -124,6 +145,42 @@ mod tests {
         let pk_bytes = signing_key.verifying_key().to_bytes();
         let did = Did::derive_did_key(&pk_bytes);
         (did, signing_key)
+    }
+
+    #[test]
+    fn sign_then_verify_roundtrip() {
+        let (voucher_did, voucher_sk) = make_identity();
+        let (member_did, _) = make_identity();
+        let community_id = CommunityId([42u8; 32]);
+        let joined_at = PhalanxTimestamp(1000);
+
+        let vouch = sign_vouch(
+            &voucher_sk,
+            &voucher_did,
+            &member_did,
+            &community_id,
+            joined_at,
+        );
+        assert!(verify_vouch(&vouch, &member_did, &community_id, joined_at).is_ok());
+    }
+
+    #[test]
+    fn sign_vouch_wrong_community_fails() {
+        let (voucher_did, voucher_sk) = make_identity();
+        let (member_did, _) = make_identity();
+        let community_id = CommunityId([42u8; 32]);
+        let wrong_id = CommunityId([99u8; 32]);
+        let joined_at = PhalanxTimestamp(1000);
+
+        let vouch = sign_vouch(
+            &voucher_sk,
+            &voucher_did,
+            &member_did,
+            &community_id,
+            joined_at,
+        );
+        // Verify against wrong community — should fail
+        assert!(verify_vouch(&vouch, &member_did, &wrong_id, joined_at).is_err());
     }
 
     #[test]
@@ -139,7 +196,6 @@ mod tests {
         msg.extend_from_slice(&community_id.0);
         msg.extend_from_slice(&joined_at.0.to_le_bytes());
 
-        use ed25519_dalek::Signer;
         let sig = voucher_sk.sign(&msg);
 
         let vouch = Vouch {
@@ -163,7 +219,6 @@ mod tests {
         msg.extend_from_slice(&community_id.0);
         msg.extend_from_slice(&joined_at.0.to_le_bytes());
 
-        use ed25519_dalek::Signer;
         let sig = voucher_sk.sign(&msg);
 
         let vouch = Vouch {
@@ -186,7 +241,6 @@ mod tests {
         };
 
         let msg = ble_auth_message(&responder_did, &challenger_did, &challenge.nonce);
-        use ed25519_dalek::Signer;
         let sig = responder_sk.sign(&msg);
 
         let response = BleResponse {
@@ -209,7 +263,6 @@ mod tests {
         };
 
         let msg = ble_auth_message(&responder_did, &challenger_did, &challenge.nonce);
-        use ed25519_dalek::Signer;
         let sig = wrong_sk.sign(&msg); // signed with wrong key
 
         let response = BleResponse {
