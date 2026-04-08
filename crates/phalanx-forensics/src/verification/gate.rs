@@ -622,6 +622,12 @@ impl PromotionGate for ForensicUnit<WitnessEnvelope, Unverified> {
             envelope = envelope.verify_link(a)?;
         }
 
+        // Integrity Report Gate — separate from LensGate, preserves monadic composition.
+        // Only runs for DeviceIntegrity evidence; all other types pass through.
+        if let Evidence::DeviceIntegrity(ref report) = envelope.evidence {
+            super::integrity_gate::validate_integrity_report(report, clock.now())?;
+        }
+
         Ok(ForensicUnit {
             data: envelope,
             _state: std::marker::PhantomData,

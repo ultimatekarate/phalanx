@@ -12,6 +12,7 @@ use phalanx_proto::corroboration::{
     CorroborationError, CorroborationProof, DeviceAttestation, EventWindow, PrnuProfile,
     ProximityWitness, SensorDivergence,
 };
+use phalanx_proto::evidence::integrity::DeviceIntegrityReport;
 use phalanx_proto::evidence::{Evidence, Recording};
 use phalanx_proto::identity::Did;
 use phalanx_proto::time::PhalanxTimestamp;
@@ -200,11 +201,13 @@ const MIN_PRNU_FRAMES: u32 = 10;
 /// 3. All pairwise PRNU divergences have p-value < divergence_alpha
 /// 4. All chains have intact integrity (head + tail hashes present)
 ///
-/// Proximity witnesses are attached as supporting evidence — not required.
+/// Proximity witnesses and device integrity attestations are attached as
+/// supporting evidence — not required, advisory only.
 #[allow(clippy::arithmetic_side_effects)] // Timestamp arithmetic for overlap computation.
 pub fn corroborate(
     recordings: &[&Recording],
     proximity_log: &[ProximityWitness],
+    integrity_log: &[DeviceIntegrityReport],
     min_overlap: Duration,
     divergence_alpha: f64,
 ) -> Result<CorroborationProof, CorroborationError> {
@@ -309,12 +312,22 @@ pub fn corroborate(
         .cloned()
         .collect();
 
-    // 7. Assemble proof (signature and hash filled by the Stronghold's Hands layer)
+    // 7. Integrity attestation matching (advisory only, does not gate corroboration)
+    let max_integrity_attestations: usize = 8;
+    let integrity_attestations: Vec<DeviceIntegrityReport> = integrity_log
+        .iter()
+        .filter(|r| r.scanned_at.0 >= overlap_start && r.scanned_at.0 <= overlap_end)
+        .take(max_integrity_attestations)
+        .cloned()
+        .collect();
+
+    // 8. Assemble proof (signature and hash filled by the Stronghold's Hands layer)
     Ok(CorroborationProof {
         event_window,
         attestations,
         divergences,
         proximity_evidence,
+        integrity_attestations,
         producer_did: Did::new("pending:stronghold-signs-this"),
         producer_signature: Vec::new(),
         proof_hash: [0u8; 32], // Computed by Stronghold after signing
@@ -406,7 +419,13 @@ mod tests {
         let rec_a = make_recording("alice", 150.0, 1000, 30);
         let rec_b = make_recording("bob", 220.0, 1100, 30); // different PRNU baseline
 
-        let result = corroborate(&[&rec_a, &rec_b], &[], Duration::from_millis(100), 0.05);
+        let result = corroborate(
+            &[&rec_a, &rec_b],
+            &[],
+            &[],
+            Duration::from_millis(100),
+            0.05,
+        );
 
         assert!(
             result.is_ok(),
@@ -422,7 +441,7 @@ mod tests {
     #[test]
     fn corroborate_rejects_single_recording() {
         let rec = make_recording("alice", 150.0, 1000, 30);
-        let result = corroborate(&[&rec], &[], Duration::from_millis(100), 0.05);
+        let result = corroborate(&[&rec], &[], &[], Duration::from_millis(100), 0.05);
         assert!(matches!(
             result,
             Err(CorroborationError::InsufficientRecordings(1))
@@ -434,7 +453,13 @@ mod tests {
         let rec_a = make_recording("alice", 150.0, 1000, 30);
         let rec_b = make_recording("bob", 220.0, 50000, 30); // far in the future
 
-        let result = corroborate(&[&rec_a, &rec_b], &[], Duration::from_millis(100), 0.05);
+        let result = corroborate(
+            &[&rec_a, &rec_b],
+            &[],
+            &[],
+            Duration::from_millis(100),
+            0.05,
+        );
         assert!(matches!(result, Err(CorroborationError::NoTemporalOverlap)));
     }
 
@@ -443,7 +468,13 @@ mod tests {
         let rec_a = make_recording("alice", 150.0, 1000, 30);
         let rec_b = make_recording("alice", 220.0, 1100, 30); // same DID!
 
-        let result = corroborate(&[&rec_a, &rec_b], &[], Duration::from_millis(100), 0.05);
+        let result = corroborate(
+            &[&rec_a, &rec_b],
+            &[],
+            &[],
+            Duration::from_millis(100),
+            0.05,
+        );
         assert!(matches!(result, Err(CorroborationError::DuplicateDid(_))));
     }
 
@@ -472,6 +503,7 @@ mod tests {
         let proof = corroborate(
             &[&rec_a, &rec_b],
             &proximity,
+            &[],
             Duration::from_millis(100),
             0.05,
         )

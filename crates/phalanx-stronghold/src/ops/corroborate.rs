@@ -142,6 +142,7 @@ pub async fn run_corroboration(
     let mut proof = corroborate(
         &recording_refs,
         &proximity_log,
+        &[], // integrity_log: populated when device integrity scanning is integrated
         min_overlap,
         config.divergence_alpha,
     )?;

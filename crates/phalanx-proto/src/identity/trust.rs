@@ -17,6 +17,9 @@ pub enum Offense {
     SpectralAnomaly,
     EclipseAttempt,
     NonReciprocal,
+    /// Two nodes presenting the same DID from distinct network locations simultaneously.
+    /// Detection logic deferred — requires `Did -> Set<NetworkId>` tracking in MeshSentinel.
+    DualPresence,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

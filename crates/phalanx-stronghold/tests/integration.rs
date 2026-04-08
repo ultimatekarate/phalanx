@@ -151,6 +151,7 @@ fn make_corroboration_proof(proof_hash: [u8; 32]) -> CorroborationProof {
             p_value: 0.001,
         }],
         proximity_evidence: vec![],
+        integrity_attestations: vec![],
         producer_did: Did::new("did:key:zstronghold"),
         producer_signature: vec![0u8; 64],
         proof_hash,
