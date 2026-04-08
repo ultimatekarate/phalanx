@@ -51,6 +51,7 @@ impl EvidenceExt for Evidence {
             Evidence::Handover(h) => &h.recording_id,
             Evidence::Gap(g) => &g.recording_id,
             Evidence::Proximity(p) => &p.recording_id,
+            Evidence::DeviceIntegrity(r) => &r.recording_id,
         }
     }
     fn sequence_id(&self) -> StorageSequence {
@@ -59,7 +60,7 @@ impl EvidenceExt for Evidence {
             Evidence::Audio(s) => s.sequence_id,
             Evidence::Handover(h) => h.sequence_id,
             Evidence::Gap(g) => g.start_seq,
-            Evidence::Proximity(_) => StorageSequence(u32::MAX), // metadata, not a frame
+            Evidence::Proximity(_) | Evidence::DeviceIntegrity(_) => StorageSequence(u32::MAX), // metadata, not a frame
         }
     }
     fn timestamp(&self, fallback: PhalanxTimestamp) -> PhalanxTimestamp {

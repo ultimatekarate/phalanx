@@ -298,6 +298,76 @@ The type system makes invalid state transitions a compile error.
 
 ---
 
+## 16. Compromised Recording Device (Graphite-Class Spyware)
+
+**Threat:** The recording device is infected with mercenary spyware (Paragon Graphite, NSO Pegasus, or similar). The attacker has OS-level access and can read process memory, hook system frameworks, and exfiltrate data. This is a fundamentally different threat class from the previous fifteen — the device itself is adversarial.
+
+**Defense:** Defense-in-Depth (Cross-Device Corroboration + Device Integrity Attestation)
+
+No single defense can protect against a fully compromised operating system. Phalanx layers multiple mechanisms so that a compromised device is detectable after the fact and its damage is bounded.
+
+### 16a. Pre-Encryption Evidence Interception
+
+The spyware reads evidence frames from process memory before the Privacy Gate (Gate 4) applies XChaCha20-Poly1305 encryption.
+
+- **Per-recording key isolation.** Each recording uses an independent symmetric key. Compromising one recording does not expose others.
+- **BIP39 revocation.** Once compromise is detected, the RevocationToken system allows cryptographic deletion of all evidence from the compromised recording. The revocation key is derived from the recorder's BIP39 mnemonic (seed bytes [32..64]).
+- **Zeroize.** Sensitive buffers are zeroized after use, reducing the window for memory scraping.
+
+**Residual risk: Accepted, not mitigated.** If the OS kernel is compromised, the attacker reads process memory. Application-layer defenses cannot prevent this. The mitigation path is hardware-backed keystores (Secure Enclave / Android Keymaster) — future work.
+
+### 16b. Sensor Metric Fabrication
+
+The spyware hooks the camera pipeline or ForensicLens analysis to inject fabricated PRNU/Moiré metrics, making synthetic evidence appear genuine.
+
+- **Re-verification by honest receivers.** The `verify_provenance_from_jpeg()` function allows any honest receiving node to decode the JPEG payload to YUV420, re-run ScalarLens, and check recomputed metrics against the claimed values. Spoofed metrics are caught because the pixel data does not support the claimed fingerprint.
+- **Corroboration KS-test.** The `corroborate()` function performs pairwise Kolmogorov-Smirnov tests on PRNU distributions. A compromised device's fabricated PRNU profile will fail divergence testing against genuine profiles from other devices.
+- **Bayesian PRNU posterior.** `check_provenance_bayesian()` detects sudden shifts in a device's PRNU characteristics that do not match its historical model.
+
+**Residual risk:** If the spyware also injects fake sensor noise into the pixel data itself (not just the metrics), single-device re-verification is defeated. Cross-device corroboration remains the strongest defense — fabricating consistent sensor noise across multiple independent devices is infeasible.
+
+### 16c. Encryption Key Exfiltration
+
+The spyware extracts per-recording XChaCha20-Poly1305 symmetric keys or the Ed25519 signing key from memory.
+
+- **Per-recording key isolation** limits blast radius to one recording.
+- **BIP39 revocation** enables post-discovery cryptographic deletion.
+- **Zeroize** on all key material reduces the exfiltration window.
+
+**Residual risk: Accepted, not mitigated.** Same TEE boundary as 16a. Keys that never leave a Trusted Execution Environment cannot be exfiltrated via application-level spyware. Hardware keystore integration is future work.
+
+### 16d. Fabricated Evidence Injection
+
+The spyware creates fake WitnessEnvelopes signed with the device's stolen Ed25519 key and injects them into the mesh.
+
+- **Hash chain (Gate 8).** Each envelope carries `prev_hash`. Injected envelopes must link to the real chain. An attacker who does not know the current chain head produces a break — a hard rejection.
+- **Temporal freshness (Gate 2).** Timestamps are checked against the local trusted clock. Future-dated or stale evidence is rejected.
+- **Bloom filter.** Prevents replay of previously seen envelopes.
+- **Spectral Observer.** Detects behavioral anomalies like sudden evidence bursts from a device that was previously idle.
+
+**Residual risk:** An attacker with full device access knows the current chain head and can produce valid continuations. Cross-device corroboration is required to detect fabricated content.
+
+### 16e. Shadow Node Impersonation
+
+The spyware exfiltrates the Ed25519 signing key. The attacker operates a shadow node impersonating the compromised device from a different network location.
+
+- **`IdentityTheft` offense.** The existing offense type triggers immediate blacklisting (101 points).
+- **Eclipse detection.** The `EclipseProbe` detects anomalous changes in peer set composition.
+- **ProximityWitness BLE auth.** BLE mutual authentication verifies physical presence — a remote impersonator cannot produce valid proximity witnesses.
+- **`DualPresence` offense (new).** Detects simultaneous evidence arrival from the same DID at geographically incompatible network locations. Type defined in this iteration; detection logic deferred (requires `Did -> Set<NetworkId>` tracking in MeshSentinel and heuristics to distinguish key theft from NAT/mobile-network transitions).
+
+### Explicit Non-Goals
+
+The following are outside application-layer scope:
+
+- **OS kernel compromise prevention.** Phalanx cannot prevent a rootkit from reading process memory. The mitigation path is device integrity attestation (the `Evidence::DeviceIntegrity` type) and hardware-backed keystores.
+- **Firmware/baseband compromise.** A compromised baseband processor or secure enclave is below the application's trust boundary.
+- **Supply chain attacks on the Phalanx binary.** A trojanized build of the application itself is outside the runtime threat model.
+
+**Files:** `phalanx-forensics/src/verification/gate.rs` (re-verification, LensGate), `phalanx-forensics/src/trust/corroboration.rs` (KS-test, corroboration), `phalanx-forensics/src/verification/integrity_gate.rs` (device integrity validation), `phalanx-proto/src/evidence/integrity.rs` (DeviceIntegrityReport types), `phalanx-proto/src/identity/trust.rs` (DualPresence offense)
+
+---
+
 ## Defense-in-Depth Summary
 
 An evidence envelope entering the system passes through this chain before it can be stored or retransmitted:
@@ -308,7 +378,8 @@ Wire bytes
   -> Gate 0b: Wire bounds structural validation
   -> Gate 0:  Trust standing (blacklist check)
   -> Gate 2:  Ed25519 signature + temporal freshness
-  -> Gate 3:  PRNU sensor fingerprint + Moire screen recapture
+  -> Gate 3:  PRNU sensor fingerprint + Moire screen recapture (Video)
+              Device integrity validation (DeviceIntegrity)
   -> Gate 7:  BLAKE3 evidence hash recomputation
   -> Gate 8:  Hash chain causality verification
   -> Gate 9:  Typestate promotion (Unverified -> Verified)
