@@ -360,11 +360,11 @@ The spyware exfiltrates the Ed25519 signing key. The attacker operates a shadow 
 
 The following are outside application-layer scope:
 
-- **OS kernel compromise prevention.** Phalanx cannot prevent a rootkit from reading process memory. The mitigation path is device integrity attestation (the `Evidence::DeviceIntegrity` type) and hardware-backed keystores.
+- **OS kernel compromise prevention.** Phalanx cannot prevent a rootkit from reading process memory. The mitigation path is hardware-backed keystores (future work).
 - **Firmware/baseband compromise.** A compromised baseband processor or secure enclave is below the application's trust boundary.
 - **Supply chain attacks on the Phalanx binary.** A trojanized build of the application itself is outside the runtime threat model.
 
-**Files:** `phalanx-forensics/src/verification/gate.rs` (re-verification, LensGate), `phalanx-forensics/src/trust/corroboration.rs` (KS-test, corroboration), `phalanx-forensics/src/verification/integrity_gate.rs` (device integrity validation), `phalanx-proto/src/evidence/integrity.rs` (DeviceIntegrityReport types), `phalanx-proto/src/identity/trust.rs` (DualPresence offense)
+**Files:** `phalanx-forensics/src/verification/gate.rs` (re-verification, LensGate), `phalanx-forensics/src/trust/corroboration.rs` (KS-test, corroboration), `phalanx-proto/src/identity/trust.rs` (DualPresence offense)
 
 ---
 
@@ -379,7 +379,6 @@ Wire bytes
   -> Gate 0:  Trust standing (blacklist check)
   -> Gate 2:  Ed25519 signature + temporal freshness
   -> Gate 3:  PRNU sensor fingerprint + Moire screen recapture (Video)
-              Device integrity validation (DeviceIntegrity)
   -> Gate 7:  BLAKE3 evidence hash recomputation
   -> Gate 8:  Hash chain causality verification
   -> Gate 9:  Typestate promotion (Unverified -> Verified)

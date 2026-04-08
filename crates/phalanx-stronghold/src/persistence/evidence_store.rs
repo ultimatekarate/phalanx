@@ -67,7 +67,7 @@ impl EvidenceStore {
             Evidence::Audio(a) => a.sequence_id,
             Evidence::Gap(g) => g.start_seq,
             Evidence::Handover(_) => StorageSequence(0),
-            Evidence::Proximity(_) | Evidence::DeviceIntegrity(_) => StorageSequence(0),
+            Evidence::Proximity(_) => StorageSequence(0),
         }
     }
 
@@ -79,7 +79,6 @@ impl EvidenceStore {
             Evidence::Gap(g) => Some(g.recording_id.clone()),
             Evidence::Handover(_) => None,
             Evidence::Proximity(p) => Some(p.recording_id.clone()),
-            Evidence::DeviceIntegrity(r) => Some(r.recording_id.clone()),
         }
     }
 

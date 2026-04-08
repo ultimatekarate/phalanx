@@ -125,10 +125,6 @@ pub struct CorroborationProof {
     /// Mesh co-location evidence captured during the event.
     /// Supporting evidence — strengthens proof but not required.
     pub proximity_evidence: Vec<ProximityWitness>,
-    /// Device integrity attestations from the corroboration window.
-    /// Advisory only — attached for downstream inspection, does not gate corroboration.
-    /// Capped at 8 entries.
-    pub integrity_attestations: Vec<crate::evidence::integrity::DeviceIntegrityReport>,
     /// DID of the Stronghold that produced this proof.
     pub producer_did: Did,
     /// Ed25519 signature by the producer over the serialized proof body.
