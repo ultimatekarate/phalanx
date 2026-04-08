@@ -64,6 +64,15 @@ pub fn unmarshal_checked<T: serde::de::DeserializeOwned + phalanx_proto::wire::W
     Ok(val)
 }
 
+/// Serialization Gate: Unified postcard serialization with forensic logging.
+/// The inverse of [`unmarshal`].
+pub fn marshal<T: serde::Serialize>(value: &T, context: &str) -> Result<Vec<u8>, ShardError> {
+    postcard::to_allocvec(value).map_err(|e| {
+        warn!(event = "serialization_failure", context, error = %e);
+        ShardError::SerializationError(e.to_string())
+    })
+}
+
 /// Gate 0: The Trust Gate (Peer Standing)
 pub trait TrustGate {
     fn verify_standing(&self, oracle: &dyn ReputationGate) -> Result<(), ShardError>;

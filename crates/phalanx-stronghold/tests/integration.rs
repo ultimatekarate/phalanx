@@ -303,9 +303,9 @@ async fn community_actor_import_and_lookup() {
     let alice = PhalanxIdentity::new_ephemeral();
     let bob = PhalanxIdentity::new_ephemeral();
 
-    // Alice vouches for Bob, Bob vouches for Alice (cross-vouch with quorum=1)
+    // Both alice and bob vouch for each other (cross-vouch with quorum=1)
     let community =
-        make_community_with_real_vouches(10, &[&alice, &bob], &[&alice], "Test Community");
+        make_community_with_real_vouches(10, &[&alice, &bob], &[&alice, &bob], "Test Community");
 
     // Import
     let (reply_tx, reply_rx) = oneshot::channel();

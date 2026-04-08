@@ -57,6 +57,21 @@ enum Commands {
         #[arg(short, long, num_args = 2..)]
         recordings: Vec<String>,
     },
+    /// Sign a vouch for a community member using the Stronghold's identity.
+    Vouch {
+        /// DID of the member to vouch for.
+        #[arg(long)]
+        member_did: String,
+        /// Hex-encoded 32-byte community fingerprint.
+        #[arg(long)]
+        community_id: String,
+        /// Ceremony-level joined_at timestamp (milliseconds since epoch).
+        #[arg(long)]
+        joined_at: u64,
+        /// Output file path for the serialized Vouch.
+        #[arg(short, long)]
+        output: String,
+    },
     /// Export a proof and its evidence to disk.
     Export {
         #[arg(long)]
@@ -122,6 +137,16 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &recording_ids,
             )
             .await?;
+        }
+        Commands::Vouch {
+            member_did,
+            community_id,
+            joined_at,
+            output,
+        } => {
+            let identity = load_identity(&vault_path)?;
+            let cid = parse_community_id(&community_id)?;
+            cmd_vouch(&identity, &member_did, &cid, joined_at, &output)?;
         }
         Commands::Export {
             community,
@@ -345,6 +370,39 @@ async fn cmd_export(
     for f in &files {
         println!("  {}", f.display());
     }
+    Ok(())
+}
+
+fn cmd_vouch(
+    identity: &PhalanxIdentity,
+    member_did_str: &str,
+    community_id: &CommunityId,
+    joined_at: u64,
+    output: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use phalanx_proto::identity::Did;
+    use phalanx_proto::time::PhalanxTimestamp;
+
+    let member_did = Did::new(member_did_str);
+    let timestamp = PhalanxTimestamp(joined_at);
+
+    let vouch = phalanx_forensics::identity::sign_vouch(
+        &identity.keypair,
+        &identity.did,
+        &member_did,
+        community_id,
+        timestamp,
+    );
+
+    let bytes = phalanx_forensics::gate::marshal(&vouch, "stronghold_vouch")
+        .map_err(|e| format!("Failed to serialize vouch: {e}"))?;
+
+    std::fs::write(output, &bytes)?;
+
+    println!("Vouch signed for {member_did_str}");
+    println!("  Voucher: {}", identity.did);
+    println!("  Output:  {output}");
+    println!("  Size:    {} bytes", bytes.len());
     Ok(())
 }
 

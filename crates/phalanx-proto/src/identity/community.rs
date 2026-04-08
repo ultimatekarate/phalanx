@@ -7,6 +7,8 @@
 // emerges from the membership graph. Members are admitted when
 // k existing members vouch for them.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
@@ -17,12 +19,46 @@ use crate::trust::{PetName, TrustLevel};
 // ── Community Identity ──────────────────────────────────────────────────
 
 /// Deterministic community identity — no keypair.
-/// Hash of (name || quorum || sorted founding member DIDs).
-/// The hash algorithm is determined by the mobile client; Rust receives
-/// the opaque 32-byte result. Canary alert key derivation depends on
-/// this being high-entropy — do not replace with human-readable strings.
+/// BLAKE3 hash with domain separation:
+/// `BLAKE3("PhalanxCommunityId/v1" || len(name) || name || quorum || member_count || len(did_i) || did_i ...)`.
+/// DIDs are sorted lexicographically before hashing for order-independence.
+/// Canary alert key derivation depends on this being high-entropy —
+/// do not replace with human-readable strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CommunityId(pub [u8; 32]);
+
+impl CommunityId {
+    /// Compute the deterministic community fingerprint from founding parameters.
+    ///
+    /// Domain-separated BLAKE3 with length-prefixed variable fields to ensure
+    /// the encoding is injective (no two distinct inputs produce the same pre-image).
+    /// Compute the deterministic community fingerprint.
+    ///
+    /// # Panics
+    /// Panics if name or DID strings exceed 4 GiB (impossible in practice
+    /// since `PetName` is capped at 64 chars and DIDs at 512 bytes).
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)] // PetName ≤ 64 chars, DID ≤ 512 bytes, members ≤ 256
+    pub fn compute(name: &PetName, quorum: Quorum, founding_dids: &[Did]) -> Self {
+        let mut sorted: Vec<&Did> = founding_dids.iter().collect();
+        sorted.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PhalanxCommunityId/v1");
+
+        let name_bytes = name.as_str().as_bytes();
+        hasher.update(&(name_bytes.len() as u32).to_le_bytes());
+        hasher.update(name_bytes);
+        hasher.update(&[quorum.value()]);
+        hasher.update(&(sorted.len() as u32).to_le_bytes());
+        for did in &sorted {
+            let did_bytes = did.as_str().as_bytes();
+            hasher.update(&(did_bytes.len() as u32).to_le_bytes());
+            hasher.update(did_bytes);
+        }
+        Self(*hasher.finalize().as_bytes())
+    }
+}
 
 /// Minimum vouches required for membership. Must be > 0.
 /// Constructed via `Quorum::new(n) -> Option<Self>`.
@@ -97,22 +133,28 @@ pub struct MemberEntry {
 impl MemberEntry {
     /// The only way to construct a MemberEntry.
     ///
-    /// Verifies:
-    /// 1. All vouch signatures are valid Ed25519 signatures over
-    ///    (member_did || community_fingerprint || joined_at)
-    /// 2. The number of valid vouches >= quorum
+    /// Enforces:
+    /// 1. Unique *external* vouchers >= quorum (self-vouches don't count)
+    /// 2. Duplicate voucher DIDs are collapsed (same signer cannot satisfy quorum twice)
     ///
-    /// Returns None if any signature fails or insufficient vouches.
     /// Signature verification is delegated to the Laboratory layer
     /// (phalanx-forensics) — this constructor accepts pre-verified vouches
     /// and enforces the quorum count invariant.
+    /// Self-vouches are retained in the vec for audit trail but excluded
+    /// from the quorum check.
     pub fn new_validated(
         member_did: Did,
         joined_at: PhalanxTimestamp,
         vouches: Vec<Vouch>,
         quorum: Quorum,
     ) -> Option<Self> {
-        if vouches.len() < quorum.value() as usize {
+        // Count unique external vouchers — self-vouches and duplicates excluded
+        let external_unique: HashSet<&str> = vouches
+            .iter()
+            .filter(|v| v.voucher_did.as_str() != member_did.as_str())
+            .map(|v| v.voucher_did.as_str())
+            .collect();
+        if external_unique.len() < quorum.value() as usize {
             return None;
         }
         Some(Self {
@@ -137,6 +179,22 @@ impl MemberEntry {
     pub fn vouches(&self) -> &[Vouch] {
         &self.vouches
     }
+}
+
+// ── Ceremony Staging ───────────────────────────────────────────────────
+
+/// Pre-validation staging type for community ceremony assembly.
+///
+/// This is NOT a validated member — use [`MemberEntry::new_validated`] to
+/// produce a quorum-enforced, dedup-checked member from this input.
+/// Must not be persisted, transmitted on the mesh, or stored in any registry.
+///
+/// `joined_at` is intentionally absent — it is a ceremony-level parameter
+/// passed to the assembly function, not a per-member property.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CeremonyMember {
+    pub did: Did,
+    pub vouches: Vec<Vouch>,
 }
 
 // ── Community Grants ────────────────────────────────────────────────────
@@ -171,7 +229,7 @@ impl Default for CommunityGrants {
 /// via `Zeroize`. The absence of the object IS the dissolved state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Community {
-    /// Deterministic fingerprint: SHA-256(name || quorum || sorted founding DIDs).
+    /// Deterministic fingerprint: BLAKE3 with domain separation. See [`CommunityId::compute`].
     pub fingerprint: CommunityId,
     /// Human-readable community name.
     pub name: PetName,
@@ -291,6 +349,83 @@ mod tests {
         );
         assert!(entry.is_some());
         assert_eq!(entry.unwrap().vouch_count(), 2);
+    }
+
+    #[test]
+    fn community_id_is_deterministic() {
+        let name = PetName::new("ACLU Portland").unwrap();
+        let quorum = Quorum::new(2).unwrap();
+        let dids = vec![Did::new("did:key:zA"), Did::new("did:key:zB")];
+        let id1 = CommunityId::compute(&name, quorum, &dids);
+        let id2 = CommunityId::compute(&name, quorum, &dids);
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn community_id_is_order_independent() {
+        let name = PetName::new("ACLU Portland").unwrap();
+        let quorum = Quorum::new(2).unwrap();
+        let dids_ab = vec![Did::new("did:key:zA"), Did::new("did:key:zB")];
+        let dids_ba = vec![Did::new("did:key:zB"), Did::new("did:key:zA")];
+        assert_eq!(
+            CommunityId::compute(&name, quorum, &dids_ab),
+            CommunityId::compute(&name, quorum, &dids_ba),
+        );
+    }
+
+    #[test]
+    fn community_id_differs_on_name_change() {
+        let quorum = Quorum::new(2).unwrap();
+        let dids = vec![Did::new("did:key:zA"), Did::new("did:key:zB")];
+        let id1 = CommunityId::compute(&PetName::new("ACLU Portland").unwrap(), quorum, &dids);
+        let id2 = CommunityId::compute(&PetName::new("ACLU Seattle").unwrap(), quorum, &dids);
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn duplicate_voucher_dids_rejected() {
+        let quorum = Quorum::new(2).unwrap();
+        // Same voucher DID twice — should NOT satisfy quorum of 2
+        let vouches = vec![
+            Vouch {
+                voucher_did: Did::new("did:key:z1"),
+                signature: VouchSignature::new([0u8; 64]),
+            },
+            Vouch {
+                voucher_did: Did::new("did:key:z1"),
+                signature: VouchSignature::new([0u8; 64]),
+            },
+        ];
+        let entry = MemberEntry::new_validated(
+            Did::new("did:key:zmember"),
+            PhalanxTimestamp::now(),
+            vouches,
+            quorum,
+        );
+        assert!(
+            entry.is_none(),
+            "duplicate voucher DIDs must not satisfy quorum"
+        );
+    }
+
+    #[test]
+    fn self_vouch_excluded_from_quorum() {
+        let quorum = Quorum::new(2).unwrap();
+        // One external vouch + one self-vouch = only 1 external unique
+        let member_did = Did::new("did:key:zmember");
+        let vouches = vec![
+            Vouch {
+                voucher_did: Did::new("did:key:z1"),
+                signature: VouchSignature::new([0u8; 64]),
+            },
+            Vouch {
+                voucher_did: member_did.clone(),
+                signature: VouchSignature::new([0u8; 64]),
+            },
+        ];
+        let entry =
+            MemberEntry::new_validated(member_did, PhalanxTimestamp::now(), vouches, quorum);
+        assert!(entry.is_none(), "self-vouch must not count toward quorum");
     }
 
     #[test]

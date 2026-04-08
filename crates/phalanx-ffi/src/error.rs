@@ -39,6 +39,8 @@ pub enum PhalanxError {
     NotRecording = -12,
     /// Cryptographic Forgetting: revocation failed (bad mnemonic, key mismatch, or storage error).
     RevocationFailed = -13,
+    /// Community ceremony failed (invalid vouch, quorum not met, expired, etc.).
+    CeremonyFailed = -14,
 }
 
 impl PhalanxError {
@@ -82,6 +84,7 @@ mod tests {
         assert_eq!(PhalanxError::AlreadyRecording.code(), -11);
         assert_eq!(PhalanxError::NotRecording.code(), -12);
         assert_eq!(PhalanxError::RevocationFailed.code(), -13);
+        assert_eq!(PhalanxError::CeremonyFailed.code(), -14);
     }
 
     #[test]
@@ -101,6 +104,7 @@ mod tests {
             PhalanxError::AlreadyRecording.code(),
             PhalanxError::NotRecording.code(),
             PhalanxError::RevocationFailed.code(),
+            PhalanxError::CeremonyFailed.code(),
         ];
 
         let mut sorted = codes.clone();
@@ -127,6 +131,7 @@ mod tests {
             PhalanxError::AlreadyRecording,
             PhalanxError::NotRecording,
             PhalanxError::RevocationFailed,
+            PhalanxError::CeremonyFailed,
         ];
 
         for variant in &error_variants {
