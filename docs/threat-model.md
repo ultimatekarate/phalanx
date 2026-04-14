@@ -368,6 +368,46 @@ The following are outside application-layer scope:
 
 ---
 
+## 17. Device Seizure and Role Asymmetry
+
+**Threat:** A device is physically seized — at a protest, checkpoint, border crossing, or post-event arrest. The attacker has unlimited offline access to whatever was written to disk. Weaker than full OS compromise (section 16) — no live code execution, no memory scraping — but common and unavoidable in field scenarios.
+
+**Defense:** Two-role deployment with asymmetric persistence
+
+Phalanx assumes two device classes with different physical threat profiles, and routes persistence accordingly. State that could implicate collaborators, reveal group membership, or enable post-facto correlation lives only on the class that is expected to remain in operator custody.
+
+### Role asymmetry
+
+- **Mobile (phone, Flutter + FFI node).** Treated as seizable. Identity and ops-sensitive state is RAM-only; process death wipes it; the user re-acquires state the next session.
+
+- **Stronghold (egui desktop / CLI, optional deployment).** Treated as operator-safe — installed in a location unlikely to be seized (legal office, newsroom, NGO headquarters). Disk persistence is correct there and is required to resolve the long-lived evidence vault.
+
+### What is ephemeral on mobile
+
+- **Trusted community membership.** `TrustRegistry.communities` is `#[serde(skip)]` at `phalanx-node/src/trust.rs:186`; `TrustRegistry::save()` serialises only the peer roster. Community rosters enter RAM via `phalanx_import_community` (typically from a QR code at event start) and die with the process. A seized phone reveals nothing about which groups the user belonged to.
+- **Silent Canary watch set.** Section 12; peer-presence monitoring state is never persisted.
+- **Replay Bloom filter.** Section 3; both generations are ephemeral and never disclose which evidence was seen.
+- **Proximity witnesses.** `phalanx-ffi/src/community.rs` flushes `sentinel.proximity_witnesses` via `std::mem::take` on recording stop.
+
+### What persists on mobile (seizure-tolerable)
+
+- **Peer reputation / blacklist.** `trust_registry.bin` holds long-lived behavioral data. Seizure-tolerable because knowing a device previously blacklisted `did:key:zFoo` does not reveal which event or group the DID participated in.
+- **Device identity (`identity.bin`).** Passphrase-sealed; regenerable from the user's BIP39 mnemonic (section 9).
+- **Evidence vault.** Per-recording XChaCha20-Poly1305 (section 8); cryptographically forgettable via mnemonic-derived revocation (section 9).
+
+### What Stronghold persists
+
+- **Community rosters** at `{vault}/communities/*.bin`, auto-hydrated on boot by `auto_import_communities` in `phalanx-stronghold/src/gui/bridge.rs`.
+- **Evidence shards** at `{vault}/evidence/{hex(community_id)}/...`, reachable only via the matching community identifier.
+
+Dropping the roster on every Stronghold restart would orphan the shards, so persistence there is required, not optional. The security boundary is carried by the operator — Stronghold is not deployed in environments where it is expected to be seized.
+
+**Residual risk:** If the operator's Stronghold is compromised (theft, subpoena, insider), community rosters and the evidence vault are exposed. The mitigation is deployment-level (physical security, encrypted home directory, jurisdiction selection), not application-level.
+
+**Files:** `phalanx-node/src/trust.rs` (mobile-side ephemeral communities), `phalanx-stronghold/src/gui/panels/communities.rs` + `phalanx-stronghold/src/gui/bridge.rs` (Stronghold-side persistent rosters), `phalanx-stronghold/src/persistence/evidence_store.rs` (shard path scheme)
+
+---
+
 ## Defense-in-Depth Summary
 
 An evidence envelope entering the system passes through this chain before it can be stored or retransmitted:
