@@ -403,6 +403,12 @@ class PhalanxBridge {
 
   bool get isAlive => _handle != nullptr && !_destroyed;
 
+  /// Raw native handle, for sibling FFI bridges (e.g. [CommunityBridge])
+  /// that share the same engine. Callers must guard with [isAlive] —
+  /// passing a null handle to the Rust side returns `nullPointer` (-1)
+  /// on every call.
+  Pointer<Void> get nativeHandle => _destroyed ? nullptr : _handle;
+
   // =====================================================================
   // LIFECYCLE
   // =====================================================================

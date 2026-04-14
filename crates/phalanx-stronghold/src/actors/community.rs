@@ -8,8 +8,10 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use phalanx_forensics::identity::verify_vouch;
-use phalanx_proto::community::{Community, CommunityId};
+use phalanx_forensics::identity::verify_community_vouches;
+use phalanx_proto::community::{
+    Community, CommunityId, CommunityRoster, CommunitySummary, CommunityVerifyError, MemberSummary,
+};
 use phalanx_proto::identity::Did;
 use phalanx_proto::time::PhalanxTimestamp;
 use tokio::sync::mpsc;
@@ -38,6 +40,12 @@ pub enum CommunityCommand {
     /// List all communities as (id, name) pairs.
     ListCommunities {
         reply_to: oneshot::Sender<Vec<(CommunityId, String)>>,
+    },
+    /// Fetch the full roster for a single community (for the GUI detail
+    /// panel). `None` if the id is unknown.
+    GetDetail {
+        community_id: CommunityId,
+        reply_to: oneshot::Sender<Option<CommunityRoster>>,
     },
     /// Snapshot the full DID-to-community routing table.
     SnapshotRouting {
@@ -109,6 +117,13 @@ impl CommunityActor {
                 let list = self.list_communities();
                 let _ = reply_to.send(list);
             }
+            CommunityCommand::GetDetail {
+                community_id,
+                reply_to,
+            } => {
+                let detail = self.get_detail(&community_id);
+                let _ = reply_to.send(detail);
+            }
             CommunityCommand::SnapshotRouting { reply_to } => {
                 let snapshot = self.snapshot_routing();
                 let _ = reply_to.send(snapshot);
@@ -127,19 +142,13 @@ impl CommunityActor {
                 .as_millis() as u64,
         );
 
-        // Reject expired communities
-        if community.is_expired(now) {
-            return Err(StrongholdError::CommunityExpired);
-        }
+        // Delegate expiration + vouch verification to the shared forensics verb.
+        verify_community_vouches(&community, now).map_err(|e| match e {
+            CommunityVerifyError::Expired { .. } => StrongholdError::CommunityExpired,
+            other => StrongholdError::VouchVerification(other.to_string()),
+        })?;
 
-        // Verify all vouch signatures for every member
         let community_id = community.fingerprint;
-        for member in &community.members {
-            for vouch in member.vouches() {
-                verify_vouch(vouch, member.did(), &community_id, member.joined())
-                    .map_err(|e| StrongholdError::VouchVerification(e.to_string()))?;
-            }
-        }
 
         // Rebuild did_index entries for this community
         for member in &community.members {
@@ -194,6 +203,39 @@ impl CommunityActor {
             .iter()
             .map(|(id, c)| (*id, c.name.as_str().to_owned()))
             .collect()
+    }
+
+    fn get_detail(&self, community_id: &CommunityId) -> Option<CommunityRoster> {
+        let community = self.communities.get(community_id)?;
+        let member_count = u16::try_from(community.members.len()).unwrap_or(u16::MAX);
+        let summary = CommunitySummary {
+            id: community.fingerprint,
+            name: community.name.clone(),
+            member_count,
+            expires_at: community.expires_at,
+            quorum: community.quorum,
+        };
+        let members = community
+            .members
+            .iter()
+            .map(|m| {
+                let vouch_count = u16::try_from(m.vouches().len()).unwrap_or(u16::MAX);
+                MemberSummary {
+                    did: m.did().clone(),
+                    joined_at: m.joined(),
+                    vouch_count,
+                    // Stronghold does not maintain peer aliases for community
+                    // members; surface None and let the UI render the DID.
+                    pet_name: None,
+                }
+            })
+            .collect();
+        Some(CommunityRoster {
+            summary,
+            members,
+            grants: community.grants,
+            stronghold_did: community.stronghold_did.clone(),
+        })
     }
 
     fn snapshot_routing(&self) -> HashMap<Did, Vec<CommunityId>> {

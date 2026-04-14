@@ -18,6 +18,8 @@ dependencies:
   share_plus: ^7.0.0
   app_links: ^6.0.0
   flutter_pcm_sound: ^3.3.0
+  # Community QR scanning for the Join ceremony (Phase 3 UI).
+  mobile_scanner: ^5.0.0
 
 dev_dependencies:
   flutter_test:

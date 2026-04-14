@@ -1,9 +1,42 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use phalanx_proto::community::{CommunityId, Vouch, VouchSignature};
+use phalanx_proto::community::{
+    CeremonyMember, Community, CommunityAssemblyError, CommunityGrants, CommunityId,
+    CommunityVerifyError, MemberEntry, Quorum, Vouch, VouchSignature, COMMUNITY_PAYLOAD_VERSION,
+};
 use phalanx_proto::crypto::CryptoError;
 use phalanx_proto::network::{BleChallenge, BleResponse};
 use phalanx_proto::prelude::*;
 use phalanx_proto::time::PhalanxTimestamp;
+use phalanx_proto::trust::{PetName, TrustLevel};
+
+// ── Community Ceremony Thresholds ───────────────────────────────────────
+
+/// Maximum age of a vouch relative to `now`. Vouches signed earlier than
+/// `now - VOUCH_FRESHNESS_WINDOW_SECS` are stale and rejected.
+pub const VOUCH_FRESHNESS_WINDOW_SECS: u64 = 3600; // 1 hour
+
+/// Maximum forward clock skew tolerated. A vouch whose `joined_at` is later
+/// than `now + CLOCK_SKEW_TOLERANCE_SECS` is treated as a replay attempt
+/// against a future window (or a broken signer clock).
+pub const CLOCK_SKEW_TOLERANCE_SECS: u64 = 300; // 5 minutes
+
+/// Minimum community lifetime (seconds). Floor guards against accidental
+/// near-zero expirations that would expire before the ceremony completes.
+pub const MIN_EXPIRES_SECS: u64 = 300; // 5 minutes
+
+/// Maximum community lifetime (seconds). Ceiling closes the "immortal
+/// community" gap — tokens older than 30 days must be re-issued.
+pub const MAX_EXPIRES_SECS: u64 = 30 * 86_400; // 30 days
+
+/// Soft warning ceiling on serialized community payload size, aligned with
+/// QR v40 alphanumeric capacity after base64url expansion.
+pub const QR_PAYLOAD_BUDGET_BYTES: usize = 2800;
+
+/// Maximum founding members in a ceremony.
+pub const MAX_CEREMONY_MEMBERS: usize = 256;
+
+/// Maximum vouches per member during a ceremony.
+pub const MAX_VOUCHES_PER_MEMBER: usize = 256;
 
 pub fn resolve_did_public_key(did: &Did) -> Result<[u8; 32], CryptoError> {
     // Safe Prefix Handling (Zero-Panic)
@@ -65,6 +98,248 @@ pub fn verify_vouch(
     verifying_key
         .verify(&message, &signature)
         .map_err(|_| CryptoError::DecryptionFailure)
+}
+
+// ── Community-Level Verification ────────────────────────────────────────
+
+/// Verify an entire community token: expiration, every member's quorum,
+/// every vouch signature. Pure verb — no IO, no clock held internally.
+///
+/// `now` must be supplied by the caller from a `TrustedClock` (§III
+/// Temporal Agreement of `linguistic-code-model.md`).
+///
+/// Returns the first rejection reason encountered. On success, the community
+/// has a live membership graph whose every vouch is cryptographically valid.
+pub fn verify_community_vouches(
+    community: &Community,
+    now: PhalanxTimestamp,
+) -> Result<(), CommunityVerifyError> {
+    if community.is_expired(now) {
+        return Err(CommunityVerifyError::Expired {
+            community_id: community.fingerprint,
+            now,
+            expires_at: community.expires_at,
+        });
+    }
+
+    let quorum = community.quorum.value() as usize;
+
+    for member in &community.members {
+        // Quorum re-check — belt-and-suspenders alongside `MemberEntry::new_validated`.
+        let unique_external: std::collections::HashSet<&str> = member
+            .vouches()
+            .iter()
+            .filter(|v| v.voucher_did.as_str() != member.did().as_str())
+            .map(|v| v.voucher_did.as_str())
+            .collect();
+        if unique_external.len() < quorum {
+            return Err(CommunityVerifyError::QuorumViolation {
+                member: member.did().clone(),
+            });
+        }
+
+        for vouch in member.vouches() {
+            verify_vouch(vouch, member.did(), &community.fingerprint, member.joined()).map_err(
+                |_| CommunityVerifyError::BadVouch {
+                    member: member.did().clone(),
+                    voucher: vouch.voucher_did.clone(),
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Strip the `[COMMUNITY_PAYLOAD_VERSION]` prefix and return the inner
+/// postcard body. Returns [`CommunityVerifyError::UnsupportedVersion`] if the
+/// first byte does not match the current envelope version.
+///
+/// Pure function — no deserialization performed here.
+pub fn strip_payload_version(bytes: &[u8]) -> Result<&[u8], CommunityVerifyError> {
+    let (&version, rest) = bytes
+        .split_first()
+        .ok_or(CommunityVerifyError::UnsupportedVersion { version: 0 })?;
+    if version != COMMUNITY_PAYLOAD_VERSION {
+        return Err(CommunityVerifyError::UnsupportedVersion { version });
+    }
+    Ok(rest)
+}
+
+/// Prepend the envelope version byte to an already-serialized community.
+/// Companion to [`strip_payload_version`].
+#[must_use]
+pub fn wrap_payload_version(postcard_bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(postcard_bytes.len().saturating_add(1));
+    out.push(COMMUNITY_PAYLOAD_VERSION);
+    out.extend_from_slice(postcard_bytes);
+    out
+}
+
+// ── Community Assembly (Ceremony) ───────────────────────────────────────
+
+/// Inputs for the ceremony assembly verb. Every field is a Dictionary Noun;
+/// construction errors are the caller's responsibility (e.g. `PetName::new`).
+#[derive(Debug, Clone)]
+pub struct CommunityAssemblyParams {
+    pub name: PetName,
+    pub quorum: Quorum,
+    pub joined_at: PhalanxTimestamp,
+    pub expires_at: PhalanxTimestamp,
+    pub stronghold_did: Option<Did>,
+    pub baseline_trust: TrustLevel,
+    pub grants: CommunityGrants,
+    pub members: Vec<CeremonyMember>,
+}
+
+/// Assemble a community from ceremony inputs, validating every invariant
+/// the existing inline logic covered plus the new 30-day expiration ceiling.
+///
+/// Pure verb. `now` is supplied by the caller so this code never holds a clock.
+///
+/// Invariants enforced (in declaration order):
+/// 1. `joined_at` freshness and skew against `now`.
+/// 2. `expires_at - now` is within `[MIN_EXPIRES_SECS, MAX_EXPIRES_SECS]`.
+/// 3. Non-empty member list below `MAX_CEREMONY_MEMBERS`.
+/// 4. Each member's vouches under `MAX_VOUCHES_PER_MEMBER`.
+/// 5. Every vouch cryptographically verifies (via `verify_vouch`).
+/// 6. Quorum satisfied for every member (via `MemberEntry::new_validated`).
+/// 7. Serialized payload ≤ `QR_PAYLOAD_BUDGET_BYTES`.
+pub fn assemble_community(
+    params: CommunityAssemblyParams,
+    now: PhalanxTimestamp,
+) -> Result<Community, CommunityAssemblyError> {
+    // ── Invariant 1: vouch freshness / skew ──
+    let now_ms = now.0;
+    let joined_ms = params.joined_at.0;
+    let vouch_freshness_ms = VOUCH_FRESHNESS_WINDOW_SECS.saturating_mul(1000);
+    let clock_skew_ms = CLOCK_SKEW_TOLERANCE_SECS.saturating_mul(1000);
+
+    // Saturating arithmetic guarantees no underflow on either branch.
+    if joined_ms <= now_ms {
+        let age_ms = now_ms.saturating_sub(joined_ms);
+        if age_ms > vouch_freshness_ms {
+            // Report first member as the "voucher" anchor — age applies to the
+            // ceremony's joined_at, which is shared by all vouches by construction.
+            let voucher = params
+                .members
+                .first()
+                .map(|m| m.did.clone())
+                .unwrap_or_else(|| Did::new(""));
+            return Err(CommunityAssemblyError::VouchStale {
+                voucher,
+                age_seconds: age_ms / 1000,
+            });
+        }
+    } else {
+        let skew_ms = joined_ms.saturating_sub(now_ms);
+        if skew_ms > clock_skew_ms {
+            let voucher = params
+                .members
+                .first()
+                .map(|m| m.did.clone())
+                .unwrap_or_else(|| Did::new(""));
+            return Err(CommunityAssemblyError::VouchFuture {
+                voucher,
+                skew_seconds: skew_ms / 1000,
+            });
+        }
+    }
+
+    // ── Invariant 2: expiration window ──
+    let lifetime_ms = params.expires_at.0.saturating_sub(now_ms);
+    let min_lifetime_ms = MIN_EXPIRES_SECS.saturating_mul(1000);
+    let max_lifetime_ms = MAX_EXPIRES_SECS.saturating_mul(1000);
+    if lifetime_ms < min_lifetime_ms {
+        return Err(CommunityAssemblyError::ExpirationTooSoon {
+            seconds: lifetime_ms / 1000,
+        });
+    }
+    if lifetime_ms > max_lifetime_ms {
+        return Err(CommunityAssemblyError::ExpirationTooFar {
+            seconds: lifetime_ms / 1000,
+        });
+    }
+
+    // ── Invariant 3 & 4: bounded member / vouch counts ──
+    if params.members.is_empty() || params.members.len() > MAX_CEREMONY_MEMBERS {
+        return Err(CommunityAssemblyError::QuorumUnsatisfiable {
+            member: Did::new(""),
+            needed: params.quorum.value(),
+            available: 0,
+        });
+    }
+    for cm in &params.members {
+        if cm.vouches.len() > MAX_VOUCHES_PER_MEMBER {
+            return Err(CommunityAssemblyError::QuorumUnsatisfiable {
+                member: cm.did.clone(),
+                needed: params.quorum.value(),
+                #[allow(clippy::cast_possible_truncation)]
+                available: cm.vouches.len().min(u8::MAX as usize) as u8,
+            });
+        }
+    }
+
+    // ── Compute deterministic fingerprint from member DIDs ──
+    let member_dids: Vec<Did> = params.members.iter().map(|cm| cm.did.clone()).collect();
+    let fingerprint = CommunityId::compute(&params.name, params.quorum, &member_dids);
+
+    // ── Invariant 5 & 6: per-vouch signature, per-member quorum ──
+    let mut members = Vec::with_capacity(params.members.len());
+    for cm in params.members {
+        for vouch in &cm.vouches {
+            verify_vouch(vouch, &cm.did, &fingerprint, params.joined_at).map_err(|_| {
+                CommunityAssemblyError::Verify(CommunityVerifyError::BadVouch {
+                    member: cm.did.clone(),
+                    voucher: vouch.voucher_did.clone(),
+                })
+            })?;
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let available_unique = {
+            let set: std::collections::HashSet<&str> = cm
+                .vouches
+                .iter()
+                .filter(|v| v.voucher_did.as_str() != cm.did.as_str())
+                .map(|v| v.voucher_did.as_str())
+                .collect();
+            set.len().min(u8::MAX as usize) as u8
+        };
+
+        let entry =
+            MemberEntry::new_validated(cm.did.clone(), params.joined_at, cm.vouches, params.quorum)
+                .ok_or_else(|| CommunityAssemblyError::QuorumUnsatisfiable {
+                    member: cm.did.clone(),
+                    needed: params.quorum.value(),
+                    available: available_unique,
+                })?;
+        members.push(entry);
+    }
+
+    let community = Community {
+        fingerprint,
+        name: params.name,
+        quorum: params.quorum,
+        members,
+        stronghold_did: params.stronghold_did,
+        baseline_trust: params.baseline_trust,
+        grants: params.grants,
+        expires_at: params.expires_at,
+    };
+
+    // ── Invariant 7: QR budget ──
+    let body = postcard::to_allocvec(&community).map_err(|_| {
+        CommunityAssemblyError::QrBudgetExceeded {
+            bytes: usize::MAX, // encoding failure treated as ceiling violation
+        }
+    })?;
+    // Include version byte in the budget check — that is what we actually ship.
+    let payload_len = body.len().saturating_add(1);
+    if payload_len > QR_PAYLOAD_BUDGET_BYTES {
+        return Err(CommunityAssemblyError::QrBudgetExceeded { bytes: payload_len });
+    }
+
+    Ok(community)
 }
 
 // ── Vouch Signing ──────────────────────────────────────────────────────
@@ -135,6 +410,14 @@ pub fn verify_ble_response(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
     use phalanx_proto::identity::Did;
@@ -249,6 +532,315 @@ mod tests {
         };
 
         assert!(verify_ble_response(&challenge, &response).is_ok());
+    }
+
+    // ── Community Assembly & Verification Tests ─────────────────────────
+
+    fn build_ceremony_member(
+        signer_sk: &SigningKey,
+        signer_did: &Did,
+        member_did: &Did,
+        community_id: &CommunityId,
+        joined_at: PhalanxTimestamp,
+    ) -> CeremonyMember {
+        let vouch = sign_vouch(signer_sk, signer_did, member_did, community_id, joined_at);
+        CeremonyMember {
+            did: member_did.clone(),
+            vouches: vec![vouch],
+        }
+    }
+
+    #[test]
+    fn assemble_community_happy_path() {
+        let (voucher_a_did, voucher_a_sk) = make_identity();
+        let (voucher_b_did, voucher_b_sk) = make_identity();
+        let (member_did, _) = make_identity();
+
+        let name = PetName::new("ACLU Portland").unwrap();
+        let quorum = Quorum::new(2).unwrap();
+        let now = PhalanxTimestamp(1_000_000);
+        let joined_at = now;
+        let expires_at = PhalanxTimestamp(now.0 + 10 * 60_000); // +10 minutes
+
+        // Pre-compute fingerprint using the member list that assembly will use.
+        let tentative_fingerprint =
+            CommunityId::compute(&name, quorum, std::slice::from_ref(&member_did));
+
+        let vouch_a = sign_vouch(
+            &voucher_a_sk,
+            &voucher_a_did,
+            &member_did,
+            &tentative_fingerprint,
+            joined_at,
+        );
+        let vouch_b = sign_vouch(
+            &voucher_b_sk,
+            &voucher_b_did,
+            &member_did,
+            &tentative_fingerprint,
+            joined_at,
+        );
+
+        let params = CommunityAssemblyParams {
+            name: name.clone(),
+            quorum,
+            joined_at,
+            expires_at,
+            stronghold_did: None,
+            baseline_trust: TrustLevel::Verified,
+            grants: CommunityGrants::default(),
+            members: vec![CeremonyMember {
+                did: member_did.clone(),
+                vouches: vec![vouch_a, vouch_b],
+            }],
+        };
+
+        let community = assemble_community(params, now).expect("happy path");
+        assert_eq!(community.fingerprint, tentative_fingerprint);
+        assert_eq!(community.members.len(), 1);
+
+        // Verify round-trips cleanly.
+        verify_community_vouches(&community, now).expect("valid community");
+    }
+
+    #[test]
+    fn assemble_community_rejects_expired_too_soon() {
+        let (_, _) = make_identity();
+        let (member_did, _) = make_identity();
+        let name = PetName::new("too-brief").unwrap();
+        let quorum = Quorum::new(1).unwrap();
+        let now = PhalanxTimestamp(1_000_000);
+        let params = CommunityAssemblyParams {
+            name,
+            quorum,
+            joined_at: now,
+            // 1 second after now — below MIN_EXPIRES_SECS
+            expires_at: PhalanxTimestamp(now.0 + 1000),
+            stronghold_did: None,
+            baseline_trust: TrustLevel::Verified,
+            grants: CommunityGrants::default(),
+            members: vec![CeremonyMember {
+                did: member_did,
+                vouches: vec![],
+            }],
+        };
+
+        let err = assemble_community(params, now).unwrap_err();
+        assert!(matches!(
+            err,
+            CommunityAssemblyError::ExpirationTooSoon { .. }
+        ));
+    }
+
+    #[test]
+    fn assemble_community_rejects_expiration_too_far() {
+        let (member_did, _) = make_identity();
+        let name = PetName::new("immortal").unwrap();
+        let quorum = Quorum::new(1).unwrap();
+        let now = PhalanxTimestamp(1_000_000);
+        // 31 days out — above MAX_EXPIRES_SECS
+        let expires_at = PhalanxTimestamp(now.0 + (31u64 * 86_400 * 1000));
+
+        let params = CommunityAssemblyParams {
+            name,
+            quorum,
+            joined_at: now,
+            expires_at,
+            stronghold_did: None,
+            baseline_trust: TrustLevel::Verified,
+            grants: CommunityGrants::default(),
+            members: vec![CeremonyMember {
+                did: member_did,
+                vouches: vec![],
+            }],
+        };
+
+        let err = assemble_community(params, now).unwrap_err();
+        assert!(matches!(
+            err,
+            CommunityAssemblyError::ExpirationTooFar { .. }
+        ));
+    }
+
+    #[test]
+    fn assemble_community_rejects_stale_vouch() {
+        let (member_did, _) = make_identity();
+        let name = PetName::new("stale").unwrap();
+        let quorum = Quorum::new(1).unwrap();
+        let now = PhalanxTimestamp(10 * 60 * 60 * 1000); // 10 hours
+                                                         // joined_at 2h earlier — outside the 1h freshness window.
+        let joined_at = PhalanxTimestamp(now.0 - 2 * 60 * 60 * 1000);
+        let expires_at = PhalanxTimestamp(now.0 + 10 * 60_000);
+
+        let params = CommunityAssemblyParams {
+            name,
+            quorum,
+            joined_at,
+            expires_at,
+            stronghold_did: None,
+            baseline_trust: TrustLevel::Verified,
+            grants: CommunityGrants::default(),
+            members: vec![CeremonyMember {
+                did: member_did,
+                vouches: vec![],
+            }],
+        };
+
+        let err = assemble_community(params, now).unwrap_err();
+        assert!(matches!(err, CommunityAssemblyError::VouchStale { .. }));
+    }
+
+    #[test]
+    fn assemble_community_rejects_future_vouch() {
+        let (member_did, _) = make_identity();
+        let name = PetName::new("future").unwrap();
+        let quorum = Quorum::new(1).unwrap();
+        let now = PhalanxTimestamp(10 * 60 * 60 * 1000);
+        // joined_at 10 minutes *after* now — > 5-minute skew tolerance.
+        let joined_at = PhalanxTimestamp(now.0 + 10 * 60_000);
+        let expires_at = PhalanxTimestamp(now.0 + 30 * 60_000);
+
+        let params = CommunityAssemblyParams {
+            name,
+            quorum,
+            joined_at,
+            expires_at,
+            stronghold_did: None,
+            baseline_trust: TrustLevel::Verified,
+            grants: CommunityGrants::default(),
+            members: vec![CeremonyMember {
+                did: member_did,
+                vouches: vec![],
+            }],
+        };
+
+        let err = assemble_community(params, now).unwrap_err();
+        assert!(matches!(err, CommunityAssemblyError::VouchFuture { .. }));
+    }
+
+    #[test]
+    fn assemble_community_rejects_quorum_unsatisfiable() {
+        let (voucher_did, voucher_sk) = make_identity();
+        let (member_did, _) = make_identity();
+        let name = PetName::new("lonely").unwrap();
+        let quorum = Quorum::new(2).unwrap(); // needs 2 unique vouchers
+        let now = PhalanxTimestamp(1_000_000);
+        let expires_at = PhalanxTimestamp(now.0 + 10 * 60_000);
+
+        let tentative_fingerprint =
+            CommunityId::compute(&name, quorum, std::slice::from_ref(&member_did));
+        let vouch = sign_vouch(
+            &voucher_sk,
+            &voucher_did,
+            &member_did,
+            &tentative_fingerprint,
+            now,
+        );
+
+        let params = CommunityAssemblyParams {
+            name,
+            quorum,
+            joined_at: now,
+            expires_at,
+            stronghold_did: None,
+            baseline_trust: TrustLevel::Verified,
+            grants: CommunityGrants::default(),
+            members: vec![CeremonyMember {
+                did: member_did,
+                vouches: vec![vouch],
+            }],
+        };
+
+        let err = assemble_community(params, now).unwrap_err();
+        assert!(matches!(
+            err,
+            CommunityAssemblyError::QuorumUnsatisfiable { .. }
+        ));
+    }
+
+    #[test]
+    fn verify_community_vouches_rejects_expired() {
+        let (voucher_did, voucher_sk) = make_identity();
+        let (member_did, _) = make_identity();
+        let name = PetName::new("expired").unwrap();
+        let quorum = Quorum::new(1).unwrap();
+        let joined_at = PhalanxTimestamp(1_000_000);
+        let expires_at = PhalanxTimestamp(joined_at.0 + 10 * 60_000);
+
+        let tentative_fingerprint =
+            CommunityId::compute(&name, quorum, std::slice::from_ref(&member_did));
+        let vouch = sign_vouch(
+            &voucher_sk,
+            &voucher_did,
+            &member_did,
+            &tentative_fingerprint,
+            joined_at,
+        );
+        let community = assemble_community(
+            CommunityAssemblyParams {
+                name,
+                quorum,
+                joined_at,
+                expires_at,
+                stronghold_did: None,
+                baseline_trust: TrustLevel::Verified,
+                grants: CommunityGrants::default(),
+                members: vec![CeremonyMember {
+                    did: member_did,
+                    vouches: vec![vouch],
+                }],
+            },
+            joined_at,
+        )
+        .expect("assemble OK");
+
+        // Verify at a timestamp past expiration.
+        let past_expiry = PhalanxTimestamp(expires_at.0 + 1);
+        let err = verify_community_vouches(&community, past_expiry).unwrap_err();
+        assert!(matches!(err, CommunityVerifyError::Expired { .. }));
+    }
+
+    #[test]
+    fn payload_envelope_roundtrip() {
+        let body = vec![1u8, 2, 3, 4, 5];
+        let wrapped = wrap_payload_version(&body);
+        assert_eq!(wrapped[0], COMMUNITY_PAYLOAD_VERSION);
+        let inner = strip_payload_version(&wrapped).expect("valid envelope");
+        assert_eq!(inner, body.as_slice());
+    }
+
+    #[test]
+    fn payload_envelope_rejects_unknown_version() {
+        let mut wrapped = vec![0x02u8];
+        wrapped.extend_from_slice(&[9, 9, 9]);
+        let err = strip_payload_version(&wrapped).unwrap_err();
+        assert!(matches!(
+            err,
+            CommunityVerifyError::UnsupportedVersion { version: 0x02 }
+        ));
+    }
+
+    #[test]
+    fn payload_envelope_rejects_empty() {
+        let err = strip_payload_version(&[]).unwrap_err();
+        assert!(matches!(
+            err,
+            CommunityVerifyError::UnsupportedVersion { version: 0 }
+        ));
+    }
+
+    // suppress unused warning — fixture is imported for symmetry with other tests.
+    #[allow(dead_code)]
+    fn _unused_fixture() -> CeremonyMember {
+        let (sk, _) = (SigningKey::generate(&mut OsRng), ());
+        let did = Did::new("did:key:zExample");
+        build_ceremony_member(
+            &sk,
+            &did,
+            &did,
+            &CommunityId([0u8; 32]),
+            PhalanxTimestamp(0),
+        )
     }
 
     #[test]

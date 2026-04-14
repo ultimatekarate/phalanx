@@ -83,6 +83,32 @@ enum Commands {
         #[arg(short, long, default_value = "./export")]
         output: String,
     },
+    /// Assemble a community from a collected set of vouches. Delegates all
+    /// invariants (freshness, expiration bounds, quorum, QR budget) to
+    /// `phalanx_forensics::identity::assemble_community`.
+    CreateCommunity {
+        /// Community pet name (1-64 chars).
+        #[arg(long)]
+        name: String,
+        /// Quorum threshold — minimum distinct vouchers per member.
+        #[arg(long)]
+        quorum: u8,
+        /// Path to the TOML file containing the collected ceremony vouches.
+        #[arg(long)]
+        vouches: String,
+        /// Ceremony joined_at (RFC3339, e.g. 2026-04-14T17:00:00Z).
+        #[arg(long)]
+        joined_at: String,
+        /// Community expiry (RFC3339).
+        #[arg(long)]
+        expires_at: String,
+        /// Optional Stronghold DID (operator's own identity) to associate.
+        #[arg(long)]
+        stronghold_did: Option<String>,
+        /// Output path for the postcard-serialized Community token.
+        #[arg(short, long)]
+        output: String,
+    },
 }
 
 // ── Main ────────────────────────────────────────────────────────────────
@@ -169,6 +195,25 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 &output_dir,
             )
             .await?;
+        }
+        Commands::CreateCommunity {
+            name,
+            quorum,
+            vouches,
+            joined_at,
+            expires_at,
+            stronghold_did,
+            output,
+        } => {
+            cmd_create_community(
+                &name,
+                quorum,
+                &vouches,
+                &joined_at,
+                &expires_at,
+                stronghold_did.as_deref(),
+                &output,
+            )?;
         }
     }
 
@@ -372,6 +417,154 @@ async fn cmd_export(
     }
     Ok(())
 }
+
+// ── `create-community` subcommand ───────────────────────────────────────
+
+/// TOML-friendly shape of the vouches file.
+#[derive(serde::Deserialize)]
+struct VouchesFile {
+    members: Vec<CeremonyMemberEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct CeremonyMemberEntry {
+    did: String,
+    vouches: Vec<VouchEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct VouchEntry {
+    voucher_did: String,
+    signature: String,
+}
+
+/// Assemble a community from the operator's collected vouches and emit the
+/// community token plus three share-ready forms (raw bytes, custom scheme,
+/// Universal Link). Delegates every invariant to
+/// `phalanx_forensics::identity::assemble_community`.
+#[allow(clippy::too_many_arguments)]
+fn cmd_create_community(
+    name_str: &str,
+    quorum: u8,
+    vouches_path: &str,
+    joined_at_str: &str,
+    expires_at_str: &str,
+    stronghold_did_str: Option<&str>,
+    output: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use phalanx_forensics::identity::{
+        assemble_community, wrap_payload_version, CommunityAssemblyParams,
+    };
+    use phalanx_proto::community::{
+        CeremonyMember, CommunityGrants, Quorum, Vouch, VouchSignature,
+    };
+    use phalanx_proto::identity::Did;
+    use phalanx_proto::time::{SystemClock, TrustedClock};
+    use phalanx_proto::trust::{PetName, TrustLevel};
+
+    // ── Parse arguments ────────────────────────────────────────────────
+    let name = PetName::new(name_str).map_err(|e| format!("Invalid name: {e}"))?;
+    let quorum = Quorum::new(quorum)
+        .ok_or_else::<Box<dyn std::error::Error>, _>(|| "Quorum must be > 0".into())?;
+    let joined_ts = rfc3339_to_millis(joined_at_str)
+        .map_err(|e| format!("Invalid --joined-at {joined_at_str:?}: {e}"))?;
+    let expires_ts = rfc3339_to_millis(expires_at_str)
+        .map_err(|e| format!("Invalid --expires-at {expires_at_str:?}: {e}"))?;
+    let stronghold_did = stronghold_did_str.map(Did::new);
+
+    // ── Load vouches TOML ──────────────────────────────────────────────
+    let text = std::fs::read_to_string(vouches_path)
+        .map_err(|e| format!("Failed to read {vouches_path:?}: {e}"))?;
+    let file: VouchesFile = toml::from_str(&text)
+        .map_err(|e| format!("Failed to parse vouches TOML {vouches_path:?}: {e}"))?;
+
+    let members: Result<Vec<CeremonyMember>, Box<dyn std::error::Error>> = file
+        .members
+        .into_iter()
+        .map(|m| {
+            let did = Did::new(&m.did);
+            let vouches =
+                m.vouches
+                    .into_iter()
+                    .map(|v| {
+                        let sig_bytes = parse_hex_bytes(&v.signature)?;
+                        let signature = VouchSignature::try_from_slice(&sig_bytes)
+                            .ok_or_else::<Box<dyn std::error::Error>, _>(|| {
+                                format!(
+                                    "Vouch signature for {} has {} bytes; expected 64",
+                                    v.voucher_did,
+                                    sig_bytes.len()
+                                )
+                                .into()
+                            })?;
+                        Ok::<Vouch, Box<dyn std::error::Error>>(Vouch {
+                            voucher_did: Did::new(&v.voucher_did),
+                            signature,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+            Ok(CeremonyMember { did, vouches })
+        })
+        .collect();
+    let members = members?;
+
+    // ── Delegate assembly to forensics verb ───────────────────────────
+    let params = CommunityAssemblyParams {
+        name: name.clone(),
+        quorum,
+        joined_at: joined_ts,
+        expires_at: expires_ts,
+        stronghold_did,
+        baseline_trust: TrustLevel::Verified,
+        grants: CommunityGrants::default(),
+        members,
+    };
+    let now = SystemClock.now();
+    let community =
+        assemble_community(params, now).map_err(|e| format!("Community assembly rejected: {e}"))?;
+
+    // ── Serialize + emit ───────────────────────────────────────────────
+    let body = phalanx_forensics::gate::marshal(&community, "create_community")
+        .map_err(|e| format!("Failed to serialize community: {e}"))?;
+    let payload = wrap_payload_version(&body);
+    std::fs::write(output, &payload).map_err(|e| format!("Failed to write {output:?}: {e}"))?;
+
+    let base64url = URL_SAFE_NO_PAD.encode(&payload);
+
+    println!("Community assembled and serialized.");
+    println!("  ID:          {}", hex_encode(&community.fingerprint.0));
+    println!("  Name:        {}", community.name);
+    println!("  Members:     {}", community.members.len());
+    println!(
+        "  Payload:     {} bytes (envelope + postcard body)",
+        payload.len()
+    );
+    println!("  Output file: {output}");
+    println!();
+    println!("Share-ready forms:");
+    println!("  base64url:        {base64url}");
+    println!("  Custom scheme:    phalanx://community/join#data={base64url}");
+    println!("  Universal Link:   https://phalanx.app/c/join#data={base64url}");
+
+    Ok(())
+}
+
+fn rfc3339_to_millis(text: &str) -> Result<PhalanxTimestamp, Box<dyn std::error::Error>> {
+    use chrono::DateTime;
+    use phalanx_proto::time::PhalanxTimestamp;
+    let parsed: DateTime<chrono::FixedOffset> = DateTime::parse_from_rfc3339(text)?;
+    let millis = parsed.timestamp_millis();
+    if millis < 0 {
+        return Err("timestamp is before UNIX epoch".into());
+    }
+    #[allow(clippy::cast_sign_loss)] // checked above
+    let millis = millis as u64;
+    Ok(PhalanxTimestamp::from_millis(millis))
+}
+
+// Need PhalanxTimestamp in the return type for rfc3339_to_millis.
+use phalanx_proto::time::PhalanxTimestamp;
 
 fn cmd_vouch(
     identity: &PhalanxIdentity,

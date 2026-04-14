@@ -1,6 +1,10 @@
 use crate::clock::TrustedClock;
 use crate::trust::{ClockProvider, SystemClock, TrustRegistry};
 use phalanx_forensics::policy::TrustArbiter;
+use phalanx_proto::community::{
+    Community, CommunityId, CommunityRoster, CommunitySummary, DissolveOutcome, ImportOutcome,
+    MemberSummary,
+};
 use phalanx_proto::prelude::*;
 use phalanx_proto::trust::{Offense, PetName, TrustError};
 use serde::Serialize;
@@ -51,10 +55,19 @@ pub enum TrustCommand {
     },
     // --- Community management ---
     ImportCommunity {
-        community: phalanx_proto::community::Community,
+        community: Community,
+        reply_to: oneshot::Sender<ImportOutcome>,
     },
     DissolveCommunity {
-        community_id: phalanx_proto::community::CommunityId,
+        community_id: CommunityId,
+        reply_to: oneshot::Sender<DissolveOutcome>,
+    },
+    ListCommunities {
+        reply_to: oneshot::Sender<Vec<CommunitySummary>>,
+    },
+    GetCommunity {
+        community_id: CommunityId,
+        reply_to: oneshot::Sender<Option<CommunityRoster>>,
     },
 }
 
@@ -156,99 +169,109 @@ impl TrustActor {
                 let result = self.registry.remove_peer(&did).await;
                 let _ = reply_to.send(result);
             }
-            TrustCommand::ImportCommunity { community } => {
-                // Defense-in-depth: verify vouch signatures and expiration on import.
-                // The creation side validates at assembly time; this catches tampered tokens.
-                {
+            TrustCommand::ImportCommunity {
+                community,
+                reply_to,
+            } => {
+                // Defense-in-depth: delegate expiration + vouch checks to the
+                // shared forensics verb. Creation side also validates; this
+                // catches tampered tokens in transit.
+                let outcome = {
                     use phalanx_proto::time::TrustedClock;
                     let now = phalanx_proto::time::SystemClock.now();
-                    if community.is_expired(now) {
-                        tracing::warn!(
+                    match phalanx_forensics::identity::verify_community_vouches(&community, now) {
+                        Ok(()) => {
+                            let fingerprint = community.fingerprint;
+                            tracing::info!(
+                                target: "phalanx::trust",
+                                community = %community.name,
+                                members = community.members.len(),
+                                "Importing verified community into TrustRegistry"
+                            );
+                            // Sync community data to ReputationProjection for
+                            // lock-free effective_trust reads.
+                            let community_data: Vec<_> = std::iter::once((
+                                community.baseline_trust,
+                                community.members.iter().map(|m| m.did().clone()).collect(),
+                            ))
+                            .chain(self.registry.communities.values().map(|c| {
+                                (
+                                    c.baseline_trust,
+                                    c.members.iter().map(|m| m.did().clone()).collect(),
+                                )
+                            }))
+                            .collect();
+                            self.registry.communities.insert(fingerprint, community);
+                            self.registry
+                                .live_projection
+                                .sync_communities(community_data);
+                            ImportOutcome::Ok(fingerprint)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "phalanx::trust",
+                                community = %community.name,
+                                error = %e,
+                                "Rejecting community on import — verification failed"
+                            );
+                            ImportOutcome::Err(e)
+                        }
+                    }
+                };
+                let _ = reply_to.send(outcome);
+            }
+            TrustCommand::DissolveCommunity {
+                community_id,
+                reply_to,
+            } => {
+                let outcome =
+                    if let Some(community) = self.registry.communities.remove(&community_id) {
+                        tracing::info!(
                             target: "phalanx::trust",
                             community = %community.name,
-                            "Rejecting expired community on import"
+                            "Dissolving community — zeroizing membership data"
                         );
-                        return true;
-                    }
-                    let mut vouch_valid = true;
-                    for member in &community.members {
-                        for vouch in member.vouches() {
-                            if phalanx_forensics::identity::verify_vouch(
-                                vouch,
-                                member.did(),
-                                &community.fingerprint,
-                                member.joined(),
-                            )
-                            .is_err()
-                            {
-                                tracing::warn!(
-                                    target: "phalanx::trust",
-                                    member = %member.did(),
-                                    voucher = %vouch.voucher_did,
-                                    "Vouch verification failed on import — rejecting community"
-                                );
-                                vouch_valid = false;
-                                break;
-                            }
-                        }
-                        if !vouch_valid {
-                            break;
-                        }
-                    }
-                    if !vouch_valid {
-                        return true;
-                    }
-                }
-
-                tracing::info!(
-                    target: "phalanx::trust",
-                    community = %community.name,
-                    members = community.members.len(),
-                    "Importing verified community into TrustRegistry"
-                );
-                // Sync community data to ReputationProjection for lock-free effective_trust reads
-                let community_data: Vec<_> = std::iter::once((
-                    community.baseline_trust,
-                    community.members.iter().map(|m| m.did().clone()).collect(),
-                ))
-                .chain(self.registry.communities.values().map(|c| {
-                    (
-                        c.baseline_trust,
-                        c.members.iter().map(|m| m.did().clone()).collect(),
-                    )
-                }))
-                .collect();
-                self.registry
-                    .communities
-                    .insert(community.fingerprint, community);
-                self.registry
-                    .live_projection
-                    .sync_communities(community_data);
+                        community.dissolve(); // Consumes and zeroizes
+                                              // Re-sync projection without the dissolved community
+                        let community_data: Vec<_> = self
+                            .registry
+                            .communities
+                            .values()
+                            .map(|c| {
+                                (
+                                    c.baseline_trust,
+                                    c.members.iter().map(|m| m.did().clone()).collect(),
+                                )
+                            })
+                            .collect();
+                        self.registry
+                            .live_projection
+                            .sync_communities(community_data);
+                        DissolveOutcome::Ok(community_id)
+                    } else {
+                        DissolveOutcome::NotFound
+                    };
+                let _ = reply_to.send(outcome);
             }
-            TrustCommand::DissolveCommunity { community_id } => {
-                if let Some(community) = self.registry.communities.remove(&community_id) {
-                    tracing::info!(
-                        target: "phalanx::trust",
-                        community = %community.name,
-                        "Dissolving community — zeroizing membership data"
-                    );
-                    community.dissolve(); // Consumes and zeroizes
-                                          // Re-sync projection without the dissolved community
-                    let community_data: Vec<_> = self
-                        .registry
-                        .communities
-                        .values()
-                        .map(|c| {
-                            (
-                                c.baseline_trust,
-                                c.members.iter().map(|m| m.did().clone()).collect(),
-                            )
-                        })
-                        .collect();
-                    self.registry
-                        .live_projection
-                        .sync_communities(community_data);
-                }
+            TrustCommand::ListCommunities { reply_to } => {
+                let summaries: Vec<CommunitySummary> = self
+                    .registry
+                    .communities
+                    .values()
+                    .map(summarize_community)
+                    .collect();
+                let _ = reply_to.send(summaries);
+            }
+            TrustCommand::GetCommunity {
+                community_id,
+                reply_to,
+            } => {
+                let roster = self
+                    .registry
+                    .communities
+                    .get(&community_id)
+                    .map(|c| project_roster(c, &self.registry));
+                let _ = reply_to.send(roster);
             }
         }
         true
@@ -257,5 +280,53 @@ impl TrustActor {
     async fn run_maintenance(&mut self) {
         let now = self.clock.current_monotonic();
         TrustArbiter::accumulate_reputation(&mut self.registry.peers, now, 60, 5);
+
+        // Mobile maintenance sweep: expire communities past their
+        // `expires_at` so a long-running phone across many events does not
+        // accumulate stale rosters in RAM. See plan R5.
+        use phalanx_proto::time::TrustedClock;
+        let wall_now = phalanx_proto::time::SystemClock.now();
+        self.registry.dissolve_expired_communities(wall_now);
+    }
+}
+
+// ── Projection helpers ──────────────────────────────────────────────────
+
+fn summarize_community(community: &Community) -> CommunitySummary {
+    // Member counts are bounded by MAX_CEREMONY_MEMBERS (256), so u16
+    // truncation is safe; nonetheless cast via `try_from` for robustness.
+    let member_count = u16::try_from(community.members.len()).unwrap_or(u16::MAX);
+    CommunitySummary {
+        id: community.fingerprint,
+        name: community.name.clone(),
+        member_count,
+        expires_at: community.expires_at,
+        quorum: community.quorum,
+    }
+}
+
+fn project_roster(community: &Community, registry: &TrustRegistry) -> CommunityRoster {
+    let summary = summarize_community(community);
+    let members = community
+        .members
+        .iter()
+        .map(|m| {
+            let vouch_count = u16::try_from(m.vouches().len()).unwrap_or(u16::MAX);
+            let pet_name = registry
+                .get_alias(m.did())
+                .and_then(|alias| PetName::new(alias).ok());
+            MemberSummary {
+                did: m.did().clone(),
+                joined_at: m.joined(),
+                vouch_count,
+                pet_name,
+            }
+        })
+        .collect();
+    CommunityRoster {
+        summary,
+        members,
+        grants: community.grants,
+        stronghold_did: community.stronghold_did.clone(),
     }
 }

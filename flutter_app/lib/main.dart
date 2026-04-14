@@ -1,17 +1,27 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:app_links/app_links.dart';
 import 'package:battery_plus/battery_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'ffi/community_models.dart';
+import 'providers/communities_provider.dart';
 import 'providers/phalanx_provider.dart';
 import 'screens/capture_screen.dart';
+import 'screens/community/community_confirm_screen.dart';
+import 'screens/community/community_detail_screen.dart';
+import 'screens/community/community_join_screen.dart';
+import 'screens/community/community_list_screen.dart';
 import 'screens/genesis_phrase_screen.dart';
 import 'screens/peers_screen.dart';
 import 'screens/playback_screen.dart';
 import 'screens/settings_screen.dart';
+import 'services/community_link_service.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -41,11 +51,24 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
   bool _engineReady = false;
   String? _genesisPhrase;
 
+  // Deep-link plumbing.
+  //
+  // R9 ordering: `AppLinks().getInitialLink()` can return the cold-launch
+  // URI before Flutter has built its first frame, and therefore before any
+  // ProviderScope / Navigator exists. We buffer every URI into
+  // [_deepLinkBuffer] until the first frame fires, then drain the buffer.
+  final AppLinks _appLinks = AppLinks();
+  StreamSubscription<Uri>? _linkSubscription;
+  final Queue<Uri> _deepLinkBuffer = Queue<Uri>();
+  bool _deepLinkDrained = false;
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _initEngine();
+    _subscribeDeepLinks();
   }
 
   Future<void> _initEngine() async {
@@ -76,6 +99,71 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
     } catch (e) {
       debugPrint('Phalanx engine init failed: $e');
     }
+  }
+
+  void _subscribeDeepLinks() {
+    // Warm-path stream subscription starts right away — it simply enqueues
+    // until the first frame has rendered (see [_drainDeepLinks]).
+    _linkSubscription = _appLinks.uriLinkStream.listen(
+      (uri) => _onDeepLink(uri),
+      onError: (Object err) => debugPrint('Deep-link stream error: $err'),
+    );
+
+    // Cold-launch path: drain after the first frame so `ProviderScope` and
+    // the `Navigator` are both ready to accept a push.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      try {
+        final initial = await _appLinks.getInitialLink();
+        if (initial != null) _onDeepLink(initial);
+      } catch (e) {
+        debugPrint('Failed to read initial deep-link: $e');
+      }
+      _drainDeepLinks();
+    });
+  }
+
+  void _onDeepLink(Uri uri) {
+    if (!_deepLinkDrained) {
+      _deepLinkBuffer.add(uri);
+      return;
+    }
+    _dispatchDeepLink(uri);
+  }
+
+  void _drainDeepLinks() {
+    _deepLinkDrained = true;
+    while (_deepLinkBuffer.isNotEmpty) {
+      _dispatchDeepLink(_deepLinkBuffer.removeFirst());
+    }
+  }
+
+  void _dispatchDeepLink(Uri uri) {
+    Uint8List bytes;
+    try {
+      bytes = decodeJoinPayload(uri.toString());
+    } on LinkDecodeError catch (e) {
+      debugPrint('Deep-link rejected: ${e.message}');
+      final messenger = _navigatorKey.currentState?.overlay?.context;
+      if (messenger != null) {
+        ScaffoldMessenger.of(messenger).showSnackBar(
+          SnackBar(content: Text('Community link rejected: ${e.message}')),
+        );
+      }
+      return;
+    }
+
+    // Enqueue for the confirmation screen — R1 requires human review
+    // before any import. Never import silently.
+    final container = ProviderScope.containerOf(_navigatorKey.currentContext!);
+    container.read(pendingJoinQueueProvider.notifier).enqueue(bytes);
+
+    // Push the confirm route. The screen reads its payload from either
+    // the routing argument (foreground scan) or the queue (cold/warm
+    // deep-link). Here we pass bytes directly.
+    _navigatorKey.currentState?.pushNamed(
+      '/community/confirm',
+      arguments: bytes,
+    );
   }
 
   String _getStoragePath() {
@@ -132,6 +220,7 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _sensorTimer?.cancel();
+    _linkSubscription?.cancel();
     super.dispose();
   }
 
@@ -160,6 +249,7 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
     return MaterialApp(
       title: 'Phalanx',
       debugShowCheckedModeBanner: false,
+      navigatorKey: _navigatorKey,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: Colors.black,
         appBarTheme: AppBarTheme(
@@ -168,11 +258,37 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
         ),
       ),
       home: home,
+      onGenerateRoute: _onGenerateRoute,
       routes: {
         '/playback': (_) => const PlaybackScreen(),
         '/peers': (_) => const PeersScreen(),
         '/settings': (_) => const SettingsScreen(),
+        '/community': (_) => const CommunityListScreen(),
+        '/community/join': (_) => const CommunityJoinScreen(),
       },
     );
+  }
+
+  Route<dynamic>? _onGenerateRoute(RouteSettings settings) {
+    switch (settings.name) {
+      case '/community/confirm':
+        final arg = settings.arguments;
+        if (arg is Uint8List) {
+          return MaterialPageRoute<void>(
+            builder: (_) => CommunityConfirmScreen(payloadBytes: arg),
+          );
+        }
+        return null;
+      case '/community/detail':
+        final arg = settings.arguments;
+        if (arg is CommunityId) {
+          return MaterialPageRoute<void>(
+            builder: (_) => CommunityDetailScreen(communityId: arg),
+          );
+        }
+        return null;
+      default:
+        return null;
+    }
   }
 }

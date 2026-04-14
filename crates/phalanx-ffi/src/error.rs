@@ -41,6 +41,13 @@ pub enum PhalanxError {
     RevocationFailed = -13,
     /// Community ceremony failed (invalid vouch, quorum not met, expired, etc.).
     CeremonyFailed = -14,
+    /// Caller-provided output buffer was too small. `*out_len` has been
+    /// updated with the required size; retry with a larger buffer.
+    /// Part of the two-call query protocol for community query functions.
+    BufferTooSmall = -15,
+    /// Postcard encoding of a response payload failed. Indicates a bug in
+    /// the wire type, not caller error.
+    SerializationFailure = -16,
 }
 
 impl PhalanxError {
@@ -85,6 +92,8 @@ mod tests {
         assert_eq!(PhalanxError::NotRecording.code(), -12);
         assert_eq!(PhalanxError::RevocationFailed.code(), -13);
         assert_eq!(PhalanxError::CeremonyFailed.code(), -14);
+        assert_eq!(PhalanxError::BufferTooSmall.code(), -15);
+        assert_eq!(PhalanxError::SerializationFailure.code(), -16);
     }
 
     #[test]
@@ -105,6 +114,8 @@ mod tests {
             PhalanxError::NotRecording.code(),
             PhalanxError::RevocationFailed.code(),
             PhalanxError::CeremonyFailed.code(),
+            PhalanxError::BufferTooSmall.code(),
+            PhalanxError::SerializationFailure.code(),
         ];
 
         let mut sorted = codes.clone();
@@ -132,6 +143,8 @@ mod tests {
             PhalanxError::NotRecording,
             PhalanxError::RevocationFailed,
             PhalanxError::CeremonyFailed,
+            PhalanxError::BufferTooSmall,
+            PhalanxError::SerializationFailure,
         ];
 
         for variant in &error_variants {
