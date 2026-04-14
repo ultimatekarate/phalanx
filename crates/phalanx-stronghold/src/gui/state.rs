@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use phalanx_proto::community::CommunityId;
+use phalanx_proto::community::{CommunityId, CommunityRoster};
 use phalanx_proto::corroboration::CorroborationProof;
 use phalanx_proto::identity::RecordingId;
 use zeroize::Zeroizing;
@@ -123,6 +123,16 @@ pub struct CommunityInfo {
 pub struct CommunitiesState {
     pub communities: AsyncReply<Result<Vec<CommunityInfo>, String>>,
     pub import_result: AsyncReply<Result<String, String>>,
+    /// Currently selected community for the detail pane; `None` means
+    /// the list view is shown. Selection survives across frames.
+    pub selected: Option<CommunityId>,
+    /// Roster for the selected community, fetched via
+    /// `CommunityCommand::GetDetail`. `Ready(None)` means the actor did
+    /// not recognise the id (e.g. dissolved in another tab).
+    pub detail: AsyncReply<Option<CommunityRoster>>,
+    /// Outcome of a Dissolve button click. Polled each frame; when
+    /// `Ready(Ok(()))` the list refreshes automatically.
+    pub dissolve_result: AsyncReply<Result<(), String>>,
 }
 
 impl Default for CommunitiesState {
@@ -130,6 +140,9 @@ impl Default for CommunitiesState {
         Self {
             communities: AsyncReply::Idle,
             import_result: AsyncReply::Idle,
+            selected: None,
+            detail: AsyncReply::Idle,
+            dissolve_result: AsyncReply::Idle,
         }
     }
 }
@@ -215,6 +228,8 @@ impl PanelStates {
     pub fn poll_all(&mut self) {
         self.communities.communities.poll();
         self.communities.import_result.poll();
+        self.communities.detail.poll();
+        self.communities.dissolve_result.poll();
         self.recordings.recordings.poll();
         self.corroborate.available_recordings.poll();
         self.corroborate.result.poll();

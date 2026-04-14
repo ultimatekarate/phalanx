@@ -16,6 +16,15 @@ use crate::identity::Did;
 use crate::time::PhalanxTimestamp;
 use crate::trust::{PetName, TrustLevel};
 
+// ── Payload Envelope Version ────────────────────────────────────────────
+
+/// Version byte prepended to postcard-encoded community tokens.
+/// `payload_bytes = [COMMUNITY_PAYLOAD_VERSION] || postcard_bytes(Community)`.
+/// Incrementing this value must be matched with a new `CommunityVerifyError`
+/// variant and a compatible decoder. Unknown version bytes are rejected via
+/// [`CommunityVerifyError::UnsupportedVersion`].
+pub const COMMUNITY_PAYLOAD_VERSION: u8 = 0x01;
+
 // ── Community Identity ──────────────────────────────────────────────────
 
 /// Deterministic community identity — no keypair.
@@ -278,6 +287,118 @@ impl Community {
     }
 }
 
+// ── Error Surfaces ──────────────────────────────────────────────────────
+
+/// Errors that can arise when verifying a community token (import or preview).
+///
+/// `#[non_exhaustive]` keeps the wire ABI stable as new rejection reasons are
+/// added — older decoders see a fallback variant without breaking.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum CommunityVerifyError {
+    /// Community has already expired by `now` ≥ `expires_at`.
+    #[error("community {community_id:?} expired at {expires_at:?} (now={now:?})")]
+    Expired {
+        community_id: CommunityId,
+        now: PhalanxTimestamp,
+        expires_at: PhalanxTimestamp,
+    },
+    /// A vouch signature failed Ed25519 verification.
+    #[error("bad vouch: voucher {voucher} on member {member}")]
+    BadVouch { member: Did, voucher: Did },
+    /// A member has fewer unique external vouchers than the community quorum.
+    #[error("quorum violation for member {member}")]
+    QuorumViolation { member: Did },
+    /// Payload envelope version is not recognized by this build.
+    #[error("unsupported community payload version {version}")]
+    UnsupportedVersion { version: u8 },
+}
+
+/// Errors that can arise when assembling a fresh community during a ceremony.
+///
+/// Emitted by the `assemble_community` verb in `phalanx-forensics`. Carries
+/// enough context that a CLI / GUI caller can surface a specific message to
+/// the operator — all variants report the offending value.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum CommunityAssemblyError {
+    /// A vouch was signed too long ago (≤ `joined_at < now` by > 1 h).
+    #[error("vouch from {voucher} is stale ({age_seconds}s old)")]
+    VouchStale { voucher: Did, age_seconds: u64 },
+    /// A vouch was signed too far in the future (> 5 min clock skew).
+    #[error("vouch from {voucher} is {skew_seconds}s in the future")]
+    VouchFuture { voucher: Did, skew_seconds: u64 },
+    /// `expires_at` is less than `MIN_EXPIRES_SECS` after `now`.
+    #[error("community expires too soon ({seconds}s)")]
+    ExpirationTooSoon { seconds: u64 },
+    /// `expires_at` is more than `MAX_EXPIRES_SECS` after `now`.
+    #[error("community expires too far in the future ({seconds}s)")]
+    ExpirationTooFar { seconds: u64 },
+    /// Not enough unique external vouchers to satisfy quorum for this member.
+    #[error("quorum unsatisfiable for {member}: need {needed}, have {available}")]
+    QuorumUnsatisfiable {
+        member: Did,
+        needed: u8,
+        available: u8,
+    },
+    /// Serialized payload exceeds QR v40 alphanumeric capacity (~2800 bytes).
+    #[error("QR payload budget exceeded ({bytes} bytes)")]
+    QrBudgetExceeded { bytes: usize },
+    /// Propagated verification failure from the inner Verify step.
+    #[error("verification failed: {0}")]
+    Verify(#[from] CommunityVerifyError),
+}
+
+// ── Wire Types (UI projections) ─────────────────────────────────────────
+
+/// Compact community summary used by list views.
+///
+/// Reuses existing Dictionary Nouns (`PetName`, `PhalanxTimestamp`, `Quorum`,
+/// `CommunityId`) — no new scalar newtypes required.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommunitySummary {
+    pub id: CommunityId,
+    pub name: PetName,
+    pub member_count: u16,
+    pub expires_at: PhalanxTimestamp,
+    pub quorum: Quorum,
+}
+
+/// Per-member row in a [`CommunityRoster`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberSummary {
+    pub did: Did,
+    pub joined_at: PhalanxTimestamp,
+    pub vouch_count: u16,
+    /// Local alias assigned in the TrustRegistry, if any.
+    pub pet_name: Option<PetName>,
+}
+
+/// Full community roster surfaced to the UI. The only shape that exposes
+/// member DIDs to the outside world.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommunityRoster {
+    pub summary: CommunitySummary,
+    pub members: Vec<MemberSummary>,
+    pub grants: CommunityGrants,
+    /// Optional Stronghold DID associated with the community.
+    pub stronghold_did: Option<Did>,
+}
+
+/// Outcome of `phalanx_import_community`. Domain error on the failure path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImportOutcome {
+    Ok(CommunityId),
+    Err(CommunityVerifyError),
+}
+
+/// Outcome of `phalanx_dissolve_community`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DissolveOutcome {
+    Ok(CommunityId),
+    NotFound,
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -426,6 +547,72 @@ mod tests {
         let entry =
             MemberEntry::new_validated(member_did, PhalanxTimestamp::now(), vouches, quorum);
         assert!(entry.is_none(), "self-vouch must not count toward quorum");
+    }
+
+    #[test]
+    fn import_outcome_postcard_roundtrip() {
+        let id = CommunityId([7u8; 32]);
+        let ok = ImportOutcome::Ok(id);
+        let bytes = postcard::to_allocvec(&ok).unwrap();
+        let decoded: ImportOutcome = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, ok);
+
+        let err = ImportOutcome::Err(CommunityVerifyError::UnsupportedVersion { version: 2 });
+        let bytes = postcard::to_allocvec(&err).unwrap();
+        let decoded: ImportOutcome = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, err);
+    }
+
+    #[test]
+    fn dissolve_outcome_postcard_roundtrip() {
+        let id = CommunityId([3u8; 32]);
+        let ok = DissolveOutcome::Ok(id);
+        let bytes = postcard::to_allocvec(&ok).unwrap();
+        let decoded: DissolveOutcome = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, ok);
+
+        let nf = DissolveOutcome::NotFound;
+        let bytes = postcard::to_allocvec(&nf).unwrap();
+        let decoded: DissolveOutcome = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, nf);
+    }
+
+    #[test]
+    fn community_summary_postcard_roundtrip() {
+        let summary = CommunitySummary {
+            id: CommunityId([0xAA; 32]),
+            name: PetName::new("ACLU Portland").unwrap(),
+            member_count: 12,
+            expires_at: PhalanxTimestamp(999_999),
+            quorum: Quorum::new(3).unwrap(),
+        };
+        let bytes = postcard::to_allocvec(&summary).unwrap();
+        let decoded: CommunitySummary = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, summary);
+    }
+
+    #[test]
+    fn community_verify_error_variants_serialize() {
+        let variants = vec![
+            CommunityVerifyError::Expired {
+                community_id: CommunityId([1u8; 32]),
+                now: PhalanxTimestamp(100),
+                expires_at: PhalanxTimestamp(50),
+            },
+            CommunityVerifyError::BadVouch {
+                member: Did::new("did:key:z1"),
+                voucher: Did::new("did:key:z2"),
+            },
+            CommunityVerifyError::QuorumViolation {
+                member: Did::new("did:key:z1"),
+            },
+            CommunityVerifyError::UnsupportedVersion { version: 0xFF },
+        ];
+        for v in variants {
+            let bytes = postcard::to_allocvec(&v).unwrap();
+            let decoded: CommunityVerifyError = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(decoded, v);
+        }
     }
 
     #[test]

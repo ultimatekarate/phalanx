@@ -29,12 +29,15 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:launchMode="singleTop"
+            android:launchMode="singleTask"
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize"
             android:screenOrientation="portrait">
+            <!-- launchMode=singleTask (R8) so a Join deep-link tap resumes
+                 the existing activity rather than spawning a new instance,
+                 preserving any active capture session. -->
 
             <!-- Normal app launch -->
             <intent-filter>
@@ -48,6 +51,31 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="phx" />
+            </intent-filter>
+
+            <!-- Community Join, Universal Link form (R2 — preferred).
+                 Requires https://phalanx.app/.well-known/assetlinks.json to list
+                 this app. autoVerify=true means the OS fetches the manifest at
+                 install time; if phalanx.app is unreachable, the intent-filter
+                 still works as a non-verified chooser entry. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="phalanx.app"
+                      android:pathPrefix="/c/join" />
+            </intent-filter>
+
+            <!-- Community Join, custom-scheme fallback (R2 — debug/offline only).
+                 Any Android app can claim this scheme, so production builds
+                 should strip this filter via a manifest merge or build variant.
+                 Keep here for `flutter run` / `adb shell am start` testing; the
+                 canonical production path is the App Link above. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="phalanx" android:host="community" />
             </intent-filter>
         </activity>
 
