@@ -178,7 +178,17 @@ async fn auto_import_communities(vault_path: &Path, community_tx: &mpsc::Sender<
             }
         };
 
-        let community: Community = match postcard::from_bytes(&bytes) {
+        // Files on disk are envelope-wrapped (see `cmd_import_community`).
+        // Strip the version byte before postcard decode.
+        let body = match phalanx_forensics::identity::strip_payload_version(&bytes) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "Unsupported community envelope version");
+                continue;
+            }
+        };
+
+        let community: Community = match postcard::from_bytes(body) {
             Ok(c) => c,
             Err(e) => {
                 warn!(path = %path.display(), error = %e, "Failed to deserialize community");

@@ -56,7 +56,7 @@ pub fn render(
                     *next_phase = Some(AppPhase::Running {
                         bridge,
                         active_panel: PanelId::Dashboard,
-                        panels: PanelStates::default(),
+                        panels: Box::new(PanelStates::default()),
                     });
                 }
                 Err(msg) => {

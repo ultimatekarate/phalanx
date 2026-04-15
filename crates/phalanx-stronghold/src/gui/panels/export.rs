@@ -40,22 +40,28 @@ pub fn render(
                         continue;
                     }
                     if let Ok(bytes) = std::fs::read(&path) {
-                        if let Ok(community) =
-                            postcard::from_bytes::<phalanx_proto::community::Community>(&bytes)
+                        // Wrapped envelope on disk — strip the version byte
+                        // before postcard decode. Silently skip malformed files.
+                        if let Ok(body) = phalanx_forensics::identity::strip_payload_version(&bytes)
                         {
-                            let name = community.name.to_string();
-                            let id = community.fingerprint;
-                            if ui
-                                .selectable_label(
-                                    state.selected_community.as_ref().map(|(i, _)| i) == Some(&id),
-                                    &name,
-                                )
-                                .clicked()
+                            if let Ok(community) =
+                                postcard::from_bytes::<phalanx_proto::community::Community>(body)
                             {
-                                state.selected_community = Some((id, name));
-                                state.proof_list = AsyncReply::Idle;
-                                state.selected_proof = None;
-                                state.result = AsyncReply::Idle;
+                                let name = community.name.to_string();
+                                let id = community.fingerprint;
+                                if ui
+                                    .selectable_label(
+                                        state.selected_community.as_ref().map(|(i, _)| i)
+                                            == Some(&id),
+                                        &name,
+                                    )
+                                    .clicked()
+                                {
+                                    state.selected_community = Some((id, name));
+                                    state.proof_list = AsyncReply::Idle;
+                                    state.selected_proof = None;
+                                    state.result = AsyncReply::Idle;
+                                }
                             }
                         }
                     }
@@ -81,11 +87,11 @@ pub fn render(
                     .map_err(|e| format!("{e}"));
                 let _ = tx.send(result);
             });
-            state.proof_list = AsyncReply::Pending(rx);
+            state.proof_list = AsyncReply::pending(rx);
         }
 
         match &state.proof_list {
-            AsyncReply::Pending(_) => {
+            AsyncReply::Pending { .. } => {
                 ui.spinner();
             }
             AsyncReply::Ready(Ok(proofs)) => {
@@ -223,7 +229,7 @@ pub fn render(
                     });
                     let _ = tx.send(result);
                 });
-                state.result = AsyncReply::Pending(rx);
+                state.result = AsyncReply::pending(rx);
             }
         }
     });

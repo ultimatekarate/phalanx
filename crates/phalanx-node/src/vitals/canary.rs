@@ -165,6 +165,12 @@ impl CanaryMonitor {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 
@@ -191,7 +197,7 @@ mod tests {
         // Disconnect alone should not trigger
         canary.on_peer_disconnected(&net("peer-a"));
         // Not yet confirmed stale — no alert
-        assert!(canary.stale_counts.get(&net("peer-a")).is_none());
+        assert!(!canary.stale_counts.contains_key(&net("peer-a")));
 
         // Stale confirmation fires the canary
         let state = canary.on_peer_stale(&net("peer-a"));

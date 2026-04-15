@@ -1,5 +1,6 @@
 // crates/phalanx-stronghold/src/gui/panels/mod.rs
 
+pub mod ceremony;
 pub mod communities;
 pub mod corroborate;
 pub mod dashboard;

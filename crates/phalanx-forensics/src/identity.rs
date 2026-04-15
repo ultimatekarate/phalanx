@@ -1,7 +1,9 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use phalanx_proto::community::{
-    CeremonyMember, Community, CommunityAssemblyError, CommunityGrants, CommunityId,
-    CommunityVerifyError, MemberEntry, Quorum, Vouch, VouchSignature, COMMUNITY_PAYLOAD_VERSION,
+    CeremonyError, CeremonyMember, Community, CommunityAssemblyError, CommunityGrants, CommunityId,
+    CommunityVerifyError, MemberEntry, Quorum, Vouch, VouchRequest, VouchRequestPreview,
+    VouchResponse, VouchSignature, CEREMONY_RESPONSE_FRESHNESS_SECS, COMMUNITY_PAYLOAD_VERSION,
+    VOUCH_REQUEST_VERSION, VOUCH_RESPONSE_VERSION,
 };
 use phalanx_proto::crypto::CryptoError;
 use phalanx_proto::network::{BleChallenge, BleResponse};
@@ -171,6 +173,70 @@ pub fn strip_payload_version(bytes: &[u8]) -> Result<&[u8], CommunityVerifyError
 pub fn wrap_payload_version(postcard_bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(postcard_bytes.len().saturating_add(1));
     out.push(COMMUNITY_PAYLOAD_VERSION);
+    out.extend_from_slice(postcard_bytes);
+    out
+}
+
+// ── Ceremony envelope helpers ───────────────────────────────────────────
+//
+// `VouchRequest` and `VouchResponse` travel over QR / file surfaces that
+// must survive future protocol rev bumps. Every ceremony byte stream is
+// wrapped `[VERSION_BYTE] || postcard(T)` — the same shape as the
+// community-payload envelope above. These helpers centralise the
+// version-byte arithmetic so the Stronghold panel and the mobile FFI
+// never reach for raw `[version_byte]` slicing.
+//
+// A missing or mismatched version byte is reported as
+// `CeremonyError::UnsupportedVersion { version }` — distinct from
+// `CommunityVerifyError::UnsupportedVersion` so ceremony callers can
+// surface ceremony-specific UX copy without inspecting the inner enum.
+
+/// Strip the `[VOUCH_REQUEST_VERSION]` prefix from a wrapped request
+/// envelope. Returns the raw postcard body on success.
+///
+/// Pure function — no deserialization performed here. A zero-length
+/// input is reported as `UnsupportedVersion { version: 0 }`, matching
+/// the `strip_payload_version` convention.
+pub fn strip_vouch_request(bytes: &[u8]) -> Result<&[u8], CeremonyError> {
+    let (&version, rest) = bytes
+        .split_first()
+        .ok_or(CeremonyError::UnsupportedVersion { version: 0 })?;
+    if version != VOUCH_REQUEST_VERSION {
+        return Err(CeremonyError::UnsupportedVersion { version });
+    }
+    Ok(rest)
+}
+
+/// Prepend `[VOUCH_REQUEST_VERSION]` to an already-postcard-serialized
+/// request body. Companion to [`strip_vouch_request`].
+#[must_use]
+pub fn wrap_vouch_request(postcard_bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(postcard_bytes.len().saturating_add(1));
+    out.push(VOUCH_REQUEST_VERSION);
+    out.extend_from_slice(postcard_bytes);
+    out
+}
+
+/// Strip the `[VOUCH_RESPONSE_VERSION]` prefix from a wrapped response
+/// envelope. Returns the raw postcard body on success.
+///
+/// Pure function — no deserialization performed here.
+pub fn strip_vouch_response(bytes: &[u8]) -> Result<&[u8], CeremonyError> {
+    let (&version, rest) = bytes
+        .split_first()
+        .ok_or(CeremonyError::UnsupportedVersion { version: 0 })?;
+    if version != VOUCH_RESPONSE_VERSION {
+        return Err(CeremonyError::UnsupportedVersion { version });
+    }
+    Ok(rest)
+}
+
+/// Prepend `[VOUCH_RESPONSE_VERSION]` to an already-postcard-serialized
+/// response body. Companion to [`strip_vouch_response`].
+#[must_use]
+pub fn wrap_vouch_response(postcard_bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(postcard_bytes.len().saturating_add(1));
+    out.push(VOUCH_RESPONSE_VERSION);
     out.extend_from_slice(postcard_bytes);
     out
 }
@@ -365,6 +431,160 @@ pub fn sign_vouch(
     }
 }
 
+// ── Ceremony Verbs ──────────────────────────────────────────────────────
+//
+// These three verbs thread `request_id` + freshness + slot-integrity
+// checks on top of `sign_vouch` / `verify_vouch`. Layering the
+// ceremony-level bookkeeping here (not inside the primitives) keeps
+// `sign_vouch` reusable for code paths that already know the member
+// and fingerprint directly.
+
+/// Project a [`VouchRequest`] to its review-safe preview shape. Pure
+/// copy — drops `voucher_did` so the preview type cannot be fed back
+/// into [`sign_vouch_response`] (the type system enforces the
+/// projection direction).
+#[must_use]
+pub fn preview_vouch_request(request: &VouchRequest) -> VouchRequestPreview {
+    VouchRequestPreview {
+        request_id: request.request_id,
+        tentative_fingerprint: request.tentative_fingerprint,
+        name: request.name.clone(),
+        quorum: request.quorum,
+        members: request.members.clone(),
+        member_did: request.member_did.clone(),
+        issued_at: request.issued_at,
+        member_joined_at: request.member_joined_at,
+    }
+}
+
+/// Produce a [`VouchResponse`] for a received [`VouchRequest`].
+///
+/// Fails with [`CeremonyError::VoucherMismatch`] if the signing key
+/// does not match `request.voucher_did` — i.e., the caller picked up
+/// a request addressed to a different device. The ceremony protocol
+/// assumes every vouch is signed by the key the initiator expects, so
+/// this eager check prevents a voucher from producing a signature that
+/// would later fail `verify_vouch_response`.
+///
+/// Fails with [`CeremonyError::ResponseStale`] when the signed
+/// `member_joined_at` is already older than
+/// [`CEREMONY_RESPONSE_FRESHNESS_SECS`] at sign time. The voucher's
+/// phone clock says "this request has already aged out, don't produce
+/// a doomed response" — verification will reject a stale response
+/// anyway, but catching it at sign time yields a cleaner UX on the
+/// voucher's device.
+///
+/// The signature binds `(request.member_did ||
+/// request.tentative_fingerprint || request.member_joined_at)` — the
+/// same pre-image as [`sign_vouch`] and [`verify_vouch`]. Pure logic —
+/// no IO, no ambient clock.
+pub fn sign_vouch_response(
+    voucher_sk: &SigningKey,
+    request: &VouchRequest,
+    now: PhalanxTimestamp,
+) -> Result<VouchResponse, CeremonyError> {
+    // 1. Voucher identity: derive the signer's DID from the key and
+    //    compare to the slot this request targets. A mismatch here
+    //    means the key-holder picked up someone else's request.
+    let pk_bytes = voucher_sk.verifying_key().to_bytes();
+    let signer_did = Did::derive_did_key(&pk_bytes);
+    if signer_did != request.voucher_did {
+        return Err(CeremonyError::VoucherMismatch {
+            expected: request.voucher_did.clone(),
+            actual: signer_did,
+        });
+    }
+
+    // 2. Eager freshness check on the signed `member_joined_at`. We
+    //    refuse to produce a response that is already too old to
+    //    verify — saves a round-trip.
+    let age_ms = now.0.saturating_sub(request.member_joined_at.0);
+    let window_ms = CEREMONY_RESPONSE_FRESHNESS_SECS.saturating_mul(1000);
+    if age_ms > window_ms {
+        return Err(CeremonyError::ResponseStale {
+            age_seconds: age_ms / 1000,
+        });
+    }
+
+    // 3. Produce the signature via the existing primitive.
+    let vouch = sign_vouch(
+        voucher_sk,
+        &signer_did,
+        &request.member_did,
+        &request.tentative_fingerprint,
+        request.member_joined_at,
+    );
+    Ok(VouchResponse {
+        request_id: request.request_id,
+        vouch,
+    })
+}
+
+/// Verify a received [`VouchResponse`] against the
+/// [`VouchRequest`] the initiator issued.
+///
+/// Checks, in order:
+/// 1. `response.request_id == request.request_id` — response is for
+///    a request we actually issued. Typical failure: stray response
+///    from an aborted-and-restarted ceremony.
+/// 2. Freshness: `now - request.member_joined_at <
+///    CEREMONY_RESPONSE_FRESHNESS_SECS`. Freshness is gated by the
+///    *signed* `member_joined_at` — never the unsigned
+///    `issued_at` — because a replay attacker could forge the latter
+///    to defeat the window.
+/// 3. Slot integrity: `response.vouch.voucher_did == request.voucher_did`.
+///    A voucher cannot sign one slot and submit the response as if it
+///    were for another.
+/// 4. Signature verification via [`verify_vouch`] against
+///    `(request.member_did, request.tentative_fingerprint,
+///    request.member_joined_at)`. Failure here means the voucher
+///    signed a different fingerprint (tampered tentative) or a
+///    different member — surface as [`CeremonyError::FingerprintMismatch`].
+///
+/// Pure logic — no IO, no ambient clock. `now` must come from a
+/// [`TrustedClock`] (§III Temporal Agreement).
+///
+/// [`TrustedClock`]: phalanx_proto::prelude::TrustedClock
+pub fn verify_vouch_response(
+    request: &VouchRequest,
+    response: &VouchResponse,
+    now: PhalanxTimestamp,
+) -> Result<(), CeremonyError> {
+    // 1. request_id match.
+    if response.request_id != request.request_id {
+        return Err(CeremonyError::RequestIdMismatch);
+    }
+
+    // 2. Freshness on the signed member_joined_at.
+    let age_ms = now.0.saturating_sub(request.member_joined_at.0);
+    let window_ms = CEREMONY_RESPONSE_FRESHNESS_SECS.saturating_mul(1000);
+    if age_ms > window_ms {
+        return Err(CeremonyError::ResponseStale {
+            age_seconds: age_ms / 1000,
+        });
+    }
+
+    // 3. Slot integrity — voucher in response must match the slot
+    //    the request targets.
+    if response.vouch.voucher_did != request.voucher_did {
+        return Err(CeremonyError::VoucherMismatch {
+            expected: request.voucher_did.clone(),
+            actual: response.vouch.voucher_did.clone(),
+        });
+    }
+
+    // 4. Signature verification. Ed25519 rejection here implies the
+    //    voucher signed a different fingerprint or member_did — both
+    //    roll up under FingerprintMismatch for UX purposes.
+    verify_vouch(
+        &response.vouch,
+        &request.member_did,
+        &request.tentative_fingerprint,
+        request.member_joined_at,
+    )
+    .map_err(|_| CeremonyError::FingerprintMismatch)
+}
+
 // ── BLE Challenge-Response Verification ─────────────────────────────────
 
 /// Build the message that must be signed for a BLE auth response.
@@ -420,6 +640,7 @@ pub fn verify_ble_response(
 )]
 mod tests {
     use super::*;
+    use phalanx_proto::community::CeremonyNonce;
     use phalanx_proto::identity::Did;
     use rand_core::OsRng;
 
@@ -827,6 +1048,262 @@ mod tests {
             err,
             CommunityVerifyError::UnsupportedVersion { version: 0 }
         ));
+    }
+
+    // ── Ceremony envelope helper tests ──────────────────────────────
+
+    #[test]
+    fn vouch_request_envelope_roundtrip() {
+        let body = vec![7u8, 8, 9, 10, 11];
+        let wrapped = wrap_vouch_request(&body);
+        assert_eq!(wrapped[0], VOUCH_REQUEST_VERSION);
+        assert_eq!(wrapped.len(), body.len() + 1);
+        let inner = strip_vouch_request(&wrapped).expect("valid request envelope");
+        assert_eq!(inner, body.as_slice());
+    }
+
+    #[test]
+    fn vouch_request_envelope_rejects_unknown_version() {
+        let mut wrapped = vec![0x99u8];
+        wrapped.extend_from_slice(&[1, 2, 3]);
+        let err = strip_vouch_request(&wrapped).unwrap_err();
+        assert!(matches!(
+            err,
+            CeremonyError::UnsupportedVersion { version: 0x99 }
+        ));
+    }
+
+    #[test]
+    fn vouch_request_envelope_rejects_empty() {
+        let err = strip_vouch_request(&[]).unwrap_err();
+        assert!(matches!(
+            err,
+            CeremonyError::UnsupportedVersion { version: 0 }
+        ));
+    }
+
+    #[test]
+    fn vouch_response_envelope_roundtrip() {
+        let body = vec![42u8; 96]; // approximate vouch signature size
+        let wrapped = wrap_vouch_response(&body);
+        assert_eq!(wrapped[0], VOUCH_RESPONSE_VERSION);
+        let inner = strip_vouch_response(&wrapped).expect("valid response envelope");
+        assert_eq!(inner, body.as_slice());
+    }
+
+    #[test]
+    fn vouch_response_envelope_rejects_unknown_version() {
+        let mut wrapped = vec![0xAAu8];
+        wrapped.extend_from_slice(&[4, 5, 6]);
+        let err = strip_vouch_response(&wrapped).unwrap_err();
+        assert!(matches!(
+            err,
+            CeremonyError::UnsupportedVersion { version: 0xAA }
+        ));
+    }
+
+    #[test]
+    fn vouch_response_envelope_rejects_empty() {
+        let err = strip_vouch_response(&[]).unwrap_err();
+        assert!(matches!(
+            err,
+            CeremonyError::UnsupportedVersion { version: 0 }
+        ));
+    }
+
+    /// Request envelope accepts only `VOUCH_REQUEST_VERSION`, not the
+    /// response version. The two streams are distinct by design — a
+    /// mis-labelled envelope must fail fast rather than silently
+    /// decoding into the wrong Noun.
+    #[test]
+    fn request_envelope_rejects_response_version_byte() {
+        // Hand-construct: response version byte + arbitrary body.
+        assert_ne!(
+            VOUCH_REQUEST_VERSION,
+            VOUCH_RESPONSE_VERSION.wrapping_add(1)
+        );
+        // If the two constants ever diverge (e.g., request bumps to v2
+        // while response stays at v1), this test's premise needs revisiting.
+        // For v1 both are 0x01, so we cross-check with a synthetic 0x02.
+        let mut wrapped = vec![0x02u8];
+        wrapped.extend_from_slice(&[0u8; 4]);
+        let err = strip_vouch_request(&wrapped).unwrap_err();
+        assert!(matches!(
+            err,
+            CeremonyError::UnsupportedVersion { version: 0x02 }
+        ));
+    }
+
+    // ── Ceremony verb tests ─────────────────────────────────────────
+
+    /// Construct a well-formed `VouchRequest` the voucher signs.
+    /// Returns `(request, voucher_sk)` so tests can produce responses.
+    /// The `ceremony_nonce` is fixed (all-zero) inside tests — randomness
+    /// only matters for disambiguating ceremony restarts in production;
+    /// deterministic bytes keep the test assertions stable.
+    fn make_vouch_request(
+        member_did: &Did,
+        tentative: CommunityId,
+        now: PhalanxTimestamp,
+    ) -> (VouchRequest, SigningKey) {
+        let (voucher_did, voucher_sk) = make_identity();
+        let name = PetName::new("ceremony-verb-test").unwrap();
+        let quorum = Quorum::new(1).unwrap();
+        let ceremony_nonce = CeremonyNonce([0u8; 16]);
+        let request_id =
+            VouchRequest::compute_id(&tentative, &ceremony_nonce, &voucher_did, member_did);
+        let request = VouchRequest {
+            request_id,
+            tentative_fingerprint: tentative,
+            ceremony_nonce,
+            name,
+            quorum,
+            members: vec![member_did.clone()],
+            member_did: member_did.clone(),
+            voucher_did,
+            issued_at: now,
+            member_joined_at: now,
+        };
+        (request, voucher_sk)
+    }
+
+    #[test]
+    fn preview_vouch_request_drops_voucher_did() {
+        let (member_did, _) = make_identity();
+        let now = PhalanxTimestamp(1_000_000);
+        let (request, _sk) = make_vouch_request(&member_did, CommunityId([7u8; 32]), now);
+        let preview = preview_vouch_request(&request);
+        // Every review-relevant field round-trips.
+        assert_eq!(preview.request_id, request.request_id);
+        assert_eq!(preview.tentative_fingerprint, request.tentative_fingerprint);
+        assert_eq!(preview.name, request.name);
+        assert_eq!(preview.quorum, request.quorum);
+        assert_eq!(preview.members, request.members);
+        assert_eq!(preview.member_did, request.member_did);
+        assert_eq!(preview.issued_at, request.issued_at);
+        assert_eq!(preview.member_joined_at, request.member_joined_at);
+        // `voucher_did` is intentionally absent from the preview — the
+        // type system (no such field on `VouchRequestPreview`) already
+        // enforces this at compile time; no runtime check required.
+    }
+
+    #[test]
+    fn sign_then_verify_vouch_response_roundtrip() {
+        let (member_did, _) = make_identity();
+        let now = PhalanxTimestamp(1_000_000);
+        let (request, voucher_sk) = make_vouch_request(&member_did, CommunityId([7u8; 32]), now);
+
+        let response = sign_vouch_response(&voucher_sk, &request, now).expect("sign");
+        assert_eq!(response.request_id, request.request_id);
+        assert_eq!(response.vouch.voucher_did, request.voucher_did);
+
+        verify_vouch_response(&request, &response, now).expect("verify");
+    }
+
+    #[test]
+    fn sign_vouch_response_rejects_voucher_mismatch() {
+        let (member_did, _) = make_identity();
+        let now = PhalanxTimestamp(1_000_000);
+        let (request, _correct_sk) = make_vouch_request(&member_did, CommunityId([7u8; 32]), now);
+
+        // A different signer tries to sign this slot.
+        let (_wrong_did, wrong_sk) = make_identity();
+        let err = sign_vouch_response(&wrong_sk, &request, now).unwrap_err();
+        assert!(matches!(err, CeremonyError::VoucherMismatch { .. }));
+    }
+
+    #[test]
+    fn sign_vouch_response_rejects_stale_request() {
+        let (member_did, _) = make_identity();
+        let signed_at = PhalanxTimestamp(1_000_000);
+        let (request, voucher_sk) =
+            make_vouch_request(&member_did, CommunityId([7u8; 32]), signed_at);
+
+        // now is 2 hours past member_joined_at — outside the 1h window.
+        let now = PhalanxTimestamp(signed_at.0 + 2 * 60 * 60 * 1000);
+        let err = sign_vouch_response(&voucher_sk, &request, now).unwrap_err();
+        match err {
+            CeremonyError::ResponseStale { age_seconds } => {
+                assert!(age_seconds >= CEREMONY_RESPONSE_FRESHNESS_SECS);
+            }
+            other => panic!("expected ResponseStale, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_vouch_response_rejects_request_id_mismatch() {
+        let (member_did, _) = make_identity();
+        let now = PhalanxTimestamp(1_000_000);
+        let (request, voucher_sk) = make_vouch_request(&member_did, CommunityId([7u8; 32]), now);
+
+        let mut response = sign_vouch_response(&voucher_sk, &request, now).unwrap();
+        // Tamper with the request_id so verify can no longer match.
+        response.request_id = [0xFFu8; 32];
+
+        let err = verify_vouch_response(&request, &response, now).unwrap_err();
+        assert!(matches!(err, CeremonyError::RequestIdMismatch));
+    }
+
+    #[test]
+    fn verify_vouch_response_rejects_stale_response() {
+        let (member_did, _) = make_identity();
+        let signed_at = PhalanxTimestamp(1_000_000);
+        let (request, voucher_sk) =
+            make_vouch_request(&member_did, CommunityId([7u8; 32]), signed_at);
+        // Produce the response at signed_at — legitimate at sign time.
+        let response = sign_vouch_response(&voucher_sk, &request, signed_at).unwrap();
+
+        // Verify hours later — past the freshness window.
+        let verify_at = PhalanxTimestamp(signed_at.0 + 2 * 60 * 60 * 1000);
+        let err = verify_vouch_response(&request, &response, verify_at).unwrap_err();
+        assert!(matches!(err, CeremonyError::ResponseStale { .. }));
+    }
+
+    #[test]
+    fn verify_vouch_response_rejects_fingerprint_mismatch() {
+        let (member_did, _) = make_identity();
+        let now = PhalanxTimestamp(1_000_000);
+        let (request, voucher_sk) = make_vouch_request(&member_did, CommunityId([7u8; 32]), now);
+        let response = sign_vouch_response(&voucher_sk, &request, now).unwrap();
+
+        // Feed verify a request whose fingerprint the signature does
+        // not commit to — signature verification fails →
+        // FingerprintMismatch.
+        let mut tampered = request.clone();
+        tampered.tentative_fingerprint = CommunityId([0xAAu8; 32]);
+        // Keep `request_id` consistent with the (new) tentative so the
+        // request_id check passes and we reach the signature check.
+        tampered.request_id = VouchRequest::compute_id(
+            &tampered.tentative_fingerprint,
+            &tampered.ceremony_nonce,
+            &tampered.voucher_did,
+            &tampered.member_did,
+        );
+        // Response's request_id must match this tampered view for the
+        // test to reach the signature step.
+        let mut tampered_response = response.clone();
+        tampered_response.request_id = tampered.request_id;
+
+        let err = verify_vouch_response(&tampered, &tampered_response, now).unwrap_err();
+        assert!(matches!(err, CeremonyError::FingerprintMismatch));
+    }
+
+    #[test]
+    fn verify_vouch_response_rejects_slot_voucher_mismatch() {
+        let (member_did, _) = make_identity();
+        let now = PhalanxTimestamp(1_000_000);
+        let (request, voucher_sk) = make_vouch_request(&member_did, CommunityId([7u8; 32]), now);
+        let response = sign_vouch_response(&voucher_sk, &request, now).unwrap();
+
+        // Tamper with the response's voucher_did (as if a malicious
+        // intermediary swapped it). Slot-integrity check fires before
+        // the signature check.
+        let mut tampered_response = response.clone();
+        let (other_did, _) = make_identity();
+        tampered_response.vouch.voucher_did = other_did;
+
+        let err = verify_vouch_response(&request, &tampered_response, now).unwrap_err();
+        assert!(matches!(err, CeremonyError::VoucherMismatch { .. }));
     }
 
     // suppress unused warning — fixture is imported for symmetry with other tests.

@@ -69,12 +69,12 @@ pub fn render(
             let result = load_recording_summaries(&vault_path, &community_id).await;
             let _ = tx.send(result);
         });
-        state.recordings = AsyncReply::Pending(rx);
+        state.recordings = AsyncReply::pending(rx);
     }
 
     // Display recordings table
     match &state.recordings {
-        AsyncReply::Pending(_) => {
+        AsyncReply::Pending { .. } => {
             ui.spinner();
         }
         AsyncReply::Ready(Ok(recordings)) => {

@@ -35,12 +35,7 @@ async fn test_node_behaviour_initialization() {
     let db_path = dir.path().join("test_dht.redb");
 
     let local_network_id = identity.did.to_network_id();
-    let store = RedbStore::new(
-        &db_path,
-        NetworkId::from(local_network_id),
-        Arc::new(MockEvaluator),
-    )
-    .unwrap();
+    let store = RedbStore::new(&db_path, local_network_id, Arc::new(MockEvaluator)).unwrap();
 
     let transport_config = MeshTransportConfig::default();
     let result = build_mesh_transport_with_store(&identity, store, &transport_config);

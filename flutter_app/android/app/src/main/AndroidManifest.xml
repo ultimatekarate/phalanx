@@ -66,17 +66,11 @@
                       android:pathPrefix="/c/join" />
             </intent-filter>
 
-            <!-- Community Join, custom-scheme fallback (R2 — debug/offline only).
-                 Any Android app can claim this scheme, so production builds
-                 should strip this filter via a manifest merge or build variant.
-                 Keep here for `flutter run` / `adb shell am start` testing; the
-                 canonical production path is the App Link above. -->
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="phalanx" android:host="community" />
-            </intent-filter>
+            <!-- Community Join custom-scheme fallback (phalanx://community)
+                 lives in src/debug/AndroidManifest.xml — any app on a
+                 production device can claim a custom scheme, so release
+                 builds strip the filter. Gradle merges the debug manifest
+                 into debug/offline builds automatically. -->
         </activity>
 
         <!-- Flutter embedding metadata -->

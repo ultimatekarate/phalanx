@@ -74,6 +74,7 @@ impl eframe::App for StrongholdApp {
                         let tab_defs = [
                             (PanelId::Dashboard, "Dashboard"),
                             (PanelId::Communities, "Communities"),
+                            (PanelId::Ceremony, "Ceremony"),
                             (PanelId::Recordings, "Recordings"),
                             (PanelId::Corroborate, "Corroborate"),
                             (PanelId::Export, "Export"),
@@ -113,6 +114,9 @@ impl eframe::App for StrongholdApp {
                         }
                         PanelId::Export => {
                             panels::export::render(ui, ctx, bridge, &mut panels.export);
+                        }
+                        PanelId::Ceremony => {
+                            panels::ceremony::render(ui, ctx, bridge, &mut panels.ceremony);
                         }
                     }
                 });

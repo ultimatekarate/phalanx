@@ -995,3 +995,197 @@ async fn export_end_to_end_c2pa() {
         "Re-export should produce same file count"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Test 10: Envelope roundtrip — `stronghold create-community` emits a
+//          wrapped envelope; `stronghold import-community` reads it back.
+//
+// Phase 7.A.1 regression guard. Before the fix, the two CLI subcommands
+// disagreed on envelope presence (create wrote wrapped bytes, import
+// called `postcard::from_bytes` directly) so the shell pipeline failed.
+// This test drives the real binary both ways and asserts the vault ends
+// up with the same wrapped bytes on disk.
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn create_and_import_community_envelope_roundtrip() {
+    use phalanx_forensics::identity::sign_vouch;
+    use phalanx_proto::community::{CommunityId, Quorum, COMMUNITY_PAYLOAD_VERSION};
+    use phalanx_proto::time::PhalanxTimestamp;
+    use phalanx_proto::trust::PetName;
+    use std::process::Command;
+
+    let dir = tempdir().unwrap();
+    let vault = dir.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+
+    // ── Identities: one member, two external vouchers ─────────────────
+    let member = PhalanxIdentity::new_ephemeral();
+    let voucher_a = PhalanxIdentity::new_ephemeral();
+    let voucher_b = PhalanxIdentity::new_ephemeral();
+
+    // ── Ceremony timestamps ────────────────────────────────────────────
+    // joined_at must be within VOUCH_FRESHNESS_WINDOW_SECS (3600) of now;
+    // expires_at must be in [MIN_EXPIRES_SECS (300), MAX_EXPIRES_SECS (30d)].
+    let now_utc = chrono::Utc::now();
+    let joined_utc = now_utc - chrono::Duration::seconds(30);
+    let expires_utc = now_utc + chrono::Duration::minutes(30);
+    let joined_at_rfc = joined_utc.to_rfc3339();
+    let expires_at_rfc = expires_utc.to_rfc3339();
+    let joined_ms = PhalanxTimestamp(u64::try_from(joined_utc.timestamp_millis()).unwrap());
+
+    // ── Fingerprint cmd_create_community will recompute inside
+    //    `assemble_community`. Vouches must sign over this exact value. ──
+    let pet = PetName::new("RoundtripTest").unwrap();
+    let quorum = Quorum::new(2).unwrap();
+    let tentative = CommunityId::compute(&pet, quorum, std::slice::from_ref(&member.did));
+
+    let vouch_a = sign_vouch(
+        &voucher_a.keypair,
+        &voucher_a.did,
+        &member.did,
+        &tentative,
+        joined_ms,
+    );
+    let vouch_b = sign_vouch(
+        &voucher_b.keypair,
+        &voucher_b.did,
+        &member.did,
+        &tentative,
+        joined_ms,
+    );
+
+    // ── Vouches TOML consumed by cmd_create_community ─────────────────
+    let vouches_toml = format!(
+        "[[members]]\n\
+         did = \"{member_did}\"\n\
+         \n\
+         [[members.vouches]]\n\
+         voucher_did = \"{voucher_a_did}\"\n\
+         signature = \"{sig_a}\"\n\
+         \n\
+         [[members.vouches]]\n\
+         voucher_did = \"{voucher_b_did}\"\n\
+         signature = \"{sig_b}\"\n",
+        member_did = member.did.as_str(),
+        voucher_a_did = voucher_a.did.as_str(),
+        sig_a = hex_hash_bytes(vouch_a.signature.as_bytes()),
+        voucher_b_did = voucher_b.did.as_str(),
+        sig_b = hex_hash_bytes(vouch_b.signature.as_bytes()),
+    );
+    let toml_path = dir.path().join("vouches.toml");
+    std::fs::write(&toml_path, vouches_toml).unwrap();
+
+    // ── Config TOML pointing the vault at our tempdir ─────────────────
+    // Forward-slashes inside the TOML string avoid Windows backslash-escape
+    // confusion; both OSes accept them through `tokio::fs`.
+    let vault_for_toml = vault.display().to_string().replace('\\', "/");
+    let config_toml = format!(
+        "[storage]\n\
+         vault_path = \"{vault_for_toml}\"\n\
+         max_storage_bytes = 10485760\n\
+         max_per_community_bytes = 1048576\n\
+         \n\
+         [network]\n\
+         listen_addresses = [\"/ip4/0.0.0.0/tcp/0\"]\n\
+         bootstrap_peers = []\n\
+         \n\
+         [corroboration]\n\
+         min_overlap_ms = 5000\n\
+         divergence_alpha = 0.05\n"
+    );
+    let config_path = dir.path().join("stronghold.toml");
+    std::fs::write(&config_path, config_toml).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_stronghold");
+    let x_bin = dir.path().join("x.bin");
+
+    // ── Pass 1: create-community ───────────────────────────────────────
+    let create_out = Command::new(bin)
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "create-community",
+            "--name",
+            "RoundtripTest",
+            "--quorum",
+            "2",
+            "--vouches",
+            toml_path.to_str().unwrap(),
+            "--joined-at",
+            &joined_at_rfc,
+            "--expires-at",
+            &expires_at_rfc,
+            "--output",
+            x_bin.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn create-community");
+
+    assert!(
+        create_out.status.success(),
+        "create-community failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&create_out.stdout),
+        String::from_utf8_lossy(&create_out.stderr),
+    );
+    assert!(x_bin.exists(), "create-community did not produce x.bin");
+
+    // The emitted file must be envelope-wrapped.
+    let wrapped = std::fs::read(&x_bin).unwrap();
+    assert_eq!(
+        wrapped.first().copied(),
+        Some(COMMUNITY_PAYLOAD_VERSION),
+        "create-community output is not envelope-wrapped"
+    );
+
+    // ── Pass 2: import-community ───────────────────────────────────────
+    let import_out = Command::new(bin)
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "import-community",
+            "-f",
+            x_bin.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn import-community");
+
+    assert!(
+        import_out.status.success(),
+        "import-community failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&import_out.stdout),
+        String::from_utf8_lossy(&import_out.stderr),
+    );
+
+    // ── Verify the vault now holds the wrapped roster ──────────────────
+    let communities_dir = vault.join("communities");
+    assert!(
+        communities_dir.is_dir(),
+        "vault/communities/ was not created"
+    );
+    let mut saw_community = false;
+    for entry in std::fs::read_dir(&communities_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("bin") {
+            continue;
+        }
+        let persisted = std::fs::read(&path).unwrap();
+        assert_eq!(
+            persisted.first().copied(),
+            Some(COMMUNITY_PAYLOAD_VERSION),
+            "vault file {} is not envelope-wrapped",
+            path.display()
+        );
+        saw_community = true;
+    }
+    assert!(saw_community, "no .community.bin in vault after import");
+}
+
+fn hex_hash_bytes(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}

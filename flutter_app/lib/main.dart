@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:app_links/app_links.dart';
 import 'package:battery_plus/battery_plus.dart';
@@ -17,6 +16,7 @@ import 'screens/community/community_confirm_screen.dart';
 import 'screens/community/community_detail_screen.dart';
 import 'screens/community/community_join_screen.dart';
 import 'screens/community/community_list_screen.dart';
+import 'screens/community/community_vouch_screen.dart';
 import 'screens/genesis_phrase_screen.dart';
 import 'screens/peers_screen.dart';
 import 'screens/playback_screen.dart';
@@ -265,6 +265,7 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
         '/settings': (_) => const SettingsScreen(),
         '/community': (_) => const CommunityListScreen(),
         '/community/join': (_) => const CommunityJoinScreen(),
+        '/community/vouch': (_) => const CommunityVouchScreen(),
       },
     );
   }

@@ -73,7 +73,7 @@ fn render_list(
                     let result = import_community(&vault_path, &path, &community_tx).await;
                     let _ = tx.send(result);
                 });
-                state.import_result = AsyncReply::Pending(rx);
+                state.import_result = AsyncReply::pending(rx);
             }
         }
     });
@@ -102,7 +102,7 @@ fn render_list(
     // Display communities table. Each row is a clickable button that
     // selects the community and kicks off a GetDetail fetch.
     match &state.communities {
-        AsyncReply::Pending(_) => {
+        AsyncReply::Pending { .. } => {
             ui.spinner();
         }
         AsyncReply::Ready(Ok(communities)) => {
@@ -167,7 +167,7 @@ fn render_detail(
     ui.add_space(8.0);
 
     match &state.detail {
-        AsyncReply::Pending(_) => {
+        AsyncReply::Pending { .. } => {
             ui.spinner();
         }
         AsyncReply::Ready(Some(roster)) => {
@@ -334,7 +334,7 @@ fn spawn_list_refresh(bridge: &DaemonBridge, state: &mut CommunitiesState) {
         let result = load_communities_from_disk(&vault_path).await;
         let _ = tx.send(result);
     });
-    state.communities = AsyncReply::Pending(rx);
+    state.communities = AsyncReply::pending(rx);
 }
 
 /// Kick off a detail fetch via the live actor. Mutates `state.detail`.
@@ -356,7 +356,7 @@ fn spawn_detail_fetch(bridge: &DaemonBridge, state: &mut CommunitiesState, id: C
         }
         let _ = outer_tx.send(inner_rx.await.unwrap_or(None));
     });
-    state.detail = AsyncReply::Pending(outer_rx);
+    state.detail = AsyncReply::pending(outer_rx);
 }
 
 /// Kick off a Dissolve via the live actor. Mutates `state.dissolve_result`.
@@ -403,7 +403,7 @@ fn spawn_dissolve(bridge: &DaemonBridge, state: &mut CommunitiesState, id: Commu
             }
         }
     });
-    state.dissolve_result = AsyncReply::Pending(outer_rx);
+    state.dissolve_result = AsyncReply::pending(outer_rx);
 }
 
 // ── Async Helpers (disk I/O) ───────────────────────────────────────────
@@ -433,7 +433,14 @@ async fn load_communities_from_disk(
             Err(_) => continue,
         };
 
-        if let Ok(community) = postcard::from_bytes::<Community>(&bytes) {
+        // Files on disk are wrapped envelopes (see `cmd_import_community`).
+        // Silently skip any file whose envelope version is unknown.
+        let body = match phalanx_forensics::identity::strip_payload_version(&bytes) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+
+        if let Ok(community) = postcard::from_bytes::<Community>(body) {
             result.push(CommunityInfo {
                 id: community.fingerprint,
                 name: community.name.to_string(),
@@ -454,8 +461,13 @@ async fn import_community(
         .await
         .map_err(|e| format!("Failed to read file: {e}"))?;
 
-    let community: Community = postcard::from_bytes(&bytes)
-        .map_err(|e| format!("Failed to deserialize community: {e}"))?;
+    // The picked file is a wrapped envelope produced by `cmd_create_community`.
+    // Strip the version byte before postcard decode; persist the wrapped form.
+    let body = phalanx_forensics::identity::strip_payload_version(&bytes)
+        .map_err(|e| format!("Community envelope rejected: {e}"))?;
+
+    let community: Community =
+        postcard::from_bytes(body).map_err(|e| format!("Failed to deserialize community: {e}"))?;
 
     let name = community.name.to_string();
     let id = community.fingerprint;
