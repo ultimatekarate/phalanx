@@ -63,16 +63,29 @@ ctrlc = "3.5.2"
 
 # GUI (optional, feature-gated)
 eframe = { version = "0.30", optional = true, default-features = false, features = ["glow", "default_fonts"] }
+# AsyncFileDialog is built-in (no feature flag); the Ceremony panel uses
+# it because the sync FileDialog::pick_file blocks the egui event loop —
+# unacceptable in a narrated demo. Dialogs are awaited in tokio tasks and
+# dropped back onto the panel via AsyncReply<PathBuf>.
 rfd = { version = "0.15", optional = true }
+# QR rendering for the Ceremony panel (request-slot QRs + final join QR).
+# Used only under the gui feature; feature-gated alongside eframe.
+# default-features disabled to avoid pulling in the `image` crate —
+# we paint ColorImage pixels from QrCode::to_colors() directly.
+qrcode = { version = "0.14", optional = true, default-features = false }
 
 [features]
 default = []
-gui = ["eframe", "rfd"]
+gui = ["eframe", "rfd", "qrcode"]
 
 [dev-dependencies]
 tempfile = "3.26.0"
 oneshot = { version = "0.2.1", features = ["async"] }
 phalanx-test-fixtures = { workspace = true }
+# test-util unlocks `tokio::time::pause` / `tokio::time::advance` for
+# `#[tokio::test(start_paused = true)]` in AsyncReply timeout tests.
+# Dev-only — do not promote to [dependencies].
+tokio = { version = "1.0", features = ["full", "test-util"] }
 
 [lints]
 workspace = true

@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:record/record.dart';
 
 import '../providers/capture_provider.dart';
+import '../providers/communities_provider.dart';
 import '../providers/phalanx_provider.dart';
 
 /// The primary screen — full-bleed camera with a single record button.
@@ -194,13 +195,24 @@ class _CaptureScreenState extends ConsumerState<CaptureScreen> {
               child: CircularProgressIndicator(color: Colors.white),
             ),
 
-          // Recording indicator — subtle dot in top-right
-          if (recording.isRecording)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 16,
-              right: 16,
-              child: _RecordingIndicator(),
+          // Top-right overlay: active-community chip + recording dot.
+          // Both pieces share the top-right slot; stacking them in a
+          // Column keeps the recording dot's position stable whether
+          // or not a community is pinned.
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 16,
+            right: 16,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                const _ActiveCommunityChip(),
+                if (recording.isRecording) ...[
+                  const SizedBox(height: 8),
+                  _RecordingIndicator(),
+                ],
+              ],
             ),
+          ),
 
           // Record button — bottom center
           Positioned(
@@ -304,6 +316,54 @@ class _RecordButton extends StatelessWidget {
               color: Colors.red,
               borderRadius: BorderRadius.circular(isRecording ? 6 : 32),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Active-community chip. Visible in the capture screen's top-right
+/// whenever a community is pinned (see [activeCommunityProvider]).
+/// Tap to jump to that community's detail screen — invisible when no
+/// community is active, so it never competes for attention with the
+/// primary record control.
+class _ActiveCommunityChip extends ConsumerWidget {
+  const _ActiveCommunityChip();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final active = ref.watch(activeCommunityProvider);
+    if (active == null) return const SizedBox.shrink();
+    return Material(
+      color: Colors.black.withValues(alpha: 0.55),
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: () => Navigator.of(context).pushNamed(
+          '/community/detail',
+          arguments: active.id,
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.shield, color: Colors.white70, size: 14),
+              const SizedBox(width: 6),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 160),
+                child: Text(
+                  active.name,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),

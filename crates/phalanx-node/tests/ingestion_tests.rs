@@ -31,18 +31,22 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// Build an IngestionActor with standard test configuration.
-/// Returns the actor and all channels for injecting commands / observing side effects.
-fn build_test_ingestion(
-    config: NodeConfig,
-) -> (
+/// Tuple returned from `build_test_ingestion`: the actor under test, its
+/// command sender, observer receivers for storage/egress/trust side
+/// effects, and the shared system governor. Named for clippy's
+/// `type_complexity` lint.
+type IngestionActorRig = (
     IngestionActor,
     mpsc::Sender<IngestionCommand>,
     mpsc::Receiver<StorageCommand>,
     mpsc::Receiver<EgressCommand>,
     mpsc::Receiver<TrustCommand>,
     Arc<SystemGovernor>,
-) {
+);
+
+/// Build an IngestionActor with standard test configuration.
+/// Returns the actor and all channels for injecting commands / observing side effects.
+fn build_test_ingestion(config: NodeConfig) -> IngestionActorRig {
     let (ingestion_tx, ingestion_rx) = mpsc::channel(32);
     let (storage_tx, storage_rx) = mpsc::channel(32);
     let (egress_tx, egress_rx) = mpsc::channel(32);

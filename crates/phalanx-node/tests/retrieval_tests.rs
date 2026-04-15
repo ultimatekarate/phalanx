@@ -27,16 +27,20 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// Build a RetrievalActor and return all channels for injection/observation.
-fn build_retrieval_actor(
-    system_governor: Arc<SystemGovernor>,
-) -> (
+/// Tuple bundling the channels + join handle returned from spawning a
+/// `RetrievalActor` in a test: retrieval-command sender, observers for
+/// the storage / egress / trust outbound channels, and the actor's
+/// `JoinHandle`. Named for clippy's `type_complexity` lint.
+type RetrievalActorRig = (
     mpsc::Sender<RetrievalCommand>,
     mpsc::Receiver<StorageCommand>,
     mpsc::Receiver<EgressCommand>,
     mpsc::Receiver<TrustCommand>,
     tokio::task::JoinHandle<()>,
-) {
+);
+
+/// Build a RetrievalActor and return all channels for injection/observation.
+fn build_retrieval_actor(system_governor: Arc<SystemGovernor>) -> RetrievalActorRig {
     let (retrieval_tx, retrieval_rx) = mpsc::channel(32);
     let (storage_tx, storage_rx) = mpsc::channel(32);
     let (egress_tx, egress_rx) = mpsc::channel(32);

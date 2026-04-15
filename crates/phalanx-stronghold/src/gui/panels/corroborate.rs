@@ -68,22 +68,28 @@ fn render_community_selector(
                         continue;
                     }
                     if let Ok(bytes) = std::fs::read(&path) {
-                        if let Ok(community) =
-                            postcard::from_bytes::<phalanx_proto::community::Community>(&bytes)
+                        // Wrapped envelope on disk — strip the version byte
+                        // before postcard decode. Silently skip malformed files.
+                        if let Ok(body) = phalanx_forensics::identity::strip_payload_version(&bytes)
                         {
-                            let name = community.name.to_string();
-                            let id = community.fingerprint;
-                            if ui
-                                .selectable_label(
-                                    state.selected_community.as_ref().map(|(i, _)| i) == Some(&id),
-                                    &name,
-                                )
-                                .clicked()
+                            if let Ok(community) =
+                                postcard::from_bytes::<phalanx_proto::community::Community>(body)
                             {
-                                state.selected_community = Some((id, name));
-                                state.available_recordings = AsyncReply::Idle;
-                                state.selected_recording_indices.clear();
-                                state.result = AsyncReply::Idle;
+                                let name = community.name.to_string();
+                                let id = community.fingerprint;
+                                if ui
+                                    .selectable_label(
+                                        state.selected_community.as_ref().map(|(i, _)| i)
+                                            == Some(&id),
+                                        &name,
+                                    )
+                                    .clicked()
+                                {
+                                    state.selected_community = Some((id, name));
+                                    state.available_recordings = AsyncReply::Idle;
+                                    state.selected_recording_indices.clear();
+                                    state.result = AsyncReply::Idle;
+                                }
                             }
                         }
                     }
@@ -110,11 +116,11 @@ fn render_recording_selector(
             let result = load_summaries(&vault_path, &community_id).await;
             let _ = tx.send(result);
         });
-        state.available_recordings = AsyncReply::Pending(rx);
+        state.available_recordings = AsyncReply::pending(rx);
     }
 
     match &state.available_recordings {
-        AsyncReply::Pending(_) => {
+        AsyncReply::Pending { .. } => {
             ui.spinner();
         }
         AsyncReply::Ready(Ok(recordings)) => {
@@ -238,7 +244,7 @@ fn render_run_button(ui: &mut egui::Ui, bridge: &DaemonBridge, state: &mut Corro
                         .map_err(|e| format!("{e}"));
                         let _ = tx.send(result);
                     });
-                    state.result = AsyncReply::Pending(rx);
+                    state.result = AsyncReply::pending(rx);
                 }
             }
         }

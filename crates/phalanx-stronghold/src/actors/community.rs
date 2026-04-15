@@ -8,9 +8,12 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use phalanx_forensics::identity::verify_community_vouches;
+use phalanx_forensics::identity::{
+    assemble_community, verify_community_vouches, verify_vouch_response, CommunityAssemblyParams,
+};
 use phalanx_proto::community::{
-    Community, CommunityId, CommunityRoster, CommunitySummary, CommunityVerifyError, MemberSummary,
+    CeremonyError, Community, CommunityId, CommunityRoster, CommunitySummary, CommunityVerifyError,
+    MemberSummary, VouchRequest, VouchResponse,
 };
 use phalanx_proto::identity::Did;
 use phalanx_proto::time::PhalanxTimestamp;
@@ -50,6 +53,37 @@ pub enum CommunityCommand {
     /// Snapshot the full DID-to-community routing table.
     SnapshotRouting {
         reply_to: oneshot::Sender<HashMap<Did, Vec<CommunityId>>>,
+    },
+    /// Ceremony hook: verify a `VouchResponse` against the `VouchRequest`
+    /// the panel issued. Pure delegation to `verify_vouch_response` — the
+    /// actor owns no ceremony state, so this is functionally stateless
+    /// but goes through the actor so the panel never spawns its own
+    /// blocking verification. Ceremony state lives in the panel.
+    ///
+    /// `request` and `response` are boxed because `VouchRequest` carries
+    /// the full ceremony roster (`Vec<Did>`), making the variant
+    /// materially larger than the existing `Import { community }` one —
+    /// boxing keeps `CommunityCommand` within clippy's
+    /// `large_enum_variant` budget.
+    VerifyVouchResponse {
+        request: Box<VouchRequest>,
+        response: Box<VouchResponse>,
+        reply_to: oneshot::Sender<Result<(), CeremonyError>>,
+    },
+    /// Ceremony hook: assemble a community from collected vouches,
+    /// then import it into the actor's roster. On success, returns the
+    /// fingerprint **and** a cloned copy of the installed community so
+    /// the panel can serialize the join payload for QR rendering
+    /// without a follow-up round-trip. The actor retains the canonical
+    /// copy; the clone travels to the panel for serialization only.
+    ///
+    /// `params` is boxed for the same reason as the request above —
+    /// `CommunityAssemblyParams` owns the full ceremony roster plus
+    /// every vouch, and this variant would otherwise bloat the enum.
+    /// The reply `Community` is likewise boxed.
+    AssembleAndImport {
+        params: Box<CommunityAssemblyParams>,
+        reply_to: oneshot::Sender<Result<(CommunityId, Box<Community>), CeremonyError>>,
     },
 }
 
@@ -127,6 +161,18 @@ impl CommunityActor {
             CommunityCommand::SnapshotRouting { reply_to } => {
                 let snapshot = self.snapshot_routing();
                 let _ = reply_to.send(snapshot);
+            }
+            CommunityCommand::VerifyVouchResponse {
+                request,
+                response,
+                reply_to,
+            } => {
+                let result = self.verify_vouch_response(&request, &response);
+                let _ = reply_to.send(result);
+            }
+            CommunityCommand::AssembleAndImport { params, reply_to } => {
+                let result = self.assemble_and_import(*params);
+                let _ = reply_to.send(result);
             }
         }
     }
@@ -243,6 +289,77 @@ impl CommunityActor {
             .iter()
             .map(|(did, set)| (did.clone(), set.iter().copied().collect()))
             .collect()
+    }
+
+    // ── Ceremony Handlers ───────────────────────────────────────────────
+
+    /// Delegate to the Laboratory verb; the actor owns no ceremony
+    /// state, it just threads `now` through the system clock. The
+    /// panel collects responses directly in its own `CollectingVouches`
+    /// state.
+    #[allow(clippy::cast_possible_truncation)] // Epoch millis fit in u64 for centuries.
+    fn verify_vouch_response(
+        &self,
+        request: &VouchRequest,
+        response: &VouchResponse,
+    ) -> Result<(), CeremonyError> {
+        let now = PhalanxTimestamp::from_millis(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        );
+        verify_vouch_response(request, response, now)
+    }
+
+    /// Run the Laboratory assembly verb, then import the resulting
+    /// `Community` into this actor's roster. The separate `Import`
+    /// command path handles externally-delivered communities (join QR
+    /// scanned off another Stronghold); this path handles the freshly
+    /// assembled ones. Both funnel through `Self::import` so the
+    /// did_index is rebuilt identically in both cases.
+    ///
+    /// Errors are routed cleanly to their respective `CeremonyError`
+    /// variants: `assemble_community` errors become
+    /// `CeremonyError::Assembly` via the `#[from]` conversion; any
+    /// error surfacing from the import leg (typically unreachable
+    /// post-assembly) becomes `CeremonyError::ImportFailed { reason }`,
+    /// carrying the underlying `StrongholdError::Display` text. The
+    /// variant split keeps the panel's error rendering free of
+    /// fabricated `CommunityId` / `Did` placeholders.
+    #[allow(clippy::cast_possible_truncation)] // Epoch millis fit in u64 for centuries.
+    fn assemble_and_import(
+        &mut self,
+        params: CommunityAssemblyParams,
+    ) -> Result<(CommunityId, Box<Community>), CeremonyError> {
+        let now = PhalanxTimestamp::from_millis(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        );
+        // assemble_community returns Err(CommunityAssemblyError) → into CeremonyError::Assembly
+        let community = assemble_community(params, now)?;
+        // Clone once for the reply — the panel needs the full struct to
+        // serialize the join payload, and this avoids a second
+        // `GetCommunity` round-trip plus the ambiguity of fetching a
+        // community that might already have been dissolved in a racing
+        // tab. The original moves into `import()`; the clone travels to
+        // the panel for serialization only.
+        let community_clone = community.clone();
+        // Reuse Self::import so the did_index rebuild and zeroize-on-dissolve
+        // invariants stay identical to the join path. Any error here is
+        // post-assembly and typically unreachable (assembly just produced a
+        // Community whose vouches verify by construction) — map to
+        // `CeremonyError::ImportFailed` so the panel can surface the real
+        // `StrongholdError::Display` message rather than fabricating a
+        // zeroed `CommunityId` or a synthetic `Did` built from the error
+        // string.
+        self.import(community)
+            .map_err(|e| CeremonyError::ImportFailed {
+                reason: e.to_string(),
+            })?;
+        Ok((community_clone.fingerprint, Box::new(community_clone)))
     }
 
     // ── Maintenance ─────────────────────────────────────────────────────

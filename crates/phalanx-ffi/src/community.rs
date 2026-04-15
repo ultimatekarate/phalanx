@@ -293,6 +293,187 @@ pub unsafe extern "C" fn phalanx_create_community(
     0
 }
 
+// ── Ceremony: Vouch Request / Response (mobile side) ──────────────────
+//
+// These two FFIs let a voucher's phone handle a `VouchRequest` it
+// scanned off a Stronghold QR. Neither goes through the `TrustActor`
+// — the handle carries the signing key directly, same pattern as
+// `phalanx_sign_vouch` at line 99. The Stronghold Ceremony panel is
+// the coordinator; the phone is a pure signer, so keeping these
+// calls actor-free avoids wiring a signing key into `TrustActor`
+// just to relay it.
+//
+// Both follow the two-call buffer protocol (null-probe → allocate →
+// re-invoke) and return postcard bytes of `Result<T, CeremonyError>`.
+// A missing envelope version, an FFI-layer voucher-identity mismatch,
+// or a signing failure rides in the inner `Result::Err` — FFI
+// transport errors are reserved for null pointers and SerializationFailure.
+
+/// Preview a scanned `VouchRequest` for the Review screen.
+///
+/// Strips the `[VOUCH_REQUEST_VERSION]` envelope, deserializes the
+/// request, checks that `request.voucher_did` matches the handle's
+/// DID (returning `CeremonyError::VoucherMismatch` if not), then
+/// projects to a `VouchRequestPreview` that omits the voucher DID so
+/// the preview type cannot be fed back into
+/// [`phalanx_sign_vouch_request`] by accident.
+///
+/// Pure call with respect to protocol state — no side effects, no
+/// actor message, no signature produced. Safe to run on every QR
+/// frame if that matches the UI.
+///
+/// # Safety
+/// * `handle` must be a valid `PhalanxHandle` pointer.
+/// * `bytes_ptr`/`bytes_len` must describe a valid wrapped-envelope
+///   byte slice.
+/// * `out_len` must be a valid writable pointer.
+/// * `out_buf` may be null (sizing call) or point to `*out_len`
+///   writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn phalanx_preview_vouch_request(
+    handle: *const PhalanxHandle,
+    bytes_ptr: *const u8,
+    bytes_len: usize,
+    out_buf: *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if handle.is_null() || bytes_ptr.is_null() || bytes_len == 0 || out_len.is_null() {
+        return PhalanxError::NullPointer.code();
+    }
+    let h = &*handle;
+    let wire = std::slice::from_raw_parts(bytes_ptr, bytes_len);
+
+    // 1. Strip the envelope. Version mismatch → domain error.
+    let body = match phalanx_forensics::identity::strip_vouch_request(wire) {
+        Ok(b) => b,
+        Err(e) => {
+            let outcome: Result<
+                phalanx_proto::community::VouchRequestPreview,
+                phalanx_proto::community::CeremonyError,
+            > = Err(e);
+            return write_postcard_outcome(&outcome, "vouch_request_preview", out_buf, out_len);
+        }
+    };
+
+    // 2. Decode the VouchRequest. Transport-level failure on decode.
+    let request: phalanx_proto::community::VouchRequest =
+        match phalanx_forensics::gate::unmarshal(body, "vouch_request_preview") {
+            Ok(r) => r,
+            Err(_) => return PhalanxError::InvalidState.code(),
+        };
+
+    // 3. Voucher-identity check: does this device hold the expected key?
+    if request.voucher_did != h.identity.did {
+        let outcome: Result<
+            phalanx_proto::community::VouchRequestPreview,
+            phalanx_proto::community::CeremonyError,
+        > = Err(phalanx_proto::community::CeremonyError::VoucherMismatch {
+            expected: request.voucher_did,
+            actual: h.identity.did.clone(),
+        });
+        return write_postcard_outcome(&outcome, "vouch_request_preview", out_buf, out_len);
+    }
+
+    // 4. Project to the review-safe shape.
+    let preview = phalanx_forensics::identity::preview_vouch_request(&request);
+    let outcome: Result<
+        phalanx_proto::community::VouchRequestPreview,
+        phalanx_proto::community::CeremonyError,
+    > = Ok(preview);
+    write_postcard_outcome(&outcome, "vouch_request_preview", out_buf, out_len)
+}
+
+/// Sign a scanned `VouchRequest` and return the wrapped `VouchResponse`.
+///
+/// Strips the request envelope, decodes the `VouchRequest`, calls
+/// `sign_vouch_response(&handle.keypair, &request, SystemClock.now())`
+/// directly (no actor round-trip — matches `phalanx_sign_vouch`),
+/// then produces a `VouchResponse` wrapped with
+/// `[VOUCH_RESPONSE_VERSION]` inside the outer `Result::Ok`.
+///
+/// The Dart side reads `Result<VouchResponse, CeremonyError>`, checks
+/// the variant, and on `Ok(response)` serializes the wrapped bytes
+/// directly to a QR / file.
+///
+/// Failure modes encoded in `Result::Err`:
+/// - `UnsupportedVersion { version }` — bad request envelope.
+/// - `VoucherMismatch { expected, actual }` — request targets another
+///   device's DID.
+/// - `ResponseStale { age_seconds }` — request is already past the
+///   freshness window.
+///
+/// # Safety
+/// * `handle` must be a valid `PhalanxHandle` pointer.
+/// * `bytes_ptr`/`bytes_len` must describe a valid wrapped-envelope
+///   byte slice.
+/// * `out_len` must be a valid writable pointer.
+/// * `out_buf` may be null (sizing call) or point to `*out_len`
+///   writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn phalanx_sign_vouch_request(
+    handle: *const PhalanxHandle,
+    bytes_ptr: *const u8,
+    bytes_len: usize,
+    out_buf: *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if handle.is_null() || bytes_ptr.is_null() || bytes_len == 0 || out_len.is_null() {
+        return PhalanxError::NullPointer.code();
+    }
+    let h = &*handle;
+    let wire = std::slice::from_raw_parts(bytes_ptr, bytes_len);
+
+    // 1. Strip the request envelope.
+    let body = match phalanx_forensics::identity::strip_vouch_request(wire) {
+        Ok(b) => b,
+        Err(e) => {
+            // Produce `Result<Vec<u8>, CeremonyError>::Err`.
+            let outcome: Result<Vec<u8>, phalanx_proto::community::CeremonyError> = Err(e);
+            return write_postcard_outcome(&outcome, "vouch_response_signed", out_buf, out_len);
+        }
+    };
+
+    // 2. Decode the VouchRequest.
+    let request: phalanx_proto::community::VouchRequest =
+        match phalanx_forensics::gate::unmarshal(body, "vouch_request_sign") {
+            Ok(r) => r,
+            Err(_) => return PhalanxError::InvalidState.code(),
+        };
+
+    // 3. Sign via the Laboratory verb. Uses SystemClock — the phone's
+    //    local wall clock. Same time source as `phalanx_create_community`.
+    use phalanx_proto::time::TrustedClock;
+    let now = phalanx_proto::time::SystemClock.now();
+    let response = match phalanx_forensics::identity::sign_vouch_response(
+        &h.identity.keypair,
+        &request,
+        now,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            let outcome: Result<Vec<u8>, phalanx_proto::community::CeremonyError> = Err(e);
+            return write_postcard_outcome(&outcome, "vouch_response_signed", out_buf, out_len);
+        }
+    };
+
+    // 4. Serialize and wrap with the response envelope — the Dart side
+    //    surfaces these bytes directly to a QR payload.
+    let body = match phalanx_forensics::gate::marshal(&response, "vouch_response_signed") {
+        Ok(bytes) => bytes,
+        Err(_) => return PhalanxError::SerializationFailure.code(),
+    };
+    let wrapped = phalanx_forensics::identity::wrap_vouch_response(&body);
+    let outcome: Result<Vec<u8>, phalanx_proto::community::CeremonyError> = Ok(wrapped);
+
+    tracing::info!(
+        target: "phalanx::ffi",
+        member = %request.member_did.as_str(),
+        "VouchResponse signed"
+    );
+
+    write_postcard_outcome(&outcome, "vouch_response_signed", out_buf, out_len)
+}
+
 // ── Import & Lifecycle ────────────────────────────────────────────────
 
 /// Write a postcard-encoded value into a caller-provided output buffer using
@@ -992,6 +1173,148 @@ mod tests {
                 wire.as_ptr(),
                 wire.len(),
                 0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, PhalanxError::NullPointer.code());
+    }
+
+    // ── Vouch Request / Response FFI null-guard tests ───────────────
+    //
+    // The two `vouch_request` FFIs take a `*const PhalanxHandle` and
+    // invoke the SystemClock + handle's signing key. Happy-path
+    // coverage requires a fully bootstrapped engine and therefore
+    // lives in Phase 7.D's `ceremony_e2e.rs` integration test. Here
+    // we only exercise the null-pointer guards that fire before any
+    // handle dereference — same split as the other handle-requiring
+    // FFIs (see `mod tests` preamble above).
+
+    #[test]
+    fn preview_vouch_request_null_handle_returns_null_pointer() {
+        let wire = [0x01u8, 0xAA];
+        let mut out_len: usize = 0;
+        let status = unsafe {
+            phalanx_preview_vouch_request(
+                std::ptr::null(),
+                wire.as_ptr(),
+                wire.len(),
+                std::ptr::null_mut(),
+                &mut out_len as *mut usize,
+            )
+        };
+        assert_eq!(status, PhalanxError::NullPointer.code());
+    }
+
+    #[test]
+    fn preview_vouch_request_null_bytes_returns_null_pointer() {
+        let mut out_len: usize = 0;
+        // Use a non-null dummy handle ptr — the guard checks bytes_ptr
+        // before dereferencing anything else.
+        let dummy_handle = 0x1usize as *const PhalanxHandle;
+        let status = unsafe {
+            phalanx_preview_vouch_request(
+                dummy_handle,
+                std::ptr::null(),
+                16,
+                std::ptr::null_mut(),
+                &mut out_len as *mut usize,
+            )
+        };
+        assert_eq!(status, PhalanxError::NullPointer.code());
+    }
+
+    #[test]
+    fn preview_vouch_request_zero_length_returns_null_pointer() {
+        let wire = [0x01u8];
+        let mut out_len: usize = 0;
+        let dummy_handle = 0x1usize as *const PhalanxHandle;
+        let status = unsafe {
+            phalanx_preview_vouch_request(
+                dummy_handle,
+                wire.as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                &mut out_len as *mut usize,
+            )
+        };
+        assert_eq!(status, PhalanxError::NullPointer.code());
+    }
+
+    #[test]
+    fn preview_vouch_request_null_out_len_returns_null_pointer() {
+        let wire = [0x01u8, 0xAA];
+        let dummy_handle = 0x1usize as *const PhalanxHandle;
+        let status = unsafe {
+            phalanx_preview_vouch_request(
+                dummy_handle,
+                wire.as_ptr(),
+                wire.len(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, PhalanxError::NullPointer.code());
+    }
+
+    #[test]
+    fn sign_vouch_request_null_handle_returns_null_pointer() {
+        let wire = [0x01u8, 0xAA];
+        let mut out_len: usize = 0;
+        let status = unsafe {
+            phalanx_sign_vouch_request(
+                std::ptr::null(),
+                wire.as_ptr(),
+                wire.len(),
+                std::ptr::null_mut(),
+                &mut out_len as *mut usize,
+            )
+        };
+        assert_eq!(status, PhalanxError::NullPointer.code());
+    }
+
+    #[test]
+    fn sign_vouch_request_null_bytes_returns_null_pointer() {
+        let mut out_len: usize = 0;
+        let dummy_handle = 0x1usize as *const PhalanxHandle;
+        let status = unsafe {
+            phalanx_sign_vouch_request(
+                dummy_handle,
+                std::ptr::null(),
+                16,
+                std::ptr::null_mut(),
+                &mut out_len as *mut usize,
+            )
+        };
+        assert_eq!(status, PhalanxError::NullPointer.code());
+    }
+
+    #[test]
+    fn sign_vouch_request_zero_length_returns_null_pointer() {
+        let wire = [0x01u8];
+        let mut out_len: usize = 0;
+        let dummy_handle = 0x1usize as *const PhalanxHandle;
+        let status = unsafe {
+            phalanx_sign_vouch_request(
+                dummy_handle,
+                wire.as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                &mut out_len as *mut usize,
+            )
+        };
+        assert_eq!(status, PhalanxError::NullPointer.code());
+    }
+
+    #[test]
+    fn sign_vouch_request_null_out_len_returns_null_pointer() {
+        let wire = [0x01u8, 0xAA];
+        let dummy_handle = 0x1usize as *const PhalanxHandle;
+        let status = unsafe {
+            phalanx_sign_vouch_request(
+                dummy_handle,
+                wire.as_ptr(),
+                wire.len(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
             )

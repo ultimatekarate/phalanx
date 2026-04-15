@@ -264,13 +264,19 @@ async fn cmd_import_community(
     vault_path: &Path,
     file: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use phalanx_forensics::identity::strip_payload_version;
+
     let bytes = tokio::fs::read(file).await?;
-    let community: Community = postcard::from_bytes(&bytes)
+    // The file is an envelope-wrapped postcard body, produced by
+    // `cmd_create_community`. Strip the version byte before deserializing.
+    let body =
+        strip_payload_version(&bytes).map_err(|e| format!("Community envelope rejected: {e}"))?;
+    let community: Community = postcard::from_bytes(body)
         .map_err(|e| format!("Failed to deserialize community file: {e}"))?;
 
     let community_id = community.fingerprint;
 
-    // Store the community roster to disk for later use
+    // Store the original wrapped bytes so every reader sees the same envelope.
     let communities_dir = vault_path.join("communities");
     tokio::fs::create_dir_all(&communities_dir).await?;
     let out_path = communities_dir.join(format!("{}.community.bin", hex_encode(&community_id.0)));
@@ -301,7 +307,12 @@ async fn cmd_list_communities(vault_path: &Path) -> Result<(), Box<dyn std::erro
         }
 
         let bytes = tokio::fs::read(&path).await?;
-        if let Ok(community) = postcard::from_bytes::<Community>(&bytes) {
+        // Each file is a wrapped envelope — strip the version byte before
+        // postcard decode. Silently skip malformed/legacy files.
+        let Ok(body) = phalanx_forensics::identity::strip_payload_version(&bytes) else {
+            continue;
+        };
+        if let Ok(community) = postcard::from_bytes::<Community>(body) {
             println!(
                 "  {} — {} ({} members)",
                 hex_encode(&community.fingerprint.0),

@@ -93,7 +93,7 @@ impl Quorum {
 
 /// Ed25519 vouch signature. Fixed 64 bytes.
 /// Stored as Vec<u8> for serde compatibility; length validated on construction.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VouchSignature(Vec<u8>);
 
 impl VouchSignature {
@@ -117,7 +117,7 @@ impl VouchSignature {
 }
 
 /// A single vouch — one member attesting another's membership.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vouch {
     pub voucher_did: Did,
     /// Ed25519 signature over (member_did || community_fingerprint || joined_at).
@@ -399,6 +399,268 @@ pub enum DissolveOutcome {
     NotFound,
 }
 
+// ── Ceremony Nouns ──────────────────────────────────────────────────────
+//
+// A ceremony is the multi-device protocol that produces a fresh
+// Community. The Stronghold coordinates; mobile devices sign. Each
+// (member, voucher) pair gets one `VouchRequest`, travelling QR- or
+// file-shaped to the voucher's phone. The voucher signs and returns a
+// `VouchResponse`. Once quorum is met for every member, the initiator
+// assembles the `Community` and emits a join QR.
+//
+// The Dictionary defines only the data shapes and the pure derivation
+// of `request_id`. All signature production and verification lives in
+// the Laboratory (`phalanx-forensics::identity`).
+
+/// Version byte prepended to postcard-encoded `VouchRequest` payloads.
+/// Envelope: `[VOUCH_REQUEST_VERSION] || postcard(VouchRequest)`.
+pub const VOUCH_REQUEST_VERSION: u8 = 0x01;
+
+/// Version byte prepended to postcard-encoded `VouchResponse` payloads.
+/// Envelope: `[VOUCH_RESPONSE_VERSION] || postcard(VouchResponse)`.
+pub const VOUCH_RESPONSE_VERSION: u8 = 0x01;
+
+/// Maximum age of a signed vouch response, measured from the
+/// `member_joined_at` timestamp bound in the signature. Matches
+/// `VOUCH_FRESHNESS_WINDOW_SECS` in the Laboratory so a response that
+/// verifies at ceremony time also verifies at assembly time.
+pub const CEREMONY_RESPONSE_FRESHNESS_SECS: u64 = 3_600;
+
+/// Per-ceremony entropy mixed into every `VouchRequest::request_id`.
+///
+/// Disambiguates two ceremonies with identical `(name, quorum,
+/// members)`: without it, re-issuing a ceremony after abort produces
+/// identical request_ids to the aborted run, and the initiator's
+/// dedup table cannot tell a fresh signature from a replay of the
+/// aborted-ceremony responses. With a fresh 128-bit nonce per
+/// ceremony, two such ceremonies always produce different
+/// request_ids — the response-side `RequestIdMismatch` check then
+/// automatically rejects any carryover responses.
+///
+/// Not a security primitive in its own right: the voucher's
+/// signature binds `(member, tentative_fingerprint, joined_at)`,
+/// which is identical across two ceremonies with the same shape,
+/// so the nonce only protects the initiator's bookkeeping — it
+/// does not need to be signed. 128 bits is ample headroom against
+/// birthday collisions within a single organizer's session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CeremonyNonce(pub [u8; 16]);
+
+impl CeremonyNonce {
+    /// Generate a fresh random nonce via the OS CSPRNG. Called once
+    /// per ceremony on the coordinator; every request issued in that
+    /// ceremony carries the same nonce.
+    #[must_use]
+    pub fn random() -> Self {
+        use rand::RngCore;
+        let mut bytes = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+}
+
+/// A voucher-directed request issued by the ceremony initiator.
+///
+/// Each request binds a single (member, voucher) slot. The initiator
+/// produces one `VouchRequest` per slot at the start of the ceremony
+/// and surfaces each as a QR / file for the target voucher. Voucher
+/// devices consume the request, project it via
+/// [`preview_vouch_request`] for Review UI, then sign via
+/// `sign_vouch_response` to produce a `VouchResponse`.
+///
+/// `member_joined_at` is the timestamp the voucher's signature binds.
+/// Every voucher for the same member signs the same value, so the
+/// assembled `MemberEntry` has a single coherent `joined_at`. It is
+/// set once per ceremony by the initiator and *cannot* be chosen
+/// independently by each voucher — doing so would fracture the
+/// MemberEntry signatures.
+///
+/// [`preview_vouch_request`]: fn@crate::identity::community
+// (crate-level anchor — the verb lives in phalanx-forensics)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VouchRequest {
+    /// Deterministic id: `BLAKE3("PhalanxVouchRequestId/v2" || tentative
+    /// || ceremony_nonce || voucher_did || member_did)`. Re-issuing
+    /// the same logical request within the same ceremony produces the
+    /// same id (convenient for the initiator's dedup table); a fresh
+    /// ceremony with an independent `ceremony_nonce` produces
+    /// different ids even when `(name, quorum, members)` match a
+    /// prior run. See [`VouchRequest::compute_id`].
+    pub request_id: [u8; 32],
+    /// Pre-computed community fingerprint the voucher's signature
+    /// binds. Must equal `CommunityId::compute(&name, quorum, members)`.
+    pub tentative_fingerprint: CommunityId,
+    /// Proposed community name. Shown at Review for human sanity-check.
+    pub name: PetName,
+    /// Proposed quorum threshold. Shown at Review.
+    pub quorum: Quorum,
+    /// Full ceremony roster. Shown at Review so the voucher knows who
+    /// else is in the web of trust.
+    pub members: Vec<Did>,
+    /// The member this request vouches *for*.
+    pub member_did: Did,
+    /// The slot this request targets — the device holding the matching
+    /// signing key. Mobile FFI rejects requests whose `voucher_did`
+    /// does not match the handle's DID with `VoucherMismatch`.
+    pub voucher_did: Did,
+    /// Wall-clock time the initiator issued the request. Unsigned;
+    /// drives only the freshness countdown in the UI. Security-relevant
+    /// freshness uses `member_joined_at` below.
+    pub issued_at: PhalanxTimestamp,
+    /// The `joined_at` value bound in every voucher's signature for
+    /// this member. Checked against `CEREMONY_RESPONSE_FRESHNESS_SECS`
+    /// by `verify_vouch_response`.
+    pub member_joined_at: PhalanxTimestamp,
+    /// Per-ceremony entropy — identical across every request in the
+    /// same ceremony, fresh every time a new ceremony starts. See
+    /// [`CeremonyNonce`] for the rationale.
+    pub ceremony_nonce: CeremonyNonce,
+}
+
+impl VouchRequest {
+    /// Compute the deterministic request id for the given slot.
+    ///
+    /// Domain-separated BLAKE3 with length-prefixed variable fields
+    /// (mirrors `CommunityId::compute`). Same inputs → same id;
+    /// different inputs → different id with overwhelming probability.
+    /// `ceremony_nonce` is part of the pre-image so two ceremonies
+    /// with identical `(tentative, voucher, member)` but distinct
+    /// nonces produce distinct request_ids — see [`CeremonyNonce`].
+    #[must_use]
+    pub fn compute_id(
+        tentative: &CommunityId,
+        ceremony_nonce: &CeremonyNonce,
+        voucher_did: &Did,
+        member_did: &Did,
+    ) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"PhalanxVouchRequestId/v2");
+        hasher.update(&tentative.0);
+        hasher.update(&ceremony_nonce.0);
+        let v = voucher_did.as_str().as_bytes();
+        let m = member_did.as_str().as_bytes();
+        // Length prefixes prevent (voucher_did || member_did) concatenation
+        // collisions, e.g. ("ab", "c") vs. ("a", "bc") producing the same
+        // pre-image.
+        #[allow(clippy::cast_possible_truncation)] // Did is capped at 512 bytes, fits u32.
+        {
+            hasher.update(&(v.len() as u32).to_le_bytes());
+        }
+        hasher.update(v);
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            hasher.update(&(m.len() as u32).to_le_bytes());
+        }
+        hasher.update(m);
+        *hasher.finalize().as_bytes()
+    }
+}
+
+/// Projection of a [`VouchRequest`] safe to render on the voucher's
+/// device. Carries every field the voucher needs to review at sign
+/// time and nothing more.
+///
+/// Deliberately distinct from `VouchRequest` so the FFI preview
+/// return type cannot be fed back into `sign_vouch_response` by
+/// accident — the type system enforces the projection direction.
+/// `voucher_did` is intentionally absent: the voucher's own DID is
+/// implicit (the device already knows who it is) and a preview that
+/// omits it cannot be misused to sign on behalf of another device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VouchRequestPreview {
+    pub request_id: [u8; 32],
+    pub tentative_fingerprint: CommunityId,
+    pub name: PetName,
+    pub quorum: Quorum,
+    pub members: Vec<Did>,
+    pub member_did: Did,
+    pub issued_at: PhalanxTimestamp,
+    pub member_joined_at: PhalanxTimestamp,
+}
+
+/// A voucher's signed reply. Wraps the existing [`Vouch`] verbatim so
+/// `assemble_community` consumes it unchanged; `request_id` lets the
+/// initiator match the response to the request it issued.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VouchResponse {
+    /// Must equal the `request_id` of the originating `VouchRequest`.
+    pub request_id: [u8; 32],
+    /// The signed vouch. The signature is over
+    /// `(request.member_did || request.tentative_fingerprint ||
+    /// request.member_joined_at)` — same pre-image as `sign_vouch`.
+    pub vouch: Vouch,
+}
+
+/// Ceremony-level error surface. Union across signing-side
+/// (`sign_vouch_response`) and verification-side
+/// (`verify_vouch_response`, duplicate-voucher checks in the initiator
+/// panel) errors; the variant tells the caller which layer rejected.
+///
+/// `#[non_exhaustive]` keeps the wire ABI stable — older decoders see
+/// a fallback variant when a new rejection reason ships.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum CeremonyError {
+    /// Response's `request_id` does not match the id of any request
+    /// the initiator issued. Typical cause: response carried over
+    /// from an aborted-and-restarted ceremony, or a spoofed payload.
+    #[error("vouch response carries unknown request_id")]
+    RequestIdMismatch,
+    /// Response's signed `member_joined_at` is more than
+    /// `CEREMONY_RESPONSE_FRESHNESS_SECS` seconds old.
+    #[error("vouch response is stale ({age_seconds}s old)")]
+    ResponseStale { age_seconds: u64 },
+    /// Envelope version byte not recognised by this build.
+    #[error("unsupported ceremony payload version {version}")]
+    UnsupportedVersion { version: u8 },
+    /// Response's signature binds a different community fingerprint
+    /// than the request's. Can only happen if the voucher device
+    /// tampered with the tentative before signing.
+    #[error("vouch response fingerprint does not match request")]
+    FingerprintMismatch,
+    /// The initiator already holds a response from this voucher for
+    /// this slot. Eager check in the Ceremony panel before handing
+    /// off to `assemble_community`.
+    #[error("duplicate vouch from {voucher}")]
+    DuplicateVoucher { voucher: Did },
+    /// `response.vouch.voucher_did` does not correspond to any of the
+    /// roster slots in the ceremony. Emitted by the marshaling helper
+    /// when grouping responses by member.
+    #[error("response refers to unknown member slot {member}")]
+    UnknownSlot { member: Did },
+    /// The voucher's device DID does not match
+    /// `request.voucher_did`. Raised by `sign_vouch_response` when the
+    /// signer attempts to sign a request addressed to someone else.
+    #[error("voucher mismatch: request addressed {expected}, signer is {actual}")]
+    VoucherMismatch { expected: Did, actual: Did },
+    /// Signature verification failed or quorum unsatisfied — bubbled
+    /// up from the Laboratory.
+    #[error("community verification failed: {0}")]
+    Verify(#[from] CommunityVerifyError),
+    /// Assembly-side invariant violation — bubbled up from
+    /// `assemble_community`. Carries the full Laboratory error so the
+    /// panel can render a specific operator message (e.g. "payload
+    /// exceeds QR budget", "expires_at too far"). Distinct from
+    /// `Verify` because assembly errors include QR-budget and
+    /// expiration-window violations that signature verification alone
+    /// never raises.
+    #[error("community assembly failed: {0}")]
+    Assembly(#[from] CommunityAssemblyError),
+    /// Post-assembly import into the Stronghold vault failed. The
+    /// Laboratory produced a valid `Community` but the Hands-layer
+    /// bookkeeping rejected it — typically an unreachable invariant
+    /// (signatures passed verify but the vault is wedged, or the
+    /// in-memory routing table is inconsistent). Carries the
+    /// `Display` rendering of the underlying `StrongholdError` as a
+    /// human-readable reason; the concrete error type lives in the
+    /// Hands layer and is not serialized across the FFI boundary.
+    /// Distinct from `Verify` so the panel never has to fabricate
+    /// fake `CommunityId` / `Did` values to fit a type-shape that
+    /// doesn't apply to import-time failures.
+    #[error("community import into Stronghold failed: {reason}")]
+    ImportFailed { reason: String },
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -631,5 +893,182 @@ mod tests {
         assert!(!community.is_expired(PhalanxTimestamp(999)));
         assert!(community.is_expired(PhalanxTimestamp(1000)));
         assert!(community.is_expired(PhalanxTimestamp(1001)));
+    }
+
+    // ── Ceremony Noun tests ────────────────────────────────────────────
+
+    fn sample_tentative() -> CommunityId {
+        CommunityId([0x42; 32])
+    }
+
+    /// Fixed nonce used across the sample_request helper and
+    /// equality-roundtrip tests. Pinned to a known value so the
+    /// roundtrip tests are deterministic; separate tests below cover
+    /// the randomness of `CeremonyNonce::random`.
+    fn sample_nonce() -> CeremonyNonce {
+        CeremonyNonce([0x11; 16])
+    }
+
+    fn sample_request() -> VouchRequest {
+        let tentative = sample_tentative();
+        let nonce = sample_nonce();
+        let voucher = Did::new("did:key:zVoucher");
+        let member = Did::new("did:key:zMember");
+        VouchRequest {
+            request_id: VouchRequest::compute_id(&tentative, &nonce, &voucher, &member),
+            tentative_fingerprint: tentative,
+            name: PetName::new("ACLU Portland").unwrap(),
+            quorum: Quorum::new(2).unwrap(),
+            members: vec![member.clone(), voucher.clone(), Did::new("did:key:zC")],
+            member_did: member,
+            voucher_did: voucher,
+            issued_at: PhalanxTimestamp(1_000),
+            member_joined_at: PhalanxTimestamp(1_000),
+            ceremony_nonce: nonce,
+        }
+    }
+
+    #[test]
+    fn vouch_request_id_is_deterministic_and_domain_separated() {
+        let tentative = sample_tentative();
+        let nonce = sample_nonce();
+        let voucher = Did::new("did:key:zVoucher");
+        let member = Did::new("did:key:zMember");
+        let id1 = VouchRequest::compute_id(&tentative, &nonce, &voucher, &member);
+        let id2 = VouchRequest::compute_id(&tentative, &nonce, &voucher, &member);
+        assert_eq!(id1, id2, "deterministic under identical inputs");
+
+        // Swapping voucher/member produces a different id — catches
+        // collisions in the length-prefix scheme.
+        let swapped = VouchRequest::compute_id(&tentative, &nonce, &member, &voucher);
+        assert_ne!(id1, swapped, "member/voucher swap must not collide");
+    }
+
+    #[test]
+    fn vouch_request_id_nonce_disambiguates_restarted_ceremonies() {
+        // Abort-and-restart: same (tentative, voucher, member), but a
+        // fresh nonce on the restart. The request_ids must differ so
+        // the initiator's dedup table cannot confuse a replayed
+        // aborted-run response with a fresh signature.
+        let tentative = sample_tentative();
+        let voucher = Did::new("did:key:zVoucher");
+        let member = Did::new("did:key:zMember");
+        let nonce_a = CeremonyNonce([0x01; 16]);
+        let nonce_b = CeremonyNonce([0x02; 16]);
+        let id_a = VouchRequest::compute_id(&tentative, &nonce_a, &voucher, &member);
+        let id_b = VouchRequest::compute_id(&tentative, &nonce_b, &voucher, &member);
+        assert_ne!(id_a, id_b, "distinct nonces must produce distinct ids");
+    }
+
+    #[test]
+    fn ceremony_nonce_random_produces_distinct_values() {
+        // Not a statistical test — just a sanity check that
+        // `CeremonyNonce::random` actually reads entropy each call.
+        // Two back-to-back calls colliding on 128 bits is
+        // astronomically unlikely; a failure almost certainly means
+        // the implementation returns a constant.
+        let n1 = CeremonyNonce::random();
+        let n2 = CeremonyNonce::random();
+        assert_ne!(n1, n2);
+    }
+
+    #[test]
+    fn vouch_request_id_length_prefix_prevents_collision() {
+        // Distinct (voucher, member) pairs whose naive concatenation
+        // would overlap must produce distinct ids — validates the
+        // length prefix in compute_id.
+        let t = sample_tentative();
+        let nonce = sample_nonce();
+        let a1 = Did::new("did:key:ab");
+        let b1 = Did::new("did:key:c");
+        let a2 = Did::new("did:key:a");
+        let b2 = Did::new("did:key:bc");
+        assert_ne!(
+            VouchRequest::compute_id(&t, &nonce, &a1, &b1),
+            VouchRequest::compute_id(&t, &nonce, &a2, &b2),
+        );
+    }
+
+    #[test]
+    fn vouch_request_postcard_roundtrip() {
+        let req = sample_request();
+        let bytes = postcard::to_allocvec(&req).unwrap();
+        let decoded: VouchRequest = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn vouch_request_preview_postcard_roundtrip() {
+        let req = sample_request();
+        let preview = VouchRequestPreview {
+            request_id: req.request_id,
+            tentative_fingerprint: req.tentative_fingerprint,
+            name: req.name.clone(),
+            quorum: req.quorum,
+            members: req.members.clone(),
+            member_did: req.member_did.clone(),
+            issued_at: req.issued_at,
+            member_joined_at: req.member_joined_at,
+        };
+        let bytes = postcard::to_allocvec(&preview).unwrap();
+        let decoded: VouchRequestPreview = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, preview);
+    }
+
+    #[test]
+    fn vouch_response_postcard_roundtrip() {
+        let response = VouchResponse {
+            request_id: [0xAB; 32],
+            vouch: Vouch {
+                voucher_did: Did::new("did:key:zV"),
+                signature: VouchSignature::new([0xCC; 64]),
+            },
+        };
+        let bytes = postcard::to_allocvec(&response).unwrap();
+        let decoded: VouchResponse = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, response);
+    }
+
+    #[test]
+    fn ceremony_error_variants_serialize() {
+        let variants = vec![
+            CeremonyError::RequestIdMismatch,
+            CeremonyError::ResponseStale { age_seconds: 4_000 },
+            CeremonyError::UnsupportedVersion { version: 0x02 },
+            CeremonyError::FingerprintMismatch,
+            CeremonyError::DuplicateVoucher {
+                voucher: Did::new("did:key:zV"),
+            },
+            CeremonyError::UnknownSlot {
+                member: Did::new("did:key:zM"),
+            },
+            CeremonyError::VoucherMismatch {
+                expected: Did::new("did:key:zE"),
+                actual: Did::new("did:key:zA"),
+            },
+            CeremonyError::Verify(CommunityVerifyError::UnsupportedVersion { version: 0xFF }),
+            CeremonyError::Assembly(CommunityAssemblyError::QrBudgetExceeded { bytes: 4096 }),
+            CeremonyError::ImportFailed {
+                reason: "vault wedged".to_owned(),
+            },
+        ];
+        for v in variants {
+            let bytes = postcard::to_allocvec(&v).unwrap();
+            let decoded: CeremonyError = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(decoded, v);
+        }
+    }
+
+    #[test]
+    fn ceremony_freshness_window_matches_laboratory() {
+        // The ceremony window must not exceed the Laboratory's
+        // assembly freshness window — otherwise a response that
+        // verifies at ceremony time could fail at assembly time.
+        // The Laboratory constant is defined in phalanx-forensics;
+        // we duplicate the expected value here rather than pull a
+        // cross-crate dependency into a Dictionary test. Keep these
+        // two constants in lock-step.
+        const EXPECTED_LABORATORY_WINDOW_SECS: u64 = 3_600;
+        assert!(CEREMONY_RESPONSE_FRESHNESS_SECS <= EXPECTED_LABORATORY_WINDOW_SECS);
     }
 }
