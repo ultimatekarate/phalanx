@@ -1341,4 +1341,78 @@ mod tests {
 
         assert!(verify_ble_response(&challenge, &response).is_err());
     }
+
+    // ── DID resolution hardening ────────────────────────────────────────
+
+    #[test]
+    fn resolve_did_public_key_roundtrips_ephemeral_identity() {
+        // Positive path: an identity's own DID must resolve to its own
+        // verifying key bytes. If this drifts, locally-signed envelopes
+        // become unverifiable on the mesh.
+        use phalanx_proto::prelude::PhalanxIdentity;
+        let identity = PhalanxIdentity::new_ephemeral();
+        let recovered = resolve_did_public_key(&identity.did)
+            .expect("ephemeral identity's own DID must resolve");
+        assert_eq!(recovered, identity.keypair.verifying_key().to_bytes());
+    }
+
+    #[test]
+    fn resolve_did_public_key_rejects_missing_did_key_prefix() {
+        // A `did:web:` or bare string must not be accepted by a `did:key:`-only resolver.
+        let bad = Did("did:web:example.com".into());
+        assert!(matches!(
+            resolve_did_public_key(&bad),
+            Err(CryptoError::DidResolutionFailure)
+        ));
+    }
+
+    #[test]
+    fn resolve_did_public_key_rejects_missing_z_multibase() {
+        // Non-`z` multibase (e.g. `m` for base64) is not supported by this resolver.
+        let bad = Did("did:key:mABCDEF".into());
+        assert!(matches!(
+            resolve_did_public_key(&bad),
+            Err(CryptoError::DidResolutionFailure)
+        ));
+    }
+
+    #[test]
+    fn resolve_did_public_key_rejects_wrong_multicodec() {
+        // Multicodec 0xec,0x01 is X25519, not Ed25519 (0xed,0x01). A resolver
+        // that accepts the wrong codec would let X25519 keys masquerade as
+        // Ed25519 signers.
+        let mut wrong = vec![0xec, 0x01];
+        wrong.extend_from_slice(&[7u8; 32]);
+        let encoded = bs58::encode(&wrong).into_string();
+        let bad = Did(format!("did:key:z{encoded}"));
+        assert!(matches!(
+            resolve_did_public_key(&bad),
+            Err(CryptoError::DidResolutionFailure)
+        ));
+    }
+
+    #[test]
+    fn resolve_did_public_key_rejects_wrong_key_length() {
+        // Multicodec header is correct but the key bytes are 16 instead of 32.
+        // Silent acceptance here would write a truncated buffer.
+        let mut bad_bytes = vec![0xed, 0x01];
+        bad_bytes.extend_from_slice(&[3u8; 16]);
+        let encoded = bs58::encode(&bad_bytes).into_string();
+        let bad = Did(format!("did:key:z{encoded}"));
+        assert!(matches!(
+            resolve_did_public_key(&bad),
+            Err(CryptoError::DidResolutionFailure)
+        ));
+    }
+
+    #[test]
+    fn resolve_did_public_key_rejects_non_base58_payload() {
+        // Valid prefix, valid `z`, but the payload contains characters that
+        // Base58 does not accept (e.g. `0`, `O`, `l`). Must fail cleanly.
+        let bad = Did("did:key:z0OIl".into());
+        assert!(matches!(
+            resolve_did_public_key(&bad),
+            Err(CryptoError::DidResolutionFailure)
+        ));
+    }
 }

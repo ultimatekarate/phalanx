@@ -745,4 +745,77 @@ mod tests {
             .try_allocate(mock_peer(), TrustLevel::Verified, SystemStress::Nominal)
             .is_ok());
     }
+
+    // ── Additional coverage: cooldown + should_verify_signature ──────────
+
+    #[test]
+    fn cooldown_blocks_recovery_for_recent_offense() {
+        // A non-blacklisted peer with a fresh offense must NOT recover until
+        // the 60-second cooldown elapses. Without this gate, a misbehaving
+        // peer could immediately regain reputation after a single offense.
+        let mut peers = HashMap::<Did, PeerRecord>::new();
+        let did = Did("recent-offender".to_string());
+        let mut clock = MockClock::new(1000);
+        let offense_time = clock.now();
+
+        peers.insert(
+            did.clone(),
+            PeerRecord {
+                reputation: PeerReputation {
+                    score: 40,
+                    is_blacklisted: false,
+                    last_update_secs: MonotonicClock::default(),
+                    last_offense_secs: offense_time,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        // Advance 30s — less than the 60s cooldown
+        clock.tick(30);
+        TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 1, 10);
+        assert_eq!(
+            peers[&did].reputation.score, 40,
+            "Score must not recover inside the 60s cooldown window"
+        );
+
+        // Advance past the cooldown — one interval of recovery now permitted.
+        // Quadratic factor at score=40 is (40/100)^2 = 0.16, step clamps to max(1, floor(10 * 0.16)) = 1.
+        clock.tick(35); // total 65s since offense
+        TrustArbiter::accumulate_reputation(&mut peers, clock.now(), 1, 10);
+        assert!(
+            peers[&did].reputation.score > 40,
+            "Score must recover once cooldown has elapsed, got {}",
+            peers[&did].reputation.score
+        );
+    }
+
+    #[test]
+    fn should_verify_signature_true_for_non_blacklisted_peer() {
+        // Forensic zero-trust: the only gate on signature verification is the
+        // blacklist. Any non-blacklisted peer's signature MUST be verified.
+        let record = PeerRecord {
+            reputation: PeerReputation {
+                score: 5,
+                is_blacklisted: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(TrustArbiter::should_verify_signature(&record));
+    }
+
+    #[test]
+    fn should_verify_signature_false_for_blacklisted_peer() {
+        let record = PeerRecord {
+            reputation: PeerReputation {
+                score: -5,
+                is_blacklisted: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!TrustArbiter::should_verify_signature(&record));
+    }
 }

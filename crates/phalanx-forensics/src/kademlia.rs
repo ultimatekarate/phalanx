@@ -270,4 +270,51 @@ mod tests {
             Err(ShardError::InvalidConfiguration(_))
         ));
     }
+
+    // ── N1 FIX regression guards ────────────────────────────────────────
+
+    #[test]
+    fn verify_ownership_accepts_exact_prefix_match() {
+        // Happy path: a payload that starts with the expected owner prefix
+        // must be accepted.
+        let payload = DhtPayload::new(
+            b"did:key:zAlice|shard-42".to_vec(),
+            PayloadKind::ShardPointer,
+            None,
+        );
+        assert!(payload.verify_ownership("did:key:zAlice"));
+    }
+
+    #[test]
+    fn verify_ownership_rejects_substring_injection_attack() {
+        // The N1 hardening: an attacker embeds the victim's DID *inside*
+        // the payload rather than at the start. Under the old `contains()`
+        // check this bypassed ownership. Under `starts_with()` it must fail.
+        let attack = DhtPayload::new(
+            b"did:key:zAttacker|stuffed:did:key:zAlice|shard".to_vec(),
+            PayloadKind::ShardPointer,
+            None,
+        );
+        assert!(
+            !attack.verify_ownership("did:key:zAlice"),
+            "substring injection must not pass ownership check"
+        );
+    }
+
+    #[test]
+    fn verify_ownership_rejects_empty_payload() {
+        // Empty payload has no owner to verify. Must fail closed.
+        let empty = DhtPayload::new(vec![], PayloadKind::ShardPointer, None);
+        assert!(!empty.verify_ownership("did:key:zAlice"));
+    }
+
+    #[test]
+    fn verify_ownership_rejects_unrelated_prefix() {
+        let payload = DhtPayload::new(
+            b"did:key:zAlice|data".to_vec(),
+            PayloadKind::ShardPointer,
+            None,
+        );
+        assert!(!payload.verify_ownership("did:key:zBob"));
+    }
 }

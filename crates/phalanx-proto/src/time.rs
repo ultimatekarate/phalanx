@@ -143,3 +143,140 @@ impl MonotonicClock {
         self.0.saturating_sub(earlier.0)
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
+mod causality_tests {
+    use super::*;
+    use crate::evidence::{Evidence, ForensicGap, StorageSequence, WitnessEnvelope};
+    use crate::identity::{NetworkId, PhalanxIdentity, RecordingId};
+    use crate::revocation::RevocationKey;
+
+    fn stub_envelope(
+        prev_hash: Option<SignatureHash>,
+        evidence_hash_first_byte: u8,
+    ) -> WitnessEnvelope {
+        let mut evidence_hash = [0u8; 32];
+        evidence_hash[0] = evidence_hash_first_byte;
+        WitnessEnvelope {
+            evidence: Evidence::Gap(ForensicGap {
+                recording_id: RecordingId::new("causality-probe"),
+                start_seq: StorageSequence(0),
+                end_seq: StorageSequence(1),
+                detected_at: PhalanxTimestamp::from_millis(1_700_000_000_000),
+            }),
+            evidence_hash,
+            witness_peer_id: NetworkId("test-peer".into()),
+            witness_signature: vec![],
+            did: PhalanxIdentity::new_ephemeral().did,
+            prev_hash,
+            revocation_key: RevocationKey::default(),
+        }
+    }
+
+    fn fresh_session() -> CausalitySession {
+        let identity = Arc::new(PhalanxIdentity::new_ephemeral());
+        CausalitySession::new(identity, NetworkId("peer-under-test".into()))
+    }
+
+    #[test]
+    fn genesis_envelope_is_accepted_and_advances_head() {
+        let mut session = fresh_session();
+        assert!(session.last_hash.is_none());
+
+        let env = stub_envelope(None, 0xAA);
+        session
+            .verify_next(&env)
+            .expect("genesis envelope must be accepted");
+
+        assert_eq!(
+            session.last_hash,
+            Some(SignatureHash(env.evidence_hash)),
+            "verify_next must promote evidence_hash to chain head"
+        );
+    }
+
+    #[test]
+    fn sequential_envelope_matching_head_is_accepted() {
+        let mut session = fresh_session();
+        let genesis = stub_envelope(None, 0x11);
+        session.verify_next(&genesis).expect("genesis ok");
+
+        let head = SignatureHash(genesis.evidence_hash);
+        let next = stub_envelope(Some(head), 0x22);
+        session
+            .verify_next(&next)
+            .expect("sequential chain must be accepted");
+
+        assert_eq!(session.last_hash, Some(SignatureHash(next.evidence_hash)));
+    }
+
+    #[test]
+    fn mismatched_prev_hash_returns_causality_break() {
+        let mut session = fresh_session();
+        let genesis = stub_envelope(None, 0x33);
+        session.verify_next(&genesis).expect("genesis ok");
+
+        // Forged envelope claims to follow a hash that was never our head.
+        let wrong_prev = SignatureHash([0xFF; 32]);
+        let forged = stub_envelope(Some(wrong_prev), 0x44);
+        let err = session
+            .verify_next(&forged)
+            .expect_err("mismatched prev_hash must be rejected");
+        assert!(
+            matches!(err, TimeError::CausalityBreak { .. }),
+            "expected CausalityBreak, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn non_genesis_into_fresh_session_is_rejected() {
+        // A fresh session (last_hash = None) must reject an envelope that
+        // claims to follow some earlier hash. Without this, an attacker can
+        // splice fabricated chains into a newly started session.
+        let mut session = fresh_session();
+        let intrusive = stub_envelope(Some(SignatureHash([0x77; 32])), 0x88);
+        let err = session
+            .verify_next(&intrusive)
+            .expect_err("non-genesis prev into empty session must be rejected");
+        assert!(matches!(err, TimeError::CausalityBreak { .. }));
+    }
+
+    #[test]
+    fn genesis_envelope_into_established_session_is_rejected() {
+        // Once the chain is established, an envelope with prev_hash=None
+        // would effectively re-genesis the session. Must fail.
+        let mut session = fresh_session();
+        session
+            .verify_next(&stub_envelope(None, 0x01))
+            .expect("genesis ok");
+
+        let regenesis = stub_envelope(None, 0x02);
+        let err = session
+            .verify_next(&regenesis)
+            .expect_err("second genesis must be rejected");
+        assert!(matches!(err, TimeError::CausalityBreak { .. }));
+    }
+
+    #[test]
+    fn monotonic_elapsed_since_is_correct_forward() {
+        let earlier = MonotonicClock(100);
+        let later = MonotonicClock(250);
+        assert_eq!(later.elapsed_since(earlier), 150);
+    }
+
+    #[test]
+    fn monotonic_elapsed_since_saturates_on_underflow() {
+        // saturating_sub is the deliberate behaviour: `elapsed_since` of a
+        // future moment must return 0, not panic or wrap. Without this,
+        // a tick ordering bug would crash the cooldown machinery.
+        let earlier = MonotonicClock(100);
+        let later = MonotonicClock(250);
+        assert_eq!(earlier.elapsed_since(later), 0);
+    }
+}

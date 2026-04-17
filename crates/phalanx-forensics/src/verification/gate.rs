@@ -743,6 +743,89 @@ mod tests {
     }
 
     #[test]
+    fn unmarshal_rejects_input_over_64mib() {
+        // Gate 0a: amplification-attack defence. A buffer just over the 64 MiB
+        // cap must be refused BEFORE postcard touches it, otherwise a hostile
+        // peer could force us to allocate arbitrary memory during decode.
+        let oversized = vec![0u8; MAX_UNMARSHAL_INPUT_BYTES + 1];
+        let result: Result<u64, ShardError> = unmarshal(&oversized, "oversized_test");
+        match result {
+            Err(ShardError::SerializationError(msg)) => {
+                assert!(
+                    msg.contains("exceeds unmarshal limit"),
+                    "error message should identify the size-gate rejection, got: {msg}"
+                );
+            }
+            other => panic!("expected SerializationError on oversized input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unmarshal_checked_enforces_wire_bounds_after_decode() {
+        // Gate 0b: build a postcard blob for a RevocationToken with an
+        // oversized signature vec, then confirm unmarshal_checked returns a
+        // value whose bounds have been enforced (signature truncated to 64).
+        use phalanx_proto::identity::RecordingId;
+        use phalanx_proto::revocation::{RevocationKey, RevocationToken};
+        use phalanx_proto::time::PhalanxTimestamp;
+
+        let oversized = RevocationToken {
+            recording_id: RecordingId::new("wire-bound-probe"),
+            issued_at: PhalanxTimestamp::from_millis(1_700_000_000_000),
+            nonce: [3u8; 32],
+            signature: vec![0u8; 256], // 4x the Ed25519 size
+            revocation_key: RevocationKey([4u8; 32]),
+        };
+        let bytes = postcard::to_allocvec(&oversized).expect("serialize oversized");
+
+        let checked: RevocationToken =
+            unmarshal_checked(&bytes, "oversized_revocation").expect("checked decode ok");
+        assert_eq!(
+            checked.signature.len(),
+            64,
+            "unmarshal_checked must invoke enforce_wire_bounds"
+        );
+    }
+
+    #[test]
+    fn marshal_then_unmarshal_checked_roundtrips_valid_value() {
+        // Happy-path guard: a valid value (inside all bounds) must survive
+        // the round trip through marshal → unmarshal_checked unchanged.
+        use phalanx_proto::identity::RecordingId;
+        use phalanx_proto::revocation::{RevocationKey, RevocationToken};
+        use phalanx_proto::time::PhalanxTimestamp;
+
+        let original = RevocationToken {
+            recording_id: RecordingId::new("roundtrip"),
+            issued_at: PhalanxTimestamp::from_millis(1_700_000_000_000),
+            nonce: [9u8; 32],
+            signature: vec![0xAB; 64],
+            revocation_key: RevocationKey([5u8; 32]),
+        };
+
+        let bytes = marshal(&original, "roundtrip").expect("marshal ok");
+        let recovered: RevocationToken =
+            unmarshal_checked(&bytes, "roundtrip").expect("unmarshal_checked ok");
+
+        assert_eq!(recovered.recording_id, original.recording_id);
+        assert_eq!(recovered.nonce, original.nonce);
+        assert_eq!(recovered.signature, original.signature);
+        assert_eq!(recovered.revocation_key.0, original.revocation_key.0);
+    }
+
+    #[test]
+    fn unmarshal_rejects_malformed_postcard_data() {
+        // Corrupt bytes must fail cleanly with SerializationError — never panic.
+        let junk = vec![0xFFu8; 7];
+        let result: Result<phalanx_proto::evidence::ShardChunk, ShardError> =
+            unmarshal(&junk, "malformed");
+        assert!(
+            matches!(result, Err(ShardError::SerializationError(_))),
+            "malformed postcard input must produce SerializationError, got {result:?}"
+        );
+    }
+
+    #[test]
     fn test_lens_gate_auto_exposure_scaling() {
         // The same sensor fingerprint at different exposure levels should be
         // treated consistently. A bright frame naturally has higher raw metrics.

@@ -60,6 +60,8 @@ A two-generation probabilistic filter rejects evidence that has been seen recent
 
 - **No cross-session tracking.** The filter is ephemeral and never persisted. Seizure of a powered-off device reveals no history of which evidence was processed.
 
+- **Accepted false-positive surface: signature-mangle filter poisoning.** The filter is keyed on `evidence_hash = blake3(evidence)`, which is independent of the signature field. An attacker who scrapes an honest envelope's bytes off the gossip wire can retransmit them with a mangled signature (same `evidence_hash`, fails `verify_envelope`). The ordering in `handle_ingest` (filter-check → disk-append → filter-insert → verify) populates the filter before verification runs, so the poisoned hash lands in the filter and the honest copy is rejected as a "replay" when it arrives. **Blast radius is local-node only, bounded to one bloom-rotation cycle.** Other peers re-verify on receive, so gossip still delivers the honest copy to the wider network, and the next rotation clears the poisoned entry locally. This is a deliberate performance tradeoff — flipping the order to verify-before-filter would cost a full ed25519 verify per duplicate-hash arrival on the hot path (the common case for legitimate gossip, where peers X and Y both forward the same honest shard). The choice was made during the C2 audit round; do not reorder without updating this section.
+
 **Files:** `phalanx-forensics/src/verification/bloom.rs`, `phalanx-node/src/actors/storage.rs` (seed_replay_filter)
 
 ---
@@ -185,7 +187,9 @@ Three traffic governors translate integral pressure into admission decisions:
 
 - **Ghost key cleanup.** On restart, the storage actor scans for revoked recordings that still have content keys (from a partial crash) and destroys them.
 
-**Files:** `phalanx-forensics/src/trust/revocation.rs`, `phalanx-ffi/src/forget.rs`, `phalanx-node/src/actors/storage.rs` (cleanup_ghost_keys)
+- **Audit note — `handle_revoke` trust transfer.** The `handle_revoke` path in `phalanx-node/src/actors/storage.rs` reads `envelopes.first().revocation_key` without re-verifying the envelope's ed25519 signature, and `.first()` returns an arbitrary shard from the local log. This is **intentionally safe**: the revocation key embedded in every envelope is a public-key commitment to a BIP39-derived keypair whose private half lives only in the user's mnemonic (off-device after identity creation). Cryptographic authorization lives in `verify_revocation_token` — the token must be signed by the mnemonic-derived private key, which an attacker cannot synthesize. The equality check against `envelopes.first().revocation_key` is a *consistency gate*, not the trust anchor; even if `.first()` selects a hypothetically-poisoned shard, no matching token can exist without the mnemonic. Do not "harden" this lookup by adding envelope re-verification — it would add cost without closing any attack surface.
+
+**Files:** `phalanx-forensics/src/trust/revocation.rs`, `phalanx-ffi/src/forget.rs`, `phalanx-node/src/actors/storage.rs` (cleanup_ghost_keys, handle_revoke)
 
 ---
 

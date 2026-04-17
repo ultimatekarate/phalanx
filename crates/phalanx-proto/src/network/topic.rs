@@ -96,3 +96,46 @@ impl AsRef<str> for MeshTopic {
         &self.0
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_normalizes_mixed_case() {
+        let topic = MeshTopic::new("Video/1.0.0");
+        assert_eq!(topic.as_str(), "/phalanx/video/1.0.0");
+    }
+
+    #[test]
+    fn new_deduplicates_phalanx_prefix() {
+        // Input that already carries the phalanx/ prefix must not double-prefix.
+        let topic = MeshTopic::new("/phalanx/custom");
+        assert_eq!(topic.as_str(), "/phalanx/custom");
+    }
+
+    #[test]
+    fn new_strips_leading_slashes() {
+        // Multiple leading slashes should all be trimmed before re-prefixing.
+        let topic = MeshTopic::new("///revocation");
+        assert_eq!(topic.as_str(), "/phalanx/revocation");
+    }
+
+    #[test]
+    fn well_known_topic_values_are_stable() {
+        // Regression guard: these strings are wire-visible. Changing them
+        // breaks compatibility with every peer on the mesh.
+        assert_eq!(MeshTopic::video().as_str(), "/phalanx/video/1.0.0");
+        assert_eq!(
+            MeshTopic::revocation().as_str(),
+            "/phalanx/revocation/1.0.0"
+        );
+        assert_eq!(MeshTopic::mesh().as_str(), "/phalanx/mesh/1.0.0");
+    }
+}

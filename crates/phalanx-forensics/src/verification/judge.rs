@@ -306,4 +306,95 @@ mod tests {
 
         info!("Forensic Boundary: Successfully verified that Gate 3 and Gate 4 block tampered evidence.");
     }
+
+    // ── PayloadCipher: encryption state machine ─────────────────────────
+
+    use phalanx_proto::crypto::SymmetricKey as TestSymKey;
+
+    fn test_key() -> TestSymKey {
+        TestSymKey::from_bytes([0x5Au8; 32])
+    }
+
+    #[test]
+    fn payload_cipher_clear_to_encrypt_then_reveal_roundtrips() {
+        // Round-trip: Clear → apply_encryption → reveal must return original bytes.
+        // If the cipher or nonce handling drifted, decryption would produce junk.
+        let plaintext = b"evidence-bytes-under-test".to_vec();
+        let mut payload = DataPayload::Clear(plaintext.clone());
+        payload
+            .apply_encryption(&test_key())
+            .expect("clear-path encryption must succeed");
+
+        assert!(
+            matches!(payload, DataPayload::Encrypted { .. }),
+            "apply_encryption must promote Clear to Encrypted"
+        );
+        let revealed = payload.reveal(&test_key()).expect("reveal must succeed");
+        assert_eq!(revealed, plaintext);
+    }
+
+    #[test]
+    fn payload_cipher_apply_encryption_is_idempotent_on_already_encrypted() {
+        // The explicit idempotence guard (judge.rs line 51) — re-encrypting an
+        // already-encrypted payload must be a no-op, not a double-encrypt.
+        // Without this, a buggy pipeline re-run would corrupt evidence.
+        let mut payload = DataPayload::Clear(b"once-only".to_vec());
+        payload
+            .apply_encryption(&test_key())
+            .expect("first encrypt");
+
+        // Snapshot the encrypted payload's ciphertext.
+        let first_ciphertext = match &payload {
+            DataPayload::Encrypted { ciphertext, .. } => ciphertext.clone(),
+            other => panic!("expected Encrypted, got {other:?}"),
+        };
+
+        // Re-apply encryption — must be a no-op.
+        payload
+            .apply_encryption(&test_key())
+            .expect("idempotent second encrypt");
+        let second_ciphertext = match &payload {
+            DataPayload::Encrypted { ciphertext, .. } => ciphertext.clone(),
+            other => panic!("expected Encrypted after second call, got {other:?}"),
+        };
+        assert_eq!(
+            first_ciphertext, second_ciphertext,
+            "second apply_encryption must leave Encrypted variant untouched"
+        );
+    }
+
+    #[test]
+    fn payload_cipher_rejects_missing_variant() {
+        // A `Missing` payload has no plaintext to encrypt — must fail cleanly
+        // rather than silently producing an Encrypted(empty) value.
+        let mut payload = DataPayload::Missing;
+        let err = payload
+            .apply_encryption(&test_key())
+            .expect_err("Missing payload must not encrypt");
+        let _ = err; // variant shape is the only guarantee we rely on here.
+    }
+
+    #[test]
+    fn payload_cipher_reveal_with_wrong_key_fails() {
+        // AEAD tag verification must catch a wrong decryption key.
+        let mut payload = DataPayload::Clear(b"secret".to_vec());
+        payload.apply_encryption(&test_key()).expect("encrypt ok");
+
+        let wrong_key = TestSymKey::from_bytes([0xA5u8; 32]);
+        let result = payload.reveal(&wrong_key);
+        assert!(
+            result.is_err(),
+            "reveal with wrong key must fail, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn payload_cipher_reveal_on_clear_returns_underlying_bytes() {
+        // Reveal on a Clear payload is zero-op pass-through. If this path
+        // drifts, end-to-end consumers would silently receive empty bytes.
+        let bytes = b"already-clear".to_vec();
+        let payload = DataPayload::Clear(bytes.clone());
+        let revealed = payload.reveal(&test_key()).expect("reveal on Clear");
+        assert_eq!(revealed, bytes);
+    }
 }

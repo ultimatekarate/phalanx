@@ -84,6 +84,52 @@ pub enum StorageAck {
 ///
 /// This is a Noun (capability contract) — implementations live in
 /// `phalanx-node` (FileJournal) and test doubles.
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
+mod handover_proof_tests {
+    use super::*;
+
+    fn sample_handover_proof(sequence: u32, anchor_first_byte: u8) -> HandoverProof {
+        let mut anchor_bytes = [0u8; 32];
+        anchor_bytes[0] = anchor_first_byte;
+        HandoverProof {
+            recording_id: RecordingId::new("rec-handover"),
+            sequence_id: StorageSequence(sequence),
+            old_did: Did("did:key:old".to_string()),
+            new_did: Did("did:key:new".to_string()),
+            anchor_hash: SignatureHash(anchor_bytes),
+            old_signature: Signature::from_bytes(&[1u8; 64]),
+            new_signature: Signature::from_bytes(&[2u8; 64]),
+        }
+    }
+
+    #[test]
+    fn handover_proof_postcard_roundtrip_preserves_all_fields() {
+        let original = sample_handover_proof(42, 0xAB);
+        let bytes = postcard::to_allocvec(&original).expect("serialize HandoverProof");
+        let recovered: HandoverProof =
+            postcard::from_bytes(&bytes).expect("deserialize HandoverProof");
+        assert_eq!(recovered, original);
+    }
+
+    #[test]
+    fn handover_proof_with_different_sequence_ids_serialize_distinctly() {
+        // Ordering-sensitivity guard: two proofs identical except for sequence_id
+        // must produce different wire bytes. If they collided, evidence chain
+        // replay would be undetectable.
+        let a = sample_handover_proof(1, 0xCD);
+        let b = sample_handover_proof(2, 0xCD);
+        let bytes_a = postcard::to_allocvec(&a).expect("serialize a");
+        let bytes_b = postcard::to_allocvec(&b).expect("serialize b");
+        assert_ne!(bytes_a, bytes_b);
+    }
+}
+
 #[async_trait]
 pub trait TransientJournal: Send + Sync + 'static {
     // --- WAL (Write-Ahead Log) Verbs ---

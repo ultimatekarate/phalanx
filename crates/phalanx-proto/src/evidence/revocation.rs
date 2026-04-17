@@ -84,3 +84,64 @@ pub enum RevocationError {
     #[error("Revocation not supported: recording has empty revocation key (legacy/ephemeral)")]
     NotSupported,
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+
+    fn token_with_signature(signature: Vec<u8>, recording_id: &str) -> RevocationToken {
+        RevocationToken {
+            recording_id: RecordingId::new(recording_id),
+            issued_at: PhalanxTimestamp::from_millis(1_700_000_000_000),
+            nonce: [7u8; 32],
+            signature,
+            revocation_key: RevocationKey([1u8; 32]),
+        }
+    }
+
+    #[test]
+    fn enforce_wire_bounds_truncates_oversized_signature() {
+        // Gate 0b contract: signatures longer than the Ed25519 size must be clamped,
+        // otherwise memory amplification on the wire is possible.
+        let mut token = token_with_signature(vec![0u8; 128], "over-sized");
+        token.enforce_wire_bounds();
+        assert_eq!(token.signature.len(), 64);
+    }
+
+    #[test]
+    fn enforce_wire_bounds_is_idempotent_on_valid_input() {
+        // Calling twice must not corrupt an already-valid token.
+        let mut token = token_with_signature(vec![0u8; 64], "valid");
+        token.enforce_wire_bounds();
+        let first_signature = token.signature.clone();
+        let first_recording = token.recording_id.clone();
+        token.enforce_wire_bounds();
+        assert_eq!(token.signature, first_signature);
+        assert_eq!(token.recording_id, first_recording);
+    }
+
+    #[test]
+    fn enforce_wire_bounds_replaces_empty_recording_id() {
+        // An empty recording_id is structurally invalid: RevocationToken must
+        // always name the recording it destroys.
+        let mut token = token_with_signature(vec![0u8; 64], "");
+        token.enforce_wire_bounds();
+        assert_eq!(token.recording_id.as_str(), "_invalid_");
+    }
+
+    #[test]
+    fn enforce_wire_bounds_does_not_grow_short_signature() {
+        // The bound is one-sided: too long is truncated, too short stays short
+        // (will fail signature verification later, which is the right place
+        // to reject it — Gate 0b is about structural caps, not content validity).
+        let mut token = token_with_signature(vec![0u8; 32], "short");
+        token.enforce_wire_bounds();
+        assert_eq!(token.signature.len(), 32);
+    }
+}

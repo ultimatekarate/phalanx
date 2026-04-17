@@ -110,6 +110,12 @@ impl RetrievalActor {
         }
 
         let io_start = tokio::time::Instant::now();
+        // `StorageCommand::Retrieval` returns RAW envelopes without
+        // re-running `verify_envelope` — see `storage.rs::handle_retrieval`.
+        // Re-verification happens below inside `verify_and_seal_envelopes`
+        // via `WitnessEnvelope::check_integrity`, which unconditionally
+        // calls `verify_envelope` before admitting any envelope to the
+        // outgoing batch. Do not shortcut that call.
         let raw_envelopes = reply_rx.await.unwrap_or_default();
         self.system_governor.record_io_pressure(io_start.elapsed());
 

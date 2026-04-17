@@ -280,3 +280,98 @@ impl Default for NodeConfig {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
+mod validation_tests {
+    use super::*;
+
+    // The purpose of `HardwareConfig::validated()` is to repair values that
+    // slipped through `#[serde(transparent)]` deserialization (which bypasses
+    // `Fps::new`, `SampleRate::new`, `ChannelCount::new`). We test that
+    // out-of-range TOML values are clamped to safe bounds.
+
+    #[test]
+    fn validated_clamps_zero_fps_to_one() {
+        // `Fps` has a floor of 1 — zero would divide-by-zero downstream.
+        let cfg: HardwareConfig = toml::from_str(
+            r#"
+            camera_fps = 0
+            audio_sample_rate = 16000
+            audio_channels = 1
+            "#,
+        )
+        .expect("TOML parses");
+        assert_eq!(cfg.camera_fps.get(), 0, "serde accepts raw zero");
+
+        let v = cfg.validated();
+        assert_eq!(
+            v.camera_fps.get(),
+            1,
+            "validated() must clamp zero FPS up to the 1-FPS floor"
+        );
+    }
+
+    #[test]
+    fn validated_clamps_sample_rate_above_maximum() {
+        // SampleRate::new clamps to [1, 192_000]. A malicious or wrong TOML
+        // must not leak an out-of-range audio sample rate into capture pipelines.
+        let cfg: HardwareConfig = toml::from_str(
+            r#"
+            camera_fps = 30
+            audio_sample_rate = 5000000
+            audio_channels = 2
+            "#,
+        )
+        .expect("TOML parses");
+        let v = cfg.validated();
+        assert!(
+            v.audio_sample_rate.get() <= 192_000,
+            "sample rate must be clamped to MAX, got {}",
+            v.audio_sample_rate.get()
+        );
+    }
+
+    #[test]
+    fn validated_clamps_excessive_channel_count_to_maximum() {
+        // ChannelCount::new clamps to [1, 8].
+        let cfg: HardwareConfig = toml::from_str(
+            r#"
+            camera_fps = 30
+            audio_sample_rate = 48000
+            audio_channels = 64
+            "#,
+        )
+        .expect("TOML parses");
+        let v = cfg.validated();
+        assert_eq!(
+            v.audio_channels.get(),
+            8,
+            "channel count must clamp to 8, got {}",
+            v.audio_channels.get()
+        );
+    }
+
+    #[test]
+    fn validated_preserves_valid_values_unchanged() {
+        // Regression guard: values already within bounds must pass through
+        // untouched — validated() must not be a silent rescaler.
+        let cfg: HardwareConfig = toml::from_str(
+            r#"
+            camera_fps = 30
+            audio_sample_rate = 48000
+            audio_channels = 2
+            "#,
+        )
+        .expect("TOML parses");
+        let v = cfg.validated();
+        assert_eq!(v.camera_fps.get(), 30);
+        assert_eq!(v.audio_sample_rate.get(), 48_000);
+        assert_eq!(v.audio_channels.get(), 2);
+    }
+}

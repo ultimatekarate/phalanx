@@ -548,6 +548,34 @@ impl<J: TransientJournal> StorageActor<J> {
         match reassembly_result {
             Ok(Some(envelope_state)) => {
                 // 1. Disk first — persist to recording log before verification
+                //
+                // Ordering note (filter-check → disk → filter-insert → verify)
+                // is deliberate. The replay filter is a DoS-mitigation
+                // heuristic, not a cryptographic correctness gate — it
+                // admits a ~1% false-positive rate per threat-model.md and
+                // is seeded on boot from disk-persisted envelopes (C2 FIX,
+                // `recording_log.rs::collect_recent_evidence_hashes`), which
+                // themselves went through this same write-first-verify-later
+                // contract. Populating the filter before `verify_envelope`
+                // runs is consistent with that seeding semantics.
+                //
+                // Known false-positive surface: an attacker who scrapes an
+                // honest envelope's bytes off the wire can retransmit them
+                // with a mangled signature (same `evidence_hash`, since
+                // hash = blake3(evidence) and ignores the signature field).
+                // That poisons the filter with the victim's hash, causing
+                // the honest copy to be rejected as a "replay" for at most
+                // one bloom-rotation cycle. Blast radius is local-node only
+                // — peers re-verify on receive, so gossip eventually
+                // delivers the honest copy to everyone else, and the next
+                // bloom rotation clears the poisoned entry here too.
+                //
+                // Do NOT reorder to verify-before-filter without updating
+                // threat-model.md. Flipping it costs a full ed25519 verify
+                // per duplicate-hash arrival on the hot path — the common
+                // case for legitimate gossip (peers X and Y both forward
+                // the same honest shard) — which was deemed unacceptable
+                // during the C2 audit round.
                 match &envelope_state {
                     EnvelopeState::Intact(envelope) => {
                         // Replay detection: reject evidence_hash seen recently.
@@ -650,7 +678,31 @@ impl<J: TransientJournal> StorageActor<J> {
             GuardianError::VerificationFailed(format!("Revocation token invalid: {e}"))
         })?;
 
-        // 2. Look up any envelope to get the recording's embedded revocation key
+        // 2. Look up any envelope to get the recording's embedded revocation key.
+        //
+        // NOTE (audit-closed): `read_all_shards` returns RAW envelopes without
+        // re-running `verify_envelope`, and `.first()` picks an arbitrary shard.
+        // This is safe because the cryptographic trust anchor is the BIP39
+        // mnemonic held off-device by the recording author, NOT the on-disk
+        // `revocation_key` field:
+        //
+        //   - `revocation_key` embedded in every envelope is a *public-key
+        //     commitment* to a keypair derived from the author's BIP39 seed.
+        //   - `verify_revocation_token` at step 1 checks the token's self-
+        //     signature against that key. The matching private key is
+        //     non-derivable from anything on the network — an attacker who
+        //     injects a shard with a chosen `revocation_key` still cannot
+        //     forge a token that verifies.
+        //   - The step-2 equality check (`token.key == first.revocation_key`)
+        //     is therefore a *consistency* gate, not the trust anchor. Even
+        //     if `.first()` picks a poisoned shard, revocation only fires if
+        //     the attacker *also* produces a token signed by the matching
+        //     private key — which requires the BIP39 seed.
+        //
+        // Do NOT "harden" this by adding `verify_envelope` to the lookup —
+        // the token gate already provides cryptographic authorization.
+        // Previously flagged, investigated, closed. See audit trail in
+        // threat-model.md §9 "Forced Evidence Retention."
         let envelopes = self
             .guardian
             .read_all_shards(&recording_id, None)
