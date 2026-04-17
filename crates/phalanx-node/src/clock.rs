@@ -256,4 +256,41 @@ mod tests {
             "Clock did not apply positive offset correctly"
         );
     }
+
+    #[test]
+    fn set_offset_overwrites_previous_value() {
+        // Idempotency / last-write-wins. Without this, an NTP failure could
+        // pin the clock to a stale offset forever even if retry succeeds.
+        let clock = TrustedClock::new();
+        clock.set_offset(5_000).unwrap();
+        clock.set_offset(500).unwrap();
+
+        let local = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let adjusted = clock.now().unwrap().0 as i64;
+
+        // Offset applied must be the second write (≈500), not the first (5000).
+        let observed = adjusted - local;
+        assert!(
+            observed < 2_000 && observed >= 0,
+            "second set_offset call must win (expected ~500ms drift, got {observed}ms)"
+        );
+    }
+
+    #[test]
+    fn now_saturates_at_zero_when_offset_is_catastrophically_negative() {
+        // T1 FIX boundary: even with a huge negative offset (e.g. an attacker
+        // trying to poison the clock), `now()` must not return a negative
+        // timestamp. The `.max(0)` clamp inside `now()` is load-bearing.
+        let clock = TrustedClock::new();
+        clock.set_offset(-(i64::MAX / 2)).unwrap();
+
+        let adjusted = clock.now().unwrap().0; // u64 — can't be negative by construction
+        assert_eq!(
+            adjusted, 0,
+            "massive negative offset must clamp to zero, not wrap"
+        );
+    }
 }

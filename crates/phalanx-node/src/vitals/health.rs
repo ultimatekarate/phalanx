@@ -127,3 +127,118 @@ impl Default for HealthTracker {
         Self::new()
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp
+)]
+mod tests {
+    use super::*;
+
+    fn peer(name: &str) -> NetworkId {
+        NetworkId::from(name.to_string())
+    }
+
+    #[test]
+    fn should_broadcast_self_true_on_significant_load_change() {
+        // Significance rule: load delta > 0.10 triggers a broadcast.
+        let mut tracker = HealthTracker::new();
+        tracker.last_sent_load = 0.10;
+
+        // Delta 0.30 → exceeds 0.10 threshold.
+        assert!(tracker.should_broadcast_self(0.40, 100));
+    }
+
+    #[test]
+    fn should_broadcast_self_false_when_load_stable_and_time_fresh() {
+        // No significant change AND no staleness → no broadcast.
+        // Fresh tracker has last_sent_at = now, so elapsed << 30s.
+        let mut tracker = HealthTracker::new();
+        tracker.last_sent_load = 0.50;
+
+        // Delta 0.05 < 0.10; elapsed < 1s < 30s → should not broadcast.
+        assert!(!tracker.should_broadcast_self(0.55, 100));
+    }
+
+    #[test]
+    fn should_broadcast_self_updates_stored_state_on_broadcast() {
+        // When a broadcast fires, the tracker must record what it just sent,
+        // otherwise the next call will re-fire against the same delta.
+        let mut tracker = HealthTracker::new();
+        tracker.last_sent_load = 0.0;
+        tracker.last_sent_storage = 0;
+
+        let fired = tracker.should_broadcast_self(0.75, 512);
+        assert!(fired);
+        assert_eq!(tracker.last_sent_load, 0.75);
+        assert_eq!(tracker.last_sent_storage, 512);
+
+        // Second call with same inputs must not re-fire — delta is now 0.
+        let fired_again = tracker.should_broadcast_self(0.75, 512);
+        assert!(!fired_again);
+    }
+
+    #[test]
+    fn is_peer_stale_returns_true_for_unknown_peer() {
+        // An unknown peer has never heartbeated — must be treated as stale.
+        // Any other behaviour would let silent peers coast indefinitely.
+        let tracker = HealthTracker::new();
+        let physics = PhalanxPhysics::default();
+        assert!(tracker.is_peer_stale(&peer("ghost"), &physics));
+    }
+
+    #[test]
+    fn is_peer_stale_returns_false_immediately_after_registration() {
+        // Freshly registered peer — elapsed time is microseconds, grace
+        // period is measured in seconds.
+        let mut tracker = HealthTracker::new();
+        let pid = peer("live");
+        let msg = ControlMessage {
+            sender: pid.clone(),
+            load_factor: 0.1,
+            storage_remaining_mb: 1024,
+            heartbeat_ms: 5_000,
+            is_leaf: false,
+            integral_summary: None,
+        };
+        tracker.register_activity(msg);
+
+        let physics = PhalanxPhysics::default();
+        assert!(
+            !tracker.is_peer_stale(&pid, &physics),
+            "fresh heartbeat must not be classified as stale"
+        );
+    }
+
+    #[test]
+    fn is_peer_stale_grace_period_scales_with_tau_rtt() {
+        // Regression guard: the jitter_multiplier derivation is
+        // `(tau_rtt / 10).max(2)`. If tau_rtt drops, the multiplier floor
+        // of 2 must still protect us — otherwise fresh peers get flagged
+        // as stale on networks with very low RTT.
+        let mut tracker = HealthTracker::new();
+        let pid = peer("low-rtt-peer");
+        let msg = ControlMessage {
+            sender: pid.clone(),
+            load_factor: 0.1,
+            storage_remaining_mb: 1024,
+            heartbeat_ms: 5_000,
+            is_leaf: false,
+            integral_summary: None,
+        };
+        tracker.register_activity(msg);
+
+        let low_rtt_physics = PhalanxPhysics {
+            tau_rtt: 1,
+            ..PhalanxPhysics::default()
+        };
+        assert!(
+            !tracker.is_peer_stale(&pid, &low_rtt_physics),
+            "min-multiplier floor must prevent spurious staleness on low RTT"
+        );
+    }
+}

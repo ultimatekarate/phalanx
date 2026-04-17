@@ -176,6 +176,20 @@ async fn build_c2pa_export(
 
     let envelopes = reply_rx.await.map_err(|_| PhalanxError::ChannelClosed)?;
 
+    // `StorageCommand::Retrieval` returns RAW envelopes without re-running
+    // `verify_envelope` — see `storage.rs::handle_retrieval`. This caller
+    // does NOT re-verify the ed25519 signature directly. Trust transfers
+    // across three downstream boundaries instead:
+    //   1. `payload.reveal(vault_key)` — requires the local vault key, so
+    //      payloads forged without it fail to decrypt.
+    //   2. `verify_provenance_from_jpeg` (below) — re-computes PRNU / Moiré
+    //      metrics from the actual pixels, catching spoofed lens_metrics.
+    //   3. C2PA re-signing with the node's identity (step 5 below) — the
+    //      exported MP4 is attested by the node, not by the envelope's
+    //      original signer.
+    // If this pipeline is ever changed to emit envelope-derived fields
+    // directly to an external consumer WITHOUT these gates, add an explicit
+    // `verify_envelope()` check here.
     if envelopes.is_empty() {
         return Err(PhalanxError::InvalidState);
     }

@@ -141,3 +141,59 @@ pub enum TrustError {
 
 // MonotonicClock moved to time.rs (Tense, not Trust)
 pub use crate::time::MonotonicClock;
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
+mod petname_tests {
+    use super::*;
+
+    #[test]
+    fn empty_string_rejected() {
+        let err = PetName::new("").expect_err("empty PetName must be rejected");
+        assert!(matches!(err, TrustError::InvalidPetName(_)));
+    }
+
+    #[test]
+    fn whitespace_only_rejected_via_trim() {
+        // The validator trims before the emptiness check: a string that is
+        // all whitespace must not slip through as a "name".
+        let err = PetName::new("   \t ").expect_err("whitespace-only PetName must be rejected");
+        assert!(matches!(err, TrustError::InvalidPetName(_)));
+    }
+
+    #[test]
+    fn sixty_four_byte_boundary_accepted() {
+        // 64 is the inclusive upper bound — the condition is `len() > 64`.
+        let name = "a".repeat(64);
+        let pet = PetName::new(&name).expect("64-char name must be accepted");
+        assert_eq!(pet.as_str().len(), 64);
+    }
+
+    #[test]
+    fn sixty_five_bytes_rejected() {
+        let name = "a".repeat(65);
+        let err = PetName::new(&name).expect_err("65-char name must be rejected");
+        assert!(matches!(err, TrustError::InvalidPetName(_)));
+    }
+
+    #[test]
+    fn control_characters_rejected() {
+        // Control chars are the only content-filter rule. If they leak through,
+        // PetName displays could corrupt log output and terminal rendering.
+        let err =
+            PetName::new("alice\u{0007}bob").expect_err("control characters must be rejected");
+        assert!(matches!(err, TrustError::InvalidPetName(_)));
+    }
+
+    #[test]
+    fn unknown_fallback_is_stable() {
+        // The infallible fallback is wire-visible in logs and UIs — its value
+        // must not drift silently.
+        assert_eq!(PetName::unknown().as_str(), "Unknown");
+    }
+}

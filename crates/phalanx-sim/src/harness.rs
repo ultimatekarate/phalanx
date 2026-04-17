@@ -9,10 +9,12 @@ use crate::world::SimulationWorld;
 
 use phalanx_forensics::policy::Homeostasis;
 use phalanx_node::actors::meshsentinel::{MeshSentinel, SentinelDependencies};
+use phalanx_node::actors::storage::StorageCommand;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::persistence::vault::derive_vault_key;
 use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::SystemGovernor;
+use phalanx_proto::evidence::{Evidence, WitnessEnvelope};
 use phalanx_proto::identity::{NetworkId, NodeRole, PhalanxIdentity, RecordingId};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::network::{EgressPort, IngressPort};
@@ -480,6 +482,11 @@ pub struct SimulationHarness {
     node_temps: Vec<tempfile::TempDir>,
     /// Per-node governor references for scenario observation and direct injection.
     governors: HashMap<Did, Arc<SystemGovernor>>,
+    /// Per-node `StorageActor` command senders, cloned out of `MeshSentinel`
+    /// before the sentinel is moved into its detached task. Used by
+    /// `retrieve_evidence` / `await_replication` to query each node's
+    /// persisted envelopes without piercing actor encapsulation.
+    storage_txs: HashMap<Did, mpsc::Sender<StorageCommand>>,
 }
 
 impl SimulationHarness {
@@ -506,6 +513,7 @@ impl SimulationHarness {
             telemetry_tx,
             node_temps: Vec::new(),
             governors: HashMap::new(),
+            storage_txs: HashMap::new(),
         };
 
         (harness, collector)
@@ -586,6 +594,11 @@ impl SimulationHarness {
             },
         )?;
 
+        // Capture the storage command sender before the sentinel is moved
+        // into its detached task. This is what powers `retrieve_evidence`.
+        let storage_tx = sentinel.storage_tx.clone();
+        self.storage_txs.insert(node_did.clone(), storage_tx);
+
         // Detach sentinel execution
         tokio::spawn(async move {
             if let Err(e) = sentinel.run().await {
@@ -624,7 +637,7 @@ impl SimulationHarness {
     pub async fn inject_chaos(&mut self, did: &Did, mode: ChaosMode) {
         {
             let mut world = self.world.write().await;
-            world.chaos_registry.insert(did.clone(), mode);
+            world.chaos_registry.insert(did.clone(), mode.clone());
         }
 
         // Resolve NetworkId for telemetry
@@ -770,6 +783,10 @@ impl SimulationHarness {
             },
         )?;
 
+        // Capture the storage command sender before the sentinel is moved.
+        let storage_tx = sentinel.storage_tx.clone();
+        self.storage_txs.insert(node_did.clone(), storage_tx);
+
         // Detach sentinel execution
         tokio::spawn(async move {
             if let Err(e) = sentinel.run().await {
@@ -798,4 +815,230 @@ impl SimulationHarness {
     pub fn governor_for(&self, did: &Did) -> Option<Arc<SystemGovernor>> {
         self.governors.get(did).cloned()
     }
+
+    /// Iterator over every DID that has a captured `storage_tx`. Used by
+    /// tests that fan-out over all spawned peers (e.g. evidence retrieval).
+    pub fn node_dids(&self) -> Vec<Did> {
+        self.storage_txs.keys().cloned().collect()
+    }
+
+    /// Config accessor for tests that need `network.video_topic`, MTU, etc.
+    pub fn config(&self) -> &NodeConfig {
+        &self.config
+    }
+
+    /// Retrieve envelopes for `recording_id` from `did`, applying the peer's
+    /// compromise chaos mode to the result at the retrieval boundary.
+    ///
+    /// Compromise behaviour (applied here, not in routing):
+    /// - [`ChaosMode::OmitStored`] — returns `vec![]` without querying
+    ///   the real store (silent faulty).
+    /// - [`ChaosMode::CorruptStored`] — queries the real store, then
+    ///   XORs `0xFF` into the first byte of every envelope's
+    ///   `witness_signature`. Empty-sig envelopes are tolerated via
+    ///   `first_mut()`.
+    /// - [`ChaosMode::ForgeSigner`] — returns **only** forgeries (no
+    ///   honest data). Two flavours are produced:
+    ///     * Flavour A (pass-verify forgery): freshly-signed envelope
+    ///       under a random identity. `verify_envelope()` passes; the
+    ///       envelope's `did` is the forger's, NOT the legitimate
+    ///       signer's — caught by the test's "did == signer.did"
+    ///       filter.
+    ///     * Flavour B (mismatched-did forgery): envelope signed by
+    ///       one random identity with its `did` field rewritten to a
+    ///       different random DID — `verify_envelope()` fails because
+    ///       the public key resolved from `did` doesn't match the
+    ///       signing key.
+    /// - Otherwise — honest pass-through via
+    ///   [`StorageCommand::Retrieval`], guarded by a deadline so a
+    ///   stuck actor cannot hang the test under paused virtual clock.
+    pub async fn retrieve_evidence(
+        &self,
+        did: &Did,
+        recording_id: &RecordingId,
+    ) -> Vec<WitnessEnvelope> {
+        let chaos = {
+            let world = self.world.read().await;
+            world
+                .chaos_registry
+                .get(did)
+                .cloned()
+                .unwrap_or(ChaosMode::Stable)
+        };
+
+        match chaos {
+            ChaosMode::OmitStored => Vec::new(),
+            ChaosMode::CorruptStored => {
+                let mut envs = self.honest_retrieve(did, recording_id).await;
+                for env in &mut envs {
+                    if let Some(b) = env.witness_signature.first_mut() {
+                        *b ^= 0xFF;
+                    }
+                }
+                envs
+            }
+            ChaosMode::ForgeSigner => forge_pair(recording_id),
+            _ => self.honest_retrieve(did, recording_id).await,
+        }
+    }
+
+    /// Pure pass-through to `StorageCommand::Retrieval` with a
+    /// deadline. Returns `Vec::new()` on timeout or channel failure.
+    async fn honest_retrieve(&self, did: &Did, recording_id: &RecordingId) -> Vec<WitnessEnvelope> {
+        let Some(tx) = self.storage_txs.get(did).cloned() else {
+            return Vec::new();
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if tx
+            .send(StorageCommand::Retrieval {
+                recording_id: recording_id.clone(),
+                owner_did: None,
+                reply_to: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        // Deadline uses a bounded tokio::select! against a real-time
+        // sleep — survives paused virtual clock because the underlying
+        // actor runs on the same runtime and will drain commands.
+        tokio::select! {
+            result = reply_rx => result.unwrap_or_default(),
+            _ = tokio::time::sleep(Duration::from_secs(5)) => Vec::new(),
+        }
+    }
+
+    /// Fan-out `StorageCommand::WriteShard` to every registered peer's
+    /// storage actor, bypassing the ingestion trust/quota pipeline.
+    ///
+    /// This is the seeding primitive for Byzantine-tolerance tests:
+    /// the ingestion actor enforces `sender_did.verify_standing()`,
+    /// which would reject an ad-hoc test signer whose DID isn't in the
+    /// trust registry. Since the test's contract is "all peers hold
+    /// an authentic copy before chaos starts," going directly to
+    /// storage is the right abstraction — the envelope still has to
+    /// pass `verify_envelope()` inside the Guardian's ingest path.
+    ///
+    /// Returns the set of DIDs that returned `Ok(())`. A peer may
+    /// reject (e.g. replay filter, invalid envelope); the caller
+    /// should assert on the returned set if it cares.
+    pub async fn seed_envelope(&self, envelope: WitnessEnvelope) -> Vec<Did> {
+        let mut accepted = Vec::new();
+        for (did, tx) in &self.storage_txs {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            if tx
+                .send(StorageCommand::WriteShard {
+                    envelope: envelope.clone(),
+                    reply_to: reply_tx,
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!(%did, "seed_envelope: storage channel closed");
+                continue;
+            }
+            tokio::select! {
+                r = reply_rx => match r {
+                    Ok(Ok(())) => accepted.push(did.clone()),
+                    Ok(Err(e)) => tracing::warn!(%did, error = %e, "seed_envelope: guardian rejected"),
+                    Err(_) => tracing::warn!(%did, "seed_envelope: oneshot sender dropped"),
+                },
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                    tracing::warn!(%did, "seed_envelope: reply timed out");
+                }
+            }
+        }
+        accepted
+    }
+
+    /// Poll every registered node's storage until each returns at
+    /// least `min_envelopes` envelopes for the recording, or
+    /// `max_attempts` elapses. Between attempts, advances virtual
+    /// time by `step` to let pending actor ticks run.
+    ///
+    /// Returns the per-node envelope counts at the moment the wait
+    /// resolved (successful or exhausted).
+    ///
+    /// **Must be called BEFORE any peer is tagged as compromised** —
+    /// a `ForgeSigner` peer would otherwise report `>= 1` via its
+    /// forgery output and produce a spurious green wait.
+    pub async fn await_replication(
+        &self,
+        recording_id: &RecordingId,
+        min_envelopes: usize,
+        max_attempts: usize,
+        step: Duration,
+    ) -> HashMap<Did, usize> {
+        let mut counts: HashMap<Did, usize> = HashMap::new();
+        let dids: Vec<Did> = self.storage_txs.keys().cloned().collect();
+
+        for _ in 0..max_attempts {
+            counts.clear();
+            let mut all_satisfied = true;
+            for did in &dids {
+                let envs = self.honest_retrieve(did, recording_id).await;
+                let n = envs.len();
+                counts.insert(did.clone(), n);
+                if n < min_envelopes {
+                    all_satisfied = false;
+                }
+            }
+            if all_satisfied {
+                return counts;
+            }
+            self.advance_time(step).await;
+        }
+        counts
+    }
+}
+
+/// Build a pair of forged envelopes for [`ChaosMode::ForgeSigner`].
+///
+/// See [`SimulationHarness::retrieve_evidence`] for the rationale —
+/// flavour A slips past `verify_envelope()` but carries the forger's
+/// DID; flavour B carries a consistent-looking DID that fails the
+/// signature check. Together they exercise both soundness filters.
+fn forge_pair(recording_id: &RecordingId) -> Vec<WitnessEnvelope> {
+    use phalanx_forensics::pipeline::witness::WitnessAuthority;
+    use phalanx_proto::evidence::VideoShard;
+
+    // Flavour A — fresh-identity forgery (passes verify, fails did filter)
+    let forger_a = PhalanxIdentity::new_ephemeral();
+    let shard_a = VideoShard {
+        recording_id: recording_id.clone(),
+        ..Default::default()
+    };
+    let evidence_a = Evidence::Video(shard_a);
+    let env_a = match WitnessEnvelope::sign_envelope(
+        evidence_a,
+        &forger_a,
+        forger_a.network_id.clone(),
+        None,
+    ) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    // Flavour B — did/sig mismatch (fails verify)
+    let signer_b = PhalanxIdentity::new_ephemeral();
+    let did_holder_b = PhalanxIdentity::new_ephemeral();
+    let shard_b = VideoShard {
+        recording_id: recording_id.clone(),
+        ..Default::default()
+    };
+    let evidence_b = Evidence::Video(shard_b);
+    let mut env_b = match WitnessEnvelope::sign_envelope(
+        evidence_b,
+        &signer_b,
+        signer_b.network_id.clone(),
+        None,
+    ) {
+        Ok(e) => e,
+        Err(_) => return vec![env_a],
+    };
+    // Rewrite the did so the resolved pubkey disagrees with the sig.
+    env_b.did = did_holder_b.did.clone();
+
+    vec![env_a, env_b]
 }

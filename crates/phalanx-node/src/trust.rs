@@ -758,4 +758,80 @@ mod tests {
 
         let _ = std::fs::remove_dir_all("logs");
     }
+
+    // ── ReputationProjection pure-logic tests ───────────────────────────
+
+    #[test]
+    fn is_blacklisted_by_did_returns_false_for_unknown_did() {
+        // Fail-open for unknown DIDs is deliberate: the blacklist is only
+        // authoritative for peers we've actually seen. An attacker naming a
+        // random DID must not inherit a blacklist status. (Fail-secure for
+        // poisoned lock is covered separately in the source code — the
+        // early-return on `.read()` Err.)
+        let projection = ReputationProjection::default();
+        let unknown = Did::from("did:phx:stranger");
+        assert!(!projection.is_blacklisted_by_did(&unknown));
+    }
+
+    #[test]
+    fn check_trust_by_did_unknown_did_returns_ignored() {
+        // Default trust for unseen peers is Ignored — neither blocked nor
+        // verified. This is the baseline the E4 Sybil-resistance fix depends on.
+        let projection = ReputationProjection::default();
+        let unknown = Did::from("did:phx:stranger");
+        assert_eq!(projection.check_trust_by_did(&unknown), TrustLevel::Ignored);
+    }
+
+    #[test]
+    fn evaluate_reputation_unknown_peer_returns_e4_minimum_trust() {
+        // E4 FIX regression guard: unknown peers must start at 0.1 (minimum
+        // trust), not 1.0. Without this, a Sybil attacker gets full trust on
+        // first contact and can use it to pre-empt verified peers.
+        let projection = ReputationProjection::default();
+        let stranger = NetworkId::from("fresh-sybil".to_string());
+        let score = projection.evaluate_reputation(&stranger);
+        assert!(
+            (score - 0.1).abs() < f32::EPSILON,
+            "E4 FIX: unknown peers must start at 0.1 (got {score})"
+        );
+    }
+
+    #[test]
+    fn effective_trust_blacklisted_cannot_be_rehabilitated_by_community() {
+        // Blacklisting is absolute — community membership must not uplift a
+        // Blocked peer to Verified or Ally. Without this guard, the
+        // community-elevation path would whitelist banned members.
+        let projection = ReputationProjection::default();
+        let banned_did = Did::from("did:phx:banned");
+        let banned_nid = NetworkId::from("nid-banned".to_string());
+
+        // Seed: banned DID maps to a blocked PeerReputationInfo.
+        {
+            let mut did_map = projection.did_to_network_id.write().unwrap();
+            did_map.insert(banned_did.clone(), banned_nid.clone());
+        }
+        {
+            let mut scores = projection.scores.write().unwrap();
+            scores.insert(
+                banned_nid,
+                PeerReputationInfo {
+                    score: -10.0,
+                    is_blacklisted: true,
+                    trust_level: TrustLevel::Blocked,
+                },
+            );
+        }
+
+        // Add the banned DID to a "high trust" community — should NOT elevate.
+        let mut members = HashSet::new();
+        members.insert(banned_did.clone());
+        projection.sync_communities(vec![(TrustLevel::Ally, members)]);
+
+        let effective = projection.effective_trust(&banned_did);
+        assert_eq!(
+            effective,
+            TrustLevel::Blocked,
+            "Blocked peers must stay Blocked even in an Ally community"
+        );
+    }
 }
