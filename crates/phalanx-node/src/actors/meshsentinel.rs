@@ -350,7 +350,11 @@ impl<I: IngressPort> MeshSentinel<I> {
         // Desktop (SysfsProbe) returns None.
         let lifecycle_rx = deps.system_governor.probe().lifecycle_events();
 
-        // Placeholder providers_tx — replaced with a fresh channel on each spawn_playback() call.
+        // Placeholder providers_tx. Receiver is dropped immediately so the channel
+        // is closed-at-birth; the field is overwritten with a live channel inside
+        // `spawn_playback()`. Any `self.providers_tx.try_send(...)` before the first
+        // playback starts will fail with `TrySendError::Closed` — that is the
+        // intended no-op for pre-playback provider announcements.
         let (providers_tx, _) = mpsc::channel(1);
 
         Ok(Self {
@@ -760,11 +764,19 @@ impl<I: IngressPort> MeshSentinel<I> {
                             self.peer_first_seen.remove(&oldest_peer);
                         }
                     }
-                    let now_secs = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    self.peer_first_seen.entry(peer.clone()).or_insert(now_secs);
+                    match self.clock.now() {
+                        Ok(ts) => {
+                            let now_secs = ts.as_u64() / 1000;
+                            self.peer_first_seen.entry(peer.clone()).or_insert(now_secs);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                peer = %peer,
+                                "clock unavailable; skipping peer_first_seen insert"
+                            );
+                        }
+                    }
                 }
 
                 // Silent Canary: cancel any pending dark-peer confirmation.
@@ -864,7 +876,14 @@ impl<I: IngressPort> MeshSentinel<I> {
                 count = remote_providers.len(),
                 "DHT: Providers discovered for recording"
             );
-            let _ = self.providers_tx.try_send((recording_id, remote_providers));
+            // `Closed` is benign — see the placeholder note on `providers_tx` in `new()`.
+            // `Full` would mean the active PlaybackCoordinator consumer is stalled.
+            match self.providers_tx.try_send((recording_id, remote_providers)) {
+                Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!("providers_tx full — playback consumer stalled");
+                }
+            }
         }
     }
 
@@ -1192,16 +1211,19 @@ impl<I: IngressPort> MeshSentinel<I> {
         let peer_count = peer_ids.len();
         let subnet_distribution = self.topology_gate.subnet_counts().clone();
 
+        let now_secs = match self.clock.now() {
+            Ok(ts) => ts.as_u64() / 1000,
+            Err(e) => {
+                tracing::warn!(error = %e, "clock unavailable; skipping eclipse fingerprint");
+                return;
+            }
+        };
+
         let fingerprint = MeshFingerprint {
             peer_set_hash,
             peer_count,
             subnet_distribution,
-            timestamp: MonotonicClock(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            ),
+            timestamp: MonotonicClock(now_secs),
         };
 
         self.eclipse_probe.record(fingerprint);
@@ -1271,10 +1293,13 @@ impl<I: IngressPort> MeshSentinel<I> {
 
         let params = ReciprocityParams::default();
         let mesh_peer_count = self.topology_gate.peer_count();
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now_secs = match self.clock.now() {
+            Ok(ts) => ts.as_u64() / 1000,
+            Err(e) => {
+                tracing::warn!(error = %e, "clock unavailable; skipping reciprocity sweep");
+                return;
+            }
+        };
 
         let admitted_peers: Vec<NetworkId> = self.topology_gate.peer_ids().cloned().collect();
 

@@ -248,7 +248,7 @@ async fn bootstrap(
     // Vault
     let vault_path = Path::new(storage_path).join("vault");
     let vault_str = vault_path.to_str().ok_or(PhalanxError::BootFailed)?;
-    let vault_salt = load_or_create_vault_salt(vault_str).map_err(|e| {
+    let vault_salt = load_or_create_vault_salt(vault_str).await.map_err(|e| {
         log(&format!("vault salt failed: {e:?}"));
         PhalanxError::BootFailed
     })?;

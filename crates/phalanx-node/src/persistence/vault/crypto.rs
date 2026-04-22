@@ -30,30 +30,37 @@ pub fn derive_vault_key(identity: &PhalanxIdentity, salt: &[u8; 32]) -> Symmetri
 }
 
 /// Load or create the vault salt file. Generated once with OsRng on first vault creation.
-pub fn load_or_create_vault_salt(vault_path: &str) -> std::io::Result<[u8; 32]> {
-    let salt_path = std::path::Path::new(vault_path).join(".vault_salt");
-    if salt_path.exists() {
-        let bytes = std::fs::read(&salt_path)?;
-        if bytes.len() != 32 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Vault salt file is not 32 bytes",
-            ));
+///
+/// Runs on a blocking thread pool so boot-path callers inside `#[tokio::main]`
+/// don't stall a runtime worker on filesystem IO.
+pub async fn load_or_create_vault_salt(vault_path: &str) -> std::io::Result<[u8; 32]> {
+    let owned_path = vault_path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let salt_path = std::path::Path::new(&owned_path).join(".vault_salt");
+        if salt_path.exists() {
+            let bytes = std::fs::read(&salt_path)?;
+            if bytes.len() != 32 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Vault salt file is not 32 bytes",
+                ));
+            }
+            let mut salt = [0u8; 32];
+            salt.copy_from_slice(&bytes);
+            Ok(salt)
+        } else {
+            use rand_core::{OsRng, RngCore};
+            let mut salt = [0u8; 32];
+            OsRng.fill_bytes(&mut salt);
+            if let Some(parent) = salt_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&salt_path, salt)?;
+            Ok(salt)
         }
-        let mut salt = [0u8; 32];
-        salt.copy_from_slice(&bytes);
-        Ok(salt)
-    } else {
-        use rand_core::{OsRng, RngCore};
-        let mut salt = [0u8; 32];
-        OsRng.fill_bytes(&mut salt);
-        // Ensure parent directory exists
-        if let Some(parent) = salt_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&salt_path, salt)?;
-        Ok(salt)
-    }
+    })
+    .await
+    .map_err(|join_err| std::io::Error::new(std::io::ErrorKind::Other, join_err.to_string()))?
 }
 
 /// Encrypt and atomically write to disk (write .tmp → rename to final path).

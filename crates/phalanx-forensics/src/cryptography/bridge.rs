@@ -10,11 +10,11 @@ pub fn ed_to_x25519_pk(ed_key: &VerifyingKey) -> Result<[u8; 32], CryptoError> {
     let bytes = ed_key.to_bytes();
 
     let ed_point =
-        CompressedEdwardsY::from_slice(&bytes).map_err(|_| CryptoError::DidResolutionFailure)?;
+        CompressedEdwardsY::from_slice(&bytes).map_err(|_| CryptoError::DecompressionFailure)?;
 
     let mont_point = ed_point
         .decompress()
-        .ok_or(CryptoError::DidResolutionFailure)?
+        .ok_or(CryptoError::DecompressionFailure)?
         .to_montgomery();
 
     Ok(mont_point.to_bytes())
@@ -26,11 +26,13 @@ pub fn ed_to_x25519_sk(ed_key: &SigningKey) -> Result<x25519_dalek::StaticSecret
     hasher.update(ed_key.to_bytes());
     let hash_result = hasher.finalize();
 
-    // SHA-512 output is 64 bytes; slicing [0..32] is always valid.
+    // SHA-512 output is fixed at 64 bytes; slicing [0..32] always succeeds,
+    // so the `try_into` error branch is unreachable in practice. The error is
+    // wired up for defense-in-depth against a hypothetical hasher regression.
     #[allow(clippy::indexing_slicing)]
     let mut x25519_bytes: [u8; 32] = hash_result[0..32]
         .try_into()
-        .map_err(|_| CryptoError::EncodingError("Scalar derivation failed".into()))?;
+        .map_err(|_| CryptoError::EncodingError("SHA-512 truncation to 32 bytes failed".into()))?;
 
     let secret = x25519_dalek::StaticSecret::from(x25519_bytes);
     zeroize::Zeroize::zeroize(&mut x25519_bytes);
