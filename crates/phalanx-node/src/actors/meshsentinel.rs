@@ -868,11 +868,22 @@ impl<I: IngressPort> MeshSentinel<I> {
         }
     }
 
-    /// DHT: Write received shards to the recording log, awaiting each confirmation.
+    /// DHT: Forward received shards to the recording log (fire-and-forget).
+    ///
+    /// Storage's `handle_write_shard` logs its own persistence and
+    /// verification results; awaiting a per-envelope reply here would stall
+    /// the MeshSentinel select loop on disk latency, blocking unrelated
+    /// mesh events (peer discovery, canary escalation, revocation replay).
+    ///
+    /// Channel-level backpressure is preserved via `send().await` on the
+    /// bounded mpsc to storage: if storage cannot drain, MeshSentinel
+    /// blocks on the mpsc — not on disk — and the queue depth stays
+    /// bounded by the channel capacity rather than by per-write latency.
     async fn handle_shard_response(&mut self, origin: NetworkId, envelopes: Vec<WitnessEnvelope>) {
+        let count = envelopes.len();
         tracing::info!(
             peer = %origin,
-            count = envelopes.len(),
+            count,
             "DHT: Shard response received"
         );
         for envelope in envelopes {
@@ -880,7 +891,10 @@ impl<I: IngressPort> MeshSentinel<I> {
             // for community peers during active recordings.
             self.register_canary_contribution(&origin, &envelope);
 
-            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            // Fire-and-forget: the reply receiver is intentionally dropped.
+            // Storage logs failures itself; the oneshot is only here to
+            // satisfy `StorageCommand::WriteShard`'s type signature.
+            let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
             if let Err(e) = self
                 .storage_tx
                 .send(StorageCommand::WriteShard {
@@ -892,16 +906,12 @@ impl<I: IngressPort> MeshSentinel<I> {
                 tracing::warn!("DHT shard write: storage channel closed: {e}");
                 continue;
             }
-            match reply_rx.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    tracing::warn!("DHT shard write failed: {e}");
-                }
-                Err(_) => {
-                    tracing::warn!("DHT shard write: storage actor dropped reply channel");
-                }
-            }
         }
+        tracing::debug!(
+            peer = %origin,
+            count,
+            "DHT: dispatched shard writes"
+        );
     }
 
     async fn handle_peer_disconnected(&mut self, peer: NetworkId) {

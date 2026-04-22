@@ -82,7 +82,11 @@ Every `#[allow(clippy::...)]` in the codebase has a comment explaining why the s
 2. **NEVER** allow filesystem IO (`std::fs`, `tokio::fs`) or network IO (`std::net`, `tokio::net`) into the Lab. In-memory byte assembly (`std::io::Cursor`, `std::io::Write` on `Vec<u8>`) is permitted when required by codec dependencies. For persistence, use the `TransientJournal` trait.
 3. **ALWAYS** define reassembly strategies as `Mold` implementations in the Lab.
 4. **PREFER** the `prelude` for cross-crate imports of first-class Nouns. Import persistence contracts, scheduling types, and operational state directly from their defining module.
-5. **NEVER** use mutex or RwLock unless it is absolutely necessary. Treat network deadlocks as a conflict of tense.
+5. **NEVER** use mutex or RwLock unless it is absolutely necessary. Treat network deadlocks as a conflict of tense. Organize resources by temporal kind:
+- Past: sealed / immutable data (your typestate Sealed phase, audit-log entries). Read freely, no lock needed.
+- Present: in-flight operations, currently-held state. Touched briefly, never awaited on.
+- Future: pending commitments (PendingEgress). Enqueued, not held.
+The rule that falls out: never await on present while holding present. Wait on past (free) or future (enqueued); never on a peer's current-tense state. That breaks deadlock's cycle requirement by construction.
 6. **ALWAYS** ensure subject-verb agreement: a Noun constructed for consumption by a Verb must satisfy that Verb's preconditions. Temporal Nouns must agree with temporal Verbs. Cryptographic Nouns must agree with verification Verbs.
 7. **NEVER** construct test Nouns with fixed values when the consumption path includes a Verb that validates against live state. Use the same source the Verb uses.
 8. **NEVER** add `phalanx-test-fixtures` as a production `[dependency]`. The Phrasebook exists only in dev-dependency graphs. If a fixture is needed at runtime, promote the construction logic to its owning crate as a semantic constructor.
