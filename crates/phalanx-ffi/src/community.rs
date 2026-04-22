@@ -129,6 +129,9 @@ pub unsafe extern "C" fn phalanx_sign_vouch(
     std::ptr::copy_nonoverlapping(community_id_ptr, id_bytes.as_mut_ptr(), 32);
     let community_id = phalanx_proto::community::CommunityId(id_bytes);
 
+    // Sign-loss is guarded: the `joined_at < 0` check above rejects negative
+    // values before this cast runs. FFI boundary receives i64 because Swift/Kotlin
+    // expose milliseconds-since-epoch as a signed integer; PhalanxTimestamp is u64.
     #[allow(clippy::cast_sign_loss)]
     let timestamp = phalanx_proto::time::PhalanxTimestamp(joined_at as u64);
 

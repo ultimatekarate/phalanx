@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     info!("Initializing Transient WAL");
-    let vault_salt = load_or_create_vault_salt("vault")?;
+    let vault_salt = load_or_create_vault_salt("vault").await?;
     let vault_key = derive_vault_key(&my_identity, &vault_salt);
     let journal = FileJournal::new("sentinel_transient_wal.bin", vault_key.clone()).await?;
 
