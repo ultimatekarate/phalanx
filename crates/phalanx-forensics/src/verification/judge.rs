@@ -183,13 +183,11 @@ impl TimeJudge for PhalanxTimestamp {
     }
 }
 
-// Gate traits (WitnessGate, IntegrityGate, PrivacyGate, CapacityGate,
-// ForensicGate) live in crate::gate — re-exported here for backwards
-// compatibility so existing `use phalanx_forensics::judge::IntegrityGate`
-// paths continue to resolve.
-pub use crate::gate::{
-    BufferCapacityGate, ContinuityGate, ForensicGate, IntegrityGate, PrivacyGate, WitnessGate,
-};
+// Gate traits (WitnessGate, IntegrityGate, PrivacyGate, ContinuityGate)
+// live in crate::gate — re-exported here for backwards compatibility so
+// existing `use phalanx_forensics::judge::IntegrityGate` paths continue
+// to resolve.
+pub use crate::gate::{ContinuityGate, IntegrityGate, PrivacyGate, WitnessGate};
 
 #[cfg(test)]
 #[allow(

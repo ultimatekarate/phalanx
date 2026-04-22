@@ -9,7 +9,6 @@ use phalanx_proto::evidence::{
 };
 use phalanx_proto::prelude::*;
 use phalanx_proto::time::TrustedClock;
-use std::collections::HashMap;
 use tracing::{error, warn};
 
 // Extension traits from sibling modules that provide methods on proto types.
@@ -484,54 +483,6 @@ pub fn check_provenance_bayesian(
 
     Ok(())
 }
-
-/// Gate 5: The Memory Buffer Gate
-pub trait BufferCapacityGate {
-    fn enforce_capacity_limit(
-        &mut self,
-        incoming_shard: &ShardId,
-        capacity_limit: usize,
-    ) -> Result<&mut Self, ShardError>;
-}
-
-impl BufferCapacityGate for HashMap<ShardId, crate::crucible::WorkContext<Vec<u8>>> {
-    fn enforce_capacity_limit(
-        &mut self,
-        incoming_shard: &ShardId,
-        limit: usize,
-    ) -> Result<&mut Self, ShardError> {
-        if !self.contains_key(incoming_shard) && self.len() >= limit {
-            let stale = self
-                .iter()
-                .min_by_key(|(_, ctx)| ctx.created_at)
-                .map(|(k, _)| *k);
-
-            if let Some(id) = stale {
-                warn!(event = "buffer_eviction", evicted = %id, "Memory limit reached");
-                self.remove(&id);
-            } else {
-                return Err(ShardError::InvalidConfiguration("Zero capacity".into()));
-            }
-        }
-        Ok(self)
-    }
-}
-
-/// Monadic Observation Extension
-pub trait ForensicGate<T, E> {
-    fn gate(self, event: &str, node: &NetworkId, msg: &str) -> Result<T, E>;
-}
-
-impl<T, E: std::fmt::Display> ForensicGate<T, E> for Result<T, E> {
-    fn gate(self, event: &str, node: &NetworkId, msg: &str) -> Result<T, E> {
-        if let Err(ref e) = self {
-            error!(event = event, node = %node, error = %e, "{msg}");
-        }
-        self
-    }
-}
-
-// In crates/phalanx-forensics/src/gate.rs
 
 /// Gate 7: The Coasting Gate (Probabilistic Integrity)
 pub trait CoastingGate {
