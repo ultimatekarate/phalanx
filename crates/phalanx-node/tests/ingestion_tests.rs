@@ -16,6 +16,7 @@
 use phalanx_forensics::policy::{IngressGovernor, TrafficGovernor};
 use phalanx_node::actors::egress::EgressCommand;
 use phalanx_node::actors::ingestion::{IngestionActor, IngestionCommand};
+use phalanx_node::actors::shutdown::ShutdownSignal;
 use phalanx_node::actors::storage::StorageCommand;
 use phalanx_node::actors::trust_actor::TrustCommand;
 use phalanx_node::clock::TrustedClock;
@@ -67,6 +68,7 @@ fn build_test_ingestion(config: NodeConfig) -> IngestionActorRig {
         trust_tx,
         system_governor.clone(),
         ingestion_rx,
+        ShutdownSignal::new(),
     );
 
     (
@@ -333,6 +335,7 @@ async fn test_leaf_power_state_rejects_remote_traffic() {
         trust_tx,
         system_governor,
         ingestion_rx,
+        ShutdownSignal::new(),
     );
     let handle = tokio::spawn(actor.run());
 

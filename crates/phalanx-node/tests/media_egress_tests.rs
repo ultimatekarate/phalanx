@@ -12,6 +12,7 @@
 // topic routing, hash chain continuity, WAL retry, storage pressure feedback.
 
 use phalanx_node::actors::media_egress::{MediaEgressActor, MediaEgressConfig};
+use phalanx_node::actors::shutdown::ShutdownSignal;
 use phalanx_node::clock::TrustedClock;
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::crypto::SymmetricKey;
@@ -120,7 +121,7 @@ async fn build_media_egress<E: EgressPort + 'static>(
         storage_tx: tokio::sync::mpsc::channel(16).0,
     };
 
-    let actor = MediaEgressActor::new(egress, identity, local_id, config)
+    let actor = MediaEgressActor::new(egress, identity, local_id, config, ShutdownSignal::new())
         .await
         .expect("Failed to create MediaEgressActor");
 

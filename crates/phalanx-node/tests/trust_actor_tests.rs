@@ -11,6 +11,7 @@
 // Unit tests for the TrustActor's command handling:
 // offense recording, trust queries, blacklisting, pet names, peer management.
 
+use phalanx_node::actors::shutdown::ShutdownSignal;
 use phalanx_node::actors::trust_actor::{TrustActor, TrustCommand};
 use phalanx_node::config::NodeConfig;
 use phalanx_node::trust::TrustRegistry;
@@ -27,7 +28,7 @@ async fn build_trust_actor() -> (mpsc::Sender<TrustCommand>, tokio::task::JoinHa
     config.storage.vault_path = temp.path().to_string_lossy().to_string();
     let registry = TrustRegistry::build(&config).await;
     let (tx, rx) = mpsc::channel(32);
-    let actor = TrustActor::new(registry, rx);
+    let actor = TrustActor::new(registry, rx, ShutdownSignal::new());
     let handle = tokio::spawn(actor.run());
     // Leak the tempdir so it lives until process exit (actor holds the path)
     std::mem::forget(temp);

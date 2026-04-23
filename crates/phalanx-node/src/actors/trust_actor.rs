@@ -1,3 +1,4 @@
+use crate::actors::shutdown::ShutdownSignal;
 use crate::clock::TrustedClock;
 use crate::trust::{ClockProvider, SystemClock, TrustRegistry};
 use phalanx_forensics::policy::TrustArbiter;
@@ -8,6 +9,7 @@ use phalanx_proto::community::{
 use phalanx_proto::prelude::*;
 use phalanx_proto::trust::{Offense, PetName, TrustError};
 use serde::Serialize;
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{interval, Duration};
 
@@ -75,14 +77,22 @@ pub struct TrustActor {
     registry: TrustRegistry,
     clock: SystemClock,
     rx: mpsc::Receiver<TrustCommand>,
+    /// Shared cancellation signal. The run loop's select! polls this arm with
+    /// `biased;` priority so cancel wins deterministically at shutdown.
+    shutdown: Arc<ShutdownSignal>,
 }
 
 impl TrustActor {
-    pub fn new(registry: TrustRegistry, rx: mpsc::Receiver<TrustCommand>) -> Self {
+    pub fn new(
+        registry: TrustRegistry,
+        rx: mpsc::Receiver<TrustCommand>,
+        shutdown: Arc<ShutdownSignal>,
+    ) -> Self {
         Self {
             registry,
             clock: SystemClock,
             rx,
+            shutdown,
         }
     }
 
@@ -91,15 +101,25 @@ impl TrustActor {
 
         loop {
             tokio::select! {
-                _ = maintenance_tick.tick() => {
-                    self.run_maintenance().await;
-                }
+                biased;
+                _ = self.shutdown.cancelled() => break,
                 Some(cmd) = self.rx.recv() => {
                     if !self.handle_command(cmd).await {
                         break;
                     }
                 }
+                _ = maintenance_tick.tick() => {
+                    self.run_maintenance().await;
+                }
                 else => break,
+            }
+        }
+
+        // Post-loop drain: flush any commands queued before cancellation
+        // fired so pending trust updates still land in the registry.
+        while let Ok(cmd) = self.rx.try_recv() {
+            if !self.handle_command(cmd).await {
+                break;
             }
         }
     }

@@ -1,4 +1,5 @@
 use crate::actors::egress::EgressCommand;
+use crate::actors::shutdown::ShutdownSignal;
 use crate::actors::storage::StorageCommand;
 use crate::actors::trust_actor::TrustCommand;
 use crate::clock::TrustedClock;
@@ -37,6 +38,9 @@ pub struct RetrievalActor {
     trust_tx: mpsc::Sender<TrustCommand>, // For writes
     network_key: Arc<SymmetricKey>,
     rx: mpsc::Receiver<RetrievalCommand>,
+    /// Shared cancellation signal. The run loop's select! polls this arm with
+    /// `biased;` priority so cancel wins deterministically at shutdown.
+    shutdown: Arc<ShutdownSignal>,
 }
 
 impl RetrievalActor {
@@ -51,6 +55,7 @@ impl RetrievalActor {
         trust_tx: mpsc::Sender<TrustCommand>,
         network_key: Arc<SymmetricKey>,
         rx: mpsc::Receiver<RetrievalCommand>,
+        shutdown: Arc<ShutdownSignal>,
     ) -> Self {
         Self {
             identity,
@@ -62,20 +67,38 @@ impl RetrievalActor {
             trust_tx,
             network_key,
             rx,
+            shutdown,
         }
     }
 
     pub async fn run(mut self) {
-        while let Some(cmd) = self.rx.recv().await {
-            match cmd {
-                RetrievalCommand::SecureRetrieval {
-                    origin,
-                    request,
-                    channel_id,
-                } => {
-                    self.execute_secure_retrieval(origin, request, channel_id)
-                        .await;
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.shutdown.cancelled() => break,
+                maybe_cmd = self.rx.recv() => match maybe_cmd {
+                    Some(cmd) => self.dispatch(cmd).await,
+                    None => break,
                 }
+            }
+        }
+
+        // Post-loop drain: finish any retrievals queued before cancellation
+        // fired so in-flight requests still get a response.
+        while let Ok(cmd) = self.rx.try_recv() {
+            self.dispatch(cmd).await;
+        }
+    }
+
+    async fn dispatch(&mut self, cmd: RetrievalCommand) {
+        match cmd {
+            RetrievalCommand::SecureRetrieval {
+                origin,
+                request,
+                channel_id,
+            } => {
+                self.execute_secure_retrieval(origin, request, channel_id)
+                    .await;
             }
         }
     }

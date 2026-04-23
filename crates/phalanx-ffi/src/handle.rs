@@ -453,7 +453,11 @@ pub unsafe extern "C" fn phalanx_start(handle: *mut PhalanxHandle) -> i32 {
         }
     };
 
-    // Spawn the engine's run loop
+    // Spawn the engine's run loop. After the select resolves (either run()
+    // returns or phalanx_stop dropped the shutdown_tx), call shutdown() so
+    // background actor tasks drain within the bounded deadline. Drain
+    // happens INSIDE this task — phalanx_stop itself returns as soon as it
+    // flips state, without observing drain completion.
     h.runtime.spawn(async move {
         let mut engine = sentinel_ref.lock().await;
 
@@ -467,6 +471,8 @@ pub unsafe extern "C" fn phalanx_start(handle: *mut PhalanxHandle) -> i32 {
                 tracing::info!("MeshSentinel shutdown signal received.");
             }
         }
+
+        engine.shutdown().await;
     });
 
     *state = HandleState::Running {

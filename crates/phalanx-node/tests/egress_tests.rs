@@ -12,6 +12,7 @@
 // dedup window, queue shedding, and dispatch behavior.
 
 use phalanx_node::actors::egress::{EgressActor, EgressCommand};
+use phalanx_node::actors::shutdown::ShutdownSignal;
 use phalanx_node::clock::TrustedClock;
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::identity::{NetworkId, RecordingId};
@@ -130,6 +131,7 @@ async fn test_dispatch_success_no_retry() {
         vec![],
         gov,
         Arc::new(TrustedClock::new()),
+        ShutdownSignal::new(),
     );
     let handle = tokio::spawn(actor.run());
 
@@ -168,6 +170,7 @@ async fn test_dispatch_failure_queues_for_retry() {
         vec![],
         gov,
         Arc::new(TrustedClock::new()),
+        ShutdownSignal::new(),
     );
     let handle = tokio::spawn(actor.run());
 
@@ -245,6 +248,7 @@ async fn test_dht_announce_dedup() {
         vec![],
         gov,
         Arc::new(TrustedClock::new()),
+        ShutdownSignal::new(),
     );
     let handle = tokio::spawn(actor.run());
 
@@ -290,6 +294,7 @@ async fn test_salvaged_items_restored() {
         salvaged,
         gov,
         Arc::new(TrustedClock::new()),
+        ShutdownSignal::new(),
     );
     let handle = tokio::spawn(actor.run());
 

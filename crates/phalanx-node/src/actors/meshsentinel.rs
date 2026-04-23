@@ -4,7 +4,7 @@ use crate::actors::ingestion::{IngestionActor, IngestionCommand};
 use crate::actors::media_egress::{MediaEgressActor, MediaEgressConfig};
 use crate::actors::playback::PlaybackCoordinator;
 use crate::actors::retrieval::{RetrievalActor, RetrievalCommand};
-
+use crate::actors::shutdown::ShutdownSignal;
 use crate::actors::storage::StorageCommand;
 use crate::actors::trust_actor::{TrustActor, TrustCommand};
 use crate::clock::TrustedClock;
@@ -81,8 +81,14 @@ pub struct MeshSentinel<I: IngressPort> {
     pub retrieval_tx: mpsc::Sender<RetrievalCommand>,
     pub egress_tx: mpsc::Sender<EgressCommand>,
 
-    // Keep a reference to the storage task to ensure it's not dropped.
-    pub storage_task: JoinHandle<()>,
+    /// Shared cancellation signal, cloned into every spawned background task.
+    /// Fired by `shutdown()` to wake actors' select! loops out of `rx.recv()`.
+    shutdown: Arc<ShutdownSignal>,
+
+    /// JoinHandles for all seven spawned background tasks (storage, egress,
+    /// trust, retrieval, ingestion, media, vitals). Taken by `shutdown()` and
+    /// awaited with a shared 10-second deadline.
+    background_tasks: Vec<JoinHandle<()>>,
 
     // DHT: Receives notifications when StorageActor persists a shard.
     // Triggers `EgressCommand::AnnounceRecording` to announce the recording on the DHT.
@@ -168,6 +174,11 @@ impl<I: IngressPort> MeshSentinel<I> {
         E: EgressPort + 'static,
         J: TransientJournal + Send + 'static,
     {
+        // Shared cancellation signal — cloned into every spawned task so
+        // `shutdown()` can signal them all at once. See ShutdownSignal docs
+        // for why this is Arc<Notify>+AtomicBool and not tokio-util.
+        let shutdown = ShutdownSignal::new();
+
         let local_did = deps.identity.did.clone();
         let local_network_id = deps.identity.to_network_id();
         let reassembler = Reassembler::new();
@@ -221,9 +232,10 @@ impl<I: IngressPort> MeshSentinel<I> {
             replay_filter: phalanx_forensics::bloom::RotatingBloomFilter::new(
                 phalanx_forensics::bloom::RotatingBloomFilter::DEFAULT_CAPACITY,
             ),
+            shutdown: shutdown.clone(),
         };
 
-        let storage_task = tokio::spawn(async move {
+        let storage_handle = tokio::spawn(async move {
             storage_actor.run(storage_rx).await;
         });
 
@@ -234,9 +246,10 @@ impl<I: IngressPort> MeshSentinel<I> {
             salvaged_queue,
             deps.system_governor.clone(),
             clock_handle.clone(),
+            shutdown.clone(),
         );
 
-        tokio::spawn(async move {
+        let egress_handle = tokio::spawn(async move {
             egress_actor.run().await;
         });
 
@@ -247,8 +260,8 @@ impl<I: IngressPort> MeshSentinel<I> {
         // Silent Canary: snapshot community IDs before moving the registry.
         let community_ids: Vec<_> = deps.trust_registry.communities.keys().copied().collect();
         let trust_registry = deps.trust_registry;
-        let trust_actor = TrustActor::new(trust_registry, trust_rx);
-        tokio::spawn(trust_actor.run());
+        let trust_actor = TrustActor::new(trust_registry, trust_rx, shutdown.clone());
+        let trust_handle = tokio::spawn(trust_actor.run());
 
         // Use the real vault_key — shards are encrypted with this key by MediaEgressActor.
         // The previous [0x42; 32] was a placeholder that caused silent decryption failures.
@@ -264,8 +277,9 @@ impl<I: IngressPort> MeshSentinel<I> {
             trust_tx.clone(), // Pass the sender to the retrieval actor
             network_key.clone(),
             retrieval_rx,
+            shutdown.clone(),
         );
-        tokio::spawn(retrieval_actor.run());
+        let retrieval_handle = tokio::spawn(retrieval_actor.run());
 
         // Shield Wall: retain a trust_tx handle for spectral anomaly dispatch.
         let sentinel_trust_tx = trust_tx.clone();
@@ -283,8 +297,9 @@ impl<I: IngressPort> MeshSentinel<I> {
             trust_tx,
             deps.system_governor.clone(),
             ingestion_rx,
+            shutdown.clone(),
         );
-        tokio::spawn(ingestion_actor.run());
+        let ingestion_handle = tokio::spawn(ingestion_actor.run());
 
         // Media Egress Actor instantiation — WAL-backed outbound queue for retry
         // with integral feedback: outbound queue pressure → w_integral → FPS self-regulation.
@@ -315,23 +330,32 @@ impl<I: IngressPort> MeshSentinel<I> {
                 prnu_posterior: deps.prnu_posterior.clone(),
                 storage_tx: storage_tx.clone(),
             },
+            shutdown.clone(),
         )
         .await
         .map_err(|e| -> Box<dyn Error> {
             format!("Failed to initialize MediaEgressActor outbound queue: {e}").into()
         })?;
 
-        tokio::spawn(media_actor.run());
+        let media_handle = tokio::spawn(media_actor.run());
 
         // Adaptive vitals polling — interval scales with PowerState.
         // Normal: 5s, Conserving: 15s, Leaf: 30s, Dormant: 60s.
         // Uses dynamic sleep instead of fixed interval to adapt each cycle.
+        // select! with biased cancel-first so shutdown wakes the daemon out of
+        // its sleep immediately instead of waiting for the tick.
         let vitals_governor = deps.system_governor.clone();
-        tokio::spawn(async move {
+        let vitals_shutdown = shutdown.clone();
+        let vitals_handle = tokio::spawn(async move {
             loop {
                 let interval = vitals_governor.vitals_polling_interval();
-                tokio::time::sleep(interval).await;
-                vitals_governor.update_vitals();
+                tokio::select! {
+                    biased;
+                    _ = vitals_shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(interval) => {
+                        vitals_governor.update_vitals();
+                    }
+                }
             }
         });
 
@@ -364,7 +388,16 @@ impl<I: IngressPort> MeshSentinel<I> {
             health_tracker: HealthTracker::new(),
             system_governor: deps.system_governor.clone(),
             network_key: network_key.clone(),
-            storage_task,
+            shutdown: shutdown.clone(),
+            background_tasks: vec![
+                storage_handle,
+                egress_handle,
+                trust_handle,
+                retrieval_handle,
+                ingestion_handle,
+                media_handle,
+                vitals_handle,
+            ],
             storage_tx,
             ingestion_tx,
             retrieval_tx,
@@ -451,6 +484,41 @@ impl<I: IngressPort> MeshSentinel<I> {
             }
         }
         Ok(())
+    }
+
+    /// Signal all background tasks to exit, then wait for them to drain.
+    ///
+    /// Idempotent: the underlying `ShutdownSignal` ignores repeated `cancel()`
+    /// calls, and `std::mem::take` leaves `background_tasks` empty so any
+    /// second invocation is a no-op.
+    ///
+    /// Shared 10-second deadline across all handles (not per-handle) so the
+    /// worst-case shutdown is bounded at 10s, not 10s × task count.
+    pub async fn shutdown(&mut self) {
+        self.shutdown.cancel();
+
+        let handles = std::mem::take(&mut self.background_tasks);
+        // Instant + Duration can theoretically overflow, but adding 10s to a
+        // freshly observed monotonic Instant cannot reach the saturation limit
+        // on any supported platform — this is a shared deadline, not an
+        // unbounded arithmetic expression.
+        #[allow(clippy::arithmetic_side_effects)]
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+
+        for handle in handles {
+            match tokio::time::timeout_at(deadline, handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(join_err)) => {
+                    tracing::warn!(error = %join_err, "background task panicked during shutdown");
+                }
+                Err(_) => {
+                    tracing::warn!("background task did not drain within deadline; abandoning");
+                    break; // Remaining handles will also exceed the deadline.
+                }
+            }
+        }
+
+        tracing::info!("MeshSentinel background tasks drained");
     }
 
     /// DHT: StorageActor persisted a shard — announce as provider.

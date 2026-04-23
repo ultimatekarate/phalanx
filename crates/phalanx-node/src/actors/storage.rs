@@ -1,4 +1,5 @@
 // crates/phalanx-node/src/actors/storage.rs
+use crate::actors::shutdown::ShutdownSignal;
 use crate::config::NodeConfig;
 use crate::persistence::vault::Guardian;
 use crate::vitals::{Homeostasis, SystemGovernor};
@@ -37,6 +38,9 @@ pub struct StorageActor<J: TransientJournal> {
     /// Replay detection: rotating Bloom filter for evidence_hash dedup.
     /// 1M bits per generation (~125KB × 2 = ~250KB fixed). Rotates on maintenance tick.
     pub replay_filter: RotatingBloomFilter,
+    /// Shared cancellation signal. The run loop's select! polls this arm with
+    /// `biased;` priority so cancel wins deterministically at shutdown.
+    pub shutdown: Arc<ShutdownSignal>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -126,6 +130,8 @@ impl<J: TransientJournal> StorageActor<J> {
 
         loop {
             tokio::select! {
+                biased;
+                _ = self.shutdown.cancelled() => break,
                 res = command_rx.recv() => {
                     match res {
                         Some(cmd) => self.handle_command(cmd).await,
@@ -140,6 +146,13 @@ impl<J: TransientJournal> StorageActor<J> {
                     let _ = self.guardian.check_and_finalize_recording(self.current_tolerance).await;
                 }
             }
+        }
+
+        // Post-loop drain: after cancel fires, flush queued commands so
+        // DrainForSalvage-style shutdown requests from MeshSentinel still
+        // complete before the task exits.
+        while let Ok(cmd) = command_rx.try_recv() {
+            self.handle_command(cmd).await;
         }
     }
 

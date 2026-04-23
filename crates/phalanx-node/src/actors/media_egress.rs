@@ -1,3 +1,4 @@
+use crate::actors::shutdown::ShutdownSignal;
 use crate::clock::TrustedClock;
 use crate::persistence::outbound::OutboundQueue;
 use crate::vitals::{Homeostasis, SystemGovernor};
@@ -86,6 +87,13 @@ pub struct MediaEgressActor<E: EgressPort> {
     prnu_posterior: Arc<Mutex<PrnuPosterior>>,
     /// Storage command sender — persist local captures to Guardian.
     storage_tx: mpsc::Sender<crate::actors::storage::StorageCommand>,
+    /// Shared cancellation signal. The run loop's select! polls this arm with
+    /// `biased;` priority so cancel wins deterministically at shutdown. When
+    /// cancel fires with items still in the retry queue, the actor exits
+    /// without flushing them — an accepted loss per the C2 plan (if the
+    /// network is broken enough that the retry queue isn't draining, nothing
+    /// at shutdown time can flush it either).
+    shutdown: Arc<ShutdownSignal>,
 }
 
 impl<E: EgressPort> MediaEgressActor<E> {
@@ -94,6 +102,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
         identity: Arc<PhalanxIdentity>,
         local_id: NetworkId,
         config: MediaEgressConfig,
+        shutdown: Arc<ShutdownSignal>,
     ) -> std::io::Result<Self> {
         let outbound_queue = OutboundQueue::new(config.wal_dir).await?;
         Ok(Self {
@@ -117,6 +126,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
             max_storage_bytes: config.max_storage_bytes,
             clock: config.clock,
             prnu_posterior: config.prnu_posterior,
+            shutdown,
         })
     }
 
@@ -125,9 +135,14 @@ impl<E: EgressPort> MediaEgressActor<E> {
         let mut retry_tick = tokio::time::interval(Duration::from_secs(5));
         let mut video_open = true;
         let mut audio_open = true;
+        let mut cancelled = false;
 
         loop {
             tokio::select! {
+                biased;
+                _ = self.shutdown.cancelled() => {
+                    cancelled = true;
+                }
                 result = self.video_rx.recv(), if video_open => {
                     match result {
                         Some(shard) => self.process_media_egress(Evidence::Video(shard), true).await,
@@ -145,7 +160,13 @@ impl<E: EgressPort> MediaEgressActor<E> {
                 }
             }
 
-            // Exit only when both capture channels closed AND retry queue drained
+            // Cancellation is an additional exit — the existing "all channels
+            // closed AND retry queue empty" condition still holds for graceful
+            // egress-channel-close shutdown. On cancel, pending retry-queue
+            // items are abandoned; see the `shutdown` field doc comment.
+            if cancelled {
+                break;
+            }
             if !video_open && !audio_open && self.outbound_queue.is_empty() {
                 break;
             }

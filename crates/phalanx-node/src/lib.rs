@@ -7,8 +7,11 @@ pub mod actors {
     pub mod meshsentinel;
     pub mod playback;
     pub mod retrieval;
+    pub mod shutdown;
     pub mod storage;
     pub mod trust_actor;
+
+    pub use shutdown::ShutdownSignal;
 }
 
 pub mod clock;
