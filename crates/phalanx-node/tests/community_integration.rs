@@ -23,6 +23,7 @@
 
 use ed25519_dalek::SigningKey;
 use phalanx_forensics::identity::{assemble_community, sign_vouch, CommunityAssemblyParams};
+use phalanx_node::actors::shutdown::ShutdownSignal;
 use phalanx_node::actors::trust_actor::{TrustActor, TrustCommand};
 use phalanx_node::config::NodeConfig;
 use phalanx_node::trust::TrustRegistry;
@@ -46,7 +47,7 @@ async fn build_actor() -> (mpsc::Sender<TrustCommand>, tokio::task::JoinHandle<(
     config.storage.vault_path = temp.path().to_string_lossy().to_string();
     let registry = TrustRegistry::build(&config).await;
     let (tx, rx) = mpsc::channel(32);
-    let actor = TrustActor::new(registry, rx);
+    let actor = TrustActor::new(registry, rx, ShutdownSignal::new());
     let handle = tokio::spawn(actor.run());
     // Leak so the vault dir outlives this scope — actor owns the path.
     std::mem::forget(temp);

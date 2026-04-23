@@ -13,6 +13,7 @@ use std::time::Duration;
 use phalanx_forensics::gate::WitnessGate;
 use phalanx_forensics::reassembler::FountainChunkifier;
 use phalanx_forensics::Reassembler;
+use phalanx_node::actors::shutdown::ShutdownSignal;
 use phalanx_node::actors::storage::{NoOpJournal, StorageActor, StorageCommand};
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
@@ -57,6 +58,7 @@ fn build_test_actor<J: TransientJournal + Send + 'static>(
         replay_filter: phalanx_forensics::bloom::RotatingBloomFilter::new(
             phalanx_forensics::bloom::RotatingBloomFilter::DEFAULT_CAPACITY,
         ),
+        shutdown: ShutdownSignal::new(),
     };
 
     (actor, storage_rx, storage_tx)

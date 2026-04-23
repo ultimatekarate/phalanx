@@ -1,4 +1,5 @@
 use crate::actors::egress::EgressCommand;
+use crate::actors::shutdown::ShutdownSignal;
 use crate::actors::storage::StorageCommand;
 use crate::actors::trust_actor::TrustCommand;
 use crate::clock::TrustedClock;
@@ -37,6 +38,9 @@ pub struct IngestionActor {
     trust_tx: mpsc::Sender<TrustCommand>,
     system_governor: Arc<SystemGovernor>,
     rx: mpsc::Receiver<IngestionCommand>,
+    /// Shared cancellation signal. The run loop's select! polls this arm with
+    /// `biased;` priority so cancel wins deterministically at shutdown.
+    shutdown: Arc<ShutdownSignal>,
 }
 
 impl IngestionActor {
@@ -53,6 +57,7 @@ impl IngestionActor {
         trust_tx: mpsc::Sender<TrustCommand>,
         system_governor: Arc<SystemGovernor>,
         rx: mpsc::Receiver<IngestionCommand>,
+        shutdown: Arc<ShutdownSignal>,
     ) -> Self {
         Self {
             config,
@@ -66,19 +71,37 @@ impl IngestionActor {
             trust_tx,
             system_governor,
             rx,
+            shutdown,
         }
     }
 
     pub async fn run(mut self) {
-        while let Some(cmd) = self.rx.recv().await {
-            match cmd {
-                IngestionCommand::ProcessChunk {
-                    peer_id,
-                    data,
-                    topic,
-                } => {
-                    self.handle_network_ingress(peer_id, &data, topic).await;
+        loop {
+            tokio::select! {
+                biased;
+                _ = self.shutdown.cancelled() => break,
+                maybe_cmd = self.rx.recv() => match maybe_cmd {
+                    Some(cmd) => self.dispatch(cmd).await,
+                    None => break,
                 }
+            }
+        }
+
+        // Post-loop drain: finish any ingestion work queued before cancel
+        // fired so accepted chunks still reach the vault.
+        while let Ok(cmd) = self.rx.try_recv() {
+            self.dispatch(cmd).await;
+        }
+    }
+
+    async fn dispatch(&mut self, cmd: IngestionCommand) {
+        match cmd {
+            IngestionCommand::ProcessChunk {
+                peer_id,
+                data,
+                topic,
+            } => {
+                self.handle_network_ingress(peer_id, &data, topic).await;
             }
         }
     }

@@ -1,3 +1,4 @@
+use crate::actors::shutdown::ShutdownSignal;
 use crate::clock::TrustedClock;
 use crate::vitals::{Homeostasis, SystemGovernor};
 use phalanx_proto::identity::{NetworkId, RecordingId};
@@ -56,6 +57,9 @@ pub struct EgressActor<E: EgressPort> {
     last_announce_clear: Instant,
     /// Trusted clock for forensic timestamps.
     clock: Arc<TrustedClock>,
+    /// Shared cancellation signal. The run loop's select! polls this arm with
+    /// `biased;` priority so cancel wins deterministically at shutdown.
+    shutdown: Arc<ShutdownSignal>,
 }
 
 /// DHT announce dedup window duration.
@@ -72,6 +76,7 @@ impl<E: EgressPort> EgressActor<E> {
         salvaged: Vec<PendingEgress>,
         system_governor: Arc<SystemGovernor>,
         clock: Arc<TrustedClock>,
+        shutdown: Arc<ShutdownSignal>,
     ) -> Self {
         Self {
             port,
@@ -81,6 +86,7 @@ impl<E: EgressPort> EgressActor<E> {
             announced: HashSet::new(),
             last_announce_clear: Instant::now(),
             clock,
+            shutdown,
         }
     }
 
@@ -90,14 +96,25 @@ impl<E: EgressPort> EgressActor<E> {
 
         loop {
             tokio::select! {
-                _ = retry_tick.tick() => {
-                    self.process_pending().await;
-                }
+                biased;
+                _ = self.shutdown.cancelled() => break,
                 Some(cmd) = self.rx.recv() => {
                     if self.handle_command(cmd).await {
                         break;
                     }
                 }
+                _ = retry_tick.tick() => {
+                    self.process_pending().await;
+                }
+            }
+        }
+
+        // Post-loop drain: process any queued commands — notably
+        // DrainForSalvage from MeshSentinel::handle_shutdown — so the
+        // salvage contract still completes after cancellation fires.
+        while let Ok(cmd) = self.rx.try_recv() {
+            if self.handle_command(cmd).await {
+                break;
             }
         }
     }

@@ -6,13 +6,14 @@
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation
 )]
+mod common;
+
 use phalanx_node::identity::PhalanxNodeIdentityExt;
-use phalanx_node::trust::TrustRegistry;
 
 use phalanx_forensics::gate::IntegrityGate;
 use phalanx_forensics::policy::EgressGovernor;
 use phalanx_forensics::Reassembler;
-use phalanx_node::actors::meshsentinel::{MeshSentinel, SentinelDependencies};
+use phalanx_node::actors::shutdown::ShutdownSignal;
 use phalanx_node::actors::storage::{NoOpJournal, StorageActor, StorageCommand};
 use phalanx_node::config::NodeConfig;
 use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
@@ -21,97 +22,17 @@ use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId, ShardId};
 use phalanx_proto::network::NetworkEvent;
-use phalanx_proto::network::{EgressPort, IngressPort};
 use phalanx_proto::prelude::RecordingResponse;
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::storage::TransientJournal;
 use phalanx_proto::time::SystemClock;
-use phalanx_proto::topic::MeshTopic;
 use phalanx_proto::trust::TrustLevel;
 use phalanx_proto::types::{ForensicUnit, SystemStress, Verified};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 
-// --- Actor-Oriented Test Doubles ---
-
-struct TestIngress {
-    ingress_rx: mpsc::Receiver<NetworkEvent>,
-}
-
-#[async_trait::async_trait]
-impl IngressPort for TestIngress {
-    async fn next_event(&mut self) -> Option<NetworkEvent> {
-        self.ingress_rx.recv().await
-    }
-}
-
-#[derive(Clone)]
-struct TestEgress;
-
-#[async_trait::async_trait]
-impl EgressPort for TestEgress {
-    async fn publish(&self, _topic: &MeshTopic, _data: Vec<u8>) -> Result<(), String> {
-        Ok(())
-    }
-    async fn ban_peer(&self, _peer: &NetworkId) {}
-    async fn send_response(
-        &self,
-        _channel_id: &str,
-        _response: RecordingResponse,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-    async fn announce_recording(&self, _recording_id: &RecordingId) -> Result<(), String> {
-        Ok(())
-    }
-    async fn find_providers(&self, _recording_id: &RecordingId) -> Result<(), String> {
-        Ok(())
-    }
-    async fn send_request(
-        &self,
-        _target: &NetworkId,
-        _request: phalanx_proto::retrieval::RecordingRequest,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-// --- Test Sentinel Factory ---
-
-async fn build_test_sentinel(
-    ingress_rx: mpsc::Receiver<NetworkEvent>,
-) -> (MeshSentinel<TestIngress>, tempfile::TempDir) {
-    let temp = tempfile::tempdir().unwrap();
-    let mut config = NodeConfig::default();
-    config.storage.vault_path = temp.path().to_string_lossy().to_string();
-
-    let identity = PhalanxIdentity::new_ephemeral();
-    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
-    let trust_registry = TrustRegistry::build(&config).await;
-
-    let deps = SentinelDependencies {
-        config,
-        identity,
-        ingress: TestIngress { ingress_rx },
-        egress: TestEgress,
-        journal: NoOpJournal,
-        trust_registry,
-        system_governor: Arc::new(SystemGovernor::new()),
-        vault_key,
-        local_mesh: None, // No local transport in tests
-        prnu_posterior: Arc::new(std::sync::Mutex::new(
-            phalanx_proto::evidence::PrnuPosterior::new_uninformed(),
-        )),
-    };
-
-    (
-        MeshSentinel::new(deps)
-            .await
-            .expect("Failed to build test sentinel"),
-        temp,
-    )
-}
+use common::build_test_sentinel;
 
 // --- Storage Test Helpers (unchanged) ---
 
@@ -139,6 +60,7 @@ fn build_test_actor<J: TransientJournal + Send + 'static>(
         replay_filter: phalanx_forensics::bloom::RotatingBloomFilter::new(
             phalanx_forensics::bloom::RotatingBloomFilter::DEFAULT_CAPACITY,
         ),
+        shutdown: ShutdownSignal::new(),
     };
 
     (actor, storage_rx, storage_tx)

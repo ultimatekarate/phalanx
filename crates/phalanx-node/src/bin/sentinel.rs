@@ -21,7 +21,21 @@ use phalanx_proto::prelude::PhalanxIdentity;
 async fn main() -> Result<(), Box<dyn Error>> {
     // Telemetry & Initialization
     init_observability();
-    setup_shutdown_handler();
+
+    // Ctrl-C wiring: the handler sends on a oneshot. `engine.run()` is raced
+    // against the receiver so SIGINT unwinds back to the `shutdown().await`
+    // path below instead of short-circuiting through `std::process::exit`,
+    // which would skip all actor drain.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let shutdown_tx = std::sync::Mutex::new(Some(shutdown_tx));
+    ctrlc::set_handler(move || {
+        println!("\n[PHALANX] Shutdown initiated. Sealing vault...");
+        if let Ok(mut guard) = shutdown_tx.lock() {
+            if let Some(tx) = guard.take() {
+                let _ = tx.send(());
+            }
+        }
+    })?;
 
     // Configuration Loading
     let config = NodeConfig::load_from_env();
@@ -88,17 +102,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     println!("--- PHALANX SENSOR: ONLINE (WAN + LAN) ---");
 
-    // Execution
-    engine.run().await?;
+    // Race the sentinel's main loop against the ctrl-c oneshot. When the
+    // ctrl-c arm wins, `engine.run()` is dropped mid-iteration — the message
+    // currently being handled may be lost, which is accepted SIGINT semantics.
+    // Actors still drain cleanly via `shutdown().await` below.
+    let run_result: Result<(), Box<dyn Error>> = tokio::select! {
+        result = engine.run() => result,
+        _ = shutdown_rx => Ok(()),
+    };
 
-    Ok(())
-}
+    // Always drain background tasks, even on run() error, so pending work
+    // (including EgressActor's DrainForSalvage output) lands in the journal.
+    engine.shutdown().await;
 
-fn setup_shutdown_handler() {
-    if let Err(e) = ctrlc::set_handler(move || {
-        println!("\n[PHALANX] Shutdown initiated. Sealing vault...");
-        std::process::exit(0);
-    }) {
-        eprintln!("Failed to set Ctrl-C handler: {e}");
-    }
+    run_result
 }

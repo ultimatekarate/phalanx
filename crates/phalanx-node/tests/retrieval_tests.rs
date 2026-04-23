@@ -14,6 +14,7 @@
 
 use phalanx_node::actors::egress::EgressCommand;
 use phalanx_node::actors::retrieval::{RetrievalActor, RetrievalCommand};
+use phalanx_node::actors::shutdown::ShutdownSignal;
 use phalanx_node::actors::storage::StorageCommand;
 use phalanx_node::actors::trust_actor::TrustCommand;
 use phalanx_node::clock::TrustedClock;
@@ -60,6 +61,7 @@ fn build_retrieval_actor(system_governor: Arc<SystemGovernor>) -> RetrievalActor
         trust_tx,
         network_key,
         retrieval_rx,
+        ShutdownSignal::new(),
     );
 
     let handle = tokio::spawn(actor.run());
@@ -230,6 +232,7 @@ async fn test_storage_closed_sends_not_found() {
         trust_tx,
         Arc::new(SymmetricKey::from_bytes([0u8; 32])),
         retrieval_rx,
+        ShutdownSignal::new(),
     );
     let handle = tokio::spawn(actor.run());
 
