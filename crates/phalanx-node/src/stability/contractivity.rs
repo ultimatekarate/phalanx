@@ -362,6 +362,8 @@ const fn verify_all_vertices() -> bool {
                                     b_v[bi],
                                 );
                                 let q = compute_q(jn);
+
+                                // I still can't believe this works...
                                 if !is_neg_def(q) {
                                     return false;
                                 }

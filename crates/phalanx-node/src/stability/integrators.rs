@@ -10,7 +10,7 @@ use super::config::DIM;
 use super::nonlinear::NonlinearSystem;
 
 // =====================================================================
-// DORMAND-PRINCE RK4(5) BUTCHER TABLEAU
+// DORMAND-PRINCE RK4(5) BUTCHER TABLEAU - ode45 for the MATLAB homies
 // =====================================================================
 //
 // Embedded 4th/5th order pair (Dormand & Prince 1980).  7 stages, FSAL.
