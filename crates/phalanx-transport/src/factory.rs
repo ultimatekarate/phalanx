@@ -92,7 +92,11 @@ where
     let (relay_transport, relay_client) = relay::client::new(local_peer_id);
 
     // ── I/O counters ──────────────────────────────────────────
-    let io_counters = IoCounters::new();
+    let io_counters = if config.adapter.enable_io_log {
+        IoCounters::with_io_log()
+    } else {
+        IoCounters::new()
+    };
 
     // ── Transport composition ────────────────────────────────
     let quic_transport = build_quic_transport(&local_key, &io_counters)

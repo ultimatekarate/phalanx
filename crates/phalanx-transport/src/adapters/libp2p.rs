@@ -1,5 +1,5 @@
 use crate::behaviour::{recording_id_from_key, PhalanxBehaviour};
-use crate::counting::IoCounters;
+use crate::counting::{IoCounters, IoLogEntry};
 use crate::events::PhalanxEvent;
 use crate::PeerMapper;
 use async_trait::async_trait;
@@ -33,6 +33,33 @@ pub enum TransportCommand {
     ReBootstrap(Vec<String>),
 }
 
+/// Per-protocol wake attribution. Each field is a handle to a shared atomic
+/// counter; clones share state. Always-on — 12 atomic increments per wake
+/// have negligible cost. Operational type (not a Dictionary Noun) per the
+/// Linguistic Model; lives in phalanx-transport.
+///
+/// Sum of all 12 counters equals `Libp2pAdapter::swarm_wake_count` (up to small
+/// read-races). Diverges loudly if a new `SwarmEvent` variant goes unclassified
+/// in the `handle_swarm_event!` match.
+#[derive(Clone, Debug, Default)]
+pub struct ProtocolWakeCounters {
+    pub gossipsub: Arc<AtomicU64>,
+    pub kademlia: Arc<AtomicU64>,
+    pub mdns: Arc<AtomicU64>,
+    pub identify: Arc<AtomicU64>,
+    pub autonat: Arc<AtomicU64>,
+    pub dcutr: Arc<AtomicU64>,
+    pub relay_server: Arc<AtomicU64>,
+    pub relay_client: Arc<AtomicU64>,
+    pub retrieval: Arc<AtomicU64>,
+    /// ConnectionEstablished / ConnectionClosed / IncomingConnection / Dialing / *Error
+    pub connection: Arc<AtomicU64>,
+    /// NewListenAddr / ExpiredListenAddr / ListenerClosed / ListenerError
+    pub listener: Arc<AtomicU64>,
+    /// NewExternalAddr* and any future SwarmEvent variants not otherwise classified.
+    pub other: Arc<AtomicU64>,
+}
+
 #[derive(Clone)]
 pub struct Libp2pAdapter {
     command_tx: mpsc::Sender<TransportCommand>,
@@ -51,6 +78,19 @@ pub struct Libp2pAdapter {
     /// Socket-level I/O counters. Every byte read/written on any substream
     /// is tracked here. Always active — ~1ns overhead per I/O op.
     pub io_counters: IoCounters,
+    /// Per-protocol wake attribution. Always active.
+    pub protocol_wakes: ProtocolWakeCounters,
+    /// Gauge: count of `TransportCommand`s sent but not yet consumed. Saturates
+    /// at the command-channel capacity (hardcoded 2048 today; see the
+    /// `mpsc::channel::<TransportCommand>(2048)` call in `with_config`). This is
+    /// a *gauge*, not a total — it decrements after each `command_rx.recv()`.
+    pub outbound_queue_depth: Arc<AtomicU64>,
+    /// Monotonically increasing count of `gossipsub.publish()` calls that
+    /// returned an error (e.g. `InsufficientPeers`, `MessageTooLarge`). The
+    /// `Egress::publish()` API reports these only via `tracing::error!`, so
+    /// tests with no subscriber installed lose them. This counter gives a
+    /// programmatic signal that the swarm task rejected a published message.
+    pub gossipsub_publish_errors: Arc<AtomicU64>,
 }
 
 /// Extract a `SubnetBucket` from a libp2p `Multiaddr`.
@@ -177,6 +217,10 @@ pub struct AdapterConfig {
     /// When true, the adapter records timestamps for every swarm wake into a
     /// shared log. Intended for benchmarks only — not for production use.
     pub enable_wake_log: bool,
+    /// When true, the shared `IoCounters::io_log` is initialized to `Some` so
+    /// every socket-level read/write appends a timestamped `IoLogEntry`.
+    /// Benchmarks only — not production.
+    pub enable_io_log: bool,
 }
 
 impl Default for AdapterConfig {
@@ -186,6 +230,7 @@ impl Default for AdapterConfig {
             max_events_per_peer_per_sec: 100,
             poll_cadence: None,
             enable_wake_log: false,
+            enable_io_log: false,
         }
     }
 }
@@ -209,7 +254,7 @@ impl Libp2pAdapter {
     where
         S: RecordStore + Send + Sync + 'static,
     {
-        let (command_tx, mut command_rx) = mpsc::channel::<TransportCommand>(128);
+        let (command_tx, mut command_rx) = mpsc::channel::<TransportCommand>(2048);
         let (_event_tx, event_rx) = mpsc::channel::<NetworkEvent>(config.event_channel_capacity);
         let max_per_sec = config.max_events_per_peer_per_sec;
         let dropped_counter = Arc::new(AtomicU64::new(0));
@@ -224,6 +269,14 @@ impl Libp2pAdapter {
             None
         };
         let wake_log_task = wake_log.clone();
+
+        let protocol_wakes = ProtocolWakeCounters::default();
+        let protocol_wakes_task = protocol_wakes.clone();
+
+        let outbound_queue_depth = Arc::new(AtomicU64::new(0));
+        let outbound_queue_depth_task = outbound_queue_depth.clone();
+        let gossipsub_publish_errors = Arc::new(AtomicU64::new(0));
+        let gossipsub_publish_errors_task = gossipsub_publish_errors.clone();
 
         let poll_cadence = config.poll_cadence;
 
@@ -240,6 +293,7 @@ impl Libp2pAdapter {
                         Some(TransportCommand::Publish(topic, data)) => {
                             let ident_topic = libp2p::gossipsub::IdentTopic::new(topic.to_string());
                             if let Err(publish_error) = swarm.behaviour_mut().gossipsub.publish(ident_topic, data) {
+                                gossipsub_publish_errors_task.fetch_add(1, Ordering::Relaxed);
                                 tracing::error!(
                                     target: "phalanx::transport",
                                     "Gossipsub publish failed for topic {}: {:?}",
@@ -344,6 +398,32 @@ impl Libp2pAdapter {
                         }
                     }
 
+                    // Per-protocol wake attribution. Borrows swarm_event; value
+                    // is still consumed by translate_swarm_event below.
+                    let protocol_counter: &Arc<AtomicU64> = match &swarm_event {
+                        SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(_))   => &protocol_wakes_task.gossipsub,
+                        SwarmEvent::Behaviour(PhalanxEvent::Mdns(_))        => &protocol_wakes_task.mdns,
+                        SwarmEvent::Behaviour(PhalanxEvent::Kademlia(_))    => &protocol_wakes_task.kademlia,
+                        SwarmEvent::Behaviour(PhalanxEvent::Identify(_))    => &protocol_wakes_task.identify,
+                        SwarmEvent::Behaviour(PhalanxEvent::Autonat(_))     => &protocol_wakes_task.autonat,
+                        SwarmEvent::Behaviour(PhalanxEvent::Dcutr(_))       => &protocol_wakes_task.dcutr,
+                        SwarmEvent::Behaviour(PhalanxEvent::RelayServer(_)) => &protocol_wakes_task.relay_server,
+                        SwarmEvent::Behaviour(PhalanxEvent::RelayClient(_)) => &protocol_wakes_task.relay_client,
+                        SwarmEvent::Behaviour(PhalanxEvent::Retrieval(_))   => &protocol_wakes_task.retrieval,
+                        SwarmEvent::ConnectionEstablished { .. }
+                        | SwarmEvent::ConnectionClosed { .. }
+                        | SwarmEvent::IncomingConnection { .. }
+                        | SwarmEvent::IncomingConnectionError { .. }
+                        | SwarmEvent::OutgoingConnectionError { .. }
+                        | SwarmEvent::Dialing { .. }                        => &protocol_wakes_task.connection,
+                        SwarmEvent::NewListenAddr { .. }
+                        | SwarmEvent::ExpiredListenAddr { .. }
+                        | SwarmEvent::ListenerClosed { .. }
+                        | SwarmEvent::ListenerError { .. }                  => &protocol_wakes_task.listener,
+                        _                                                    => &protocol_wakes_task.other,
+                    };
+                    protocol_counter.fetch_add(1, Ordering::Relaxed);
+
                     // Internal swarm wiring: discovered mDNS peers → Kademlia routing table
                     if let SwarmEvent::Behaviour(PhalanxEvent::Mdns(
                         libp2p::mdns::Event::Discovered(ref peers)
@@ -422,6 +502,7 @@ impl Libp2pAdapter {
                                 if command_option.is_none() {
                                     return; // Channel dropped; shutdown
                                 }
+                                outbound_queue_depth_task.fetch_sub(1, Ordering::Relaxed);
                                 handle_command!(command_option);
                             }
                             swarm_event = swarm.select_next_some() => {
@@ -443,6 +524,7 @@ impl Libp2pAdapter {
                             if command_option.is_none() {
                                 break; // Channel dropped; initiate actor shutdown
                             }
+                            outbound_queue_depth_task.fetch_sub(1, Ordering::Relaxed);
                             handle_command!(command_option);
                         },
                         swarm_event = swarm.select_next_some() => {
@@ -460,6 +542,9 @@ impl Libp2pAdapter {
             swarm_wake_count: wake_counter,
             swarm_wake_log: wake_log,
             io_counters,
+            protocol_wakes,
+            outbound_queue_depth,
+            gossipsub_publish_errors,
         }
     }
 
@@ -494,10 +579,14 @@ impl Libp2pAdapter {
 
 impl Libp2pAdapter {
     pub async fn publish(&self, topic: MeshTopic, data: Vec<u8>) -> Result<(), TransportError> {
+        self.outbound_queue_depth.fetch_add(1, Ordering::Relaxed);
         self.command_tx
             .send(TransportCommand::Publish(topic, data))
             .await
-            .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
+            .map_err(|_| {
+                self.outbound_queue_depth.fetch_sub(1, Ordering::Relaxed);
+                TransportError::Internal("Sentinel connection lost".into())
+            })
     }
 
     pub async fn send_direct(
@@ -505,47 +594,67 @@ impl Libp2pAdapter {
         target: &NetworkId,
         data: Vec<u8>,
     ) -> Result<(), TransportError> {
+        self.outbound_queue_depth.fetch_add(1, Ordering::Relaxed);
         self.command_tx
             .send(TransportCommand::SendDirect(target.clone(), data))
             .await
-            .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
+            .map_err(|_| {
+                self.outbound_queue_depth.fetch_sub(1, Ordering::Relaxed);
+                TransportError::Internal("Sentinel connection lost".into())
+            })
     }
 
     pub async fn ban_peer(&self, peer: &NetworkId) -> Result<(), TransportError> {
+        self.outbound_queue_depth.fetch_add(1, Ordering::Relaxed);
         self.command_tx
             .send(TransportCommand::Ban(peer.clone()))
             .await
-            .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
+            .map_err(|_| {
+                self.outbound_queue_depth.fetch_sub(1, Ordering::Relaxed);
+                TransportError::Internal("Sentinel connection lost".into())
+            })
     }
 
     pub async fn announce_recording(
         &self,
         recording_id: &phalanx_proto::identity::RecordingId,
     ) -> Result<(), TransportError> {
+        self.outbound_queue_depth.fetch_add(1, Ordering::Relaxed);
         self.command_tx
             .send(TransportCommand::AnnounceRecording(recording_id.clone()))
             .await
-            .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
+            .map_err(|_| {
+                self.outbound_queue_depth.fetch_sub(1, Ordering::Relaxed);
+                TransportError::Internal("Sentinel connection lost".into())
+            })
     }
 
     pub async fn find_providers(
         &self,
         recording_id: &phalanx_proto::identity::RecordingId,
     ) -> Result<(), TransportError> {
+        self.outbound_queue_depth.fetch_add(1, Ordering::Relaxed);
         self.command_tx
             .send(TransportCommand::FindRecordingProviders(
                 recording_id.clone(),
             ))
             .await
-            .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
+            .map_err(|_| {
+                self.outbound_queue_depth.fetch_sub(1, Ordering::Relaxed);
+                TransportError::Internal("Sentinel connection lost".into())
+            })
     }
 
     /// Eclipse remediation: re-dial bootstrap peers and trigger Kademlia random walk.
     pub async fn rebootstrap(&self, peers: &[String]) -> Result<(), TransportError> {
+        self.outbound_queue_depth.fetch_add(1, Ordering::Relaxed);
         self.command_tx
             .send(TransportCommand::ReBootstrap(peers.to_vec()))
             .await
-            .map_err(|_| TransportError::Internal("Sentinel connection lost".into()))
+            .map_err(|_| {
+                self.outbound_queue_depth.fetch_sub(1, Ordering::Relaxed);
+                TransportError::Internal("Sentinel connection lost".into())
+            })
     }
 }
 
@@ -598,6 +707,34 @@ impl Libp2pEgress {
     /// (each `poll_read` or `poll_write` that transfers bytes).
     pub fn socket_io_ops(&self) -> Arc<AtomicU64> {
         self.adapter.io_counters.io_ops.clone()
+    }
+
+    /// Returns a handle to the per-protocol wake counters. Clones of
+    /// `ProtocolWakeCounters` share the underlying atomics with the adapter
+    /// (12 `Arc::clone` bumps per call; only invoke at sample boundaries).
+    pub fn protocol_wakes(&self) -> ProtocolWakeCounters {
+        self.adapter.protocol_wakes.clone()
+    }
+
+    /// Returns the shared gauge of unconsumed outbound `TransportCommand`s.
+    /// Saturates at the command-channel capacity (hardcoded 2048).
+    pub fn outbound_queue_depth(&self) -> Arc<AtomicU64> {
+        self.adapter.outbound_queue_depth.clone()
+    }
+
+    /// Returns the monotonic count of failed `gossipsub.publish()` calls in
+    /// the swarm task. These errors (e.g. `InsufficientPeers`) are otherwise
+    /// only surfaced via `tracing::error!`, which is lost in tests that
+    /// don't install a subscriber.
+    pub fn gossipsub_publish_errors(&self) -> Arc<AtomicU64> {
+        self.adapter.gossipsub_publish_errors.clone()
+    }
+
+    /// Returns the shared IO event log when `AdapterConfig::enable_io_log`
+    /// is set at adapter construction. Shared across all substreams and
+    /// transports (QUIC, TCP, Relay) for this adapter.
+    pub fn io_log(&self) -> Option<Arc<Mutex<Vec<IoLogEntry>>>> {
+        self.adapter.io_counters.io_log.clone()
     }
 }
 
