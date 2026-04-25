@@ -6,7 +6,7 @@ Phalanx is a mobile app that records video, proves it hasn't been tampered with,
 
 ## How It Works
 
-Phalanx is deliberately designed to look boring. When you open it, it will look like a basic recording application. It functions exactly as you would expect it to, except it is much more robust and secure. The moment you hit record your data is being encrypted, digitally signed, sharded and stored in a distributed file system. You are the only person who decides who gets to see it. You don't have to worry if your device is seized or destroyed. You will always be able to recover your data — BIP39 mnemonics aren't just for cryptobros anymore. Phalanx also creates a digital chain of custody. It allows you to trust that the video you are seeing is true, not an AI deep fake, without trusting the person who recorded it.
+Phalanx is deliberately designed to look boring. When you open it, it will look like a basic recording application. It functions exactly as you would expect it to, except it is much more robust and secure. The moment you hit record your data is being encrypted, digitally signed, sharded, and stored in a distributed file system. You are the only person who decides who gets to see it. You don't have to worry if your device is seized or destroyed. You will always be able to recover your data — BIP39 mnemonics aren't just for cryptobros anymore. Phalanx also creates a digital chain of custody. It allows you to trust that the video you are seeing is true, not an AI deep fake, without trusting the person who recorded it.
 
 ## Background
 
@@ -14,7 +14,7 @@ This started as a way to use AI tools to learn Rust and it rapidly got out of ha
 
 I'm not an expert in any of the fields you see in this repo (well, I do have a PhD in numerical analysis so there's that) but I don't have to be because I can RTFM. The nerds of yore knew that there would come a time when someone else would need to invoke the deep magic. That's why they wrote it down. There are some genuinely novel ideas in this code base, but for the most part it is an act of synthesis that is heavily influenced by Grace Hopper and Margaret Hamilton.
 
-Grace Hopper believed that the language should be the logic. She dared to believe that the machines should meet the humans where they are — that's why we have compilers. Margaret Hamilton, the woman who coined the phrase 'software engineering', believed that software deserved the same level of rigor as the hardware that it ran on. Both were dismissed and they built the thing anyway — and they were right to do it. I'm not Grace Hopper. I'm not Margaret Hamilton. I'm just someone that had an idea that they wanted to try out — and now the world has Phalanx. Use it or don't. Hopefully, at least one person will find it useful.
+Grace Hopper believed that the language should be the logic. She dared to believe that the machines should meet the humans where they are — that's why we have compilers. Margaret Hamilton, the woman who coined the phrase "software engineering", believed that software deserved the same level of rigor as the hardware that it ran on. Both were dismissed and they built the thing anyway — and they were right to do it. I'm not Grace Hopper. I'm not Margaret Hamilton. I'm just someone that had an idea that they wanted to try out — and now the world has Phalanx. Use it or don't. Hopefully, at least one person will find it useful.
 
 ## Capabilities
 
@@ -46,7 +46,7 @@ Phalanx assumes zero trust at every boundary. No peer, device, or network path i
 
 The adaptive control system produces behaviors that were never explicitly programmed:
 
-- **Self-healing** — There is no recovery logic. When load drops, the system naturally returns to full throughput on its own. Recovery is a side effect of how pressure decays over time.
+- **Self-healing** — There is no recovery logic. When load drops, the system naturally returns to full throughput on its own. Recovery is a side effect of how pressure decays over time. 
 - **Natural load shedding order** — Under stress, untrusted peers are shed first, then bandwidth-heavy work, then memory, then storage, then CPU. Nobody wrote this priority list — it falls out of how the resource signals are coupled to each other.
 - **Sybil resistance with diminishing returns** — Each additional fake peer an attacker adds is less effective than the last. Overwhelming the system requires flooding bandwidth, not just creating identities.
 - **Anticipatory memory pressure** — When storage backs up, memory pressure rises even before anything new is allocated. The system senses that writes are queuing and preemptively constrains upstream work.
@@ -78,6 +78,8 @@ The codebase is governed by a [Linguistic Code Model](linguistic-code-model.md) 
 Phalanx is conceptually dense. I have gone to great lengths to ensure that you do not need to understand all of it to contribute to any of it. If you are interested, please read [the guide for contributing](CONTRIBUTING.md). There you will find the code base broken down by technical specialty with a list of files and a brief summary of what each file does.
 
 ## Build
+
+I want to preface this section with the fact that I am not a DevOps expert. If you are a DevOps expert I would love your help- please.
 
 Minimum Rust version: **1.93.1**
 
@@ -129,7 +131,7 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-If `turbojpeg-sys` fails, it is almost always CMake not finding the C compiler. Run `cmake --version` and `cl --version` (Windows) or `cc --version` (Linux/macOS) to verify they're reachable.
+If `turbojpeg-sys` fails, it is almost always CMake not finding the C compiler. Run `cmake --version` and `cl --version` (Windows) or `cc --version` (Linux/macOS) to verify they're reachable. I've been actively trying to get rid of this dependency- I'm out of my depth on this one.
 
 The Stronghold server binary:
 
@@ -185,4 +187,4 @@ The workspace enforces deny-level clippy lints across all crates — `unwrap_use
 
 ## License
 
-Patent pending.
+License: I'm in the early stages of filing a patent. I'm mostly doing this as a defensive measure. I have no intention of enforcing against earnest collaborators.
