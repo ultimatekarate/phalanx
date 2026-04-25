@@ -1,6 +1,6 @@
 # Contractivity Proof for Phalanx Integral System
 
-## Theorem
+## Claim
 
 There exists a symmetric positive definite matrix P (8x8) such that for the
 normalized Jacobian J_n(x) of the Volterra integral system:

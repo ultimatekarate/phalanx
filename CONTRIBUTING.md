@@ -198,7 +198,7 @@ JPEG/PCM capture, MP4 transcoding, fountain code encoding/reassembly, C2PA conte
 
 ### Control Theory & Stability
 
-Volterra integral feedback, Jacobian linearization, eigenvalue stability analysis, Padé approximants, Dyson series, and homeostatic self-regulation.
+Volterra integral feedback, Jacobian linearization, eigenvalue stability analysis, Padé approximants, Dyson series, and homeostatic self-regulation. 
 
 | File | What it does |
 | ------ | ------------- |
@@ -219,7 +219,7 @@ PRNU sensor fingerprinting, Kolmogorov-Smirnov testing, spectral analysis, and c
 
 | File | What it does |
 | ------ | ------------- |
-| `phalanx-forensics/src/pipeline/calibrate.rs` | PRNU calibration — deriving per-sensor fingerprint thresholds |
+| `phalanx-forensics/src/pipeline/calibrate.rs` | PRNU calibration — deriving per-sensor fingerprint thresholds. **This needs attention.**|
 | `phalanx-forensics/src/trust/corroboration.rs` | Gate 8 multi-device proof generation with K-S statistical testing |
 | `phalanx-proto/src/evidence/corroboration.rs` | Corroboration proof types and temporal event windows |
 | `phalanx-node/src/vitals/spectral.rs` | Spectral analysis for vitals frequency-domain monitoring |
