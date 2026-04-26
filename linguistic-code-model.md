@@ -4,6 +4,9 @@ This document establishes the "Linguistic Model" of Phalanx. All code must be pa
 
 **Multi-scale governance.** The model operates at two reinforcing scales, analogous to a multi-grid solver. The *coarse grid* is this document — it partitions the entire codebase into linguistic roles (Dictionary, Laboratory, Post Office, Sentence) so that any contributor can make a correct high-level decision without reading implementation code. The *fine grid* is the local context inside each file — semantic constructor names, type-state transitions, named handler methods, and workspace-level compiler lints. A contributor working inside a single function has enough local information to make correct decisions at that scope. Errors at one scale are caught at the other: a type placed in the wrong crate violates the coarse grid; a function that grows too complex or smuggles an `unwrap()` past governance is caught by the fine grid. Correct code emerges from convergence across both scales, not from exhaustive global knowledge.
 
+
+**A Note on the Metaphor.** The linguistic model is a tool for partitioning code. Some of the comparisons in this document are overwrought — add linguist to the list of things I am not. And if I'm being totally honest, this is little more than Apollo-era DSKY flavored Functional Core, Imperative Shell that uses the Rust compiler to give it actual teeth. Maintain the analogy insofar as it is useful, abandon it when it is not. When in doubt, the Cargo.toml files are the source of truth.
+
 ---
 
 ## I. PARTS OF SPEECH
@@ -83,7 +86,7 @@ Every `#[allow(clippy::...)]` in the codebase has a comment explaining why the s
 3. **ALWAYS** define reassembly strategies as `Mold` implementations in the Lab.
 4. **PREFER** the `prelude` for cross-crate imports of first-class Nouns. Import persistence contracts, scheduling types, and operational state directly from their defining module.
 5. **NEVER** use mutex or RwLock unless it is absolutely necessary. Treat network deadlocks as a conflict of tense. Organize resources by temporal kind:
-- Past: sealed / immutable data (your typestate Sealed phase, audit-log entries). Read freely, no lock needed.
+- Past: sealed / immutable data. Read freely, no lock needed.
 - Present: in-flight operations, currently-held state. Touched briefly, never awaited on.
 - Future: pending commitments (PendingEgress). Enqueued, not held.
 The rule that falls out: never await on present while holding present. Wait on past (free) or future (enqueued); never on a peer's current-tense state. That breaks deadlock's cycle requirement by construction.

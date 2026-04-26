@@ -59,7 +59,7 @@ The adaptive control system produces behaviors that were never explicitly progra
 
 ## Architecture
 
-The codebase is governed by a [Linguistic Code Model](linguistic-code-model.md) that partitions all code by linguistic role. It's essentially what happens when you combine functional core, imperative shell with Apollo-era DSKY applied to architecture — and use the Rust compiler to give it actual teeth. Crate boundaries are structural — the compiler enforces them, not convention. The system is composed of [35 subsystems](docs/subsystems.md) spanning evidence lifecycle, cryptography, trust, adaptive control, corroboration, and infrastructure.
+The codebase is governed by a [Linguistic Code Model](linguistic-code-model.md). The system is composed of [35 subsystems](docs/subsystems.md) spanning evidence lifecycle, cryptography, trust, adaptive control, corroboration, and infrastructure.
 
 | Crate | Role | Description |
 | --- | --- | --- |
@@ -69,23 +69,27 @@ The codebase is governed by a [Linguistic Code Model](linguistic-code-model.md) 
 | `phalanx-node` | Sentence | Actors, persistence, orchestration. Environment-dependent. |
 | `phalanx-lens` | Optics | Camera and media capture pipeline. |
 | `phalanx-ffi` | FFI Bridge | C ABI surface for iOS and Android. |
-| `phalanx-stronghold` | Vault | At-rest encrypted storage for witness envelopes. |
+| `phalanx-stronghold` | Binary | Wall powered at-rest encrypted storage for witness envelopes. |
 | `phalanx-sim` | Simulator | Network simulation and adversarial testing. |
 | `phalanx-test-fixtures` | Phrasebook | Synthetic test data satisfying validation preconditions. |
 
 ## Contributing
 
-Phalanx is conceptually dense. I have gone to great lengths to ensure that you do not need to understand all of it to contribute to any of it. If you are interested, please read [the guide for contributing](CONTRIBUTING.md). There you will find the code base broken down by technical specialty with a list of files and a brief summary of what each file does.
+Phalanx is conceptually dense. I have gone to great lengths to ensure that you do not need to understand all of it to contribute to any of it. If you are interested, please read [the friendly manual](CONTRIBUTING.md). There you will find the code base broken down by technical specialty with a list of files and a brief summary of what each file does.
+
+I'm not an expert in cryptography, control theory, networking, or any of the other fields represented here. I RTFM, implemented what made sense to me, and tried to get it right. If you are an expert and something I did gives you pause — a non-standard key derivation, an assumption that doesn't hold, an edge case I didn't consider — that is the most valuable contribution you can make. You don't need to fix it. Just telling me what's wrong and why is enough— I love to learn new ideas. Or you could fix it, that's kind of the point of open source, right?
+
+---
 
 ## Build
 
-I want to preface this section with the fact that I am not a DevOps expert. If you are a DevOps expert I would love your help- please.
+I want to preface this section with the fact that I am not a DevOps expert. If you are a DevOps expert I would love your help. Please.
 
 Minimum Rust version: **1.93.1**
 
-### Dev Container (recommended)
+### Dev Container
 
-The fastest way to build — especially on Windows. Everything is pre-installed: Rust, nasm, CMake, Android NDK, Flutter, cargo-ndk, cbindgen.
+The fastest way to build — especially on Windows. Everything is pre-installed: Rust, nasm, CMake, Android NDK, Flutter, cargo-ndk, cbindgen. I recommend doing this; do not repeat my mistakes.
 
 Open this repo in [VS Code with the Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) or in [GitHub Codespaces](https://codespaces.new). The container builds, `cargo fetch` runs, and you're ready:
 
