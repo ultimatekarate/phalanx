@@ -1,12 +1,18 @@
-# CONTRIBUTING TO PHALANX
+# Welcome to The Friendly Manual
 
-I built this project in isolation. It started as a way to learn Rust and it grew from there. If you browse the commit history you'll find me talking to myself — working through problems out loud, reacting in real time when something clicked or when the compiler surprised me. They reflect the process, not doubt about the results. In particular, I want to draw attention to the despair I felt when I decided to refactor this project from a single crate monolith into a multi-crate workspace. It's easy to look at the current state of the code and become overwhelmed. Look at the initial commits- I was happy just to capture jpeg stills.
+The codebase is structured so that each [technical specialty](#files-by-technical-specialty) (as I understand them) occupies a well-defined set of files with minimal entanglement. A networking engineer can improve the QUIC transport without understanding Padé approximants. A statistician can refine the Kolmogorov-Smirnov corroboration test without knowing how libp2p gossipsub works. A storage engineer can optimize the vault without touching the actor system.
 
-I'm not an expert in cryptography, control theory, networking, or any of the other fields represented here. I RTFM, implemented what made sense to me, and tried to get it right. If you are an expert and something I did gives you pause — a non-standard key derivation, an assumption that doesn't hold, an edge case I didn't consider — that is the most valuable contribution you can make. You don't need to fix it. Just telling me what's wrong and why is enough- I love to learn new ideas. Or you could fix it. Truthfully, I'm tired, this project has been so much fun, but it's also been so taxing.
+---
 
-The codebase is structured so that each technical specialty occupies a well-defined set of files with minimal entanglement. A networking engineer can improve the QUIC transport without understanding Padé approximants. A statistician can refine the Kolmogorov-Smirnov corroboration test without knowing how libp2p gossipsub works. A storage engineer can optimize the vault without touching the actor system. The linguistic model (`linguistic-code-model.md`) enforces these boundaries at the crate level — they are not conventions, they are compiler-enforced facts.
+## Before You Submit
 
-Before contributing, read `linguistic-code-model.md`. It defines the parts of speech (Nouns, Verbs, Conjunctions, Prepositions, etc.) and the rules that govern them. Then find your specialty in the [file reference](#files-by-technical-specialty) below and start there.
+Don't you dare disrespect yourself by submitting anything less than your best. Mistakes are acceptable, that is how we learn. The important thing is that we try. I do have some rules:
+
+1. Read `linguistic-code-model.md` — particularly Sections I (Parts of Speech) and II (Structural Enforcement), I promise it is worth it. Read the friendly manual.
+2. If you added a new type, check the linguistic model to determine which crate it belongs in. Nouns go in the Dictionary. Verbs go in the Laboratory. Prepositions go in the Post Office.
+3. Run `cargo clippy --workspace --all-targets` — zero errors, zero governance lint warnings.
+4. Run `cargo test --workspace` — all tests pass.
+5. If you added an `#[allow(clippy::...)]`, include a comment explaining why the suppression is safe.
 
 ---
 
@@ -108,18 +114,6 @@ mod tests { ... }
 ```
 
 Tests are the one place where panicking is acceptable — a failing assertion *should* panic. Production code never gets these allows.
-
----
-
-## Before You Submit
-
-Don't you dare disrespect for yourself by submitting anything less than your best. Mistakes are acceptable, that is how we learn. The important thing is that we try. I do have some rules:
-
-1. Read `linguistic-code-model.md` — particularly Sections I (Parts of Speech) and II (Structural Enforcement), I promise it is worth it. Read the friendly manual.
-2. If you added a new type, check the linguistic model to determine which crate it belongs in. Nouns go in the Dictionary. Verbs go in the Laboratory. Prepositions go in the Post Office.
-3. Run `cargo clippy --workspace --all-targets` — zero errors, zero governance lint warnings.
-4. Run `cargo test --workspace` — all tests pass.
-5. If you added an `#[allow(clippy::...)]`, include a comment explaining why the suppression is safe.
 
 ---
 
@@ -277,7 +271,9 @@ Peer scoring, offense tracking, reputation decay, community membership, and web-
 
 ### Actor Systems & Orchestration
 
-Tokio actor lifecycle, message passing, event loop design, and inter-actor coordination. See [`docs/actors.md`](docs/actors.md) for the full actor reference (topology, commands, state, design rationale) and [`linguistic-code-model.md` § VIII](linguistic-code-model.md#viii-crate-reference) for the module inventory. Key entry points: `phalanx-node/src/actors/meshsentinel.rs` (orchestrator), `phalanx-node/src/bin/sentinel.rs` (node binary), `phalanx-stronghold/src/bin/stronghold.rs` (stronghold binary).
+The full reference for Tokio actor lifecycle, message passing, event loop design, and inter-actor coordination can be found in [`docs/actors.md`](docs/actors.md). They are complex enough to warrant their own document.
+
+Key entry points: `phalanx-node/src/actors/meshsentinel.rs` (orchestrator), `phalanx-node/src/bin/sentinel.rs` (node binary), `phalanx-stronghold/src/bin/stronghold.rs` (stronghold binary).
 
 ### Simulation & Testing
 
