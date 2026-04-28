@@ -341,7 +341,8 @@ async fn bootstrap(
             egress.socket_bytes_received(),
             egress.socket_io_ops(),
             egress.dropped_event_count(),
-        ),
+        )
+        .with_queue_depth(egress.outbound_queue_depth()),
     );
 
     // Local mesh adapter — channel bridge for BLE/WiFi Direct via Flutter FFI

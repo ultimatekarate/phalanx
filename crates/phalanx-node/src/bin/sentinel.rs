@@ -83,12 +83,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         journal,
         trust_registry,
         system_governor: Arc::new(
-            phalanx_node::vitals::SystemGovernor::new().with_io_counters(
-                egress.socket_bytes_sent(),
-                egress.socket_bytes_received(),
-                egress.socket_io_ops(),
-                egress.dropped_event_count(),
-            ),
+            phalanx_node::vitals::SystemGovernor::new()
+                .with_io_counters(
+                    egress.socket_bytes_sent(),
+                    egress.socket_bytes_received(),
+                    egress.socket_io_ops(),
+                    egress.dropped_event_count(),
+                )
+                .with_queue_depth(egress.outbound_queue_depth()),
         ),
         vault_key,
         local_mesh: None, // NoOp — BLE/WiFi Direct injected during mobile integration
