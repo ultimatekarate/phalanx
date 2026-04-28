@@ -31,6 +31,12 @@ pub struct SystemGovernor {
     io_bytes_received: Option<Arc<AtomicU64>>,
     io_ops: Option<Arc<AtomicU64>>,
     transport_drops: Option<Arc<AtomicU64>>,
+    /// Outbound command-channel depth from the libp2p adapter. A *level*
+    /// signal: each tick it contributes
+    /// `queue_depth × queue_pressure_bytes_per_slot` bytes of pressure to
+    /// the `b` integral. Diagnostic for the post-prune state where
+    /// `bytes_sent` flatlines but pending demand is still high.
+    queue_depth: Option<Arc<AtomicU64>>,
     last_io_bytes_sent: AtomicU64,
     last_io_bytes_received: AtomicU64,
     last_io_ops: AtomicU64,
@@ -74,6 +80,7 @@ impl SystemGovernor {
             io_bytes_received: None,
             io_ops: None,
             transport_drops: None,
+            queue_depth: None,
             last_io_bytes_sent: AtomicU64::new(0),
             last_io_bytes_received: AtomicU64::new(0),
             last_io_ops: AtomicU64::new(0),
@@ -112,6 +119,7 @@ impl SystemGovernor {
             io_bytes_received: None,
             io_ops: None,
             transport_drops: None,
+            queue_depth: None,
             last_io_bytes_sent: AtomicU64::new(0),
             last_io_bytes_received: AtomicU64::new(0),
             last_io_ops: AtomicU64::new(0),
@@ -137,6 +145,17 @@ impl SystemGovernor {
         self.io_bytes_received = Some(received);
         self.io_ops = Some(ops);
         self.transport_drops = Some(dropped);
+        self
+    }
+
+    /// Attach the transport's outbound command-channel depth gauge.
+    /// Each vitals tick, the current depth contributes a bytes-equivalent
+    /// impulse to the `b` integral, so a sustained queue is visible to the
+    /// homeostasis loop even when bytes_sent has flatlined (the post-
+    /// gossipsub-mesh-prune state). Optional and additive: omitting it
+    /// preserves prior behaviour exactly.
+    pub fn with_queue_depth(mut self, queue_depth: Arc<AtomicU64>) -> Self {
+        self.queue_depth = Some(queue_depth);
         self
     }
 
@@ -207,7 +226,15 @@ impl SystemGovernor {
     /// Connection health (drops/ops ratio) → c integral.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Delta arithmetic on saturating counters; u64→usize safe on 64-bit targets.
     fn sample_io_counters(&self) {
-        // Bandwidth: bidirectional wire bytes → b integral
+        // Bandwidth: bidirectional wire bytes (delta this tick) plus
+        // outbound-queue back-pressure (level × bytes-per-slot) → b integral.
+        //
+        // The queue contribution is what catches the post-mesh-prune state:
+        // when gossipsub has dropped the publisher's mesh peers, bytes_sent
+        // flatlines but the command channel between Egress and the swarm
+        // task stays full, so this term keeps the b integral fed and the
+        // homeostasis loop responsive (PowerState transitions, FPS step-down)
+        // even though no wire activity is occurring.
         if let (Some(ref sent), Some(ref recv)) = (&self.io_bytes_sent, &self.io_bytes_received) {
             let cur_sent = sent.load(Ordering::Relaxed);
             let cur_recv = recv.load(Ordering::Relaxed);
@@ -215,9 +242,21 @@ impl SystemGovernor {
             let prev_recv = self
                 .last_io_bytes_received
                 .swap(cur_recv, Ordering::Relaxed);
-            let delta = cur_sent.saturating_sub(prev_sent) + cur_recv.saturating_sub(prev_recv);
-            if delta > 0 {
-                self.record_bandwidth_pressure(delta as usize);
+            let bytes_delta =
+                cur_sent.saturating_sub(prev_sent) + cur_recv.saturating_sub(prev_recv);
+
+            let queue_impulse = self
+                .queue_depth
+                .as_ref()
+                .map(|qd| {
+                    qd.load(Ordering::Relaxed)
+                        .saturating_mul(self.config.queue_pressure_bytes_per_slot)
+                })
+                .unwrap_or(0);
+
+            let total = bytes_delta.saturating_add(queue_impulse);
+            if total > 0 {
+                self.record_bandwidth_pressure(total as usize);
             }
         }
 

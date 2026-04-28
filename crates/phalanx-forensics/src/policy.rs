@@ -289,8 +289,14 @@ pub const STORAGE_SAFETY_MARGIN: f64 = 0.20;
 pub const CONNECTION_SAFETY_MARGIN: f64 = 0.10;
 
 /// Sustained bandwidth rate that constitutes full pressure (MiB/s).
-/// At NORMAL_TICK_SECS=5: 20 × 5 = 100 MiB per tick cycle.
-pub const BANDWIDTH_BUDGET_MIB_PER_SEC: f64 = 20.0;
+/// Calibrated against realistic mobile sustained uplink throughput
+/// (cellular LTE: 1–5 MiB/sec; conservative target ~1 MiB/sec for journalist/
+/// activist deployment in poor-coverage environments). The Part 2 batching
+/// CDF confirmed per-write bytes are tightly clustered at ~1348 (one RaptorQ
+/// symbol + framing), so 1 MiB/sec corresponds to ~770 RaptorQ symbols/sec —
+/// a realistic ceiling for sustained forensic egress on cellular.
+/// At NORMAL_TICK_SECS=5: 1 × 5 = 5 MiB per tick cycle.
+pub const BANDWIDTH_BUDGET_MIB_PER_SEC: f64 = 1.0;
 
 /// Pipeline capacity multiplier. The ingestion pipeline can buffer
 /// PIPELINE_CAPACITY_FACTOR × s_crit concurrent stress units.
@@ -420,12 +426,21 @@ pub struct HomeostaticConfig {
     pub k_sybil: f64,
     pub base_temporal_drift: Duration,
     // Resource pressure decay constants (Volterra kernel parameters)
-    pub lambda_mem: f64,                  // Memory pressure decay rate
-    pub m_crit: f64,                      // Memory critical threshold (MiB)
-    pub lambda_wal: f64,                  // WAL/storage pressure decay rate
-    pub w_crit: f64,                      // Storage critical ratio (0.0-1.0)
-    pub lambda_bw: f64,                   // Bandwidth pressure decay rate
-    pub b_crit: f64,                      // Bandwidth critical threshold (MiB)
+    pub lambda_mem: f64, // Memory pressure decay rate
+    pub m_crit: f64,     // Memory critical threshold (MiB)
+    pub lambda_wal: f64, // WAL/storage pressure decay rate
+    pub w_crit: f64,     // Storage critical ratio (0.0-1.0)
+    pub lambda_bw: f64,  // Bandwidth pressure decay rate
+    pub b_crit: f64,     // Bandwidth critical threshold (MiB)
+    /// Bytes-equivalent pressure contributed by each occupied slot in the
+    /// transport's outbound command queue. Each tick, queue_depth × this
+    /// constant is added (in bytes) to the bandwidth-pressure impulse fed
+    /// into the `b` integral, so a sustained queue produces sustained
+    /// pressure even when bytes_sent flatlines (e.g. after gossipsub
+    /// mesh-prune). Default 1348 = one RaptorQ symbol (SymbolSize=1200) +
+    /// libp2p/Noise/Yamux framing — the dominant write-size cluster from
+    /// the Part 2 CDF and an architecturally confirmed upper bound.
+    pub queue_pressure_bytes_per_slot: u64,
     pub lambda_conn: f64,                 // Connection pressure decay rate
     pub c_crit: f64,                      // Connection critical ratio (0.0-1.0)
     pub lambda_lat: f64,                  // Latency pressure decay rate (independent of lambda_sys)
@@ -466,6 +481,9 @@ impl Default for HomeostaticConfig {
             m_crit: REFERENCE_RAM_MIB * MEMORY_CRITICAL_FRACTION,
             w_crit: 1.0 - STORAGE_SAFETY_MARGIN,
             b_crit: BANDWIDTH_BUDGET_MIB_PER_SEC * NORMAL_TICK_SECS,
+            // 1348 = RaptorQ SymbolSize (1200) + libp2p/Noise/Yamux framing.
+            // Confirmed by the Part 2 CDF as the dominant socket-write cluster.
+            queue_pressure_bytes_per_slot: 1348,
             c_crit: 1.0 - CONNECTION_SAFETY_MARGIN,
             // Sybil parameters
             // psi_max: per-peer resource ceiling. At 64 max connections,
