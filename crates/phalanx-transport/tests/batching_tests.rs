@@ -611,14 +611,18 @@ queue_depth_min,queue_depth_max,queue_depth_mean"
         result.coarse_csv.join("\n")
     );
 
-    // Write-size histogram (aggregated over all nodes).
+    // Write-size histogram (aggregated over all nodes). Bucketed view kept for
+    // continuity with prior runs; the empirical CDF below is the data-derived
+    // companion that doesn't depend on bucket choice.
     let mut buckets = [0u64; 5];
     let mut total_writes = 0u64;
+    let mut all_write_sizes: Vec<u64> = Vec::new();
     for egress in &egresses {
         for e in snapshot_io_log(egress) {
             if e.kind == IoKind::Write {
                 buckets[write_size_bucket(e.bytes)] += 1;
                 total_writes += 1;
+                all_write_sizes.push(e.bytes);
             }
         }
     }
@@ -630,6 +634,31 @@ queue_depth_min,queue_depth_max,queue_depth_mean"
             100.0 * buckets[i] as f64 / total_writes as f64
         };
         eprintln!("  {label:>10}: {:>8} ({pct:5.1}%)", buckets[i]);
+    }
+
+    // Empirical CDF of write sizes — derived from the data, no bucket choice.
+    all_write_sizes.sort_unstable();
+    if !all_write_sizes.is_empty() {
+        let n = all_write_sizes.len();
+        let last = n - 1;
+        let percentile_at = |p: f64| -> u64 {
+            let idx = ((last as f64) * p).round() as usize;
+            all_write_sizes[idx.min(last)]
+        };
+        let sum: u128 = all_write_sizes.iter().map(|&b| b as u128).sum();
+        let mean = sum as f64 / n as f64;
+        eprintln!("\n-- Write-size empirical CDF (all nodes, n={n}) --");
+        eprintln!("  min:    {:>7}", all_write_sizes[0]);
+        eprintln!("  p10:    {:>7}", percentile_at(0.10));
+        eprintln!("  p25:    {:>7}", percentile_at(0.25));
+        eprintln!("  p50:    {:>7}", percentile_at(0.50));
+        eprintln!("  p75:    {:>7}", percentile_at(0.75));
+        eprintln!("  p90:    {:>7}", percentile_at(0.90));
+        eprintln!("  p95:    {:>7}", percentile_at(0.95));
+        eprintln!("  p99:    {:>7}", percentile_at(0.99));
+        eprintln!("  p99.9:  {:>7}", percentile_at(0.999));
+        eprintln!("  max:    {:>7}", all_write_sizes[last]);
+        eprintln!("  mean:   {mean:>9.1}");
     }
 
     // Queue-depth-at-IO (publisher node only: match each Write entry to the

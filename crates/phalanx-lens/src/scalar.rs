@@ -1,25 +1,58 @@
 // crates/phalanx-lens/src/scalar.rs
 //
 // L1-cache native ForensicLens implementation.
-//
-// Two key optimizations over the naive approach:
-//
-// 1. CONTIGUOUS CROP EXTRACTION — The raw Y-plane has stride `width` (e.g., 1920
-//    for 1080p). A 256×256 center crop spans width×256 bytes of address space —
-//    up to 491KB for 1080p, blowing L1 cache (32-64KB). We extract the crop into
-//    a contiguous 256-stride buffer (64KB) that fits entirely in L1. Both passes
-//    then operate on L1-resident data with zero cache misses.
-//
-// 2. ROW-ORIENTED SLICE ACCESS — Direct slice indexing instead of a per-pixel
-//    closure. The compiler sees contiguous sequential access patterns and
-//    auto-vectorizes the inner loops (SSE2/AVX2 on x86_64, NEON on AArch64).
-//    The Laplacian stencil loads three adjacent rows as slices, enabling the
-//    compiler to generate packed load + fused multiply-add sequences.
-//
-// The math is identical to the original scalar kernel — same Laplacian formula,
-// same variance formula, same f64 accumulation for numerical stability. Existing
-// tests validate bit-exact equivalence.
+/*
+This method is an attempt to filter out deepfake images from making
+it on to the network. Fighting AI with better AI only leads to an arms
+race. We reject this idea in favor of a physics-based method. Reality is
+our firewall.
 
+This algorithm layers PRNU analysis and Moiré pattern detection. PRNU
+is used to make sure that the video is coming from an actual sensor.
+Moiré pattern detection is used to make sure that someone isn't
+pointing a real sensor at a screen that is displaying
+a deepfake video.
+
+This method must run at capture time, prior to encryption. Speed is not
+decorative, it is imperative. Every microsecond frame data spends
+unencrypted is an increase in attack surface.
+
+The naive approach is to analyze every pixel in the full RGB image.
+
+Four key optimizations over the naive approach:
+
+1. SPATIAL DOMAIN ANALYSIS —  Moiré patterns are global periodic artifacts in
+   the spatial domain that show up as localized peaks in the frequency domain.
+   Using FFT to hunt for them in the frequency domain would blow up cache locality.
+   Instead, we exploit the local/global duality of spatial and frequency domain
+   by using the fact that these periodic effects also produce high second-derivative
+   energy that the 1-D Laplacian can detect locally.
+
+2. LUMA CHANNEL — The Y-plane (Luma channel) contains the
+   relevant signal for these computations. We are able to get this data directly
+   from mobile OS FFI instead of computing the values from RGB.
+
+3. 256 x 256 CENTER CROP — Both PRNU and Moiré patterns are global behaviors.
+   Restricting the analysis to the center crop allows us to use measurements
+   that have the highest fidelity. Furthermore, using the center crop removes
+   the need to correct the calculations for edge effects such as vignetting.
+   This also makes the method uniformly fast across all video resolutions.
+
+   A 256×256 center crop spans width×256 bytes of address space —
+   up to 491KB for 1080p, blowing L1 cache (32-64KB). We extract the crop into
+   a contiguous 256-stride buffer (64KB) that fits entirely in L1. Both passes
+   then operate on L1-resident data with zero cache misses.
+
+4. ROW-ORIENTED SLICE ACCESS — Direct slice indexing instead of a per-pixel
+   closure. The compiler sees contiguous sequential access patterns and
+   auto-vectorizes the inner loops (SSE2/AVX2 on x86_64, NEON on AArch64).
+   The Laplacian stencil loads three adjacent rows as slices, enabling the
+   compiler to generate packed load + fused multiply-add sequences.
+
+There is room for improvement but it requires arm64 and NEON intrinsics
+that I am not yet comfortable with implementing. Specifically,
+there is an in-memory transpose method that shows particular promise.
+*/
 use crate::{ForensicLens, ANALYSIS_CROP_SIZE};
 use phalanx_proto::evidence::ForensicMetrics;
 use phalanx_proto::types::BlackLevel;
@@ -41,16 +74,18 @@ pub struct ScalarLens;
 impl ForensicLens for ScalarLens {
     // SAFETY: All indexing is statically bounded.
     //
-    // Crop extraction: `row` ∈ [0, 255], `crop` = 256, so `row * crop` ∈ [0, 65280]
-    // and `row * crop + crop` ≤ 65536 = CROP_BYTES = crop_buf.len().
-    // `src_start + crop` ≤ y_plane.len() is guaranteed by the early-return guard
-    // (width ≥ crop, height ≥ crop, y_plane.len() ≥ width × height).
+    // Crop extraction: 0 <=`row` <= 255, `crop` = 256, so 0 <= `row * crop` <= 65280
+    // and `row * crop + crop` <= 65536 = CROP_BYTES = crop_buf.len().
+    // `src_start + crop` <= y_plane.len() is guaranteed by the early-return guard
+    // (width >= crop, height >= crop, y_plane.len() >= width × height).
     //
-    // Laplacian stencil: `row` ∈ [1, 254], `col` ∈ [1, 254], so all ±1 offsets
-    // stay within [0, 255]. Slice lengths are `crop` = 256, so `col + 1` ≤ 255 < 256.
+    // Laplacian stencil: 1 <= `row` <= 254, 1 <= `col` <= 254, so all +/- 1 offsets
+    // stay within [0, 255]. Slice lengths are `crop` = 256, so `col + 1` <= 255 < 256.
     //
     // Direct indexing is required here — `.get().unwrap_or()` defeats auto-vectorization
-    // by introducing a branch per pixel, destroying the packed load/FMA pipeline.
+    // by introducing a branch per pixel, destroying the packed load/FMA pipeline. Speed
+    // is better than self-imposed purity.
+
     #[allow(
         clippy::arithmetic_side_effects,
         clippy::cast_possible_truncation,
@@ -65,7 +100,7 @@ impl ForensicLens for ScalarLens {
     ) -> ForensicMetrics {
         let crop = ANALYSIS_CROP_SIZE;
 
-        // Guard: undersized frame or buffer → zero metrics (forensic signal).
+        // Guard: undersized frame or buffer -> zero metrics (forensic signal).
         if width < crop || height < crop || y_plane.len() < width * height {
             return ForensicMetrics::default();
         }
@@ -75,14 +110,14 @@ impl ForensicLens for ScalarLens {
         let y_off = (height - crop) / 2;
         let bl = black_level.0;
 
-        // ── L1-CACHE LOCK ──────────────────────────────────────────────────
+        // L1-CACHE LOCK
         // Extract 256×256 center crop to contiguous 64KB buffer.
         // Transforms stride-width access (cache-hostile) to stride-256 (L1-native).
         //
         // Cost: 256 × memcpy(256 bytes) ≈ 1–2μs on modern hardware.
         // Payoff: eliminates all cache misses for both subsequent passes.
         //
-        // 64KB stack allocation is safe — camera thread has ≥1MB stack on all
+        // 64KB stack allocation is safe — camera thread has >=1MB stack on all
         // target platforms (Android default: 1MB, iOS: 512KB min).
         let mut crop_buf = [0u8; CROP_BYTES];
         for row in 0..crop {
@@ -90,12 +125,12 @@ impl ForensicLens for ScalarLens {
             crop_buf[row * crop..][..crop].copy_from_slice(&y_plane[src_start..src_start + crop]);
         }
 
-        // ── PASS 1: PRNU VARIANCE + MEAN LUMINANCE ────────────────────────
+        // PASS 1: PRNU VARIANCE + MEAN LUMINANCE
         // Tight sequential loop over contiguous u8 data.
         // Accumulate in f64 for numerical stability (sum_sq can reach ~4.26×10⁹
         // for 65536 pixels at value 255, which exceeds f32 precision).
         //
-        // Auto-vectorization profile: the compiler emits packed u8→f32 conversion
+        // Auto-vectorization profile: the compiler emits packed u8 -> f32 conversion
         // + FMA sequences (measured: 4-8 f32 lanes per cycle on x86_64 with AVX2).
         let mut sum: f64 = 0.0;
         let mut sum_sq: f64 = 0.0;
@@ -114,7 +149,7 @@ impl ForensicLens for ScalarLens {
         let prnu_var = (sum_sq / n - mean * mean) as f32;
         let mean_luminance = (luma_sum / n) as f32;
 
-        // ── PASS 2: LAPLACIAN ENERGY (3-ROW STENCIL) ──────────────────────
+        // PASS 2: LAPLACIAN ENERGY (3-ROW STENCIL)
         // Process interior pixels: rows [1, crop-2], cols [1, crop-2].
         // Three slice references per row — prev, curr, next — all contiguous
         // in the crop buffer. No cache misses (data is L1-resident from Pass 1).
@@ -158,6 +193,13 @@ impl ForensicLens for ScalarLens {
 mod tests {
     use super::*;
 
+    // MACHine EPSilon
+    // It's pronounced Muh-cheps, as in "I'm flexing muh cheps." This is an inside joke
+    // I have with my friends from grad school. We were reading FORTRAN code because
+    // we wanted to understand why LAPACK/LINPACK was so damn fast.
+    // It's because it has 'cheps and now you're in on the joke too.
+    const MACHEPS: f32 = f32::EPSILON;
+
     #[test]
     fn test_all_black_frame() {
         // All-black (value = 0) with black_level = 16.
@@ -170,18 +212,18 @@ mod tests {
 
         // Laplacian of a constant plane is zero
         assert!(
-            metrics.h_energy < f32::EPSILON,
+            metrics.h_energy < MACHEPS,
             "h_energy should be ~0 for constant plane, got {}",
             metrics.h_energy
         );
         assert!(
-            metrics.v_energy < f32::EPSILON,
+            metrics.v_energy < MACHEPS,
             "v_energy should be ~0 for constant plane, got {}",
             metrics.v_energy
         );
         // PRNU variance of constant plane is zero (all pixels have same value)
         assert!(
-            metrics.prnu_var < f32::EPSILON,
+            metrics.prnu_var < MACHEPS,
             "prnu_var should be ~0 for constant plane, got {}",
             metrics.prnu_var
         );
@@ -198,15 +240,15 @@ mod tests {
         let metrics = ScalarLens.analyze(&y_plane, width, height, BlackLevel(16.0));
 
         assert!(
-            metrics.h_energy < f32::EPSILON,
+            metrics.h_energy < MACHEPS,
             "h_energy should be ~0 for constant plane"
         );
         assert!(
-            metrics.v_energy < f32::EPSILON,
+            metrics.v_energy < MACHEPS,
             "v_energy should be ~0 for constant plane"
         );
         assert!(
-            metrics.prnu_var < f32::EPSILON,
+            metrics.prnu_var < MACHEPS,
             "prnu_var should be ~0 for constant plane"
         );
     }
@@ -229,16 +271,16 @@ mod tests {
 
         let metrics = ScalarLens.analyze(&y_plane, width, height, BlackLevel(0.0));
 
-        // Linear gradient has zero second derivative → Laplacian ≈ 0.
+        // Linear gradient has zero second derivative -> Laplacian approx 0.
         // Quantization noise (integer rounding) introduces tiny residual.
         assert!(
             metrics.h_energy < 1.0,
             "h_energy should be near-zero for linear gradient, got {}",
             metrics.h_energy
         );
-        // Vertical: constant along y → zero
+        // Vertical: constant along y -> zero
         assert!(
-            metrics.v_energy < f32::EPSILON,
+            metrics.v_energy < MACHEPS,
             "v_energy should be ~0 for horizontal gradient"
         );
         // PRNU variance should be positive (pixel values vary)
@@ -304,7 +346,7 @@ mod tests {
 
     #[test]
     fn test_black_level_shifts_prnu() {
-        // Same data, different black levels → different PRNU variance.
+        // Same data, different black levels -> different PRNU variance.
         let width = 640;
         let height = 480;
         let mut y_plane = vec![0u8; width * height];
@@ -316,19 +358,19 @@ mod tests {
         let metrics_bl0 = ScalarLens.analyze(&y_plane, width, height, BlackLevel(0.0));
         let metrics_bl128 = ScalarLens.analyze(&y_plane, width, height, BlackLevel(128.0));
 
-        // With BL=0: all values are 128 → variance = 0
+        // With BL=0: all values are 128 -> variance = 0
         assert!(
-            metrics_bl0.prnu_var < f32::EPSILON,
+            metrics_bl0.prnu_var < MACHEPS,
             "Constant plane should have zero variance"
         );
-        // With BL=128: all values are (128-128)=0 → variance = 0
+        // With BL=128: all values are (128-128)=0 -> variance = 0
         assert!(
-            metrics_bl128.prnu_var < f32::EPSILON,
+            metrics_bl128.prnu_var < MACHEPS,
             "Constant plane should have zero variance regardless of BL"
         );
 
         // Laplacian should be zero for both (constant plane)
-        assert!(metrics_bl0.h_energy < f32::EPSILON);
-        assert!(metrics_bl128.h_energy < f32::EPSILON);
+        assert!(metrics_bl0.h_energy < MACHEPS);
+        assert!(metrics_bl128.h_energy < MACHEPS);
     }
 }

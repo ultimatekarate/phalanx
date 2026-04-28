@@ -1,25 +1,26 @@
 # PHALANX LINGUISTIC MODEL: ARCHITECTURAL GOVERNANCE
 
-This document establishes the "Linguistic Model" of Phalanx. All code must be partitioned based on its linguistic role to ensure forensic integrity and system stability.
+This document establishes the "Linguistic Model" of Phalanx. All code must be partitioned based on its linguistic role to ensure all parts remain testable. It is my attempt to create an enforceable architectural paradigm that makes the code base tractable for humans AND LLMs.
+ 
+**A Note on the Metaphor.** The linguistic model is a tool for partitioning code. Some of the comparisons in this document are overwrought — add linguist to the list of things I am not. And if I'm being totally honest, this is little more than Apollo-era DSKY flavored Functional Core, Imperative Shell that uses the Rust compiler to give it actual teeth. If language is logic, it should also be architecture. Maintain the analogy insofar as it is useful, abandon it when it is not. When in doubt, the Cargo.toml files are the source of truth.
 
-**Multi-scale governance.** The model operates at two reinforcing scales, analogous to a multi-grid solver. The *coarse grid* is this document — it partitions the entire codebase into linguistic roles (Dictionary, Laboratory, Post Office, Sentence) so that any contributor can make a correct high-level decision without reading implementation code. The *fine grid* is the local context inside each file — semantic constructor names, type-state transitions, named handler methods, and workspace-level compiler lints. A contributor working inside a single function has enough local information to make correct decisions at that scope. Errors at one scale are caught at the other: a type placed in the wrong crate violates the coarse grid; a function that grows too complex or smuggles an `unwrap()` past governance is caught by the fine grid. Correct code emerges from convergence across both scales, not from exhaustive global knowledge.
-
-
-**A Note on the Metaphor.** The linguistic model is a tool for partitioning code. Some of the comparisons in this document are overwrought — add linguist to the list of things I am not. And if I'm being totally honest, this is little more than Apollo-era DSKY flavored Functional Core, Imperative Shell that uses the Rust compiler to give it actual teeth. Maintain the analogy insofar as it is useful, abandon it when it is not. When in doubt, the Cargo.toml files are the source of truth.
+**Multi-scale governance.** The model operates at two reinforcing scales. I took inspiration from multi-grid solvers. The *coarse grid* is this document — it partitions the entire codebase into linguistic roles (Dictionary, Laboratory, Post Office, Sentence) so that any contributor can make a correct high-level decision without reading implementation code. The *fine grid* is the local context inside each file — semantic constructor names, type-state transitions, named handler methods, and workspace-level compiler lints. A contributor working inside a single function has enough local information to make correct decisions at that scope. Errors at one scale are caught at the other: a type placed in the wrong crate violates the coarse grid; a function that grows too complex or smuggles an `unwrap()` past governance is caught by the fine grid. Correct code emerges from convergence across both scales, not from exhaustive global knowledge.
 
 ---
 
-## I. PARTS OF SPEECH
+## I. Definitions
 
 Every element of Phalanx code maps to a linguistic role. Understanding these parts of speech is prerequisite to understanding the crate structure, placement rules, and governance commands that follow.
 
+### I.a. Parts of Speech
 - **Noun** — A data type, trait contract, or error type. Things that exist. `WitnessEnvelope`, `NetworkId`, `TransientJournal`, `GuardianError`. Nouns live in the Dictionary (`phalanx-proto`).
 - **Adjective** — A qualifier that narrows a noun's meaning. Type-state markers (`Verified`, `Sealed`, `Ephemeral`), configuration types, and constructor suffixes (`new_verified()`, `new_ephemeral()`). Adjectives attach to nouns — they describe *what kind* of noun you have.
 - **Verb** — Pure logic that acts on nouns. Validation, verification, transformation, encoding. `check_integrity()`, `fountain_chunkify()`, `authorize()`. Verbs live in the Laboratory (`phalanx-forensics`). A verb never touches the filesystem or network.
-- **Tense** — Temporal primitives that establish *when* things happened. `PhalanxTimestamp`, `MonotonicClock`, `TrustedClock`. Tenses are a special class of noun — they live in the Dictionary but carry the additional constraint that temporal agreement must hold between nouns and the verbs that consume them.
 - **Preposition** — The directional relationships that define how nouns move through the system. Routing, codecs, adapter boundary mappings, serialization. The `PeerId` → `NetworkId` translation at the libp2p boundary. Postcard encoding of envelopes into wire bytes. The routing switchboard that delivers events to the correct actor. `from_<source>()` constructors. Prepositions live in the Post Office (`phalanx-transport`) and at the edges of the Sentence (`phalanx-node`).
 - **Conjunction** — Monadic gates that chain verbs together and short-circuit the pipeline on failure. `LensGate`, `IntegrityGate`, `TopologyGate`. A conjunction says "and" between verbs — verify integrity *and* check provenance *and* gate bandwidth. If any conjunction fails, the sentence stops. Conjunctions live in the Laboratory.
 - **Interjection** — Forensic telemetry that observes and records without altering control flow. `tracing::error!("CRITICAL: Integrity validation failed")`, `tracing::warn!("P5: Oversized message rejected")`. Interjections are exclamations — they announce that something noteworthy happened but do not change what happens next.
+
+### I.b. Compositions
 - **Sentence** — A composition of nouns through verbs, joined by conjunctions, routed by prepositions, into running behavior. Actors and orchestration. `MeshSentinel`, `IngestionActor`, `EgressActor`. Sentences live in `phalanx-node`.
 - **Phrasebook** — Pre-composed test sentences. The Phrasebook (`phalanx-test-fixtures`) constructs synthetic nouns that satisfy verb preconditions, so that test code in the Sentence layer doesn't need to know the Laboratory's validation rules.
 
@@ -44,7 +45,7 @@ This model is not a metaphor, a style guide, or a set of suggestions. It is stru
 - `cast_possible_truncation = "deny"` — No silent truncation. If a cast is safe, prove it in a comment.
 - `cast_sign_loss = "deny"` — No silent sign loss in casts.
 - `cast_possible_wrap = "deny"` — No silent wrapping in casts.
-- `float_cmp = "deny"` — No direct float equality. Use epsilon or `ulps_eq!`.
+- `float_cmp = "deny"` — No direct float equality. Use epsilon or `ulps_eq!` or `MACHEPS` (See `crates/phalanx-lens/src/scalar.rs`, line 203).
 
 *Concurrency:*
 - `await_holding_lock = "deny"` — No holding locks across `.await` points.
@@ -85,11 +86,11 @@ Every `#[allow(clippy::...)]` in the codebase has a comment explaining why the s
 2. **NEVER** allow filesystem IO (`std::fs`, `tokio::fs`) or network IO (`std::net`, `tokio::net`) into the Lab. In-memory byte assembly (`std::io::Cursor`, `std::io::Write` on `Vec<u8>`) is permitted when required by codec dependencies. For persistence, use the `TransientJournal` trait.
 3. **ALWAYS** define reassembly strategies as `Mold` implementations in the Lab.
 4. **PREFER** the `prelude` for cross-crate imports of first-class Nouns. Import persistence contracts, scheduling types, and operational state directly from their defining module.
-5. **NEVER** use mutex or RwLock unless it is absolutely necessary. Treat network deadlocks as a conflict of tense. Organize resources by temporal kind:
+5. **NEVER** await on a present-tense state. Treat network deadlocks as a conflict of tense. Organize resources by temporal kind:
 - Past: sealed / immutable data. Read freely, no lock needed.
 - Present: in-flight operations, currently-held state. Touched briefly, never awaited on.
 - Future: pending commitments (PendingEgress). Enqueued, not held.
-The rule that falls out: never await on present while holding present. Wait on past (free) or future (enqueued); never on a peer's current-tense state. That breaks deadlock's cycle requirement by construction.
+The rule that falls out: never await on present while holding present. Wait on past (free) or future (enqueued); never on a peer's current-tense state. That breaks deadlock's cycle requirement by construction. Use Mutex and RwLock only when it is absolutely necessary. 
 6. **ALWAYS** ensure subject-verb agreement: a Noun constructed for consumption by a Verb must satisfy that Verb's preconditions. Temporal Nouns must agree with temporal Verbs. Cryptographic Nouns must agree with verification Verbs.
 7. **NEVER** construct test Nouns with fixed values when the consumption path includes a Verb that validates against live state. Use the same source the Verb uses.
 8. **NEVER** add `phalanx-test-fixtures` as a production `[dependency]`. The Phrasebook exists only in dev-dependency graphs. If a fixture is needed at runtime, promote the construction logic to its owning crate as a semantic constructor.
@@ -132,7 +133,7 @@ The prelude is the public vocabulary of a crate — the set of names that every 
 
 ## VIII. CRATE REFERENCE
 
-The following sections are a module-level inventory of each crate. Sections I–VI define the rules; this section shows where everything lives.
+The following sections are a module-level inventory of each crate. The file list isn't exhaustive. Sections I–VI define the rules. This section shows where everything lives.
 
 ### The Dictionary (phalanx-proto)
 
@@ -263,6 +264,8 @@ The following sections are a module-level inventory of each crate. Sections I–
 
 **Stability — The Nervous System:**
 
+Most of this code does not execute during run time. This is the instrumentation that I use to test the stability of the network. I have lifted it into `cargo build`. See line 308 of `crates/phalanx-node/src/stability/contractivity.rs`.
+
 - **stability/jacobian.rs:** Linearized Jacobian matrix construction for homeostatic stability analysis.
 - **stability/spectral.rs:** Spectral gap and eigenvector orthogonality analysis for control loop robustness.
 - **stability/eigenvalues.rs:** Eigenvalue computation for system pole placement and stability verification.
@@ -300,3 +303,9 @@ A Phrasebook composes Dictionary Nouns with Laboratory Verbs to produce syntheti
 - Must NOT introduce Verbs — it only calls existing ones.
 - Must appear only in `[dev-dependencies]`, never in `[dependencies]`.
 - Must self-test: fixtures that claim to pass a Laboratory Verb must prove it.
+
+## IX. POSTSCRIPT
+
+These rules are written in blood. They are derived from my specific experiences while working on this specific project. Governance command 5, treating network deadlocks as a conflict of tense, exists because I find asynchronous programming monumentally difficult to reason about. The entire section about constructor naming exists because I kept encountering, and fixing, specific hallucinations. The prelude section exists because I traded correctness for expediency when I refactored this codebase from a mono-crate ball of mud into a proper multi-crate workspace. The section about temporal agreement exists for a similar reason.
+
+Fundamentally, this document is a contract between my present self and my future self. It is a promise to future me that present me will not repeat the mistakes of past me.
