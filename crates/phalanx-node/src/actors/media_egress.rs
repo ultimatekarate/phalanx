@@ -27,6 +27,10 @@ pub struct MediaEgressConfig {
     pub audio_topic: MeshTopic,
     pub symbol_size: SymbolSize,
     pub repair_ratio: RepairRatio,
+    /// Number of RaptorQ symbols carried per `egress.publish()` call. Default
+    /// 1 publishes one symbol per call (pre-bundling behavior); larger values
+    /// amortize per-message processing cost on the libp2p path.
+    pub symbol_bundle_size: SymbolBundleSize,
     /// WAL directory for outbound queue persistence. Failed publishes are persisted
     /// here and retried with exponential backoff until network conditions improve.
     pub wal_dir: PathBuf,
@@ -67,6 +71,8 @@ pub struct MediaEgressActor<E: EgressPort> {
     audio_prev_hash: Option<SignatureHash>,
     symbol_size: SymbolSize,
     repair_ratio: RepairRatio,
+    /// Symbols batched into a single egress publish (see MediaEgressConfig).
+    symbol_bundle_size: SymbolBundleSize,
     /// Encryption key (legacy fallback / KEK) — encrypt payloads on async thread, not FFI.
     vault_key: SymmetricKey,
     /// Per-recording content key. Prefers this over vault_key when `Some`.
@@ -117,6 +123,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
             audio_prev_hash: None,
             symbol_size: config.symbol_size,
             repair_ratio: config.repair_ratio,
+            symbol_bundle_size: config.symbol_bundle_size,
             vault_key: config.vault_key,
             content_key_rx: config.content_key_rx,
             storage_tx: config.storage_tx,
@@ -305,8 +312,14 @@ impl<E: EgressPort> MediaEgressActor<E> {
         true
     }
 
-    /// Publish each fountain symbol as a separate gossipsub message.
-    /// Failed symbols are persisted to the WAL for retry.
+    /// Publish fountain symbols as bundled gossipsub messages. Each publish
+    /// carries `symbol_bundle_size` symbols (a `Vec<ShardChunk>`-encoded
+    /// payload). Bundling amortizes the per-message processing cost on the
+    /// libp2p path so the publisher's demand stays inside the per-peer queue's
+    /// drain rate. On bundle-publish failure each chunk is enqueued
+    /// individually to the WAL, preserving per-chunk retry semantics; the WAL
+    /// on-disk format stays per-chunk for backward compatibility with
+    /// pre-upgrade contents.
     #[allow(clippy::arithmetic_side_effects)] // Published counter increment.
     async fn publish_fountain_symbols(
         &mut self,
@@ -317,34 +330,54 @@ impl<E: EgressPort> MediaEgressActor<E> {
     ) {
         let symbol_count = chunks.len();
         let mut published = 0;
-        for chunk in chunks {
-            match postcard::to_allocvec(&chunk) {
+        let bundle_n = self.symbol_bundle_size.get() as usize;
+
+        for batch in chunks.chunks(bundle_n) {
+            // postcard serializes &[T] and Vec<T> identically (length-
+            // prefixed sequence), so passing the slice avoids cloning the
+            // symbols into a fresh Vec on the hot path.
+            match postcard::to_allocvec(batch) {
                 Ok(data) => {
-                    // Clone before publish: publish() takes Vec<u8> by value.
-                    // On failure we need the original bytes for WAL enqueue.
-                    if let Err(e) = self.egress.publish(topic, data.clone()).await {
+                    if let Err(e) = self.egress.publish(topic, data).await {
                         tracing::error!(
-                            event = "symbol_publish_failed",
+                            event = "bundle_publish_failed",
                             shard_id = shard_id.0,
-                            symbol = published,
+                            bundle_symbols = batch.len(),
                             error = %e,
-                            "Failed to publish fountain symbol — enqueueing for retry"
+                            "Failed to publish symbol bundle — enqueueing chunks for retry"
                         );
-                        if let Err(wal_err) = self
-                            .outbound_queue
-                            .enqueue(topic.clone(), data, self.clock.now().unwrap_or_default())
-                            .await
-                        {
-                            tracing::error!(
-                                error = %wal_err,
-                                "Failed to persist to OutboundQueue WAL"
-                            );
+                        // Enqueue each chunk individually as single-chunk
+                        // bytes. WAL format is unchanged (per-chunk records);
+                        // process_retry_queue wraps each WAL chunk back into
+                        // a length-1 bundle on republish.
+                        for chunk in batch {
+                            match postcard::to_allocvec(chunk) {
+                                Ok(chunk_bytes) => {
+                                    if let Err(wal_err) = self
+                                        .outbound_queue
+                                        .enqueue(
+                                            topic.clone(),
+                                            chunk_bytes,
+                                            self.clock.now().unwrap_or_default(),
+                                        )
+                                        .await
+                                    {
+                                        tracing::error!(
+                                            error = %wal_err,
+                                            "Failed to persist chunk to OutboundQueue WAL"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to re-serialize chunk for WAL: {e}")
+                                }
+                            }
                         }
                     } else {
-                        published += 1;
+                        published += batch.len();
                     }
                 }
-                Err(e) => tracing::error!("Failed to serialize fountain symbol: {}", e),
+                Err(e) => tracing::error!("Failed to serialize symbol bundle: {e}"),
             }
         }
 
@@ -353,6 +386,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
             shard_id = shard_id.0,
             symbols_published = published,
             symbols_total = symbol_count,
+            bundle_size = bundle_n,
             is_video = is_video,
         );
     }
@@ -383,9 +417,43 @@ impl<E: EgressPort> MediaEgressActor<E> {
                 continue;
             }
 
+            // WAL stores per-chunk bytes (postcard-encoded ShardChunk). The
+            // wire format expects Vec<ShardChunk>, so wrap the WAL bytes in
+            // a length-1 bundle before republishing. Retried chunks degrade
+            // from bundled to one-publish-per-chunk on the rare retry path.
+            let republish_bytes = match postcard::from_bytes::<phalanx_proto::evidence::ShardChunk>(
+                &entry.envelope_bytes,
+            ) {
+                // Wrap in a length-1 slice (NOT a fixed-size array) so
+                // postcard emits a length-prefixed sequence — matches the
+                // Vec<ShardChunk> wire format that receivers deserialize.
+                Ok(chunk) => match postcard::to_allocvec(std::slice::from_ref(&chunk)) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            entry_id = entry.id.0,
+                            "Failed to wrap WAL chunk into length-1 bundle; \
+                             dropping retry"
+                        );
+                        let _ = self.outbound_queue.acknowledge(entry.id).await;
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        entry_id = entry.id.0,
+                        "Failed to deserialize WAL chunk; dropping retry"
+                    );
+                    let _ = self.outbound_queue.acknowledge(entry.id).await;
+                    continue;
+                }
+            };
+
             if self
                 .egress
-                .publish(&entry.topic, entry.envelope_bytes.clone())
+                .publish(&entry.topic, republish_bytes)
                 .await
                 .is_ok()
             {

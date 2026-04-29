@@ -48,8 +48,16 @@ impl Default for MeshTransportConfig {
             listen_addresses: vec![],
             bootstrap_peers: vec![],
             subscribe_topics: vec![],
-            protocol_version: "/phalanx/1.0.0".to_string(),
-            max_chunk_size_bytes: 8192,
+            // Bumped from 1.0.0 to mark the wire-format change introduced
+            // by symbol bundling (Vec<ShardChunk> per egress.publish() call).
+            // libp2p identify exchanges this as informational metadata; old
+            // peers will still connect, but their decoders silently drop
+            // bundled payloads. Diagnostic marker, not enforcement.
+            protocol_version: "/phalanx/1.1.0".to_string(),
+            // Sized to fit a 100-symbol bundle (100 × 1200 = 120 KB) plus
+            // postcard framing overhead with margin. gossipsub max_transmit
+            // is derived as 2× this (see builder.rs) → 256 KiB ceiling.
+            max_chunk_size_bytes: 131072,
             physics: PhalanxPhysics::default_wan(),
             psk: None,
             require_psk: false,

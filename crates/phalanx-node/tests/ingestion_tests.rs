@@ -97,7 +97,11 @@ fn make_chunk(owner_did: &Did, payload_size: usize) -> Vec<u8> {
                 .as_millis() as u64,
         ),
     };
-    postcard::to_allocvec(&chunk).unwrap_or_default()
+    // Wire format: Vec<ShardChunk> (length 1 here for single-chunk tests).
+    // `from_ref` gives a `&[T]` (slice, length-prefixed seq), not `&[T; 1]`
+    // (fixed-size array, no length prefix) — the two have different postcard
+    // wire formats and the slice form matches Vec<ShardChunk> on decode.
+    postcard::to_allocvec(std::slice::from_ref(&chunk)).unwrap_or_default()
 }
 
 // =====================================================================
@@ -280,7 +284,7 @@ async fn test_stale_shard_dropped() {
                 .saturating_sub(3_600_000),
         ),
     };
-    let data = postcard::to_allocvec(&stale_chunk).unwrap_or_default();
+    let data = postcard::to_allocvec(std::slice::from_ref(&stale_chunk)).unwrap_or_default();
 
     tx.send(IngestionCommand::ProcessChunk {
         peer_id: NetworkId("peer-1".to_string()),

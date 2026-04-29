@@ -45,13 +45,21 @@ Four key optimizations over the naive approach:
 
 4. ROW-ORIENTED SLICE ACCESS — Direct slice indexing instead of a per-pixel
    closure. The compiler sees contiguous sequential access patterns and
-   auto-vectorizes the inner loops (SSE2/AVX2 on x86_64, NEON on AArch64).
-   The Laplacian stencil loads three adjacent rows as slices, enabling the
-   compiler to generate packed load + fused multiply-add sequences.
+   auto-vectorizes the inner loops. The Laplacian stencil loads three
+   adjacent rows as slices, enabling the compiler to generate packed
+   load + fused multiply-accumulate sequences.
 
 There is room for improvement but it requires arm64 and NEON intrinsics
 that I am not yet comfortable with implementing. Specifically,
 there is an in-memory transpose method that shows particular promise.
+
+N.B. This optimization is 100% owed to my little brother for teaching
+me about one-cycle multiply-accumalate and this kind of compiler
+optimization. Without him I wouldn't know to look up "packed load" or
+"fused multiply-accumulate." I knew about auto-vectorization from my
+MATLAB days, but MATLAB is a scripting language. Rust is not. I don't
+want to misrepresent my compiler knowledge. I'm only mostly sure that
+it works this way.
 */
 use crate::{ForensicLens, ANALYSIS_CROP_SIZE};
 use phalanx_proto::evidence::ForensicMetrics;

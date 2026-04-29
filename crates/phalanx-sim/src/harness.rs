@@ -73,16 +73,20 @@ impl EgressPort for SimEgress {
             )
             .await?;
 
-        // Best-effort telemetry: emit ShardPublished if the bytes deserialize as a ShardChunk.
-        // Don't block the data path for telemetry — skip if deserialization fails.
-        if let Ok(chunk) = postcard::from_bytes::<ShardChunk>(&data) {
-            let _ = self
-                .telemetry_tx
-                .send(SimEvent::ShardPublished {
-                    origin: self.source_network_id.clone(),
-                    chunk,
-                })
-                .await;
+        // Best-effort telemetry: emit ShardPublished for each chunk in the
+        // wire-format bundle (Vec<ShardChunk>, length 1 unbundled or N
+        // bundled). Don't block the data path for telemetry — skip if
+        // deserialization fails.
+        if let Ok(bundle) = postcard::from_bytes::<Vec<ShardChunk>>(&data) {
+            for chunk in bundle {
+                let _ = self
+                    .telemetry_tx
+                    .send(SimEvent::ShardPublished {
+                        origin: self.source_network_id.clone(),
+                        chunk,
+                    })
+                    .await;
+            }
         }
 
         Ok(())

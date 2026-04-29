@@ -122,24 +122,28 @@ impl<I: IngressPort> StrongholdSentinel<I> {
                     return false;
                 }
 
-                // Deserialize ShardChunk from the wire bytes.
-                let chunk: ShardChunk = match gate::unmarshal(&data, "StrongholdSentinel::ingest") {
-                    Ok(c) => c,
-                    Err(e) => {
-                        debug!(error = %e, "StrongholdSentinel: failed to unmarshal chunk");
-                        return false;
-                    }
-                };
+                // Wire format is `Vec<ShardChunk>` (length 1 for single-symbol
+                // publishes, length N for bundled). Deserialize and dispatch
+                // each chunk individually to the AggregationActor.
+                let bundle: Vec<ShardChunk> =
+                    match gate::unmarshal(&data, "StrongholdSentinel::ingest") {
+                        Ok(c) => c,
+                        Err(e) => {
+                            debug!(error = %e, "StrongholdSentinel: failed to unmarshal bundle");
+                            return false;
+                        }
+                    };
 
-                // Dispatch to AggregationActor via try_send — drop on full channel.
-                if let Err(e) = self
-                    .aggregation_tx
-                    .try_send(AggregationCommand::IngestChunk { chunk })
-                {
-                    warn!(
-                        error = %e,
-                        "StrongholdSentinel: aggregation channel full, dropping chunk"
-                    );
+                for chunk in bundle {
+                    if let Err(e) = self
+                        .aggregation_tx
+                        .try_send(AggregationCommand::IngestChunk { chunk })
+                    {
+                        warn!(
+                            error = %e,
+                            "StrongholdSentinel: aggregation channel full, dropping chunk"
+                        );
+                    }
                 }
                 false
             }

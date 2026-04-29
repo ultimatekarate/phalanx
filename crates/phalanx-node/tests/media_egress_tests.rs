@@ -28,16 +28,31 @@ use tokio::sync::mpsc;
 
 // --- Test Doubles ---
 
-/// An egress port that records all published (topic, data_len) pairs.
+/// An egress port that records all published payloads. `publish_count` keeps
+/// the cheap-to-load fast path; `published_bytes` is the slow path used by
+/// bundling tests that need to inspect wire-format structure.
 #[derive(Clone)]
 struct RecordingEgress {
     publish_count: Arc<AtomicUsize>,
+    published_bytes: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+}
+
+impl RecordingEgress {
+    fn new(publish_count: Arc<AtomicUsize>) -> Self {
+        Self {
+            publish_count,
+            published_bytes: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl EgressPort for RecordingEgress {
-    async fn publish(&self, _: &MeshTopic, _: Vec<u8>) -> Result<(), String> {
+    async fn publish(&self, _: &MeshTopic, data: Vec<u8>) -> Result<(), String> {
         self.publish_count.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut buf) = self.published_bytes.lock() {
+            buf.push(data);
+        }
         Ok(())
     }
     async fn ban_peer(&self, _: &NetworkId) {}
@@ -87,9 +102,23 @@ impl EgressPort for FailingEgress {
     }
 }
 
-/// Build a MediaEgressActor with the given egress port and return the shard senders.
+/// Build a MediaEgressActor with the default bundle size (1, no bundling).
 async fn build_media_egress<E: EgressPort + 'static>(
     egress: E,
+) -> (
+    mpsc::Sender<VideoShard>,
+    mpsc::Sender<AudioShard>,
+    tokio::task::JoinHandle<()>,
+) {
+    build_media_egress_with_bundle_size(egress, phalanx_proto::types::SymbolBundleSize::default())
+        .await
+}
+
+/// Build a MediaEgressActor with a configurable bundle size — used by the
+/// bundling tests to verify wire-format behavior at non-default values.
+async fn build_media_egress_with_bundle_size<E: EgressPort + 'static>(
+    egress: E,
+    symbol_bundle_size: phalanx_proto::types::SymbolBundleSize,
 ) -> (
     mpsc::Sender<VideoShard>,
     mpsc::Sender<AudioShard>,
@@ -109,6 +138,7 @@ async fn build_media_egress<E: EgressPort + 'static>(
         audio_topic: MeshTopic::new("/phalanx/audio/test"),
         symbol_size: SymbolSize::default(),
         repair_ratio: RepairRatio::default(),
+        symbol_bundle_size,
         wal_dir: temp.path().to_path_buf(),
         system_governor: gov,
         max_storage_bytes: 100_000_000,
@@ -148,10 +178,8 @@ fn make_audio_shard(payload_bytes: usize) -> AudioShard {
 #[tokio::test]
 async fn test_video_shard_published() {
     let counter = Arc::new(AtomicUsize::new(0));
-    let (video_tx, _audio_tx, handle) = build_media_egress(RecordingEgress {
-        publish_count: counter.clone(),
-    })
-    .await;
+    let (video_tx, _audio_tx, handle) =
+        build_media_egress(RecordingEgress::new(counter.clone())).await;
 
     video_tx.send(make_video_shard(256)).await.unwrap();
     // Give actor time to seal + fountain encode + publish
@@ -174,10 +202,8 @@ async fn test_video_shard_published() {
 #[tokio::test]
 async fn test_audio_shard_published() {
     let counter = Arc::new(AtomicUsize::new(0));
-    let (_video_tx, audio_tx, handle) = build_media_egress(RecordingEgress {
-        publish_count: counter.clone(),
-    })
-    .await;
+    let (_video_tx, audio_tx, handle) =
+        build_media_egress(RecordingEgress::new(counter.clone())).await;
 
     audio_tx.send(make_audio_shard(256)).await.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -198,10 +224,8 @@ async fn test_audio_shard_published() {
 #[tokio::test]
 async fn test_multiple_shards_sequenced() {
     let counter = Arc::new(AtomicUsize::new(0));
-    let (video_tx, audio_tx, handle) = build_media_egress(RecordingEgress {
-        publish_count: counter.clone(),
-    })
-    .await;
+    let (video_tx, audio_tx, handle) =
+        build_media_egress(RecordingEgress::new(counter.clone())).await;
 
     // 3 video + 2 audio
     for _ in 0..3u32 {
@@ -234,10 +258,8 @@ async fn test_multiple_shards_sequenced() {
 #[tokio::test]
 async fn test_actor_exits_on_channel_close() {
     let counter = Arc::new(AtomicUsize::new(0));
-    let (video_tx, audio_tx, handle) = build_media_egress(RecordingEgress {
-        publish_count: counter.clone(),
-    })
-    .await;
+    let (video_tx, audio_tx, handle) =
+        build_media_egress(RecordingEgress::new(counter.clone())).await;
 
     // Close both channels immediately
     drop(video_tx);
@@ -280,4 +302,129 @@ async fn test_failed_publish_enqueues_to_wal() {
         "Actor should keep running while WAL has pending entries"
     );
     handle.abort();
+}
+
+// =====================================================================
+// Bundling: wire-format and cardinality
+// =====================================================================
+//
+// These tests verify that publish_fountain_symbols emits a postcard-encoded
+// `Vec<ShardChunk>` per egress.publish() call (the new wire format), and that
+// `symbol_bundle_size` controls the cardinality of each bundle.
+//
+// We don't predict the exact chunk count fountain_chunkify produces for a
+// given payload — RaptorQ's repair-symbol count varies with the source-block
+// size. We assert structural properties: every published payload deserializes
+// as `Vec<ShardChunk>` (not bare `ShardChunk`), and bundle cardinality stays
+// within the configured `bundle_size` upper bound.
+
+use phalanx_proto::evidence::ShardChunk;
+
+/// Default bundle size 1: every published payload is a length-1
+/// `Vec<ShardChunk>`. Confirms the wire format is consistent even when no
+/// bundling occurs (single-chunk publishes are still wrapped).
+#[tokio::test]
+async fn test_default_bundle_size_emits_length_1_vec() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let egress = RecordingEgress::new(counter.clone());
+    let bytes_handle = egress.published_bytes.clone();
+    let (video_tx, _audio_tx, handle) = build_media_egress(egress).await;
+
+    video_tx.send(make_video_shard(256)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let buf = bytes_handle.lock().unwrap().clone();
+    assert!(!buf.is_empty(), "expected at least one publish");
+
+    for (i, payload) in buf.iter().enumerate() {
+        let bundle: Vec<ShardChunk> = postcard::from_bytes(payload)
+            .unwrap_or_else(|e| panic!("publish #{i} did not deserialize as Vec<ShardChunk>: {e}"));
+        assert_eq!(
+            bundle.len(),
+            1,
+            "publish #{i}: bundle_size=1 must emit length-1 Vec, got {}",
+            bundle.len()
+        );
+    }
+
+    drop(video_tx);
+    drop(_audio_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+}
+
+/// Larger bundle size produces fewer publishes carrying multiple chunks each.
+/// With a moderately-sized shard and bundle_size=10, we expect at least one
+/// publish with cardinality > 1, and total chunk count summed across bundles
+/// should equal the same count as the unbundled (default) baseline.
+#[tokio::test]
+async fn test_bundling_packs_multiple_chunks_per_publish() {
+    use phalanx_proto::types::SymbolBundleSize;
+
+    // Bundle size 10 — small enough to fit any shard size we might generate
+    // here, large enough that we should see multi-chunk bundles.
+    let counter_bundled = Arc::new(AtomicUsize::new(0));
+    let egress_bundled = RecordingEgress::new(counter_bundled.clone());
+    let bytes_bundled = egress_bundled.published_bytes.clone();
+    let (video_tx, _audio_tx, handle) =
+        build_media_egress_with_bundle_size(egress_bundled, SymbolBundleSize::new(10)).await;
+
+    // 8 KB shard — large enough to chunk into several RaptorQ symbols at 1200 B each.
+    video_tx.send(make_video_shard(8192)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let buf = bytes_bundled.lock().unwrap().clone();
+    assert!(!buf.is_empty(), "expected at least one publish");
+
+    let mut total_chunks_bundled = 0usize;
+    let mut max_bundle_seen = 0usize;
+    for (i, payload) in buf.iter().enumerate() {
+        let bundle: Vec<ShardChunk> = postcard::from_bytes(payload)
+            .unwrap_or_else(|e| panic!("publish #{i} did not deserialize as Vec<ShardChunk>: {e}"));
+        assert!(
+            bundle.len() <= 10,
+            "publish #{i}: bundle_size=10 cap exceeded, got {}",
+            bundle.len()
+        );
+        total_chunks_bundled += bundle.len();
+        max_bundle_seen = max_bundle_seen.max(bundle.len());
+    }
+
+    assert!(
+        max_bundle_seen > 1,
+        "expected at least one multi-chunk bundle with bundle_size=10 on an \
+         8 KB shard, but every publish had <= 1 chunk"
+    );
+
+    drop(video_tx);
+    drop(_audio_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+
+    // Compare against unbundled run with the same input — total chunk counts
+    // should match (bundling doesn't change how many symbols fountain_chunkify
+    // produces, only how many publishes they're spread across).
+    let counter_baseline = Arc::new(AtomicUsize::new(0));
+    let egress_baseline = RecordingEgress::new(counter_baseline.clone());
+    let bytes_baseline = egress_baseline.published_bytes.clone();
+    let (video_tx2, _audio_tx2, handle2) = build_media_egress(egress_baseline).await;
+    video_tx2.send(make_video_shard(8192)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let total_chunks_baseline = bytes_baseline
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|p| postcard::from_bytes::<Vec<ShardChunk>>(p).ok())
+        .map(|v| v.len())
+        .sum::<usize>();
+
+    assert_eq!(
+        total_chunks_bundled, total_chunks_baseline,
+        "total chunk count differs between bundled ({}) and baseline ({}) — \
+         bundling changed semantics, not just transport batching",
+        total_chunks_bundled, total_chunks_baseline
+    );
+
+    drop(video_tx2);
+    drop(_audio_tx2);
+    let _ = tokio::time::timeout(Duration::from_secs(10), handle2).await;
 }
