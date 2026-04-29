@@ -321,6 +321,7 @@ impl<I: IngressPort> MeshSentinel<I> {
                 audio_topic: deps.config.network.audio_topic.clone(),
                 symbol_size: deps.config.network.symbol_size,
                 repair_ratio: deps.config.network.repair_ratio,
+                symbol_bundle_size: deps.config.network.symbol_bundle_size,
                 wal_dir: outbound_wal_dir,
                 system_governor: deps.system_governor.clone(),
                 max_storage_bytes: deps.config.storage.max_storage_bytes.as_u64(),

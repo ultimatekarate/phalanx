@@ -56,7 +56,8 @@ pub mod prelude {
 
     // Four Pillars Newtypes
     pub use crate::types::{
-        BlackLevel, ChannelCount, EncodingSymbolId, Fps, RepairRatio, SampleRate, SymbolSize,
+        BlackLevel, ChannelCount, EncodingSymbolId, Fps, RepairRatio, SampleRate, SymbolBundleSize,
+        SymbolSize,
     };
 
     // Error Nouns

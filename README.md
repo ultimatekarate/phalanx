@@ -191,4 +191,4 @@ The workspace enforces deny-level clippy lints across all crates — `unwrap_use
 
 ## License
 
-License: I'm in the early stages of filing a patent. I'm mostly doing this as a defensive measure. I have no intention of enforcing against earnest collaborators.
+License: TBD. Phalanx will always be open source and free.

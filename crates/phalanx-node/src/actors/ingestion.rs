@@ -137,7 +137,22 @@ impl IngestionActor {
 
         let start_cpu = tokio::time::Instant::now();
 
-        if let Ok(raw_chunk) = phalanx_forensics::gate::unmarshal::<ShardChunk>(data, "ingestion") {
+        // Wire format is `Vec<ShardChunk>` (length 1 for single-symbol
+        // publishes, length N for bundled publishes). Iterate per chunk so
+        // the existing per-chunk handling — bandwidth tracking, ForensicUnit
+        // construction, signature verification — runs unchanged.
+        let bundle = match phalanx_forensics::gate::unmarshal::<Vec<ShardChunk>>(data, "ingestion")
+        {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        for raw_chunk in bundle {
+            // Per-chunk rejections (`continue`) skip the current chunk only —
+            // other chunks in the same bundle are processed independently, so
+            // a transient per-chunk failure doesn't waste the whole bundle.
+            // The single `return` at the storage-channel-disconnected branch
+            // below is process-fatal and aborts the whole call.
+
             // Per-peer bandwidth tracking via Volterra integral
             self.system_governor
                 .record_peer_bandwidth(&peer_id.to_string());
@@ -146,7 +161,7 @@ impl IngestionActor {
                 .is_peer_bandwidth_ok(&peer_id.to_string())
             {
                 tracing::warn!(peer = %peer_id, "Per-peer bandwidth exceeded, dropping");
-                return;
+                continue;
             }
 
             let unverified = ForensicUnit::<_, Unverified>::new(raw_chunk);
@@ -165,7 +180,7 @@ impl IngestionActor {
                 // The EgressActor does not need a way to ban peers. Banning on egress is purely
                 // about preserving capacity, not about violating trust. The integral equations handle
                 // that.
-                return;
+                continue;
             }
 
             let shard_birth = unverified.data.timestamp;
@@ -177,7 +192,7 @@ impl IngestionActor {
 
             if age > tolerance {
                 tracing::warn!(peer = %peer_id, age = ?age, tol = ?tolerance, "Dropped: Stale Shard");
-                return;
+                continue;
             }
 
             let trust_level = self.trust_oracle.check_trust_by_did(&sender_did);
@@ -208,7 +223,7 @@ impl IngestionActor {
                         "INGRESS GOVERNOR FULL! Dropping chunk from {}", peer_id
                     );
                     self.system_governor.record_memory_pressure(1024 * 1024); // 1 MiB phantom pressure per rejection
-                    return;
+                    continue;
                 }
             }
             self.system_governor.record_entry_pressure();

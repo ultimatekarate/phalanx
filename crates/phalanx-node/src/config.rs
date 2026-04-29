@@ -2,7 +2,9 @@
 
 use phalanx_proto::evidence::SensorCalibration;
 use phalanx_proto::prelude::{Did, MeshTopic};
-use phalanx_proto::types::{ByteCapacity, ChannelCount, Fps, RepairRatio, SampleRate, SymbolSize};
+use phalanx_proto::types::{
+    ByteCapacity, ChannelCount, Fps, RepairRatio, SampleRate, SymbolBundleSize, SymbolSize,
+};
 use serde::Deserialize;
 use std::path::PathBuf;
 
@@ -53,6 +55,12 @@ pub struct NetworkConfig {
     /// RaptorQ symbol payload size in bytes. Must fit within a single UDP datagram.
     #[serde(default)]
     pub symbol_size: SymbolSize,
+    /// Number of RaptorQ symbols bundled into a single `egress.publish()` call.
+    /// Default 1 preserves single-symbol-per-publish behavior. Larger values
+    /// reduce the message-rate demand on the per-peer outbound queue at the
+    /// cost of larger individual messages and coarser-grained loss.
+    #[serde(default)]
+    pub symbol_bundle_size: SymbolBundleSize,
     /// Multiaddr strings the swarm will listen on.
     /// Default: `["/ip4/0.0.0.0/udp/0/quic-v1", "/ip4/0.0.0.0/tcp/0"]`.
     #[serde(default = "default_listen_addresses")]
@@ -185,6 +193,7 @@ impl Default for NetworkConfig {
             require_psk: false,
             repair_ratio: RepairRatio::default(),
             symbol_size: SymbolSize::default(),
+            symbol_bundle_size: SymbolBundleSize::default(),
             listen_addresses: default_listen_addresses(),
             revocation_topic: default_revocation_topic(),
         }

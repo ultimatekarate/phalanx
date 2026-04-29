@@ -429,6 +429,49 @@ impl fmt::Display for SymbolSize {
     }
 }
 
+/// Number of RaptorQ symbols carried in a single egress publish. Default 1
+/// preserves single-symbol-per-publish behavior; larger values amortize
+/// per-message processing cost across more bytes at the price of bigger
+/// individual messages and coarser-grained loss granularity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SymbolBundleSize(u32);
+
+impl SymbolBundleSize {
+    /// Maximum bundle size. At 1200-byte symbols, 100 × 1200 = 120 KB —
+    /// safely under typical gossipsub max_transmit_size with framing margin.
+    pub const MAX: u32 = 100;
+
+    /// Construct a bundle size. Must be in 1..=MAX.
+    /// Panics in debug if outside range; clamps in release.
+    #[must_use]
+    pub fn new(n: u32) -> Self {
+        debug_assert!(
+            (1..=Self::MAX).contains(&n),
+            "SymbolBundleSize must be in 1..={}, got {}",
+            Self::MAX,
+            n
+        );
+        Self(n.clamp(1, Self::MAX))
+    }
+
+    #[must_use]
+    pub fn get(&self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for SymbolBundleSize {
+    fn default() -> Self {
+        Self(1) // Preserves pre-bundling single-symbol-per-publish behavior.
+    }
+}
+
+impl fmt::Display for SymbolBundleSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} symbols/publish", self.0)
+    }
+}
+
 /// Sensor analog black level offset. Wraps f32 to match NEON float32x4 pipeline.
 /// Typical value: 16.0 for 8-bit sensors (accounts for analog black offset).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
