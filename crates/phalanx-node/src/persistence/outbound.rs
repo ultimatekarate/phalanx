@@ -69,7 +69,6 @@ impl OutboundQueue {
     }
 
     /// Enqueue a failed-to-publish evidence payload for later retry.
-    #[allow(clippy::arithmetic_side_effects)] // Counter increment and byte accounting.
     pub async fn enqueue(
         &mut self,
         topic: MeshTopic,
@@ -93,7 +92,7 @@ impl OutboundQueue {
         }
 
         let id = OutboundEntryId(self.next_id);
-        self.next_id += 1;
+        self.next_id = self.next_id.saturating_add(1);
 
         let entry = OutboundEntry {
             id,
@@ -108,7 +107,7 @@ impl OutboundQueue {
         self.persist_entry(&entry).await?;
 
         self.entries.push_back(entry);
-        self.total_bytes = ByteCapacity(self.total_bytes.0 + byte_len);
+        self.total_bytes = ByteCapacity(self.total_bytes.0.saturating_add(byte_len));
 
         tracing::info!(
             event = "outbound_enqueued",
@@ -136,13 +135,12 @@ impl OutboundQueue {
 
     /// Re-enqueue an entry that failed to publish, incrementing its attempt counter.
     /// Returns `None` if the entry has exceeded MAX_ATTEMPTS (abandoned with forensic log).
-    #[allow(clippy::arithmetic_side_effects)] // Retry counter increment.
     pub async fn requeue_failed(
         &mut self,
         mut entry: OutboundEntry,
         now: PhalanxTimestamp,
     ) -> std::io::Result<Option<OutboundEntryId>> {
-        entry.attempts += 1;
+        entry.attempts = entry.attempts.saturating_add(1);
         entry.last_attempt = Some(now);
 
         if entry.attempts >= MAX_ATTEMPTS {
@@ -165,7 +163,7 @@ impl OutboundQueue {
         self.persist_entry(&entry).await?;
 
         self.entries.push_back(entry);
-        self.total_bytes = ByteCapacity(self.total_bytes.0 + byte_len);
+        self.total_bytes = ByteCapacity(self.total_bytes.0.saturating_add(byte_len));
 
         Ok(Some(id))
     }
@@ -186,11 +184,10 @@ impl OutboundQueue {
     /// Re-enqueue an entry without incrementing attempts (backoff not yet elapsed).
     /// Pushes to front to preserve FIFO ordering. No WAL write needed — entry is
     /// already persisted on disk from the original `enqueue()` call.
-    #[allow(clippy::arithmetic_side_effects)] // Byte accounting.
     pub fn requeue_unchanged(&mut self, entry: OutboundEntry) {
         let byte_len = entry.envelope_bytes.len() as u64;
         self.entries.push_front(entry);
-        self.total_bytes = ByteCapacity(self.total_bytes.0 + byte_len);
+        self.total_bytes = ByteCapacity(self.total_bytes.0.saturating_add(byte_len));
     }
 
     /// Current queue depth (number of entries).
@@ -240,7 +237,6 @@ impl OutboundQueue {
         }
     }
 
-    #[allow(clippy::arithmetic_side_effects)] // ID and byte total recovery arithmetic.
     async fn recover_from_disk(&mut self) -> std::io::Result<()> {
         let mut read_dir = tokio::fs::read_dir(&self.wal_dir).await?;
         let mut recovered: Vec<OutboundEntry> = Vec::new();
@@ -281,12 +277,12 @@ impl OutboundQueue {
 
         // Reconstruct next_id from highest recovered entry
         if let Some(last) = recovered.last() {
-            self.next_id = last.id.0 + 1;
+            self.next_id = last.id.0.saturating_add(1);
         }
 
         let mut total: u64 = 0;
         for entry in &recovered {
-            total += entry.envelope_bytes.len() as u64;
+            total = total.saturating_add(entry.envelope_bytes.len() as u64);
         }
 
         self.total_bytes = ByteCapacity(total);

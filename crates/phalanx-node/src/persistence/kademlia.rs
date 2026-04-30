@@ -99,10 +99,9 @@ impl RedbStore {
         Ok(())
     }
 
-    #[allow(clippy::arithmetic_side_effects)] // Counter increment and provider list arithmetic.
     pub fn prune_expired_blocking(&self) -> std::result::Result<usize, redb::Error> {
         let write_txn = self.db.begin_write()?;
-        let mut pruned_count = 0;
+        let mut pruned_count: usize = 0;
 
         {
             // ==========================================
@@ -129,7 +128,7 @@ impl RedbStore {
 
             for key in invalid_record_keys {
                 records_table.remove(key.as_slice())?;
-                pruned_count += 1;
+                pruned_count = pruned_count.saturating_add(1);
             }
 
             // ==========================================
@@ -181,7 +180,6 @@ impl RedbStore {
 
     /// Iterates through the records table and compiles a distribution of payload variants.
     /// Excludes expired records from the metric count.
-    #[allow(clippy::arithmetic_side_effects)] // Counter increments bounded by table size.
     pub fn get_storage_metrics(
         &self,
     ) -> std::result::Result<std::collections::HashMap<PayloadKind, usize>, redb::Error> {
@@ -192,7 +190,8 @@ impl RedbStore {
         for (_, v) in table.iter()?.flatten() {
             if let Ok(payload) = DhtPayload::decode(v.value()) {
                 if !is_expired(payload.expires_at_unix) {
-                    *metrics.entry(payload.variant).or_insert(0) += 1;
+                    let counter: &mut usize = metrics.entry(payload.variant).or_insert(0);
+                    *counter = counter.saturating_add(1);
                 }
             }
         }
