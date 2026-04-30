@@ -31,6 +31,10 @@ pub enum TransportCommand {
     FindRecordingProviders(phalanx_proto::identity::RecordingId),
     /// Eclipse remediation: re-dial bootstrap peers and trigger Kademlia random walk.
     ReBootstrap(Vec<String>),
+    /// Reply to a previously-received `Message::Request` identified by `channel_id`.
+    /// The actor looks up the captured `ResponseChannel` and calls
+    /// `swarm.behaviour_mut().retrieval.send_response(...)`.
+    SendResponse(String, RecordingResponse),
 }
 
 /// Per-protocol wake attribution. Each field is a handle to a shared atomic
@@ -91,6 +95,17 @@ pub struct Libp2pAdapter {
     /// tests with no subscriber installed lose them. This counter gives a
     /// programmatic signal that the swarm task rejected a published message.
     pub gossipsub_publish_errors: Arc<AtomicU64>,
+    /// Monotonically increasing count of retrieval responses that could not
+    /// be delivered. Three failure modes contribute:
+    /// 1. `send_response` called with an unknown `channel_id` (already
+    ///    responded, or the entry was evicted by GC after the 20s libp2p
+    ///    request-response timeout).
+    /// 2. The 30s GC sweep evicted entries whose requesters never received
+    ///    a reply (the `RecordingRequested` event was queued but no upstream
+    ///    actor produced a `RecordingResponse` in time).
+    /// 3. libp2p's `request_response::Behaviour::send_response` returned
+    ///    `Err` because the peer disconnected before we could deliver.
+    pub response_channels_lost: Arc<AtomicU64>,
 }
 
 /// Extract a `SubnetBucket` from a libp2p `Multiaddr`.
@@ -128,22 +143,10 @@ pub fn translate_swarm_event(event: SwarmEvent<PhalanxEvent>) -> Option<NetworkE
             topic: MeshTopic::new(message.topic.as_str()),
             data: message.data,
         }),
-        SwarmEvent::Behaviour(PhalanxEvent::Retrieval(
-            libp2p::request_response::Event::Message {
-                peer,
-                message:
-                    libp2p::request_response::Message::Request {
-                        request_id,
-                        request,
-                        ..
-                    },
-                ..
-            },
-        )) => Some(NetworkEvent::RecordingRequested {
-            origin: PeerMapper::to_network_id(&peer),
-            request,
-            channel_id: request_id.to_string(),
-        }),
+        // Note: `Message::Request` is intentionally NOT handled here. The
+        // actor at `with_config` intercepts that variant before this function
+        // sees it, so it can capture the `ResponseChannel` (which has no public
+        // constructor and can't be carried around inside a pure function).
         // mDNS discovery → PeerDiscovered (vitals tracking)
         SwarmEvent::Behaviour(PhalanxEvent::Mdns(libp2p::mdns::Event::Discovered(peers))) => peers
             .first()
@@ -265,6 +268,42 @@ impl PerPeerRateLimiter {
     }
 }
 
+/// Time-keyed store keyed by string IDs. Entries older than `timeout` are
+/// dropped on `evict_expired(now)`. The clock is injected so unit tests can
+/// drive eviction deterministically. Generic over `T` so tests can use any
+/// stub value (the production type `ResponseChannel<RecordingResponse>` has no
+/// public constructor).
+struct TimedStore<T> {
+    entries: HashMap<String, (T, Instant)>,
+    timeout: Duration,
+}
+
+impl<T> TimedStore<T> {
+    fn new(timeout: Duration) -> Self {
+        Self {
+            entries: HashMap::new(),
+            timeout,
+        }
+    }
+
+    fn insert(&mut self, key: String, value: T, now: Instant) {
+        self.entries.insert(key, (value, now));
+    }
+
+    fn take(&mut self, key: &str) -> Option<T> {
+        self.entries.remove(key).map(|(v, _)| v)
+    }
+
+    /// Drop entries inserted more than `timeout` ago. Returns the count evicted.
+    fn evict_expired(&mut self, now: Instant) -> usize {
+        let timeout = self.timeout;
+        let before = self.entries.len();
+        self.entries
+            .retain(|_, (_, inserted_at)| now.duration_since(*inserted_at) < timeout);
+        before - self.entries.len()
+    }
+}
+
 impl Libp2pAdapter {
     /// Initializes the Actor Pattern.
     /// The Swarm is moved into a detached Tokio task to preserve thread safety (Sync).
@@ -307,6 +346,8 @@ impl Libp2pAdapter {
         let outbound_queue_depth_task = outbound_queue_depth.clone();
         let gossipsub_publish_errors = Arc::new(AtomicU64::new(0));
         let gossipsub_publish_errors_task = gossipsub_publish_errors.clone();
+        let response_channels_lost = Arc::new(AtomicU64::new(0));
+        let response_channels_lost_task = response_channels_lost.clone();
 
         let poll_cadence = config.poll_cadence;
 
@@ -314,6 +355,15 @@ impl Libp2pAdapter {
             // H3 FIX: Per-peer rate limiting state
             let mut rate_limiter = PerPeerRateLimiter::new(max_per_sec);
             let mut dropped_events: u64 = 0;
+            // Channel store for inbound retrieval requests. Keys are
+            // `request_id.to_string()`, matching the `channel_id` we hand out
+            // upstream as part of `NetworkEvent::RecordingRequested`. Entries
+            // expire after 30s — comfortably past libp2p's 20s
+            // request-response timeout (set in builder.rs).
+            let mut response_channels: TimedStore<
+                libp2p::request_response::ResponseChannel<RecordingResponse>,
+            > = TimedStore::new(Duration::from_secs(30));
+            let mut last_gc = Instant::now();
 
             // Shared closure-like helper: process a single swarm event.
             // Extracted as a macro to avoid borrow-checker issues with `swarm`.
@@ -392,6 +442,36 @@ impl Libp2pAdapter {
                         }
                         Some(TransportCommand::FindRecordingProviders(recording_id)) => {
                             swarm.behaviour_mut().find_recording_providers(&recording_id);
+                        }
+                        Some(TransportCommand::SendResponse(channel_id, response)) => {
+                            // Amortized GC at the natural traffic point.
+                            response_channels.evict_expired(Instant::now());
+                            match response_channels.take(&channel_id) {
+                                Some(channel) => {
+                                    if swarm
+                                        .behaviour_mut()
+                                        .retrieval
+                                        .send_response(channel, response)
+                                        .is_err()
+                                    {
+                                        response_channels_lost_task
+                                            .fetch_add(1, Ordering::Relaxed);
+                                        tracing::warn!(
+                                            target: "phalanx::transport",
+                                            channel_id = %channel_id,
+                                            "send_response failed: channel closed before reply"
+                                        );
+                                    }
+                                }
+                                None => {
+                                    response_channels_lost_task.fetch_add(1, Ordering::Relaxed);
+                                    tracing::warn!(
+                                        target: "phalanx::transport",
+                                        channel_id = %channel_id,
+                                        "send_response: unknown channel_id (already responded, or expired)"
+                                    );
+                                }
+                            }
                         }
                         Some(TransportCommand::ReBootstrap(peers)) => {
                             for addr_str in &peers {
@@ -474,23 +554,77 @@ impl Libp2pAdapter {
                         _ => None,
                     };
 
-                    // Per-peer rate limiting
+                    // Per-peer rate limiting (single Instant::now() reused for GC below)
+                    let now = Instant::now();
                     let rate_ok = match source_peer {
-                        Some(peer) => rate_limiter.should_accept(peer, Instant::now()),
+                        Some(peer) => rate_limiter.should_accept(peer, now),
                         None => true,
                     };
 
+                    // Periodic GC of expired response channels. Runs at most once
+                    // per 30s (libp2p's request-response timeout is 20s, so any
+                    // entry past 30s is guaranteed dead from libp2p's perspective).
+                    if now.duration_since(last_gc) >= Duration::from_secs(30) {
+                        let evicted = response_channels.evict_expired(now);
+                        if evicted > 0 {
+                            response_channels_lost_task
+                                .fetch_add(evicted as u64, Ordering::Relaxed);
+                        }
+                        last_gc = now;
+                    }
+
+                    // Pre-process: capture the ResponseChannel from inbound Request
+                    // events before translate_swarm_event consumes the SwarmEvent.
+                    // Only capture if the event will actually be delivered upstream
+                    // (rate-limit ok AND event_tx not full); otherwise the channel
+                    // would leak in our map until GC.
+                    let (network_event, channel_to_insert) = match swarm_event {
+                        SwarmEvent::Behaviour(PhalanxEvent::Retrieval(
+                            libp2p::request_response::Event::Message {
+                                peer,
+                                message:
+                                    libp2p::request_response::Message::Request {
+                                        request_id,
+                                        request,
+                                        channel,
+                                    },
+                                ..
+                            },
+                        )) => {
+                            let channel_id = request_id.to_string();
+                            let event = NetworkEvent::RecordingRequested {
+                                origin: PeerMapper::to_network_id(&peer),
+                                request,
+                                channel_id: channel_id.clone(),
+                            };
+                            (Some(event), Some((channel_id, channel)))
+                        }
+                        other => (translate_swarm_event(other), None),
+                    };
+
                     if rate_ok {
-                        if let Some(network_event) = translate_swarm_event(swarm_event) {
-                            if _event_tx.try_send(network_event).is_err() {
-                                dropped_events += 1;
-                                dropped_counter_task.store(dropped_events, Ordering::Relaxed);
-                                if dropped_events % 100 == 1 {
-                                    tracing::warn!(
-                                        target: "phalanx::transport",
-                                        total_dropped = dropped_events,
-                                        "Event channel full, dropping events"
-                                    );
+                        if let Some(network_event) = network_event {
+                            match _event_tx.try_send(network_event) {
+                                Ok(()) => {
+                                    if let Some((id, channel)) = channel_to_insert {
+                                        response_channels.insert(id, channel, now);
+                                    }
+                                }
+                                Err(_) => {
+                                    dropped_events += 1;
+                                    dropped_counter_task
+                                        .store(dropped_events, Ordering::Relaxed);
+                                    if dropped_events % 100 == 1 {
+                                        tracing::warn!(
+                                            target: "phalanx::transport",
+                                            total_dropped = dropped_events,
+                                            "Event channel full, dropping events"
+                                        );
+                                    }
+                                    // channel_to_insert drops here — the
+                                    // ResponseChannel sender closes, libp2p's
+                                    // requester-side fires a timeout. Correct
+                                    // behavior under backpressure.
                                 }
                             }
                         }
@@ -563,6 +697,7 @@ impl Libp2pAdapter {
             protocol_wakes,
             outbound_queue_depth,
             gossipsub_publish_errors,
+            response_channels_lost,
         }
     }
 
@@ -663,6 +798,32 @@ impl Libp2pAdapter {
             })
     }
 
+    /// Reply to a previously-received `RecordingRequested` event, identified by
+    /// the `channel_id` that was delivered with the inbound event. Best-effort:
+    /// returns `Ok(())` once the command is enqueued; failures inside the actor
+    /// (unknown channel_id, libp2p response channel expired) are surfaced via
+    /// the `response_channels_lost` counter, not the return value.
+    ///
+    /// Calling this twice with the same `channel_id` is safe — the second call
+    /// is a no-op that increments the lost-counter.
+    pub async fn send_response(
+        &self,
+        channel_id: &str,
+        response: RecordingResponse,
+    ) -> Result<(), TransportError> {
+        self.outbound_queue_depth.fetch_add(1, Ordering::Relaxed);
+        self.command_tx
+            .send(TransportCommand::SendResponse(
+                channel_id.to_string(),
+                response,
+            ))
+            .await
+            .map_err(|_| {
+                self.outbound_queue_depth.fetch_sub(1, Ordering::Relaxed);
+                TransportError::Internal("Sentinel connection lost".into())
+            })
+    }
+
     /// Eclipse remediation: re-dial bootstrap peers and trigger Kademlia random walk.
     pub async fn rebootstrap(&self, peers: &[String]) -> Result<(), TransportError> {
         self.outbound_queue_depth.fetch_add(1, Ordering::Relaxed);
@@ -748,6 +909,14 @@ impl Libp2pEgress {
         self.adapter.gossipsub_publish_errors.clone()
     }
 
+    /// Returns the monotonic count of retrieval responses that could not be
+    /// delivered: unknown `channel_id`, GC eviction past libp2p's
+    /// request-response timeout, or `request_response::Behaviour::send_response`
+    /// returning `Err` because the peer disconnected.
+    pub fn response_channels_lost(&self) -> Arc<AtomicU64> {
+        self.adapter.response_channels_lost.clone()
+    }
+
     /// Returns the shared IO event log when `AdapterConfig::enable_io_log`
     /// is set at adapter construction. Shared across all substreams and
     /// transports (QUIC, TCP, Relay) for this adapter.
@@ -773,10 +942,13 @@ impl EgressPort for Libp2pEgress {
 
     async fn send_response(
         &self,
-        _channel_id: &str,
-        _response: RecordingResponse,
+        channel_id: &str,
+        response: RecordingResponse,
     ) -> Result<(), String> {
-        Ok(())
+        self.adapter
+            .send_response(channel_id, response)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn announce_recording(
@@ -994,6 +1166,54 @@ mod tests {
         assert!(config.poll_cadence.is_none());
         assert!(!config.enable_wake_log);
         assert!(!config.enable_io_log);
+    }
+
+    // === Group T: TimedStore ===
+
+    #[test]
+    fn timed_store_take_returns_inserted_value() {
+        let mut store: TimedStore<u32> = TimedStore::new(Duration::from_secs(30));
+        let t0 = Instant::now();
+        store.insert("abc".to_string(), 7, t0);
+        assert_eq!(store.take("abc"), Some(7));
+    }
+
+    #[test]
+    fn timed_store_take_consumes_entry() {
+        let mut store: TimedStore<u32> = TimedStore::new(Duration::from_secs(30));
+        let t0 = Instant::now();
+        store.insert("abc".to_string(), 7, t0);
+        assert_eq!(store.take("abc"), Some(7));
+        assert_eq!(store.take("abc"), None);
+    }
+
+    #[test]
+    fn timed_store_evict_expired_drops_old_entries() {
+        let mut store: TimedStore<u32> = TimedStore::new(Duration::from_secs(30));
+        let t0 = Instant::now();
+        store.insert("abc".to_string(), 7, t0);
+        let evicted = store.evict_expired(t0 + Duration::from_secs(31));
+        assert_eq!(evicted, 1);
+        assert_eq!(store.take("abc"), None);
+    }
+
+    #[test]
+    fn timed_store_evict_expired_keeps_fresh_entries() {
+        let mut store: TimedStore<u32> = TimedStore::new(Duration::from_secs(30));
+        let t0 = Instant::now();
+        store.insert("abc".to_string(), 7, t0);
+        let evicted = store.evict_expired(t0 + Duration::from_secs(5));
+        assert_eq!(evicted, 0);
+        assert_eq!(store.take("abc"), Some(7));
+    }
+
+    #[test]
+    fn timed_store_insert_replaces_existing_key() {
+        let mut store: TimedStore<u32> = TimedStore::new(Duration::from_secs(30));
+        let t0 = Instant::now();
+        store.insert("abc".to_string(), 7, t0);
+        store.insert("abc".to_string(), 99, t0);
+        assert_eq!(store.take("abc"), Some(99));
     }
 
     // === Group R: PerPeerRateLimiter ===
