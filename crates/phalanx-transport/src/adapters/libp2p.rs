@@ -64,6 +64,24 @@ pub struct ProtocolWakeCounters {
     pub other: Arc<AtomicU64>,
 }
 
+/// Per-message timing for `gossipsub.publish()` calls on the swarm task.
+/// Operational type (not a Dictionary Noun) per the Linguistic Model;
+/// lives in phalanx-transport.
+///
+/// Read together to compute mean call latency:
+/// `mean_nanos = call_nanos_total / call_count`. Bundling matches the
+/// `IoCounters` / `ProtocolWakeCounters` pattern: both atomics must be sampled
+/// at the same instant for the ratio to be meaningful.
+///
+/// Diagnostic-only — gated by `AdapterConfig::enable_publish_timing`.
+/// `Instant::now()` on Windows is ~50-200 ns; the wrapper is opt-in to keep
+/// production hot-paths free of measurement overhead.
+#[derive(Clone, Debug, Default)]
+pub struct PublishTimingCounters {
+    pub call_nanos_total: Arc<AtomicU64>,
+    pub call_count: Arc<AtomicU64>,
+}
+
 #[derive(Clone)]
 pub struct Libp2pAdapter {
     command_tx: mpsc::Sender<TransportCommand>,
@@ -106,6 +124,11 @@ pub struct Libp2pAdapter {
     /// 3. libp2p's `request_response::Behaviour::send_response` returned
     ///    `Err` because the peer disconnected before we could deliver.
     pub response_channels_lost: Arc<AtomicU64>,
+    /// Per-message timing for `gossipsub.publish()`. `Some` when
+    /// `AdapterConfig::enable_publish_timing` is set at construction; `None`
+    /// otherwise. Mirrors the `swarm_wake_log` opt-in pattern: production
+    /// builds default to `None` and pay zero hot-path cost.
+    pub publish_timing: Option<PublishTimingCounters>,
 }
 
 /// Extract a `SubnetBucket` from a libp2p `Multiaddr`.
@@ -224,6 +247,11 @@ pub struct AdapterConfig {
     /// every socket-level read/write appends a timestamped `IoLogEntry`.
     /// Benchmarks only — not production.
     pub enable_io_log: bool,
+    /// When true, the swarm task wraps every `gossipsub.publish()` call with
+    /// `Instant::now()` and accumulates into `Libp2pAdapter::publish_timing`.
+    /// Diagnostic only — see `docs/bottleneck-attribution-arc.md`. Adds
+    /// ~50-200 ns per publish on Windows; off by default in production.
+    pub enable_publish_timing: bool,
 }
 
 impl Default for AdapterConfig {
@@ -234,6 +262,7 @@ impl Default for AdapterConfig {
             poll_cadence: None,
             enable_wake_log: false,
             enable_io_log: false,
+            enable_publish_timing: false,
         }
     }
 }
@@ -351,6 +380,13 @@ impl Libp2pAdapter {
         let response_channels_lost = Arc::new(AtomicU64::new(0));
         let response_channels_lost_task = response_channels_lost.clone();
 
+        let publish_timing: Option<PublishTimingCounters> = if config.enable_publish_timing {
+            Some(PublishTimingCounters::default())
+        } else {
+            None
+        };
+        let publish_timing_task = publish_timing.clone();
+
         let poll_cadence = config.poll_cadence;
 
         tokio::spawn(async move {
@@ -374,6 +410,7 @@ impl Libp2pAdapter {
                     match $command_option {
                         Some(TransportCommand::Publish(topic, data)) => {
                             let ident_topic = libp2p::gossipsub::IdentTopic::new(topic.to_string());
+                            let timing_start = publish_timing_task.as_ref().map(|_| Instant::now());
                             if let Err(publish_error) = swarm.behaviour_mut().gossipsub.publish(ident_topic, data) {
                                 gossipsub_publish_errors_task.fetch_add(1, Ordering::Relaxed);
                                 tracing::error!(
@@ -382,6 +419,11 @@ impl Libp2pAdapter {
                                     topic,
                                     publish_error
                                 );
+                            }
+                            if let (Some(start), Some(timing)) = (timing_start, publish_timing_task.as_ref()) {
+                                let nanos = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                                timing.call_nanos_total.fetch_add(nanos, Ordering::Relaxed);
+                                timing.call_count.fetch_add(1, Ordering::Relaxed);
                             }
                         }
                         Some(TransportCommand::SendDirect(target, data)) => {
@@ -700,6 +742,7 @@ impl Libp2pAdapter {
             outbound_queue_depth,
             gossipsub_publish_errors,
             response_channels_lost,
+            publish_timing,
         }
     }
 
@@ -909,6 +952,14 @@ impl Libp2pEgress {
     /// don't install a subscriber.
     pub fn gossipsub_publish_errors(&self) -> Arc<AtomicU64> {
         self.adapter.gossipsub_publish_errors.clone()
+    }
+
+    /// Returns the per-publish timing counters when
+    /// `AdapterConfig::enable_publish_timing` was set at adapter construction.
+    /// `None` otherwise. Read both fields together at sample boundaries to
+    /// compute `mean_call_nanos = call_nanos_total / call_count`.
+    pub fn publish_timing(&self) -> Option<PublishTimingCounters> {
+        self.adapter.publish_timing.clone()
     }
 
     /// Returns the monotonic count of retrieval responses that could not be
@@ -1168,6 +1219,7 @@ mod tests {
         assert!(config.poll_cadence.is_none());
         assert!(!config.enable_wake_log);
         assert!(!config.enable_io_log);
+        assert!(!config.enable_publish_timing);
     }
 
     // === Group T: TimedStore ===
