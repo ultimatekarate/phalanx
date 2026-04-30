@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use libp2p::PeerId;
 use phalanx_proto::network::{IngressPort, NetworkEvent};
- // Pulls in MeshTopic, MeshAddress, WitnessId
+// Pulls in MeshTopic, MeshAddress, WitnessId
 use std::str::FromStr;
 
 // MODULE REGISTRY
