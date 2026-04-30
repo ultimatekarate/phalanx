@@ -120,3 +120,22 @@ where
         self.kademlia.get_providers(record_key)
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recording_id_from_key_parses_phalanx_namespace() {
+        let key_str = format!("{}{}", RECORDING_NAMESPACE_PREFIX, "abc-123");
+        let key = RecordKey::new(&key_str);
+        assert_eq!(
+            recording_id_from_key(&key),
+            Some(RecordingId::new("abc-123"))
+        );
+
+        let bad_key = RecordKey::new(&b"not-a-phalanx-key");
+        assert_eq!(recording_id_from_key(&bad_key), None);
+    }
+}

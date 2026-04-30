@@ -235,6 +235,36 @@ impl Default for AdapterConfig {
     }
 }
 
+/// Per-peer event rate limiter with a 1-second sliding window.
+///
+/// Each peer tracks `(count, window_start)`. Calls within 1 second of the
+/// window start increment the count; once `max_per_sec` is exceeded in a
+/// window, subsequent calls return `false` until the window resets. The
+/// clock is injected so unit tests can advance time deterministically.
+struct PerPeerRateLimiter {
+    counts: HashMap<PeerId, (u64, Instant)>,
+    max_per_sec: u64,
+}
+
+impl PerPeerRateLimiter {
+    fn new(max_per_sec: u64) -> Self {
+        Self {
+            counts: HashMap::new(),
+            max_per_sec,
+        }
+    }
+
+    fn should_accept(&mut self, peer: PeerId, now: Instant) -> bool {
+        let entry = self.counts.entry(peer).or_insert((0, now));
+        if now.duration_since(entry.1).as_secs() >= 1 {
+            entry.0 = 0;
+            entry.1 = now;
+        }
+        entry.0 += 1;
+        entry.0 <= self.max_per_sec
+    }
+}
+
 impl Libp2pAdapter {
     /// Initializes the Actor Pattern.
     /// The Swarm is moved into a detached Tokio task to preserve thread safety (Sync).
@@ -282,7 +312,7 @@ impl Libp2pAdapter {
 
         tokio::spawn(async move {
             // H3 FIX: Per-peer rate limiting state
-            let mut peer_event_counts: HashMap<PeerId, (u64, Instant)> = HashMap::new();
+            let mut rate_limiter = PerPeerRateLimiter::new(max_per_sec);
             let mut dropped_events: u64 = 0;
 
             // Shared closure-like helper: process a single swarm event.
@@ -445,21 +475,9 @@ impl Libp2pAdapter {
                     };
 
                     // Per-peer rate limiting
-                    let rate_ok = if let Some(peer) = source_peer {
-                        let now = Instant::now();
-                        let entry = peer_event_counts
-                            .entry(peer)
-                            .or_insert((0, now));
-
-                        if now.duration_since(entry.1).as_secs() >= 1 {
-                            entry.0 = 0;
-                            entry.1 = now;
-                        }
-
-                        entry.0 += 1;
-                        entry.0 <= max_per_sec
-                    } else {
-                        true
+                    let rate_ok = match source_peer {
+                        Some(peer) => rate_limiter.should_accept(peer, Instant::now()),
+                        None => true,
                     };
 
                     if rate_ok {
@@ -815,6 +833,203 @@ mod tests {
     use libp2p::swarm::{ConnectionId, SwarmEvent};
     use libp2p::PeerId;
     use phalanx_proto::network::NetworkEvent;
+
+    use libp2p::gossipsub::{self, IdentTopic, MessageId};
+    use libp2p::mdns;
+    use libp2p::Multiaddr;
+
+    fn make_gossipsub_message_event(
+        propagation_source: PeerId,
+        topic: &str,
+        data: Vec<u8>,
+    ) -> SwarmEvent<PhalanxEvent> {
+        let message = gossipsub::Message {
+            source: None,
+            data,
+            sequence_number: None,
+            topic: IdentTopic::new(topic).hash(),
+        };
+        SwarmEvent::Behaviour(PhalanxEvent::Gossipsub(gossipsub::Event::Message {
+            propagation_source,
+            message_id: MessageId(vec![0]),
+            message,
+        }))
+    }
+
+    // === Group A: extract_subnet_bucket ===
+
+    #[test]
+    fn extract_subnet_bucket_ipv4_uses_first_two_octets() {
+        let addr: Multiaddr = "/ip4/192.168.1.1/tcp/4001".parse().unwrap();
+        let bucket = extract_subnet_bucket(&addr);
+        assert_eq!(bucket.octets(), [192, 168]);
+    }
+
+    #[test]
+    fn extract_subnet_bucket_ipv6_hashes_first_six_bytes() {
+        let addr: Multiaddr = "/ip6/2001:db8::1/tcp/4001".parse().unwrap();
+        let bucket = extract_subnet_bucket(&addr);
+        let expected = SubnetBucket::from_ipv6_prefix(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00]);
+        assert_eq!(bucket, expected);
+    }
+
+    #[test]
+    fn extract_subnet_bucket_finds_ip_after_other_protocols() {
+        let addr: Multiaddr = "/dnsaddr/example.com/p2p-circuit/ip4/10.0.0.5/tcp/0"
+            .parse()
+            .unwrap();
+        let bucket = extract_subnet_bucket(&addr);
+        assert_eq!(bucket.octets(), [10, 0]);
+    }
+
+    #[test]
+    fn extract_subnet_bucket_falls_back_when_no_ip() {
+        let addr: Multiaddr = "/dnsaddr/example.com/tcp/4001".parse().unwrap();
+        let bucket1 = extract_subnet_bucket(&addr);
+        let bucket2 = extract_subnet_bucket(&addr);
+        assert_eq!(bucket1, bucket2, "fallback hash must be deterministic");
+    }
+
+    // === Group B: translate_swarm_event against real PhalanxEvent ===
+
+    #[test]
+    fn translate_real_gossipsub_message_emits_data_received() {
+        let propagation_source = PeerId::random();
+        let event =
+            make_gossipsub_message_event(propagation_source, "phalanx/test", b"hello".to_vec());
+
+        match translate_swarm_event(event)
+            .expect("gossipsub message must translate to NetworkEvent")
+        {
+            NetworkEvent::DataReceived {
+                origin,
+                topic,
+                data,
+            } => {
+                assert_eq!(origin.0, propagation_source.to_base58());
+                assert_eq!(data, b"hello".to_vec());
+                assert_eq!(topic.as_str(), "/phalanx/test");
+            }
+            _ => panic!("expected NetworkEvent::DataReceived"),
+        }
+    }
+
+    #[test]
+    fn translate_mdns_discovered_emits_peer_discovered_with_subnet() {
+        let peer_id = PeerId::random();
+        let addr: Multiaddr = "/ip4/192.168.1.5/tcp/4001".parse().unwrap();
+        let event = SwarmEvent::Behaviour(PhalanxEvent::Mdns(mdns::Event::Discovered(vec![(
+            peer_id, addr,
+        )])));
+
+        match translate_swarm_event(event).expect("mdns Discovered must translate to NetworkEvent")
+        {
+            NetworkEvent::PeerDiscovered {
+                peer,
+                source,
+                bucket,
+                transport,
+            } => {
+                assert_eq!(peer.0, peer_id.to_base58());
+                assert!(matches!(source, DiscoverySource::Mdns));
+                assert_eq!(bucket.octets(), [192, 168]);
+                assert_eq!(transport, TransportClass::Internet);
+            }
+            _ => panic!("expected NetworkEvent::PeerDiscovered"),
+        }
+    }
+
+    #[test]
+    fn translate_mdns_discovered_empty_returns_none() {
+        let event = SwarmEvent::Behaviour(PhalanxEvent::Mdns(mdns::Event::Discovered(vec![])));
+        assert!(translate_swarm_event(event).is_none());
+    }
+
+    // === Group C: ProtocolWakeCounters ===
+
+    #[test]
+    fn protocol_wake_counters_start_at_zero() {
+        let counters = ProtocolWakeCounters::default();
+        assert_eq!(counters.gossipsub.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.kademlia.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.mdns.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.identify.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.autonat.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.dcutr.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.relay_server.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.relay_client.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.retrieval.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.connection.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.listener.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.other.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn protocol_wake_counters_clone_shares_state() {
+        let a = ProtocolWakeCounters::default();
+        let b = a.clone();
+        a.gossipsub.fetch_add(7, Ordering::Relaxed);
+        assert_eq!(b.gossipsub.load(Ordering::Relaxed), 7);
+        a.connection.fetch_add(13, Ordering::Relaxed);
+        assert_eq!(b.connection.load(Ordering::Relaxed), 13);
+    }
+
+    #[test]
+    fn protocol_wake_counters_independent_fields() {
+        let counters = ProtocolWakeCounters::default();
+        counters.gossipsub.fetch_add(1, Ordering::Relaxed);
+        counters.kademlia.fetch_add(2, Ordering::Relaxed);
+        assert_eq!(counters.gossipsub.load(Ordering::Relaxed), 1);
+        assert_eq!(counters.kademlia.load(Ordering::Relaxed), 2);
+        assert_eq!(counters.mdns.load(Ordering::Relaxed), 0);
+    }
+
+    // === Group D: AdapterConfig defaults ===
+
+    #[test]
+    fn adapter_config_defaults_match_documented_values() {
+        let config = AdapterConfig::default();
+        assert_eq!(config.event_channel_capacity, 2048);
+        assert_eq!(config.max_events_per_peer_per_sec, 100);
+        assert!(config.poll_cadence.is_none());
+        assert!(!config.enable_wake_log);
+        assert!(!config.enable_io_log);
+    }
+
+    // === Group R: PerPeerRateLimiter ===
+
+    #[test]
+    fn rate_limiter_accepts_within_budget() {
+        let peer = PeerId::random();
+        let mut limiter = PerPeerRateLimiter::new(3);
+        let t0 = Instant::now();
+        assert!(limiter.should_accept(peer, t0));
+        assert!(limiter.should_accept(peer, t0));
+        assert!(limiter.should_accept(peer, t0));
+    }
+
+    #[test]
+    fn rate_limiter_rejects_over_budget() {
+        let peer = PeerId::random();
+        let mut limiter = PerPeerRateLimiter::new(3);
+        let t0 = Instant::now();
+        assert!(limiter.should_accept(peer, t0));
+        assert!(limiter.should_accept(peer, t0));
+        assert!(limiter.should_accept(peer, t0));
+        assert!(!limiter.should_accept(peer, t0));
+    }
+
+    #[test]
+    fn rate_limiter_resets_after_one_second() {
+        let peer = PeerId::random();
+        let mut limiter = PerPeerRateLimiter::new(2);
+        let t0 = Instant::now();
+        assert!(limiter.should_accept(peer, t0));
+        assert!(limiter.should_accept(peer, t0));
+        assert!(!limiter.should_accept(peer, t0));
+        let t1 = t0 + Duration::from_secs(1);
+        assert!(limiter.should_accept(peer, t1));
+    }
 
     // Mock behaviour event for testing purposes
     enum MockBehaviourEvent {
