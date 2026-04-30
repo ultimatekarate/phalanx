@@ -320,7 +320,6 @@ impl<E: EgressPort> MediaEgressActor<E> {
     /// individually to the WAL, preserving per-chunk retry semantics; the WAL
     /// on-disk format stays per-chunk for backward compatibility with
     /// pre-upgrade contents.
-    #[allow(clippy::arithmetic_side_effects)] // Published counter increment.
     async fn publish_fountain_symbols(
         &mut self,
         topic: &MeshTopic,
@@ -329,7 +328,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
         is_video: bool,
     ) {
         let symbol_count = chunks.len();
-        let mut published = 0;
+        let mut published: usize = 0;
         let bundle_n = self.symbol_bundle_size.get() as usize;
 
         for batch in chunks.chunks(bundle_n) {
@@ -374,7 +373,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
                             }
                         }
                     } else {
-                        published += batch.len();
+                        published = published.saturating_add(batch.len());
                     }
                 }
                 Err(e) => tracing::error!("Failed to serialize symbol bundle: {e}"),

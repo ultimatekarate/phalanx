@@ -779,7 +779,6 @@ impl<I: IngressPort> MeshSentinel<I> {
 
     /// Topology-aware peer admission with rate limiting, subnet diversity,
     /// IWFQ eviction, and proximity witness capture.
-    #[allow(clippy::arithmetic_side_effects)] // Rate limit counter increment.
     async fn handle_peer_discovered(
         &mut self,
         peer: MeshAddress,
@@ -794,7 +793,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             self.peer_discovery_count = 0;
             self.peer_discovery_window = now;
         }
-        self.peer_discovery_count += 1;
+        self.peer_discovery_count = self.peer_discovery_count.saturating_add(1);
         if self.peer_discovery_count > MAX_DISCOVERIES_PER_SECOND {
             tracing::debug!(
                 event = "e6_rate_limit",

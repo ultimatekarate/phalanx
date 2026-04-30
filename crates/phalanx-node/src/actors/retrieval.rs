@@ -103,7 +103,6 @@ impl RetrievalActor {
         }
     }
 
-    #[allow(clippy::arithmetic_side_effects)] // Rate limit counter increment.
     async fn execute_secure_retrieval(
         &mut self,
         origin: MeshAddress,
@@ -157,7 +156,6 @@ impl RetrievalActor {
     /// Pre-retrieval gate checks: rate limit, I/O saturation, thermal/battery,
     /// and privacy auth. Returns `Some(response)` if the request should be
     /// rejected, `None` if all gates pass.
-    #[allow(clippy::arithmetic_side_effects)] // Rate limit counter increment.
     async fn check_retrieval_gates(
         &mut self,
         origin: &MeshAddress,

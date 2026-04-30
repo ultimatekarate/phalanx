@@ -527,21 +527,20 @@ impl TrustRegistry {
         self.peers.get_mut(did).map(|record| &mut record.reputation)
     }
 
-    #[allow(clippy::arithmetic_side_effects)] // Counter increment — overflow not reachable in practice.
     fn generate_unique_pet_name(&self, did: &Did) -> PetName {
         let base_name = format!(
             "Unknown-{}",
             did.as_str().chars().take(8).collect::<String>()
         );
         let mut fallback_name = base_name.clone();
-        let mut counter = 1;
+        let mut counter: u32 = 1;
 
         let mut pet_name = PetName::new(&fallback_name).unwrap_or_else(|_| PetName::unknown());
 
         while self.pet_name_index.contains_key(&pet_name) {
             fallback_name = format!("{}-{}", base_name, counter);
             pet_name = PetName::new(&fallback_name).unwrap_or_else(|_| PetName::unknown());
-            counter += 1;
+            counter = counter.saturating_add(1);
         }
         pet_name
     }
