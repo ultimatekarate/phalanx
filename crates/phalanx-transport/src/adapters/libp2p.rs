@@ -263,7 +263,9 @@ impl PerPeerRateLimiter {
             entry.0 = 0;
             entry.1 = now;
         }
-        entry.0 += 1;
+        // Saturating: at u64::MAX the peer stays rate-limited forever within
+        // the window, which is the fail-secure outcome.
+        entry.0 = entry.0.saturating_add(1);
         entry.0 <= self.max_per_sec
     }
 }
@@ -300,7 +302,7 @@ impl<T> TimedStore<T> {
         let before = self.entries.len();
         self.entries
             .retain(|_, (_, inserted_at)| now.duration_since(*inserted_at) < timeout);
-        before - self.entries.len()
+        before.saturating_sub(self.entries.len())
     }
 }
 
