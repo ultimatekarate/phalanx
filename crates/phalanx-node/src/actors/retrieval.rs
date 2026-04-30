@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, oneshot};
 // Command for the RetrievalActor itself
 pub enum RetrievalCommand {
     SecureRetrieval {
-        origin: NetworkId,
+        origin: MeshAddress,
         request: RecordingRequest,
         channel_id: String,
     },
@@ -106,7 +106,7 @@ impl RetrievalActor {
     #[allow(clippy::arithmetic_side_effects)] // Rate limit counter increment.
     async fn execute_secure_retrieval(
         &mut self,
-        origin: NetworkId,
+        origin: MeshAddress,
         request: RecordingRequest,
         channel_id: String,
     ) {
@@ -160,7 +160,7 @@ impl RetrievalActor {
     #[allow(clippy::arithmetic_side_effects)] // Rate limit counter increment.
     async fn check_retrieval_gates(
         &mut self,
-        origin: &NetworkId,
+        origin: &MeshAddress,
         request: &RecordingRequest,
     ) -> Option<RecordingResponse> {
         // Per-recording rate limit: prevent targeted DoS on a single recording.
@@ -218,7 +218,7 @@ impl RetrievalActor {
         raw_envelopes: Vec<WitnessEnvelope>,
         request: &RecordingRequest,
     ) -> Vec<ForensicUnit<WitnessEnvelope, Sealed>> {
-        let local_id = &self.identity.network_id;
+        let local_id = &self.identity.witness_id;
         let current_stress = self.system_governor.current_stress();
         let target_trust = self.trust_oracle.check_trust_by_did(&request.target_did);
         let mut sealed_units = Vec::new();

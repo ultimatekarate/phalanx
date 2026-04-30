@@ -1,6 +1,6 @@
 // crates/phalanx-forensics/src/kademlia.rs
 
-use phalanx_proto::identity::NetworkId;
+use phalanx_proto::identity::MeshAddress;
 use phalanx_proto::kademlia::{DhtProviderSet, ProviderEntry};
 
 pub struct KademliaGovernor;
@@ -10,7 +10,7 @@ impl KademliaGovernor {
     /// Returns true if the set was modified.
     pub fn try_insert_weighted(
         set: &mut DhtProviderSet,
-        network_id: NetworkId,
+        network_id: MeshAddress,
         expiration: u64,
         reputation: f32,
         current_time: u64,
@@ -19,18 +19,14 @@ impl KademliaGovernor {
         set.providers.retain(|p| p.expiration > current_time);
 
         // Deduplication
-        if let Some(existing) = set
-            .providers
-            .iter_mut()
-            .find(|p| p.network_id == network_id)
-        {
+        if let Some(existing) = set.providers.iter_mut().find(|p| p.address == network_id) {
             existing.expiration = expiration;
             existing.reputation_score = reputation;
             return true;
         }
 
         let new_entry = ProviderEntry {
-            network_id,
+            address: network_id,
             expiration,
             reputation_score: reputation,
         };

@@ -17,13 +17,13 @@ use std::collections::HashMap;
 /// Consumed (dropped) by MeshSentinel after admission decision.
 #[derive(Debug)]
 pub struct AdmissionTicket {
-    peer: NetworkId,
+    peer: MeshAddress,
     transport: TransportClass,
     _seal: (),
 }
 
 impl AdmissionTicket {
-    pub fn peer(&self) -> &NetworkId {
+    pub fn peer(&self) -> &MeshAddress {
         &self.peer
     }
     pub fn transport(&self) -> TransportClass {
@@ -142,7 +142,7 @@ struct PeerSlot {
 /// One entry per connected peer. Enforces subnet diversity, transport quotas,
 /// IWFQ preemption, and anchor persistence.
 pub struct TopologyGate {
-    peers: HashMap<NetworkId, PeerSlot>,
+    peers: HashMap<MeshAddress, PeerSlot>,
     subnet_counts: HashMap<SubnetBucket, usize>,
     subnet_quota: SubnetQuota,
     total_capacity: usize,
@@ -171,17 +171,17 @@ impl TopologyGate {
     }
 
     /// Iterate over admitted peer IDs.
-    pub fn peer_ids(&self) -> impl Iterator<Item = &NetworkId> {
+    pub fn peer_ids(&self) -> impl Iterator<Item = &MeshAddress> {
         self.peers.keys()
     }
 
     /// Check if a peer is currently admitted.
-    pub fn is_admitted(&self, peer: &NetworkId) -> bool {
+    pub fn is_admitted(&self, peer: &MeshAddress) -> bool {
         self.peers.contains_key(peer)
     }
 
     /// Transport class of an admitted peer, if present.
-    pub fn transport_class(&self, peer: &NetworkId) -> Option<TransportClass> {
+    pub fn transport_class(&self, peer: &MeshAddress) -> Option<TransportClass> {
         self.peers.get(peer).map(|slot| slot.transport)
     }
 
@@ -190,12 +190,12 @@ impl TopologyGate {
     /// If a lower-trust peer was evicted to make room, the second element is `Some(evicted)`.
     pub fn try_admit(
         &mut self,
-        peer: NetworkId,
+        peer: MeshAddress,
         level: TrustLevel,
         bucket: SubnetBucket,
         transport: TransportClass,
         balance: TransportBalance,
-    ) -> Result<(AdmissionTicket, Option<NetworkId>), AdmissionDenied> {
+    ) -> Result<(AdmissionTicket, Option<MeshAddress>), AdmissionDenied> {
         // Idempotent: already admitted
         if self.peers.contains_key(&peer) {
             return Ok((
@@ -273,7 +273,7 @@ impl TopologyGate {
     }
 
     /// Release a peer slot. No-op if the peer is anchored (must `demote_anchor()` first).
-    pub fn release(&mut self, peer: &NetworkId) {
+    pub fn release(&mut self, peer: &MeshAddress) {
         if let Some(slot) = self.peers.get(peer) {
             if slot.anchored {
                 return; // Anchored peers cannot be released — demote first
@@ -284,7 +284,7 @@ impl TopologyGate {
 
     /// Promote a peer to anchor status. Requires proof of eligible reputation.
     /// Returns true if promotion succeeded.
-    pub fn promote_to_anchor(&mut self, peer: &NetworkId, _proof: AnchorEligible) -> bool {
+    pub fn promote_to_anchor(&mut self, peer: &MeshAddress, _proof: AnchorEligible) -> bool {
         let anchor_count = self.peers.values().filter(|s| s.anchored).count();
         if anchor_count >= self.max_anchors {
             return false;
@@ -299,7 +299,7 @@ impl TopologyGate {
     }
 
     /// Demote a peer from anchor status.
-    pub fn demote_anchor(&mut self, peer: &NetworkId) -> bool {
+    pub fn demote_anchor(&mut self, peer: &MeshAddress) -> bool {
         if let Some(slot) = self.peers.get_mut(peer) {
             if slot.anchored {
                 slot.anchored = false;
@@ -309,7 +309,7 @@ impl TopologyGate {
         false
     }
 
-    pub fn is_anchored(&self, peer: &NetworkId) -> bool {
+    pub fn is_anchored(&self, peer: &MeshAddress) -> bool {
         self.peers.get(peer).is_some_and(|s| s.anchored)
     }
 
@@ -317,7 +317,7 @@ impl TopologyGate {
 
     fn insert_peer(
         &mut self,
-        peer: NetworkId,
+        peer: MeshAddress,
         bucket: SubnetBucket,
         transport: TransportClass,
         trust: TrustLevel,
@@ -338,7 +338,7 @@ impl TopologyGate {
         );
     }
 
-    fn remove_peer(&mut self, peer: &NetworkId) {
+    fn remove_peer(&mut self, peer: &MeshAddress) {
         if let Some(slot) = self.peers.remove(peer) {
             if let Some(count) = self.subnet_counts.get_mut(&slot.bucket) {
                 *count = count.saturating_sub(1);
@@ -373,7 +373,7 @@ impl TopologyGate {
         &self,
         transport: TransportClass,
         incoming_trust: TrustLevel,
-    ) -> Option<NetworkId> {
+    ) -> Option<MeshAddress> {
         self.peers
             .iter()
             .filter(|(_, slot)| slot.transport == transport && !slot.anchored)
@@ -399,8 +399,8 @@ mod tests {
         TopologyGate::new(capacity, SubnetQuota::DEFAULT, 4)
     }
 
-    fn net_id(n: u8) -> NetworkId {
-        NetworkId::from(format!("peer-{n}"))
+    fn net_id(n: u8) -> MeshAddress {
+        MeshAddress::new(format!("peer-{n}"))
     }
 
     #[test]

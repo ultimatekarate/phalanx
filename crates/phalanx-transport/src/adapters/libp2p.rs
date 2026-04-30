@@ -9,7 +9,7 @@ use libp2p::kad::store::RecordStore;
 use libp2p::swarm::Swarm;
 use libp2p::swarm::SwarmEvent;
 use libp2p::PeerId;
-use phalanx_proto::identity::NetworkId;
+use phalanx_proto::identity::MeshAddress;
 use phalanx_proto::network::TransportError;
 use phalanx_proto::network::{EgressPort, IngressPort, NetworkEvent};
 use phalanx_proto::retrieval::RecordingResponse;
@@ -25,8 +25,8 @@ use tokio::time::Instant;
 
 pub enum TransportCommand {
     Publish(MeshTopic, Vec<u8>),
-    SendDirect(NetworkId, Vec<u8>),
-    Ban(NetworkId),
+    SendDirect(MeshAddress, Vec<u8>),
+    Ban(MeshAddress),
     AnnounceRecording(phalanx_proto::identity::RecordingId),
     FindRecordingProviders(phalanx_proto::identity::RecordingId),
     /// Eclipse remediation: re-dial bootstrap peers and trigger Kademlia random walk.
@@ -139,7 +139,7 @@ pub fn translate_swarm_event(event: SwarmEvent<PhalanxEvent>) -> Option<NetworkE
             message,
             ..
         })) => Some(NetworkEvent::DataReceived {
-            origin: PeerMapper::to_network_id(&propagation_source),
+            origin: PeerMapper::to_mesh_address(&propagation_source),
             topic: MeshTopic::new(message.topic.as_str()),
             data: message.data,
         }),
@@ -151,7 +151,7 @@ pub fn translate_swarm_event(event: SwarmEvent<PhalanxEvent>) -> Option<NetworkE
         SwarmEvent::Behaviour(PhalanxEvent::Mdns(libp2p::mdns::Event::Discovered(peers))) => peers
             .first()
             .map(|(peer_id, addr)| NetworkEvent::PeerDiscovered {
-                peer: PeerMapper::to_network_id(peer_id),
+                peer: PeerMapper::to_mesh_address(peer_id),
                 source: DiscoverySource::Mdns,
                 bucket: extract_subnet_bucket(addr),
                 transport: TransportClass::from_discovery_source(DiscoverySource::Mdns),
@@ -172,7 +172,7 @@ pub fn translate_swarm_event(event: SwarmEvent<PhalanxEvent>) -> Option<NetworkE
                 );
                 return None;
             };
-            let providers: Vec<_> = providers.iter().map(PeerMapper::to_network_id).collect();
+            let providers: Vec<_> = providers.iter().map(PeerMapper::to_mesh_address).collect();
             Some(NetworkEvent::ProvidersDiscovered {
                 recording_id,
                 providers,
@@ -189,7 +189,7 @@ pub fn translate_swarm_event(event: SwarmEvent<PhalanxEvent>) -> Option<NetworkE
             RecordingResponse::Success(sealed_units) => {
                 let envelopes = sealed_units.into_iter().map(|u| u.unpack()).collect();
                 Some(NetworkEvent::ShardResponseReceived {
-                    origin: PeerMapper::to_network_id(&peer),
+                    origin: PeerMapper::to_mesh_address(&peer),
                     envelopes,
                 })
             }
@@ -383,7 +383,7 @@ impl Libp2pAdapter {
                             }
                         }
                         Some(TransportCommand::SendDirect(target, data)) => {
-                            match PeerMapper::from_network_id(&target) {
+                            match PeerMapper::from_mesh_address(&target) {
                                 Ok(peer_id) => {
                                     if !swarm.is_connected(&peer_id) {
                                         tracing::warn!(
@@ -410,7 +410,7 @@ impl Libp2pAdapter {
                                 Err(mapping_error) => {
                                     tracing::error!(
                                         target: "phalanx::transport",
-                                        "Cannot route direct message; invalid NetworkId {}: {}",
+                                        "Cannot route direct message; invalid MeshAddress {}: {}",
                                         target.0,
                                         mapping_error
                                     );
@@ -418,7 +418,7 @@ impl Libp2pAdapter {
                             }
                         }
                         Some(TransportCommand::Ban(peer)) => {
-                            match PeerMapper::from_network_id(&peer) {
+                            match PeerMapper::from_mesh_address(&peer) {
                                 Ok(peer_id) => {
                                     let _ = swarm.disconnect_peer_id(peer_id);
                                     tracing::info!(
@@ -430,7 +430,7 @@ impl Libp2pAdapter {
                                 Err(mapping_error) => {
                                     tracing::error!(
                                         target: "phalanx::transport",
-                                        "Ban failed; invalid NetworkId {}: {}",
+                                        "Ban failed; invalid MeshAddress {}: {}",
                                         peer.0,
                                         mapping_error
                                     );
@@ -593,7 +593,7 @@ impl Libp2pAdapter {
                         )) => {
                             let channel_id = request_id.to_string();
                             let event = NetworkEvent::RecordingRequested {
-                                origin: PeerMapper::to_network_id(&peer),
+                                origin: PeerMapper::to_mesh_address(&peer),
                                 request,
                                 channel_id: channel_id.clone(),
                             };
@@ -744,7 +744,7 @@ impl Libp2pAdapter {
 
     pub async fn send_direct(
         &self,
-        target: &NetworkId,
+        target: &MeshAddress,
         data: Vec<u8>,
     ) -> Result<(), TransportError> {
         self.outbound_queue_depth.fetch_add(1, Ordering::Relaxed);
@@ -757,7 +757,7 @@ impl Libp2pAdapter {
             })
     }
 
-    pub async fn ban_peer(&self, peer: &NetworkId) -> Result<(), TransportError> {
+    pub async fn ban_peer(&self, peer: &MeshAddress) -> Result<(), TransportError> {
         self.outbound_queue_depth.fetch_add(1, Ordering::Relaxed);
         self.command_tx
             .send(TransportCommand::Ban(peer.clone()))
@@ -934,7 +934,7 @@ impl EgressPort for Libp2pEgress {
             .map_err(|e| e.to_string())
     }
 
-    async fn ban_peer(&self, peer: &NetworkId) {
+    async fn ban_peer(&self, peer: &MeshAddress) {
         if let Err(e) = self.adapter.ban_peer(peer).await {
             tracing::error!(target: "phalanx::transport", "Failed to ban peer {}: {}", peer.0, e);
         }
@@ -973,7 +973,7 @@ impl EgressPort for Libp2pEgress {
 
     async fn send_request(
         &self,
-        target: &NetworkId,
+        target: &MeshAddress,
         request: phalanx_proto::retrieval::RecordingRequest,
     ) -> Result<(), String> {
         let data = postcard::to_allocvec(&request).map_err(|e| e.to_string())?;
@@ -1261,7 +1261,7 @@ mod tests {
             match self {
                 MockBehaviourEvent::MessageReceived { source, payload } => {
                     NetworkEvent::DataReceived {
-                        origin: NetworkId(source.to_string()),
+                        origin: MeshAddress::new(source.to_string()),
                         topic: MeshTopic::new("test_topic"),
                         data: payload,
                     }

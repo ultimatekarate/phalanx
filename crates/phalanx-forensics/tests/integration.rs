@@ -125,7 +125,7 @@ fn amalgam_rejects_sequence_conflict() {
     let env_b = WitnessEnvelope::sign_envelope(
         evidence_b,
         &identity,
-        identity.network_id.clone(),
+        identity.witness_id.clone(),
         Some(hash_a),
     )
     .expect("sign should not fail");
@@ -167,7 +167,7 @@ fn amalgam_handover_transfers_ownership() {
     let env_handover = WitnessEnvelope::sign_envelope(
         Evidence::Handover(handover_proof),
         &identity_a,
-        identity_a.network_id.clone(),
+        identity_a.witness_id.clone(),
         prev_hash,
     )
     .expect("sign handover should not fail");
@@ -252,7 +252,7 @@ fn integrity_gate_accepts_valid_envelope() {
     let env = witness_envelope_for_recording(&identity, &rid, 0, None);
     let clock = SystemClock;
 
-    let result = env.check_integrity(&identity.network_id, &clock, Duration::from_secs(30), None);
+    let result = env.check_integrity(&identity.witness_id, &clock, Duration::from_secs(30), None);
     assert!(result.is_ok(), "Valid envelope should pass integrity gate");
 }
 
@@ -268,7 +268,7 @@ fn integrity_gate_rejects_tampered_signature() {
     }
 
     let clock = SystemClock;
-    let result = env.check_integrity(&identity.network_id, &clock, Duration::from_secs(30), None);
+    let result = env.check_integrity(&identity.witness_id, &clock, Duration::from_secs(30), None);
     assert!(result.is_err(), "Tampered signature should be rejected");
 }
 
@@ -282,12 +282,12 @@ fn integrity_gate_rejects_stale_timestamp() {
         PhalanxTimestamp::from_millis(SystemClock.now().as_u64().saturating_sub(3_600_000));
     let evidence = video_evidence_for_recording(&rid, 0, old_time);
     let env =
-        WitnessEnvelope::sign_envelope(evidence, &identity, identity.network_id.clone(), None)
+        WitnessEnvelope::sign_envelope(evidence, &identity, identity.witness_id.clone(), None)
             .expect("sign should not fail");
 
     let clock = SystemClock;
     let result = env.check_integrity(
-        &identity.network_id,
+        &identity.witness_id,
         &clock,
         Duration::from_secs(30), // 30s tolerance, timestamp is 1h old
         None,
@@ -303,7 +303,7 @@ fn promotion_gate_full_pipeline() {
     let unit = ForensicUnit::<WitnessEnvelope, Unverified>::new(env);
 
     let clock = SystemClock;
-    let result = unit.promote(&identity.network_id, &clock, Duration::from_secs(30), None);
+    let result = unit.promote(&identity.witness_id, &clock, Duration::from_secs(30), None);
     assert!(result.is_ok(), "Valid unit should promote to Verified");
 
     let verified = result.unwrap();
@@ -374,7 +374,7 @@ fn zero_length_signature_rejected() {
     env.witness_signature = vec![];
 
     let clock = SystemClock;
-    let result = env.check_integrity(&identity.network_id, &clock, Duration::from_secs(30), None);
+    let result = env.check_integrity(&identity.witness_id, &clock, Duration::from_secs(30), None);
     assert!(
         result.is_err(),
         "Empty signature should be rejected by integrity gate"
@@ -499,7 +499,7 @@ async fn reassembler_per_peer_quota_enforcement() {
         let env = WitnessEnvelope::sign_envelope(
             large_evidence,
             &identity,
-            identity.network_id.clone(),
+            identity.witness_id.clone(),
             None,
         )
         .expect("sign");

@@ -215,7 +215,7 @@ mod tests {
     async fn test_forensic_boundary_tamper_detection_v4() {
         // Setup Identities & Baseline Environment
         let witness_identity = PhalanxIdentity::new_ephemeral();
-        let witness_peer_id = witness_identity.clone().network_id;
+        let witness_peer_id = witness_identity.clone().witness_id;
         let vid = RecordingId::new("test_stream_01");
         let clock = SystemClock;
         let now = clock.now();

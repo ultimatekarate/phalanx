@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use libp2p::PeerId;
 use phalanx_proto::network::{IngressPort, NetworkEvent};
-use phalanx_proto::prelude::*; // Pulls in MeshTopic, NetworkId
+ // Pulls in MeshTopic, MeshAddress, WitnessId
 use std::str::FromStr;
 
 // MODULE REGISTRY
@@ -57,14 +57,19 @@ impl<A: IngressPort, B: IngressPort> IngressPort for MergedIngress<A, B> {
 pub struct PeerMapper;
 
 impl PeerMapper {
-    /// Translates a physical PeerId into a forensic NetworkId.
-    pub fn to_network_id(peer_id: &PeerId) -> NetworkId {
-        NetworkId(peer_id.to_base58())
+    /// Translates a libp2p `PeerId` into a domain-typed `MeshAddress`.
+    /// This is the canonical Post Office translation at the libp2p boundary
+    /// per `linguistic-code-model.md` §IV.1.
+    pub fn to_mesh_address(peer_id: &PeerId) -> phalanx_proto::identity::MeshAddress {
+        phalanx_proto::identity::MeshAddress(peer_id.to_base58())
     }
 
-    /// Translates a forensic NetworkId back into a physical PeerId.
-    pub fn from_network_id(network_id: &NetworkId) -> Result<PeerId, String> {
-        PeerId::from_str(&network_id.0).map_err(|error| error.to_string())
+    /// Translates a `MeshAddress` back into a libp2p `PeerId`.
+    /// Returns an error if the address is not a valid PeerId base58 multihash.
+    pub fn from_mesh_address(
+        address: &phalanx_proto::identity::MeshAddress,
+    ) -> Result<PeerId, String> {
+        PeerId::from_str(&address.0).map_err(|error| error.to_string())
     }
 }
 
@@ -79,7 +84,6 @@ impl PeerMapper {
 )]
 mod merged_ingress_tests {
     use super::*;
-    use phalanx_proto::identity::NetworkId;
     use tokio::sync::mpsc;
 
     /// A trivial IngressPort backed by an mpsc receiver.
@@ -100,7 +104,7 @@ mod merged_ingress_tests {
         let mut merged = MergedIngress::new(ChanIngress(rx_a), ChanIngress(rx_b));
 
         // Send one event from each source.
-        let peer_b = NetworkId("libp2p-peer".into());
+        let peer_b = phalanx_proto::identity::MeshAddress::new("libp2p-peer");
 
         tx_a.send(NetworkEvent::Shutdown).await.unwrap();
         tx_b.send(NetworkEvent::PeerDiscovered {

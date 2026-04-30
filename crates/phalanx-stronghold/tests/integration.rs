@@ -21,7 +21,7 @@ use phalanx_proto::crypto::{GrantPermissions, SealedLocator, SymmetricKey};
 use phalanx_proto::evidence::{
     DataPayload, Evidence, ForensicMetrics, StorageSequence, VideoShard, WitnessEnvelope,
 };
-use phalanx_proto::identity::{Did, NetworkId, PhalanxIdentity, RecordingId};
+use phalanx_proto::identity::{Did, PhalanxIdentity, RecordingId, WitnessId};
 use phalanx_proto::time::PhalanxTimestamp;
 use phalanx_proto::trust::TrustLevel;
 
@@ -61,7 +61,7 @@ fn make_envelope(seq: u32, recording_id: &str, did_str: &str) -> WitnessEnvelope
             h[0] = seq as u8;
             h
         },
-        witness_peer_id: NetworkId("peer1".to_string()),
+        witness_peer_id: WitnessId::new("peer1"),
         witness_signature: vec![0u8; 64],
         did: Did::new(did_str),
         prev_hash: None,
@@ -449,7 +449,7 @@ fn make_signed_encrypted_envelope(
 
     // 3. Sign the encrypted evidence
     let prev_hash = None;
-    let peer_id = identity.network_id.clone();
+    let peer_id = identity.witness_id.clone();
     WitnessEnvelope::sign_envelope(Evidence::Video(shard), identity, peer_id, prev_hash)
         .expect("envelope signing failed")
 }

@@ -10,7 +10,7 @@ use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{
     AudioShard, ChunkType, Evidence, PrnuPosterior, SignatureHash, VideoShard,
 };
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, ShardId};
+use phalanx_proto::identity::{PhalanxIdentity, ShardId, WitnessId};
 use phalanx_proto::network::EgressPort;
 use phalanx_proto::prelude::*;
 use std::path::PathBuf;
@@ -66,7 +66,7 @@ pub struct MediaEgressActor<E: EgressPort> {
     video_topic: MeshTopic,
     audio_topic: MeshTopic,
     identity: Arc<PhalanxIdentity>,
-    local_id: NetworkId,
+    local_id: WitnessId,
     video_prev_hash: Option<SignatureHash>,
     audio_prev_hash: Option<SignatureHash>,
     symbol_size: SymbolSize,
@@ -106,7 +106,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
     pub async fn new(
         egress: E,
         identity: Arc<PhalanxIdentity>,
-        local_id: NetworkId,
+        local_id: WitnessId,
         config: MediaEgressConfig,
         shutdown: Arc<ShutdownSignal>,
     ) -> std::io::Result<Self> {

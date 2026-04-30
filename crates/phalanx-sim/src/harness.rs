@@ -15,7 +15,7 @@ use phalanx_node::persistence::vault::derive_vault_key;
 use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::evidence::{Evidence, WitnessEnvelope};
-use phalanx_proto::identity::{NetworkId, NodeRole, PhalanxIdentity, RecordingId};
+use phalanx_proto::identity::{MeshAddress, NodeRole, PhalanxIdentity, RecordingId};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::network::{EgressPort, IngressPort};
 use phalanx_proto::prelude::*;
@@ -56,7 +56,7 @@ impl IngressPort for SimIngress {
 pub struct SimEgress {
     world: Arc<RwLock<SimulationWorld>>,
     source_did: Did,
-    source_network_id: NetworkId,
+    source_network_id: MeshAddress,
     telemetry_tx: mpsc::Sender<SimEvent>,
 }
 
@@ -92,7 +92,7 @@ impl EgressPort for SimEgress {
         Ok(())
     }
 
-    async fn ban_peer(&self, peer: &NetworkId) {
+    async fn ban_peer(&self, peer: &MeshAddress) {
         // Mirror the MockTransport telemetry pattern (mock.rs:64-77)
         let event = SimEvent::AttackAttemptBlocked {
             attacker: peer.clone(),
@@ -123,7 +123,7 @@ impl EgressPort for SimEgress {
 
     async fn send_request(
         &self,
-        _target: &NetworkId,
+        _target: &MeshAddress,
         _request: phalanx_proto::retrieval::RecordingRequest,
     ) -> Result<(), String> {
         // No-op in simulation — direct shard retrieval not simulated yet
@@ -151,7 +151,7 @@ pub struct NodeMetrics {
 /// query aggregated metrics, filter events, or wait for specific event patterns.
 pub struct TelemetryCollector {
     events: Arc<RwLock<Vec<(Instant, SimEvent)>>>,
-    node_metrics: Arc<RwLock<HashMap<NetworkId, NodeMetrics>>>,
+    node_metrics: Arc<RwLock<HashMap<MeshAddress, NodeMetrics>>>,
     /// Tracks the last event index consumed by `drain_new()`.
     /// Used by the dashboard to process only new events each frame.
     last_drained: Arc<tokio::sync::Mutex<usize>>,
@@ -259,7 +259,7 @@ impl TelemetryCollector {
     }
 
     /// All attack events: (attacker, target, reason).
-    pub async fn attacks(&self) -> Vec<(NetworkId, NetworkId, String)> {
+    pub async fn attacks(&self) -> Vec<(MeshAddress, MeshAddress, String)> {
         self.events
             .read()
             .await
@@ -280,7 +280,7 @@ impl TelemetryCollector {
     }
 
     /// Per-node aggregated metrics.
-    pub async fn node_stats(&self, network_id: &NetworkId) -> NodeMetrics {
+    pub async fn node_stats(&self, network_id: &MeshAddress) -> NodeMetrics {
         self.node_metrics
             .read()
             .await
@@ -537,7 +537,10 @@ impl SimulationHarness {
     ) -> Result<Did, Box<dyn std::error::Error + Send + Sync>> {
         let identity = PhalanxIdentity::new_ephemeral();
         let node_did = identity.did.clone();
-        let network_id = identity.network_id.clone();
+        // Sim has no real mesh transport, so its NetworkEvent and World keys
+        // use the same string as the witness identity. (After the planned
+        // mesh-namespace migration, the sim's identifier becomes MeshAddress.)
+        let network_id = MeshAddress::new(identity.witness_id.0.clone());
 
         // Each node gets its own temp directory for vault storage
         let temp_dir = tempfile::tempdir()?;
@@ -623,11 +626,11 @@ impl SimulationHarness {
         Ok(node_did)
     }
 
-    /// Resolve a node's forensic NetworkId from its DID.
+    /// Resolve a node's forensic MeshAddress from its DID.
     pub async fn resolve_did(
         &self,
         did: &Did,
-    ) -> Result<NetworkId, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<MeshAddress, Box<dyn std::error::Error + Send + Sync>> {
         let world = self.world.read().await;
         world
             .lookup_network_id(did)
@@ -644,12 +647,12 @@ impl SimulationHarness {
             world.chaos_registry.insert(did.clone(), mode.clone());
         }
 
-        // Resolve NetworkId for telemetry
+        // Resolve MeshAddress for telemetry
         let network_id = {
             let world = self.world.read().await;
             world
                 .lookup_network_id(did)
-                .unwrap_or_else(|| NetworkId::from("unknown"))
+                .unwrap_or_else(|| MeshAddress::new("unknown"))
         };
 
         tracing::info!(
@@ -727,7 +730,9 @@ impl SimulationHarness {
     ) -> Result<(Did, mpsc::Sender<NetworkEvent>), Box<dyn std::error::Error + Send + Sync>> {
         let identity = PhalanxIdentity::new_ephemeral();
         let node_did = identity.did.clone();
-        let network_id = identity.network_id.clone();
+        // Sim has no real mesh transport, so its NetworkEvent and World keys
+        // use the same string as the witness identity.
+        let network_id = MeshAddress::new(identity.witness_id.0.clone());
         let node_config = NodeConfig::default();
 
         // Create the ingress channel for simulated network events
@@ -1017,7 +1022,7 @@ fn forge_pair(recording_id: &RecordingId) -> Vec<WitnessEnvelope> {
     let env_a = match WitnessEnvelope::sign_envelope(
         evidence_a,
         &forger_a,
-        forger_a.network_id.clone(),
+        forger_a.witness_id.clone(),
         None,
     ) {
         Ok(e) => e,
@@ -1035,7 +1040,7 @@ fn forge_pair(recording_id: &RecordingId) -> Vec<WitnessEnvelope> {
     let mut env_b = match WitnessEnvelope::sign_envelope(
         evidence_b,
         &signer_b,
-        signer_b.network_id.clone(),
+        signer_b.witness_id.clone(),
         None,
     ) {
         Ok(e) => e,

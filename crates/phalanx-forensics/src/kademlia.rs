@@ -1,6 +1,6 @@
 // crates/phalanx-forensics/src/kademlia.rs
 
-use phalanx_proto::identity::NetworkId;
+use phalanx_proto::identity::MeshAddress;
 use phalanx_proto::kademlia::*;
 use phalanx_proto::prelude::ShardError;
 use std::time::Duration;
@@ -116,7 +116,7 @@ impl DhtPayloadAuthority for DhtPayload {
 pub trait ProviderAuthority {
     fn try_insert_weighted(
         &mut self,
-        new_peer: NetworkId,
+        new_peer: MeshAddress,
         expiration: u64,
         reputation: f32,
     ) -> bool;
@@ -135,7 +135,7 @@ impl ProviderAuthority for DhtProviderSet {
     /// THE WEIGHTED VERB: Reputation-based eviction logic
     fn try_insert_weighted(
         &mut self,
-        new_peer: NetworkId,
+        new_peer: MeshAddress,
         expiration: u64,
         reputation: f32,
     ) -> bool {
@@ -143,14 +143,14 @@ impl ProviderAuthority for DhtProviderSet {
         self.providers.retain(|p| !is_expired(Some(p.expiration)));
 
         // Deduplication
-        if let Some(existing) = self.providers.iter_mut().find(|p| p.network_id == new_peer) {
+        if let Some(existing) = self.providers.iter_mut().find(|p| p.address == new_peer) {
             existing.expiration = expiration;
             existing.reputation_score = reputation;
             return true;
         }
 
         let new_entry = ProviderEntry {
-            network_id: new_peer,
+            address: new_peer,
             expiration,
             reputation_score: reputation,
         };
@@ -200,20 +200,20 @@ impl ProviderAuthority for DhtProviderSet {
     fn remove_by_id(&mut self, provider_id: &str) -> bool {
         let initial_len = self.providers.len();
         self.providers
-            .retain(|p| p.network_id.to_string() != provider_id);
+            .retain(|p| p.address.to_string() != provider_id);
         self.providers.len() < initial_len
     }
 }
 
 pub trait PeerEvaluator: Send + Sync + 'static {
     /// Returns a normalized reputation score (e.g., 0.0 to 1.0).
-    fn evaluate_reputation(&self, peer_id: &NetworkId) -> f32;
+    fn evaluate_reputation(&self, peer_id: &MeshAddress) -> f32;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phalanx_proto::identity::NetworkId;
+    use phalanx_proto::identity::MeshAddress;
 
     #[test]
     fn test_dht_provider_set_weighted_eviction() {
@@ -225,7 +225,7 @@ mod tests {
 
         // Fill the set with providers of increasing reputation
         for i in 0..DhtProviderSet::MAX_PROVIDERS {
-            let pid = NetworkId::from(format!("peer_{}", i));
+            let pid = MeshAddress::new(format!("peer_{}", i));
 
             set.try_insert_weighted(pid, future, i as f32 / 100.0);
         }
@@ -234,7 +234,7 @@ mod tests {
         assert_eq!(set.providers.len(), DhtProviderSet::MAX_PROVIDERS);
 
         // Attempt to insert a high reputation peer (1.0)
-        let high_rep = NetworkId::from("high_rep_peer");
+        let high_rep = MeshAddress::new("high_rep_peer");
         let inserted = set.try_insert_weighted(high_rep.clone(), future, 1.0);
 
         assert!(
@@ -243,14 +243,14 @@ mod tests {
         );
 
         // Verify the new peer is present
-        assert!(set.providers.iter().any(|p| p.network_id == high_rep));
+        assert!(set.providers.iter().any(|p| p.address == high_rep));
 
         // Verify the lowest reputation peer (peer_0 with 0.0) was evicted
-        let evicted = NetworkId::from("peer_0");
-        assert!(!set.providers.iter().any(|p| p.network_id == evicted));
+        let evicted = MeshAddress::new("peer_0");
+        assert!(!set.providers.iter().any(|p| p.address == evicted));
 
         // Attempt to insert a low reputation peer (0.0)
-        let low_rep = NetworkId::from("low_rep_peer");
+        let low_rep = MeshAddress::new("low_rep_peer");
         let inserted_low = set.try_insert_weighted(low_rep, future, 0.0);
 
         assert!(

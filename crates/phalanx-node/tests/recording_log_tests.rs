@@ -13,7 +13,7 @@ use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
 use phalanx_proto::evidence::{Evidence, ForensicMetrics, StorageSequence, WitnessEnvelope};
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId};
+use phalanx_proto::identity::{PhalanxIdentity, RecordingId, WitnessId};
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
 use phalanx_proto::types::Fps;
 use std::sync::Arc;
@@ -35,7 +35,7 @@ fn make_envelope(
     )
     .unwrap();
     Evidence::Video(shard)
-        .seal(identity, NetworkId::random(), None)
+        .seal(identity, WitnessId::random(), None)
         .unwrap()
 }
 

@@ -20,7 +20,7 @@ use tokio::time::Duration;
 
 pub enum IngestionCommand {
     ProcessChunk {
-        peer_id: NetworkId,
+        peer_id: MeshAddress,
         data: Vec<u8>,
         topic: MeshTopic,
     },
@@ -106,7 +106,12 @@ impl IngestionActor {
         }
     }
 
-    async fn handle_network_ingress(&mut self, peer_id: NetworkId, data: &[u8], topic: MeshTopic) {
+    async fn handle_network_ingress(
+        &mut self,
+        peer_id: MeshAddress,
+        data: &[u8],
+        topic: MeshTopic,
+    ) {
         // TOPIC ROUTING (Edge Filtering)
         let topic_str = topic.as_str();
         if topic_str != self.config.network.video_topic.as_str()
@@ -130,7 +135,7 @@ impl IngestionActor {
 
         if !self
             .traffic_governor
-            .should_accept(&peer_id, &self.identity.to_network_id())
+            .should_accept(&peer_id, &self.identity.to_mesh_address())
         {
             return;
         }
@@ -299,10 +304,10 @@ impl IngestionActor {
 
 struct SlotGuard<'a> {
     governor: &'a mut IngressGovernor,
-    peer_id: NetworkId,
+    peer_id: MeshAddress,
 }
 impl<'a> SlotGuard<'a> {
-    fn new(governor: &'a mut IngressGovernor, peer_id: NetworkId) -> Self {
+    fn new(governor: &'a mut IngressGovernor, peer_id: MeshAddress) -> Self {
         Self { governor, peer_id }
     }
 }

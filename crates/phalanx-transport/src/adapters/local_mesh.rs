@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 use phalanx_proto::network::NetworkEvent;
-use phalanx_proto::prelude::NetworkId;
+use phalanx_proto::prelude::MeshAddress;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -23,11 +23,15 @@ pub struct NoOpLocalMesh;
 
 #[async_trait]
 impl LocalMeshPort for NoOpLocalMesh {
-    async fn discover_peers(&mut self) -> Vec<NetworkId> {
+    async fn discover_peers(&mut self) -> Vec<MeshAddress> {
         Vec::new()
     }
 
-    async fn send_local(&self, _target: &NetworkId, _data: Vec<u8>) -> Result<(), TransportError> {
+    async fn send_local(
+        &self,
+        _target: &MeshAddress,
+        _data: Vec<u8>,
+    ) -> Result<(), TransportError> {
         Err(TransportError::Internal(
             "NoOpLocalMesh: local transport not available on this platform".to_string(),
         ))
@@ -46,7 +50,7 @@ impl LocalMeshPort for NoOpLocalMesh {
 
 /// Outbound packet queued by `send_local` for Flutter to poll via FFI.
 pub struct OutboundLocalPacket {
-    pub target: NetworkId,
+    pub target: MeshAddress,
     pub data: Vec<u8>,
 }
 
@@ -62,7 +66,7 @@ pub struct LocalMeshAdapter {
     inbound_rx: mpsc::Receiver<NetworkEvent>,
     outbound_tx: mpsc::Sender<OutboundLocalPacket>,
     available: Arc<AtomicBool>,
-    known_peers: Vec<NetworkId>,
+    known_peers: Vec<MeshAddress>,
 }
 
 impl LocalMeshAdapter {
@@ -97,11 +101,11 @@ impl LocalMeshAdapter {
 
 #[async_trait]
 impl LocalMeshPort for LocalMeshAdapter {
-    async fn discover_peers(&mut self) -> Vec<NetworkId> {
+    async fn discover_peers(&mut self) -> Vec<MeshAddress> {
         self.known_peers.clone()
     }
 
-    async fn send_local(&self, target: &NetworkId, data: Vec<u8>) -> Result<(), TransportError> {
+    async fn send_local(&self, target: &MeshAddress, data: Vec<u8>) -> Result<(), TransportError> {
         let packet = OutboundLocalPacket {
             target: target.clone(),
             data,
@@ -173,7 +177,7 @@ mod tests {
     #[tokio::test]
     async fn test_noop_send_returns_error() {
         let mesh = NoOpLocalMesh;
-        let target = NetworkId("test_peer".to_string());
+        let target = MeshAddress::new("test_peer".to_string());
         let result = mesh.send_local(&target, vec![0x42]).await;
         assert!(result.is_err(), "NoOpLocalMesh send should fail");
     }
@@ -191,7 +195,7 @@ mod tests {
     #[tokio::test]
     async fn test_adapter_inbound_event_flows_through() {
         let (mut adapter, tx, _rx, _flag) = LocalMeshAdapter::new(16);
-        let peer = NetworkId("ble-peer-1".to_string());
+        let peer = MeshAddress::new("ble-peer-1".to_string());
 
         tx.send(NetworkEvent::PeerDiscovered {
             peer: peer.clone(),
@@ -212,8 +216,8 @@ mod tests {
     #[tokio::test]
     async fn test_adapter_tracks_known_peers() {
         let (mut adapter, tx, _rx, _flag) = LocalMeshAdapter::new(16);
-        let peer_a = NetworkId("peer-a".to_string());
-        let peer_b = NetworkId("peer-b".to_string());
+        let peer_a = MeshAddress::new("peer-a".to_string());
+        let peer_b = MeshAddress::new("peer-b".to_string());
 
         // Discover two peers
         tx.send(NetworkEvent::PeerDiscovered {
@@ -254,7 +258,7 @@ mod tests {
     #[tokio::test]
     async fn test_adapter_send_local_enqueues() {
         let (adapter, _tx, mut rx, _flag) = LocalMeshAdapter::new(16);
-        let target = NetworkId("target-peer".to_string());
+        let target = MeshAddress::new("target-peer".to_string());
         let data = vec![0xDE, 0xAD];
 
         adapter
@@ -270,7 +274,7 @@ mod tests {
     #[tokio::test]
     async fn test_adapter_send_local_full_queue() {
         let (adapter, _tx, _rx, _flag) = LocalMeshAdapter::new(1);
-        let target = NetworkId("target".to_string());
+        let target = MeshAddress::new("target".to_string());
 
         // Fill the queue
         adapter
@@ -286,7 +290,7 @@ mod tests {
     #[tokio::test]
     async fn test_adapter_duplicate_peer_not_added_twice() {
         let (mut adapter, tx, _rx, _flag) = LocalMeshAdapter::new(16);
-        let peer = NetworkId("same-peer".to_string());
+        let peer = MeshAddress::new("same-peer".to_string());
 
         // Discover same peer twice
         for _ in 0..2 {

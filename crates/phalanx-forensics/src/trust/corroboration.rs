@@ -359,7 +359,7 @@ mod tests {
                     h[1] = did.as_bytes()[0];
                     h
                 },
-                witness_peer_id: phalanx_proto::identity::NetworkId(did.to_string()),
+                witness_peer_id: phalanx_proto::identity::WitnessId::new(did.to_string()),
                 witness_signature: vec![0u8; 64],
                 did: Did::new(format!("did:key:{did}")),
                 prev_hash: None,

@@ -1,12 +1,15 @@
 use libp2p::identity::Keypair;
 
+use phalanx_proto::identity::MeshAddress;
 use phalanx_proto::prelude::PhalanxIdentity;
-use phalanx_proto::prelude::*;
 use zeroize::Zeroizing;
 
 pub trait Libp2pExt {
     fn to_libp2p_keypair(&self) -> Keypair;
-    fn to_network_id(&self) -> NetworkId;
+    /// Returns the canonical mesh-routing address for this identity.
+    /// Equivalent to `PeerMapper::to_mesh_address(&keypair.public().to_peer_id())`,
+    /// computed via the Ed25519 keypair this identity wraps.
+    fn to_mesh_address(&self) -> MeshAddress;
 }
 
 impl Libp2pExt for PhalanxIdentity {
@@ -19,8 +22,8 @@ impl Libp2pExt for PhalanxIdentity {
             .expect("Critical: PhalanxIdentity contains invalid Ed25519 material")
     }
 
-    fn to_network_id(&self) -> NetworkId {
+    fn to_mesh_address(&self) -> MeshAddress {
         let libp2p_key = self.to_libp2p_keypair();
-        crate::PeerMapper::to_network_id(&libp2p_key.public().to_peer_id())
+        crate::PeerMapper::to_mesh_address(&libp2p_key.public().to_peer_id())
     }
 }

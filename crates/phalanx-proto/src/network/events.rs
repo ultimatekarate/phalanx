@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::evidence::WitnessEnvelope;
 use crate::identity::{Did, RecordingId};
-use crate::prelude::{MeshTopic, NetworkId};
+use crate::prelude::{MeshAddress, MeshTopic};
 use crate::retrieval::{RecordingRequest, RecordingResponse};
 use crate::revocation::RevocationToken;
 use crate::telemetry::DiscoverySource;
@@ -15,7 +15,7 @@ pub const DISCOVERY_TOPIC_ID: &str = "/phalanx/discovery/1.0.0";
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {
     DataReceived {
-        origin: NetworkId,
+        origin: MeshAddress,
         topic: MeshTopic,
         data: Vec<u8>,
     },
@@ -25,41 +25,41 @@ pub enum NetworkEvent {
     /// `transport` classifies the discovery source as Internet or LocalMesh.
     /// The MeshSentinel uses this to enforce topology-aware admission via TopologyGate.
     PeerDiscovered {
-        peer: NetworkId,
+        peer: MeshAddress,
         source: DiscoverySource,
         bucket: SubnetBucket,
         transport: TransportClass,
     },
     RecordingRequested {
-        origin: NetworkId,
+        origin: MeshAddress,
         request: RecordingRequest,
         channel_id: String,
     },
     /// DHT providers discovered for a recording.
     ProvidersDiscovered {
         recording_id: RecordingId,
-        providers: Vec<NetworkId>,
+        providers: Vec<MeshAddress>,
     },
     /// Shards received from a peer in response to a recording request.
     ShardResponseReceived {
-        origin: NetworkId,
+        origin: MeshAddress,
         envelopes: Vec<WitnessEnvelope>,
     },
     /// A previously-connected peer has disconnected.
     /// Emitted by transports that maintain persistent connections (e.g., QuicAdapter client).
     PeerDisconnected {
-        peer: NetworkId,
+        peer: MeshAddress,
     },
     /// BLE mutual auth: challenge received from a LocalMesh peer.
     /// MeshSentinel should verify and respond, or drop the connection.
     BleAuthChallengeReceived {
-        peer: NetworkId,
+        peer: MeshAddress,
         challenge: BleChallenge,
     },
     /// BLE mutual auth: response received from a LocalMesh peer.
     /// MeshSentinel should verify against the pending challenge nonce.
     BleAuthResponseReceived {
-        peer: NetworkId,
+        peer: MeshAddress,
         response: BleResponse,
     },
     Shutdown,
@@ -134,7 +134,7 @@ pub trait IngressPort: Send {
 #[async_trait]
 pub trait EgressPort: Send + Sync + Clone {
     async fn publish(&self, topic: &MeshTopic, data: Vec<u8>) -> Result<(), String>;
-    async fn ban_peer(&self, peer: &NetworkId);
+    async fn ban_peer(&self, peer: &MeshAddress);
     async fn send_response(
         &self,
         channel_id: &str,
@@ -147,13 +147,13 @@ pub trait EgressPort: Send + Sync + Clone {
     /// Send a shard retrieval request to a specific peer.
     async fn send_request(
         &self,
-        target: &NetworkId,
+        target: &MeshAddress,
         request: RecordingRequest,
     ) -> Result<(), String>;
 
     /// Disconnect a specific peer (eclipse remediation).
     /// Default: delegates to ban_peer (existing mechanism).
-    async fn disconnect_peer(&self, peer: &NetworkId) {
+    async fn disconnect_peer(&self, peer: &MeshAddress) {
         self.ban_peer(peer).await;
     }
 
@@ -186,10 +186,10 @@ pub trait EgressPort: Send + Sync + Clone {
 #[async_trait]
 pub trait LocalMeshPort: Send {
     /// Discover peers reachable via this local transport (BLE, WiFi Direct).
-    async fn discover_peers(&mut self) -> Vec<NetworkId>;
+    async fn discover_peers(&mut self) -> Vec<MeshAddress>;
 
     /// Send data directly to a specific peer via the local transport.
-    async fn send_local(&self, target: &NetworkId, data: Vec<u8>) -> Result<(), TransportError>;
+    async fn send_local(&self, target: &MeshAddress, data: Vec<u8>) -> Result<(), TransportError>;
 
     /// Poll for the next inbound event from the local transport.
     async fn next_local_event(&mut self) -> Option<NetworkEvent>;

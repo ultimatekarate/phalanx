@@ -10,8 +10,8 @@ use tokio::sync::mpsc;
 /// In production, it matches incoming RecordingResponses to their pending requests.
 #[derive(Debug)]
 pub struct MeshRoutingTable {
-    /// Maps a virtual peer's NetworkId to their local event inbox (Used for MockAdapter)
-    pub routes: HashMap<NetworkId, mpsc::Sender<NetworkEvent>>,
+    /// Maps a virtual peer's MeshAddress to their local event inbox (Used for MockAdapter)
+    pub routes: HashMap<MeshAddress, mpsc::Sender<NetworkEvent>>,
 
     /// Maps a unique channel ID to the sender waiting for a response (Used for Resilient Retrieval)
     pub pending_responses: HashMap<String, mpsc::Sender<RecordingResponse>>,

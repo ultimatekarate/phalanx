@@ -15,7 +15,7 @@ use phalanx_proto::evidence::{
     DataPayload, EnvelopeState, Evidence, ForensicMetrics, StorageSequence, VideoShard,
     WitnessEnvelope,
 };
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId};
+use phalanx_proto::identity::{PhalanxIdentity, RecordingId, WitnessId};
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::{SystemClock, TrustedClock};
 use phalanx_proto::types::Fps;
@@ -54,7 +54,7 @@ async fn test_reliability_timeline_integrity() {
     let anchor_envelope = WitnessEnvelope::sign_envelope(
         Evidence::Video(anchor_shard),
         &identity,
-        NetworkId::random(),
+        WitnessId::random(),
         None,
     )
     .unwrap();
@@ -79,7 +79,7 @@ async fn test_reliability_timeline_integrity() {
     let valid_envelope = WitnessEnvelope::sign_envelope(
         Evidence::Video(valid_shard),
         &identity,
-        NetworkId::random(),
+        WitnessId::random(),
         Some(anchor_hash),
     )
     .unwrap();
@@ -105,7 +105,7 @@ async fn test_reliability_timeline_integrity() {
     let hijacked_envelope = WitnessEnvelope::sign_envelope(
         Evidence::Video(bogus_shard),
         &identity,
-        NetworkId::random(),
+        WitnessId::random(),
         Some(anchor_hash),
     )
     .unwrap();

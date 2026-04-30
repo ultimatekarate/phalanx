@@ -11,7 +11,7 @@
 use crate::error::PhalanxError;
 use crate::handle::PhalanxHandle;
 
-use phalanx_proto::identity::NetworkId;
+use phalanx_proto::identity::MeshAddress;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::telemetry::DiscoverySource;
 use phalanx_proto::topology::{SubnetBucket, TransportClass};
@@ -51,7 +51,7 @@ pub unsafe extern "C" fn phalanx_local_mesh_push_peer_discovered(
     };
 
     let event = NetworkEvent::PeerDiscovered {
-        peer: NetworkId(peer_str.to_string()),
+        peer: MeshAddress::new(peer_str.to_string()),
         source: DiscoverySource::LocalMesh,
         bucket: SubnetBucket::local_mesh(),
         transport: TransportClass::LocalMesh,
@@ -112,7 +112,7 @@ pub unsafe extern "C" fn phalanx_local_mesh_push_data_received(
     };
 
     let event = NetworkEvent::DataReceived {
-        origin: NetworkId(peer_str.to_string()),
+        origin: MeshAddress::new(peer_str.to_string()),
         topic: phalanx_proto::prelude::MeshTopic::from(topic_str),
         data: payload,
     };
@@ -157,7 +157,7 @@ pub unsafe extern "C" fn phalanx_local_mesh_push_peer_disconnected(
     };
 
     let event = NetworkEvent::PeerDisconnected {
-        peer: NetworkId(peer_str.to_string()),
+        peer: MeshAddress::new(peer_str.to_string()),
     };
 
     match tx.try_send(event) {

@@ -96,7 +96,7 @@ impl TrafficGovernor {
 
     /// Primary security gate: Determines if a chunk should be processed.
     #[must_use]
-    pub fn should_accept(&self, peer_id: &NetworkId, local_peer_id: &NetworkId) -> bool {
+    pub fn should_accept(&self, peer_id: &MeshAddress, local_peer_id: &MeshAddress) -> bool {
         match self.power_state {
             PowerState::Normal | PowerState::Conserving => true,
             // Pre-allocation check: only allow loopback traffic when in survival mode
@@ -117,7 +117,7 @@ impl Default for TrafficGovernor {
 }
 
 pub struct IngressGovernor {
-    pub active_slots: HashMap<NetworkId, TrustLevel>,
+    pub active_slots: HashMap<MeshAddress, TrustLevel>,
     pub base_max_slots: usize,
 }
 
@@ -137,16 +137,16 @@ impl IngressGovernor {
         }
     }
 
-    pub fn release_slot(&mut self, peer: &NetworkId) {
+    pub fn release_slot(&mut self, peer: &MeshAddress) {
         self.active_slots.remove(peer);
     }
 
     pub fn try_allocate(
         &mut self,
-        peer: NetworkId,
+        peer: MeshAddress,
         level: TrustLevel,
         current_stress: SystemStress,
-    ) -> Result<Option<NetworkId>, &'static str> {
+    ) -> Result<Option<MeshAddress>, &'static str> {
         let max_slots = self.current_capacity(current_stress);
 
         if self.active_slots.contains_key(&peer) {
@@ -675,12 +675,12 @@ mod tests {
         );
     }
 
-    use phalanx_proto::identity::NetworkId;
+    use phalanx_proto::identity::MeshAddress;
     use phalanx_proto::trust::TrustLevel;
     use phalanx_proto::types::SystemStress;
 
-    fn mock_peer() -> NetworkId {
-        NetworkId::random()
+    fn mock_peer() -> MeshAddress {
+        MeshAddress::random()
     }
 
     #[test]

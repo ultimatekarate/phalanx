@@ -130,7 +130,7 @@ mod tests {
         let restored = unseal_identity(&sealed, "test-passphrase").unwrap();
 
         assert_eq!(identity.did, restored.did);
-        assert_eq!(identity.network_id, restored.network_id);
+        assert_eq!(identity.witness_id, restored.witness_id);
         assert_eq!(identity.version, restored.version);
         assert_eq!(identity.keypair.to_bytes(), restored.keypair.to_bytes());
     }
@@ -154,15 +154,15 @@ mod tests {
 
     #[test]
     fn deterministic_identity_preserved() {
-        // Verify that DID and NetworkId survive the round trip exactly.
+        // Verify that DID and WitnessId survive the round trip exactly.
         let identity = PhalanxIdentity::new_ephemeral();
         let original_did = identity.did.clone();
-        let original_network_id = identity.network_id.clone();
+        let original_witness_id = identity.witness_id.clone();
 
         let sealed = seal_identity(&identity, "p").unwrap();
         let restored = unseal_identity(&sealed, "p").unwrap();
 
         assert_eq!(restored.did, original_did);
-        assert_eq!(restored.network_id, original_network_id);
+        assert_eq!(restored.witness_id, original_witness_id);
     }
 }

@@ -39,7 +39,7 @@ pub use network::wire;
 pub mod prelude {
     // Identity Nouns
     pub use crate::identity::{
-        Did, NetworkId, PhalanxIdentity, RecordingId, ShardId, IDENTITY_VERSION,
+        Did, MeshAddress, PhalanxIdentity, RecordingId, ShardId, WitnessId, IDENTITY_VERSION,
     };
 
     // Evidence Nouns

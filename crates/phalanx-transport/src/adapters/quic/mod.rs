@@ -28,7 +28,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use phalanx_proto::identity::{NetworkId, RecordingId};
+use phalanx_proto::identity::{MeshAddress, RecordingId};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::retrieval::{RecordingRequest, RecordingResponse};
 use phalanx_proto::topic::MeshTopic;
@@ -42,15 +42,15 @@ use wire::QuicWireMessage;
 
 enum QuicCommand {
     Publish(MeshTopic, Vec<u8>),
-    SendRequest(NetworkId, RecordingRequest),
+    SendRequest(MeshAddress, RecordingRequest),
     SendResponse(String, RecordingResponse),
-    Ban(NetworkId),
+    Ban(MeshAddress),
 }
 
 // ── Connection Map ───────────────────────────────────────────────────────
 
 /// Shared map of connected peers → their outbound message channels.
-type ConnectionMap = Arc<RwLock<HashMap<NetworkId, mpsc::Sender<QuicWireMessage>>>>;
+type ConnectionMap = Arc<RwLock<HashMap<MeshAddress, mpsc::Sender<QuicWireMessage>>>>;
 
 // ── Ingress Port ─────────────────────────────────────────────────────────
 
@@ -85,7 +85,7 @@ impl EgressPort for QuicEgress {
             .map_err(|_| "QUIC command channel closed".to_string())
     }
 
-    async fn ban_peer(&self, peer: &NetworkId) {
+    async fn ban_peer(&self, peer: &MeshAddress) {
         let _ = self.command_tx.send(QuicCommand::Ban(peer.clone())).await;
     }
 
@@ -112,7 +112,7 @@ impl EgressPort for QuicEgress {
 
     async fn send_request(
         &self,
-        target: &NetworkId,
+        target: &MeshAddress,
         request: RecordingRequest,
     ) -> Result<(), String> {
         self.command_tx
@@ -222,7 +222,7 @@ impl QuicAdapter {
 /// `RecordingResponse::Success` → `NetworkEvent::ShardResponseReceived`.
 pub(crate) async fn translate_response(
     event_tx: &mpsc::Sender<NetworkEvent>,
-    origin: &NetworkId,
+    origin: &MeshAddress,
     _channel_id: &str,
     response: RecordingResponse,
 ) {
@@ -422,8 +422,8 @@ mod tests {
             .expect("Server start failed");
 
         // Start client
-        let client_id = NetworkId("test_client_001".to_string());
-        let server_id = NetworkId("test_server_001".to_string());
+        let client_id = MeshAddress::new("test_client_001".to_string());
+        let server_id = MeshAddress::new("test_server_001".to_string());
 
         let client_config = QuicClientConfig {
             server_address: server_addr,
@@ -497,14 +497,14 @@ mod tests {
             .await
             .expect("Server start failed");
 
-        let client_id = NetworkId("ban_test_client".to_string());
+        let client_id = MeshAddress::new("ban_test_client".to_string());
 
         let client_config = QuicClientConfig {
             server_address: server_addr,
             server_name: "localhost".to_string(),
             ca_cert_pem: cert_pem,
             local_network_id: client_id.clone(),
-            server_network_id: NetworkId("server".to_string()),
+            server_network_id: MeshAddress::new("server".to_string()),
             event_channel_capacity: 64,
             max_reconnect_attempts: Some(0),
             base_backoff_secs: 1,
@@ -572,9 +572,9 @@ mod tests {
             .expect("Server start failed");
 
         // Connect two clients
-        let client_a_id = NetworkId("client_alpha".to_string());
-        let client_b_id = NetworkId("client_beta".to_string());
-        let server_id = NetworkId("server".to_string());
+        let client_a_id = MeshAddress::new("client_alpha".to_string());
+        let client_b_id = MeshAddress::new("client_beta".to_string());
+        let server_id = MeshAddress::new("server".to_string());
 
         let config_a = QuicClientConfig {
             server_address: server_addr,
@@ -685,8 +685,8 @@ mod tests {
             server_address: "127.0.0.1:19999".parse().unwrap(), // Nothing listening
             server_name: "localhost".to_string(),
             ca_cert_pem: cert_pem,
-            local_network_id: NetworkId("max_attempts_client".to_string()),
-            server_network_id: NetworkId("unreachable_server".to_string()),
+            local_network_id: MeshAddress::new("max_attempts_client".to_string()),
+            server_network_id: MeshAddress::new("unreachable_server".to_string()),
             event_channel_capacity: 64,
             max_reconnect_attempts: Some(2),
             base_backoff_secs: 1,
@@ -745,13 +745,13 @@ mod tests {
             .await
             .expect("Server start failed");
 
-        let server_id = NetworkId("reconnect_server".to_string());
+        let server_id = MeshAddress::new("reconnect_server".to_string());
 
         let client_config = QuicClientConfig {
             server_address: server_addr,
             server_name: "localhost".to_string(),
             ca_cert_pem: cert_pem,
-            local_network_id: NetworkId("reconnect_client".to_string()),
+            local_network_id: MeshAddress::new("reconnect_client".to_string()),
             server_network_id: server_id.clone(),
             event_channel_capacity: 64,
             max_reconnect_attempts: Some(3),

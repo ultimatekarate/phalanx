@@ -33,14 +33,14 @@ impl DhtRecordKey {
 pub struct RedbStore {
     db: Database,
     evaluator: Arc<dyn PeerEvaluator>,
-    local_peer_id: NetworkId,
+    local_peer_id: MeshAddress,
 }
 
 impl RedbStore {
     /// Initializes the persistent Kademlia store with a dependency-injected reputation evaluator.
     pub fn new<P: AsRef<Path>>(
         path: P,
-        local_peer_id: NetworkId,
+        local_peer_id: MeshAddress,
         evaluator: Arc<dyn PeerEvaluator>,
     ) -> std::result::Result<Self, redb::Error> {
         let db = Database::create(path)?;
@@ -268,7 +268,7 @@ impl RecordStore for RedbStore {
     fn add_provider(&mut self, provider_record: ProviderRecord) -> Result<()> {
         let typed_key = DhtRecordKey::new(&provider_record.key);
         let peer_id = provider_record.provider;
-        let network_id = NetworkId::from(peer_id.to_string());
+        let network_id = MeshAddress::new(peer_id.to_string());
 
         // ARCHITECTURAL UPDATE: Read `self.local_peer_id` to bypass reputation gate
         // for self-published provider records.
@@ -386,7 +386,7 @@ fn provider_set_to_records(set: DhtProviderSet, key: RecordKey) -> Vec<ProviderR
     set.providers
         .into_iter()
         .filter_map(|entry| {
-            let peer_id: PeerId = entry.network_id.to_string().parse().ok()?;
+            let peer_id: PeerId = entry.address.to_string().parse().ok()?;
             let expiration_instant = {
                 let now_unix = system_time_now_unix();
                 let now_instant = Instant::now();

@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use phalanx_proto::identity::NetworkId;
+use phalanx_proto::identity::MeshAddress;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::telemetry::DiscoverySource;
 use phalanx_proto::topic::MeshTopic;
@@ -60,7 +60,7 @@ async fn attempt_connect(
     server_address: SocketAddr,
     server_name: &str,
     attempt: &mut u32,
-    server_network_id: &NetworkId,
+    server_network_id: &MeshAddress,
     event_tx: &mpsc::Sender<NetworkEvent>,
 ) -> Option<s2n_quic::Connection> {
     let connect = s2n_quic::client::Connect::new(server_address).with_server_name(server_name);
@@ -96,7 +96,7 @@ async fn attempt_connect(
 /// Returns `true` if identification succeeded, `false` otherwise.
 async fn attempt_identify(
     connection: &mut s2n_quic::Connection,
-    local_network_id: &NetworkId,
+    local_network_id: &MeshAddress,
 ) -> bool {
     match connection.open_bidirectional_stream().await {
         Ok(mut stream) => {
@@ -170,8 +170,8 @@ async fn apply_backoff(
 /// or `CycleOutcome::EgressClosed` if the egress channel was closed (should stop).
 async fn run_connection_cycle(
     server_address: SocketAddr,
-    local_network_id: &NetworkId,
-    server_network_id: &NetworkId,
+    local_network_id: &MeshAddress,
+    server_network_id: &MeshAddress,
     event_tx: &mpsc::Sender<NetworkEvent>,
     command_rx: &mut mpsc::Receiver<QuicCommand>,
     mut connection: s2n_quic::Connection,
@@ -246,8 +246,8 @@ pub(super) async fn client_actor(
     client: s2n_quic::Client,
     server_address: SocketAddr,
     server_name: String,
-    local_network_id: NetworkId,
-    server_network_id: NetworkId,
+    local_network_id: MeshAddress,
+    server_network_id: MeshAddress,
     max_reconnect_attempts: Option<u32>,
     base_backoff_secs: u64,
     max_backoff_secs: u64,
@@ -323,8 +323,8 @@ async fn client_connection_loop(
     connection: &mut s2n_quic::Connection,
     event_tx: &mpsc::Sender<NetworkEvent>,
     command_rx: &mut mpsc::Receiver<QuicCommand>,
-    server_network_id: &NetworkId,
-    local_network_id: &NetworkId,
+    server_network_id: &MeshAddress,
+    local_network_id: &MeshAddress,
 ) -> bool {
     loop {
         tokio::select! {
@@ -386,7 +386,7 @@ async fn client_connection_loop(
 async fn handle_client_incoming(
     stream: &mut s2n_quic::stream::BidirectionalStream,
     event_tx: &mpsc::Sender<NetworkEvent>,
-    server_id: &NetworkId,
+    server_id: &MeshAddress,
 ) {
     match read_frame(stream).await {
         Ok(QuicWireMessage::Publish { topic, data }) => {
@@ -436,7 +436,7 @@ async fn handle_client_incoming(
 async fn handle_client_command(
     connection: &mut s2n_quic::Connection,
     cmd: QuicCommand,
-    local_id: &NetworkId,
+    local_id: &MeshAddress,
 ) -> Result<(), QuicError> {
     match cmd {
         QuicCommand::Publish(topic, data) => {

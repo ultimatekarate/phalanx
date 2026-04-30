@@ -1,5 +1,5 @@
 // crates/phalanx-proto/src/evidence.rs
-use crate::identity::{Did, NetworkId, RecordingId, ShardId};
+use crate::identity::{Did, RecordingId, ShardId, WitnessId};
 use crate::revocation::RevocationKey;
 use crate::storage::HandoverProof;
 use crate::time::PhalanxTimestamp;
@@ -53,7 +53,7 @@ pub struct ShardChunk {
 pub struct WitnessEnvelope {
     pub evidence: Evidence,
     pub evidence_hash: [u8; 32],
-    pub witness_peer_id: NetworkId,
+    pub witness_peer_id: WitnessId,
     pub witness_signature: Vec<u8>,
     pub did: Did,
     pub prev_hash: Option<SignatureHash>,
@@ -291,8 +291,8 @@ impl fmt::Display for RecordingId {
 /// Forensic unit for session handovers between nodes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandoverShard {
-    pub previous_node: NetworkId,
-    pub next_node: NetworkId,
+    pub previous_node: WitnessId,
+    pub next_node: WitnessId,
     pub session_transfer_token: Vec<u8>,
 }
 

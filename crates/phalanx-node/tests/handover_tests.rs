@@ -13,7 +13,7 @@ use phalanx_node::vitals::init_observability;
 use phalanx_proto::evidence::{
     EnvelopeState, Evidence, ForensicMetrics, Recording, StorageSequence, WitnessEnvelope,
 };
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId};
+use phalanx_proto::identity::{PhalanxIdentity, RecordingId, WitnessId};
 use phalanx_proto::prelude::GuardianError;
 use phalanx_proto::storage::HandoverProof;
 use phalanx_proto::time::{SystemClock, TrustedClock};
@@ -38,7 +38,7 @@ async fn test_legal_identity_handover() {
     let (identity_a, _) = PhalanxIdentity::generate().expect("Failed to generate Old DID");
     let (identity_b, _) = PhalanxIdentity::generate().expect("Failed to generate New DID");
 
-    let peer_id = NetworkId::random();
+    let peer_id = WitnessId::random();
     let vid = RecordingId::new("handover_stream_01");
 
     // Initialize Guardian (Vault) under Identity A's ownership
@@ -157,7 +157,7 @@ async fn test_illegal_identity_swap_rejected() {
 
     let identity_a = PhalanxIdentity::new_ephemeral();
     let identity_b = PhalanxIdentity::new_ephemeral();
-    let peer_id = NetworkId::random();
+    let peer_id = WitnessId::random();
     let vid = RecordingId::new("illegal_stream");
 
     let config = NodeConfig::test_defaults();

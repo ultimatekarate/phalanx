@@ -6,7 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 use tokio::time::Instant;
 
-use phalanx_proto::identity::NetworkId;
+use phalanx_proto::identity::MeshAddress;
 use phalanx_proto::vitals::ControlMessage;
 
 /// Per-peer behavioral observation state for spectral consistency detection.
@@ -45,7 +45,7 @@ impl PeerObservation {
 /// existing Volterra reputation integral toward decoupling for
 /// inconsistent peers.
 pub struct SpectralObserver {
-    peers: HashMap<NetworkId, PeerObservation>,
+    peers: HashMap<MeshAddress, PeerObservation>,
     /// Minimum heartbeats before evaluation begins.
     pub min_observations: usize,
     /// Maximum heartbeat timestamps retained per peer.
@@ -68,7 +68,7 @@ impl SpectralObserver {
     }
 
     /// Record a heartbeat arrival and update the peer's claimed state.
-    pub fn record_heartbeat(&mut self, peer_id: NetworkId, msg: &ControlMessage) {
+    pub fn record_heartbeat(&mut self, peer_id: MeshAddress, msg: &ControlMessage) {
         let obs = self
             .peers
             .entry(peer_id)
@@ -92,7 +92,7 @@ impl SpectralObserver {
 
     /// Record data volume received from a peer (called on every data message).
     #[allow(clippy::arithmetic_side_effects)] // Counter increment — overflow not reachable in practice.
-    pub fn record_data_received(&mut self, peer_id: NetworkId, bytes: usize) {
+    pub fn record_data_received(&mut self, peer_id: MeshAddress, bytes: usize) {
         let obs = self
             .peers
             .entry(peer_id)
@@ -106,7 +106,7 @@ impl SpectralObserver {
     /// `None` if insufficient data for evaluation.  The residual is a
     /// non-negative scalar: 0.0 = perfectly consistent, higher = more
     /// anomalous.
-    pub fn evaluate(&self, peer_id: &NetworkId) -> Option<f64> {
+    pub fn evaluate(&self, peer_id: &MeshAddress) -> Option<f64> {
         let obs = self.peers.get(peer_id)?;
         if obs.heartbeat_times.len() < self.min_observations {
             return None;
@@ -115,7 +115,7 @@ impl SpectralObserver {
     }
 
     /// Remove observation state for a disconnected peer.
-    pub fn remove_peer(&mut self, peer_id: &NetworkId) {
+    pub fn remove_peer(&mut self, peer_id: &MeshAddress) {
         self.peers.remove(peer_id);
     }
 
@@ -205,7 +205,7 @@ mod shield_wall_tests {
     /// Helper: build a ControlMessage with specified load/leaf/integrals.
     fn make_control(load: f32, is_leaf: bool) -> ControlMessage {
         ControlMessage {
-            sender: NetworkId("peer-1".to_string()),
+            sender: MeshAddress("peer-1".to_string()),
             load_factor: load,
             storage_remaining_mb: 1000,
             heartbeat_ms: 5000,
@@ -217,7 +217,7 @@ mod shield_wall_tests {
     #[test]
     fn test_spectral_observer_records_heartbeat() {
         let mut observer = SpectralObserver::new();
-        let peer = NetworkId("peer-1".to_string());
+        let peer = MeshAddress("peer-1".to_string());
         let msg = make_control(0.5, false);
 
         observer.record_heartbeat(peer.clone(), &msg);
@@ -231,7 +231,7 @@ mod shield_wall_tests {
     #[test]
     fn test_insufficient_data_returns_none() {
         let mut observer = SpectralObserver::new();
-        let peer = NetworkId("peer-1".to_string());
+        let peer = MeshAddress("peer-1".to_string());
         let msg = make_control(0.1, false);
 
         // Record fewer heartbeats than min_observations (default: 3)
@@ -247,7 +247,7 @@ mod shield_wall_tests {
     #[test]
     fn test_spectral_residual_zero_for_consistent_peer() {
         let mut observer = SpectralObserver::new();
-        let peer = NetworkId("peer-consistent".to_string());
+        let peer = MeshAddress("peer-consistent".to_string());
 
         // Low load, no data sent, not a leaf — perfectly consistent
         let msg = make_control(0.1, false);
@@ -270,7 +270,7 @@ mod shield_wall_tests {
     #[test]
     fn test_spectral_residual_high_for_inconsistent_peer() {
         let mut observer = SpectralObserver::new();
-        let peer = NetworkId("peer-liar".to_string());
+        let peer = MeshAddress("peer-liar".to_string());
 
         // Peer claims high load (0.95) but sends lots of data
         let msg = make_control(0.95, false);
@@ -293,7 +293,7 @@ mod shield_wall_tests {
     #[test]
     fn test_leaf_contradiction_detected() {
         let mut observer = SpectralObserver::new();
-        let peer = NetworkId("peer-fake-leaf".to_string());
+        let peer = MeshAddress("peer-fake-leaf".to_string());
 
         // Peer claims to be a leaf but sends significant data
         let msg = make_control(0.0, true);
@@ -315,7 +315,7 @@ mod shield_wall_tests {
     #[test]
     fn test_remove_peer_cleans_state() {
         let mut observer = SpectralObserver::new();
-        let peer = NetworkId("peer-temp".to_string());
+        let peer = MeshAddress("peer-temp".to_string());
         let msg = make_control(0.1, false);
 
         observer.record_heartbeat(peer.clone(), &msg);
@@ -329,7 +329,7 @@ mod shield_wall_tests {
     #[test]
     fn test_heartbeat_history_bounded() {
         let mut observer = SpectralObserver::new();
-        let peer = NetworkId("peer-chatty".to_string());
+        let peer = MeshAddress("peer-chatty".to_string());
         let msg = make_control(0.1, false);
 
         // Record more heartbeats than max_history (default: 10)
@@ -348,7 +348,7 @@ mod shield_wall_tests {
     #[test]
     fn test_data_volume_accumulates() {
         let mut observer = SpectralObserver::new();
-        let peer = NetworkId("peer-sender".to_string());
+        let peer = MeshAddress("peer-sender".to_string());
 
         observer.record_data_received(peer.clone(), 1000);
         observer.record_data_received(peer.clone(), 2000);

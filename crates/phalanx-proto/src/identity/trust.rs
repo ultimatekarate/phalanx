@@ -18,7 +18,7 @@ pub enum Offense {
     EclipseAttempt,
     NonReciprocal,
     /// Two nodes presenting the same DID from distinct network locations simultaneously.
-    /// Detection logic deferred — requires `Did -> Set<NetworkId>` tracking in MeshSentinel.
+    /// Detection logic deferred — requires `Did -> Set<MeshAddress>` tracking in MeshSentinel.
     DualPresence,
 }
 

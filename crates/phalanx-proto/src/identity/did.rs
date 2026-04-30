@@ -75,10 +75,11 @@ impl Did {
         Self(format!("did:key:z{}", multibase_pubkey))
     }
 
-    /// Converts a `did:key:` DID to a NetworkId by stripping the `did:key:` prefix.
+    /// Converts a `did:key:` DID to a `WitnessId` by stripping the `did:key:` prefix.
+    /// The resulting `WitnessId` is the canonical multibase form (`z6Mk...`).
     #[must_use]
-    pub fn to_network_id(&self) -> NetworkId {
-        NetworkId(
+    pub fn to_witness_id(&self) -> WitnessId {
+        WitnessId(
             self.0
                 .strip_prefix("did:key:")
                 .unwrap_or(&self.0)
@@ -86,10 +87,36 @@ impl Did {
         )
     }
 
-    /// Constructs a `did:key:` DID from a NetworkId.
+    /// Reconstructs a `did:key:` DID from a `WitnessId` (canonical multibase form).
     #[must_use]
-    pub fn from_network_id(id: &NetworkId) -> Self {
+    pub fn from_witness_id(id: &WitnessId) -> Self {
         Self(format!("did:key:{}", id.0))
+    }
+
+    /// Reconstructs a `did:key:` DID from a `MeshAddress` by string-prepending
+    /// the `did:key:` prefix.
+    ///
+    /// **Note:** A `MeshAddress` is libp2p PeerId multihash form, which is NOT
+    /// the same encoding as the DID multibase form. The resulting DID is
+    /// reachable as a HashMap key (string round-trip works) but is NOT
+    /// cryptographically valid as a real `did:key`. This shim exists for the
+    /// trust system's mesh-keyed lookups; do not use it where DID validity
+    /// matters.
+    #[must_use]
+    pub fn from_mesh_address(addr: &MeshAddress) -> Self {
+        Self(format!("did:key:{}", addr.0))
+    }
+
+    /// Converts a `did:key:` DID to a `MeshAddress` by stripping the `did:key:`
+    /// prefix. See `from_mesh_address` for the cryptographic caveat.
+    #[must_use]
+    pub fn to_mesh_address(&self) -> MeshAddress {
+        MeshAddress(
+            self.0
+                .strip_prefix("did:key:")
+                .unwrap_or(&self.0)
+                .to_string(),
+        )
     }
 
     #[must_use]
@@ -178,21 +205,80 @@ impl AsRef<str> for Did {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct NetworkId(pub String);
+/// Forensic identity: bs58-encoded multibase form (e.g. `z6Mk...`).
+///
+/// Round-trips with `Did` via `Did::to_witness_id` / `Did::from_witness_id`.
+/// Stable across transport changes — used by every signed `WitnessEnvelope`,
+/// `CausalitySession`, persisted evidence record. A `WitnessId` produced
+/// today must remain valid against the same keypair material in 2030 even if
+/// the underlying mesh transport (libp2p) is replaced.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WitnessId(pub String);
 
-impl NetworkId {
-    /// H1: Maximum byte length for a NetworkId on the wire.
+impl WitnessId {
+    /// H1: Maximum byte length for a WitnessId on the wire.
     pub const MAX_WIRE_LEN: usize = 256;
-    /// Returns the forensic identifier as a Base58 string.
-    /// In the Dictionary layer, this is an identity operation as the
-    /// representation is already encoded.
+
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the multibase-encoded forensic identifier as a Base58 string.
     #[inline]
     pub fn to_base58(&self) -> &str {
         &self.0
     }
 
-    /// Generates a random NetworkId for testing.
+    /// Generates a random WitnessId for testing. Produces a multibase-shaped
+    /// string (`z`-prefixed base58); the bytes do NOT decode to a valid
+    /// Ed25519 public key, so this must only be used as a test fixture.
+    pub fn random() -> Self {
+        use rand::Rng;
+        let bytes: [u8; 32] = rand::thread_rng().gen();
+        Self(format!("z{}", bs58::encode(bytes).into_string()))
+    }
+}
+
+impl std::fmt::Display for WitnessId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Mesh routing address: a libp2p `PeerId` rendered in base58 multibase form
+/// (e.g. `12D3KooW...`).
+///
+/// Round-trips through `PeerMapper::from_mesh_address` → `PeerId::from_str`.
+/// This type does **not** import any libp2p type — only the *format* is
+/// libp2p-flavoured. Per the linguistic-code-model rule that the Dictionary
+/// must not depend on libp2p, the format discipline is enforced at the
+/// `phalanx-transport` boundary, not by this type's constructor.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MeshAddress(pub String);
+
+impl MeshAddress {
+    /// H1: Maximum byte length for a MeshAddress on the wire.
+    pub const MAX_WIRE_LEN: usize = 256;
+
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Generates a random MeshAddress for testing. Produces an arbitrary
+    /// base58 string; the bytes do NOT decode to a valid libp2p PeerId, so
+    /// this must only be used as a test fixture.
     pub fn random() -> Self {
         use rand::Rng;
         let bytes: [u8; 32] = rand::thread_rng().gen();
@@ -200,29 +286,9 @@ impl NetworkId {
     }
 }
 
-impl From<String> for NetworkId {
-    fn from(id_string: String) -> Self {
-        Self(id_string)
-    }
-}
-
-impl From<&str> for NetworkId {
-    fn from(id_str: &str) -> Self {
-        Self(id_str.to_string())
-    }
-}
-
-impl FromStr for NetworkId {
-    type Err = std::convert::Infallible;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self(s.to_string()))
-    }
-}
-
-impl fmt::Display for NetworkId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+impl std::fmt::Display for MeshAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -238,7 +304,9 @@ pub struct SignatureHash(pub [u8; 32]);
 pub struct PhalanxIdentity {
     pub version: u32,
     pub did: Did,
-    pub network_id: NetworkId,
+    /// Forensic identifier. Multibase form (`z6Mk...`); round-trips with `did`
+    /// via `Did::to_witness_id` / `Did::from_witness_id`.
+    pub witness_id: WitnessId,
     pub keypair: SigningKey,
     /// The public half of the revocation keypair. Derived from BIP39 mnemonic
     /// (seed bytes [32..64]). Default (all zeros) for ephemeral identities.
@@ -255,20 +323,26 @@ impl PhalanxIdentity {
         let signing_key = SigningKey::generate(&mut csprng);
         let verifying_key = signing_key.verifying_key();
 
-        // Derive Forensic NetworkId
-        // We use the Base58 encoding of the public key. In the Phalanx mesh,
-        // this string is used by the Hands layer to reconstruct a libp2p PeerId.
         let public_key_bytes = verifying_key.to_bytes();
-        let network_id_string = bs58::encode(public_key_bytes).into_string();
-        let network_id = NetworkId(network_id_string);
 
-        // Derive Decentralized Identifier (DID)
+        // Derive Decentralized Identifier (DID) first, then derive the
+        // forensic `WitnessId` from it. This produces the canonical
+        // multibase form (`z6Mk...`) — the same encoding produced by
+        // `phalanx-node::identity::generate` for persistent identities.
+        // Both constructor paths now agree on the same encoding for the
+        // same key.
+        //
+        // The forensic `witness_id` is NOT the libp2p mesh routing
+        // address — that is derived separately by
+        // `Libp2pExt::to_mesh_address` at the `phalanx-transport`
+        // boundary, and the two encodings differ.
         let did = Did::derive_did_key(&public_key_bytes);
+        let witness_id = did.to_witness_id();
 
         Self {
             version: IDENTITY_VERSION,
             did,
-            network_id,
+            witness_id,
             keypair: signing_key,
             revocation_key: RevocationKey::default(),
         }
@@ -295,7 +369,12 @@ impl Default for PhalanxIdentity {
 pub struct IdentityDiskFormat {
     pub version: u32,
     pub did: Did,
-    pub network_id: NetworkId,
+    /// On-disk key remains `network_id` for backward compatibility with
+    /// existing identity files. The Rust field is `witness_id` to match the
+    /// canonical type. `into_identity` ignores this stored value and
+    /// re-derives the canonical form from `did` (lossless).
+    #[serde(rename = "network_id")]
+    pub witness_id: WitnessId,
     pub keypair_bytes: [u8; 32],
     /// Revocation public key. `serde(default)` for backwards compatibility —
     /// existing identity files load with `RevocationKey::default()`.
@@ -309,18 +388,31 @@ impl IdentityDiskFormat {
         Self {
             version: identity.version,
             did: identity.did.clone(),
-            network_id: identity.network_id.clone(),
+            witness_id: identity.witness_id.clone(),
             keypair_bytes: identity.keypair.to_bytes(),
             revocation_key: identity.revocation_key,
         }
     }
 
     /// Restore a runtime identity from the disk format.
+    ///
+    /// Re-derives `witness_id` from the persisted `did` instead of trusting
+    /// the on-disk value. This is lossless — the keypair bytes are
+    /// authoritative; the `did` is itself derived from the keypair; and the
+    /// `witness_id` is `did.to_witness_id()`. Older identity files that
+    /// stored a non-canonical encoding (raw-pubkey base58, missing the `z`
+    /// multibase prefix) migrate transparently on load: the canonical
+    /// multibase form is computed from the `did` and the on-disk
+    /// `witness_id` value is discarded.
     pub fn into_identity(self) -> PhalanxIdentity {
+        // M-FIX (encoding canonicalization): derive the canonical forensic
+        // identifier from the persisted `did` rather than trusting whatever
+        // was previously written to disk.
+        let witness_id = self.did.to_witness_id();
         PhalanxIdentity {
             version: self.version,
             did: self.did,
-            network_id: self.network_id,
+            witness_id,
             keypair: SigningKey::from_bytes(&self.keypair_bytes),
             revocation_key: self.revocation_key,
         }
@@ -332,7 +424,7 @@ impl std::fmt::Debug for PhalanxIdentity {
         f.debug_struct("PhalanxIdentity")
             .field("version", &self.version)
             .field("did", &self.did)
-            .field("network_id", &self.network_id)
+            .field("witness_id", &self.witness_id)
             .field("keypair", &"[REDACTED]")
             .finish()
     }
@@ -511,5 +603,97 @@ mod tests {
         let locator = PhalanxLocator::from_str(&original_uri).expect("Should parse");
         assert_eq!(locator.secret, "secret-key-456");
         assert_eq!(locator.to_string(), original_uri);
+    }
+
+    // === WitnessId / MeshAddress round-trip tests ===
+
+    #[test]
+    fn witness_id_serializes_transparently() {
+        // Newtype + #[serde(transparent)]: the inner string is the only thing
+        // on the wire, byte-identical with serializing a bare `&str`.
+        let id = WitnessId::new("z6MkqAWvMbaN66Vt");
+        let id_bytes = postcard::to_allocvec(&id).unwrap();
+        let str_bytes = postcard::to_allocvec("z6MkqAWvMbaN66Vt").unwrap();
+        assert_eq!(id_bytes, str_bytes);
+    }
+
+    #[test]
+    fn witness_id_postcard_roundtrips() {
+        let id = WitnessId::new("z6MkqAWvMbaN66Vt");
+        let bytes = postcard::to_allocvec(&id).unwrap();
+        let restored: WitnessId = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(id, restored);
+    }
+
+    #[test]
+    fn mesh_address_serializes_transparently() {
+        let addr = MeshAddress::new("12D3KooWExample");
+        let addr_bytes = postcard::to_allocvec(&addr).unwrap();
+        let str_bytes = postcard::to_allocvec("12D3KooWExample").unwrap();
+        assert_eq!(addr_bytes, str_bytes);
+    }
+
+    #[test]
+    fn mesh_address_postcard_roundtrips() {
+        let addr = MeshAddress::new("12D3KooWExample");
+        let bytes = postcard::to_allocvec(&addr).unwrap();
+        let restored: MeshAddress = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(addr, restored);
+    }
+
+    #[test]
+    fn did_round_trips_through_witness_id() {
+        let did = Did::new("did:key:z6MkqAWvMbaN66Vt");
+        let witness_id = did.to_witness_id();
+        assert_eq!(witness_id.as_str(), "z6MkqAWvMbaN66Vt");
+        let restored = Did::from_witness_id(&witness_id);
+        assert_eq!(restored, did);
+    }
+
+    // === Canonicalization tests (Commit 2) ===
+
+    #[test]
+    fn phalanx_identity_ephemeral_uses_multibase_witness_id() {
+        // After canonicalization, the ephemeral constructor produces the same
+        // multibase form (`z`-prefixed) as the persistent constructor.
+        let identity = PhalanxIdentity::new_ephemeral();
+        assert!(
+            identity.witness_id.0.starts_with('z'),
+            "ephemeral identity's witness_id should be multibase-prefixed (got {:?})",
+            identity.witness_id
+        );
+        assert_eq!(identity.witness_id, identity.did.to_witness_id());
+    }
+
+    #[test]
+    fn identity_disk_format_migrates_legacy_raw_encoding() {
+        // Simulate a legacy identity file: same did + keypair, but the
+        // persisted `witness_id` is the old raw-pubkey base58 form.
+        let identity = PhalanxIdentity::new_ephemeral();
+        let raw_pubkey_b58 =
+            bs58::encode(identity.keypair.verifying_key().to_bytes()).into_string();
+        let legacy_disk = IdentityDiskFormat {
+            version: identity.version,
+            did: identity.did.clone(),
+            witness_id: WitnessId::new(raw_pubkey_b58.clone()),
+            keypair_bytes: identity.keypair.to_bytes(),
+            revocation_key: identity.revocation_key,
+        };
+        // The on-load migration must discard the raw form and re-derive the
+        // canonical multibase form from the `did`.
+        let restored = legacy_disk.into_identity();
+        assert_ne!(restored.witness_id.0, raw_pubkey_b58);
+        assert!(restored.witness_id.0.starts_with('z'));
+        assert_eq!(restored.witness_id, restored.did.to_witness_id());
+    }
+
+    #[test]
+    fn phalanx_identity_round_trips_through_disk_format() {
+        let identity = PhalanxIdentity::new_ephemeral();
+        let disk = IdentityDiskFormat::from_identity(&identity);
+        let restored = disk.into_identity();
+        assert_eq!(restored.did, identity.did);
+        assert_eq!(restored.witness_id, identity.witness_id);
+        assert_eq!(restored.version, identity.version);
     }
 }

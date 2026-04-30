@@ -94,7 +94,7 @@ pub trait WitnessGate {
     fn seal(
         self,
         identity: &PhalanxIdentity,
-        peer_id: NetworkId,
+        peer_id: WitnessId,
         prev_hash: Option<SignatureHash>,
     ) -> Result<WitnessEnvelope, ShardError>;
 }
@@ -103,7 +103,7 @@ impl WitnessGate for Evidence {
     fn seal(
         self,
         identity: &PhalanxIdentity,
-        peer_id: NetworkId,
+        peer_id: WitnessId,
         prev_hash: Option<SignatureHash>,
     ) -> Result<WitnessEnvelope, ShardError> {
         WitnessEnvelope::sign_envelope(self, identity, peer_id, prev_hash).map_err(|e| {
@@ -117,7 +117,7 @@ impl WitnessGate for Evidence {
 pub trait IntegrityGate {
     fn check_integrity(
         self,
-        node_id: &NetworkId,
+        node_id: &WitnessId,
         clock: &dyn TrustedClock,
         tolerance: std::time::Duration,
         anchor: Option<SignatureHash>,
@@ -129,7 +129,7 @@ pub trait IntegrityGate {
 impl IntegrityGate for WitnessEnvelope {
     fn check_integrity(
         self,
-        node_id: &NetworkId,
+        node_id: &WitnessId,
         clock: &dyn TrustedClock,
         tolerance: std::time::Duration,
         _anchor: Option<SignatureHash>,
@@ -486,13 +486,13 @@ pub fn check_provenance_bayesian(
 
 /// Gate 7: The Coasting Gate (Probabilistic Integrity)
 pub trait CoastingGate {
-    fn verify_fast_hash(self, peer_id: &NetworkId) -> Result<Self, ShardError>
+    fn verify_fast_hash(self, peer_id: &WitnessId) -> Result<Self, ShardError>
     where
         Self: Sized;
 }
 
 impl CoastingGate for WitnessEnvelope {
-    fn verify_fast_hash(self, peer_id: &NetworkId) -> Result<Self, ShardError> {
+    fn verify_fast_hash(self, peer_id: &WitnessId) -> Result<Self, ShardError> {
         // Serialize evidence to compute actual hash
         let actual_bytes = postcard::to_allocvec(&self.evidence)?;
 
@@ -539,7 +539,7 @@ use phalanx_proto::types::{ForensicUnit, Unverified, Verified};
 pub trait PromotionGate {
     fn promote(
         self,
-        node_id: &NetworkId,
+        node_id: &WitnessId,
         clock: &dyn TrustedClock,
         tolerance: std::time::Duration,
         anchor: Option<SignatureHash>,
@@ -553,7 +553,7 @@ impl PromotionGate for ForensicUnit<WitnessEnvelope, Unverified> {
     /// only if all forensic gates (Integrity, Continuity, Time) are passed.
     fn promote(
         self,
-        node_id: &NetworkId,
+        node_id: &WitnessId,
         clock: &dyn TrustedClock,
         tolerance: std::time::Duration,
         anchor: Option<SignatureHash>,

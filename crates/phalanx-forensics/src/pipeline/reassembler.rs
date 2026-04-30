@@ -859,7 +859,7 @@ mod tests {
             lens_metrics: ForensicMetrics::default(),
         });
         let original_envelope =
-            WitnessEnvelope::sign_envelope(evidence, &identity, identity.network_id.clone(), None)
+            WitnessEnvelope::sign_envelope(evidence, &identity, identity.witness_id.clone(), None)
                 .expect("Failed to sign envelope");
 
         let serialized = postcard::to_allocvec(&original_envelope).expect("serialize");
@@ -908,7 +908,7 @@ mod tests {
             lens_metrics: ForensicMetrics::default(),
         });
         let original_envelope =
-            WitnessEnvelope::sign_envelope(evidence, &identity, identity.network_id.clone(), None)
+            WitnessEnvelope::sign_envelope(evidence, &identity, identity.witness_id.clone(), None)
                 .expect("sign");
 
         let serialized = postcard::to_allocvec(&original_envelope).expect("serialize");
@@ -972,7 +972,7 @@ mod tests {
             lens_metrics: ForensicMetrics::default(),
         });
         let original_envelope =
-            WitnessEnvelope::sign_envelope(evidence, &identity, identity.network_id.clone(), None)
+            WitnessEnvelope::sign_envelope(evidence, &identity, identity.witness_id.clone(), None)
                 .expect("sign");
 
         let serialized = postcard::to_allocvec(&original_envelope).expect("serialize");
@@ -1084,7 +1084,7 @@ mod tests {
                 new_signature: identity.keypair.sign(b"test"),
             }),
             &identity,
-            identity.network_id.clone(),
+            identity.witness_id.clone(),
             None,
         )
         .unwrap();

@@ -7,24 +7,24 @@
 // cessation. A peer who stops recording but stays connected is alive.
 //
 // All state is ephemeral (memory-only, never persisted). If the phone is
-// seized, disk must not contain a NetworkId -> Did roster.
+// seized, disk must not contain a MeshAddress -> Did roster.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use phalanx_proto::identity::{Did, NetworkId, RecordingId};
+use phalanx_proto::identity::{Did, MeshAddress, RecordingId};
 
 /// Monitors community peers during active recordings. Fires when a peer's
 /// mesh presence disappears (disconnect + heartbeat staleness confirmed).
 pub struct CanaryMonitor {
     /// Community peers contributing to the current event.
-    watched: HashMap<NetworkId, WatchedPeer>,
+    watched: HashMap<MeshAddress, WatchedPeer>,
     /// How many consecutive staleness checks before confirming silence.
     confirmation_required: u32,
     /// Per-peer consecutive stale count (incremented on stale tick, reset on reconnect).
-    stale_counts: HashMap<NetworkId, u32>,
+    stale_counts: HashMap<MeshAddress, u32>,
     /// Peers whose disconnect has been observed but not yet confirmed stale.
-    pending_confirmation: HashSet<NetworkId>,
+    pending_confirmation: HashSet<MeshAddress>,
 }
 
 struct WatchedPeer {
@@ -44,7 +44,7 @@ pub enum CanaryState {
     /// One or more community peers confirmed silent.
     Alert {
         /// NetworkIds of peers confirmed dark.
-        silent_peers: Vec<NetworkId>,
+        silent_peers: Vec<MeshAddress>,
         /// Recording IDs those peers were contributing to.
         recordings_at_risk: HashSet<RecordingId>,
         /// How many watched community peers are still alive.
@@ -71,7 +71,7 @@ impl CanaryMonitor {
     /// WitnessEnvelope from a peer whose `effective_trust() >= Verified`.
     pub fn register_contribution(
         &mut self,
-        peer_id: &NetworkId,
+        peer_id: &MeshAddress,
         did: &Did,
         recording_id: &RecordingId,
     ) {
@@ -92,7 +92,7 @@ impl CanaryMonitor {
     /// Does NOT immediately fire the canary. The peer must also be confirmed
     /// stale via `on_peer_stale` before the alert triggers. This prevents
     /// false positives from transient network blips.
-    pub fn on_peer_disconnected(&mut self, peer_id: &NetworkId) {
+    pub fn on_peer_disconnected(&mut self, peer_id: &MeshAddress) {
         if self.watched.contains_key(peer_id) {
             self.pending_confirmation.insert(peer_id.clone());
         }
@@ -102,7 +102,7 @@ impl CanaryMonitor {
     ///
     /// Returns `Some(CanaryState::Alert)` when the staleness threshold is met.
     /// This is the actual canary trigger — disconnect alone is not sufficient.
-    pub fn on_peer_stale(&mut self, peer_id: &NetworkId) -> Option<CanaryState> {
+    pub fn on_peer_stale(&mut self, peer_id: &MeshAddress) -> Option<CanaryState> {
         if !self.pending_confirmation.contains(peer_id) {
             return None;
         }
@@ -118,7 +118,7 @@ impl CanaryMonitor {
     }
 
     /// Peer reconnected — cancel any pending confirmation.
-    pub fn on_peer_reconnected(&mut self, peer_id: &NetworkId) {
+    pub fn on_peer_reconnected(&mut self, peer_id: &MeshAddress) {
         self.pending_confirmation.remove(peer_id);
         self.stale_counts.remove(peer_id);
     }
@@ -174,8 +174,8 @@ impl CanaryMonitor {
 mod tests {
     use super::*;
 
-    fn net(s: &str) -> NetworkId {
-        NetworkId(s.to_string())
+    fn net(s: &str) -> MeshAddress {
+        MeshAddress(s.to_string())
     }
 
     fn did(s: &str) -> Did {

@@ -12,7 +12,7 @@ use phalanx_forensics::trust::PeerEvaluator;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::kademlia::RedbStore;
-use phalanx_proto::identity::NetworkId;
+use phalanx_proto::identity::MeshAddress;
 use phalanx_proto::prelude::PhalanxIdentity;
 use phalanx_transport::prelude::{build_mesh_transport_with_store, MeshTransportConfig};
 use tempfile::tempdir;
@@ -21,7 +21,7 @@ use tempfile::tempdir;
 struct MockEvaluator;
 
 impl PeerEvaluator for MockEvaluator {
-    fn evaluate_reputation(&self, _peer_id: &NetworkId) -> f32 {
+    fn evaluate_reputation(&self, _peer_id: &MeshAddress) -> f32 {
         1.0
     }
 }
@@ -34,7 +34,7 @@ async fn test_node_behaviour_initialization() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("test_dht.redb");
 
-    let local_network_id = identity.did.to_network_id();
+    let local_network_id = identity.did.to_mesh_address();
     let store = RedbStore::new(&db_path, local_network_id, Arc::new(MockEvaluator)).unwrap();
 
     let transport_config = MeshTransportConfig::default();

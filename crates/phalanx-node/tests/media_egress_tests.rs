@@ -17,7 +17,7 @@ use phalanx_node::clock::TrustedClock;
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{AudioShard, VideoShard};
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity};
+use phalanx_proto::identity::{MeshAddress, PhalanxIdentity, WitnessId};
 use phalanx_proto::network::EgressPort;
 use phalanx_proto::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -55,7 +55,7 @@ impl EgressPort for RecordingEgress {
         }
         Ok(())
     }
-    async fn ban_peer(&self, _: &NetworkId) {}
+    async fn ban_peer(&self, _: &MeshAddress) {}
     async fn send_response(&self, _: &str, _: RecordingResponse) -> Result<(), String> {
         Ok(())
     }
@@ -67,7 +67,7 @@ impl EgressPort for RecordingEgress {
     }
     async fn send_request(
         &self,
-        _: &NetworkId,
+        _: &MeshAddress,
         _: phalanx_proto::retrieval::RecordingRequest,
     ) -> Result<(), String> {
         Ok(())
@@ -83,7 +83,7 @@ impl EgressPort for FailingEgress {
     async fn publish(&self, _: &MeshTopic, _: Vec<u8>) -> Result<(), String> {
         Err("transport down".to_string())
     }
-    async fn ban_peer(&self, _: &NetworkId) {}
+    async fn ban_peer(&self, _: &MeshAddress) {}
     async fn send_response(&self, _: &str, _: RecordingResponse) -> Result<(), String> {
         Err("transport down".to_string())
     }
@@ -95,7 +95,7 @@ impl EgressPort for FailingEgress {
     }
     async fn send_request(
         &self,
-        _: &NetworkId,
+        _: &MeshAddress,
         _: phalanx_proto::retrieval::RecordingRequest,
     ) -> Result<(), String> {
         Err("transport down".to_string())
@@ -129,7 +129,7 @@ async fn build_media_egress_with_bundle_size<E: EgressPort + 'static>(
     let temp = tempdir().expect("Failed to create temp dir");
     let gov = Arc::new(SystemGovernor::new());
     let identity = Arc::new(PhalanxIdentity::new_ephemeral());
-    let local_id = NetworkId("local-node".to_string());
+    let local_id = WitnessId::new("local-node");
 
     let config = MediaEgressConfig {
         video_rx,

@@ -16,7 +16,7 @@
 
 use phalanx_node::config::NodeConfig;
 use phalanx_proto::evidence::{ChunkType, ShardChunk};
-use phalanx_proto::identity::{NetworkId, NodeRole};
+use phalanx_proto::identity::{MeshAddress, NodeRole};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::{Did, EncodingSymbolId, PhalanxTimestamp, ShardId};
 use phalanx_proto::telemetry::{ChaosMode, SimEvent};
@@ -46,7 +46,7 @@ fn make_test_chunk(owner_did: &Did, payload_size: usize) -> Vec<u8> {
 }
 
 /// Construct a valid serialized ControlMessage heartbeat.
-fn make_control_heartbeat(sender: &NetworkId) -> Vec<u8> {
+fn make_control_heartbeat(sender: &MeshAddress) -> Vec<u8> {
     let msg = ControlMessage {
         sender: sender.clone(),
         load_factor: 0.3,
@@ -60,7 +60,7 @@ fn make_control_heartbeat(sender: &NetworkId) -> Vec<u8> {
 
 /// Construct a spectral-lie heartbeat: claims leaf + high load, but will also
 /// flood data — triggers spectral anomaly Check 3 (leaf contradiction).
-fn make_lying_heartbeat(sender: &NetworkId) -> Vec<u8> {
+fn make_lying_heartbeat(sender: &MeshAddress) -> Vec<u8> {
     let msg = ControlMessage {
         sender: sender.clone(),
         load_factor: 0.9,
@@ -142,8 +142,8 @@ async fn test_resolve_did() {
         .await
         .expect("Failed to resolve DID");
 
-    // NetworkId should be non-empty
-    assert!(!network_id.0.is_empty(), "NetworkId should not be empty");
+    // MeshAddress should be non-empty
+    assert!(!network_id.0.is_empty(), "MeshAddress should not be empty");
 
     // Resolve unknown DID should fail
     let unknown = phalanx_proto::prelude::Did::from("did:key:unknown");
@@ -1187,7 +1187,7 @@ async fn test_control_topic_leaf_liar() {
         .expect("Failed to spawn node");
 
     // Create a fake attacker identity for the lying peer
-    let attacker_net = NetworkId::from("attacker-peer-12345");
+    let attacker_net = MeshAddress::new("attacker-peer-12345");
 
     // Inject 4 lying heartbeats (spectral needs >= 3 observations to evaluate)
     for _ in 0..4u32 {

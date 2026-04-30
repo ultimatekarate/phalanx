@@ -32,7 +32,7 @@ fn create_mock_fountain_chunks(identity: &PhalanxIdentity, shard_id: ShardId) ->
     });
 
     let envelope =
-        WitnessEnvelope::sign_envelope(evidence, identity, identity.network_id.clone(), None)
+        WitnessEnvelope::sign_envelope(evidence, identity, identity.witness_id.clone(), None)
             .unwrap();
 
     // 2. Serialize it to actual bytes

@@ -26,7 +26,7 @@
 use phalanx_node::config::NodeConfig;
 use phalanx_proto::identity::NodeRole;
 use phalanx_proto::network::NetworkEvent;
-use phalanx_proto::prelude::{MeshTopic, NetworkId};
+use phalanx_proto::prelude::{MeshAddress, MeshTopic};
 use phalanx_sim::physics::PhalanxPhysics;
 use phalanx_sim::SimulationHarness;
 
@@ -59,7 +59,7 @@ async fn s2_oversized_blob_does_not_crash_guardian() {
     harness.advance_time(Duration::from_millis(100)).await;
 
     // An unrelated origin — the attack is the payload, not the provenance.
-    let attacker_net = NetworkId::from("s2-attacker-synthetic");
+    let attacker_net = MeshAddress::new("s2-attacker-synthetic");
 
     // ── Attack 1: 64 MiB + 1 byte of junk ──────────────────────────────
     harness
@@ -135,7 +135,7 @@ async fn s2_exactly_at_limit_does_not_crash_guardian() {
         .inject_event(
             &victim,
             NetworkEvent::DataReceived {
-                origin: NetworkId::from("boundary-origin"),
+                origin: MeshAddress::new("boundary-origin"),
                 topic: MeshTopic::video(),
                 data: at_limit,
             },

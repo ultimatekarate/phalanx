@@ -563,7 +563,7 @@ mod tests {
         let envelope = WitnessEnvelope::sign_envelope(
             Evidence::Video(shard),
             &identity,
-            NetworkId::random(),
+            WitnessId::random(),
             None,
         )
         .expect("WitnessEnvelope construction failed");
@@ -617,7 +617,7 @@ mod tests {
         let envelope = WitnessEnvelope::sign_envelope(
             Evidence::Video(shard),
             &identity,
-            NetworkId::random(),
+            WitnessId::random(),
             None,
         )
         .expect("WitnessEnvelope construction failed");

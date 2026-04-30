@@ -97,7 +97,7 @@ impl crate::wire::WireBound for RecordingResponse {
 mod tests {
     use super::*;
     use crate::evidence::{Evidence, ForensicGap, StorageSequence};
-    use crate::identity::NetworkId;
+    use crate::identity::WitnessId;
     use crate::time::PhalanxTimestamp;
     use crate::types::{ForensicUnit, Verified};
     use crate::wire::WireBound;
@@ -111,7 +111,7 @@ mod tests {
                 detected_at: PhalanxTimestamp::now(),
             }),
             evidence_hash: [0u8; 32],
-            witness_peer_id: NetworkId("test_peer".into()),
+            witness_peer_id: WitnessId::new("test_peer"),
             witness_signature: vec![0u8; 64],
             did: Did::new("did:test:dummy"),
             prev_hash: None,

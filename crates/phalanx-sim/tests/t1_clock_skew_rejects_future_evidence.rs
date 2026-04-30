@@ -73,7 +73,7 @@ fn signed_envelope_at(
     let envelope = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard),
         signer,
-        signer.network_id.clone(),
+        signer.witness_id.clone(),
         None,
     )
     .expect("sign_envelope");

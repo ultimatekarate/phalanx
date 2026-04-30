@@ -21,7 +21,7 @@ use phalanx_node::clock::TrustedClock;
 use phalanx_node::trust::ReputationProjection;
 use phalanx_node::vitals::{Homeostasis, SystemGovernor};
 use phalanx_proto::crypto::{SealedLocator, SymmetricKey};
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId};
+use phalanx_proto::identity::{MeshAddress, PhalanxIdentity, RecordingId};
 use phalanx_proto::prelude::Did;
 use phalanx_proto::retrieval::RecordingRequest;
 use std::sync::Arc;
@@ -105,7 +105,7 @@ async fn test_io_saturation_sends_busy() {
     let (tx, mut storage_rx, mut egress_rx, _trust_rx, handle) = build_retrieval_actor(gov.clone());
 
     tx.send(RetrievalCommand::SecureRetrieval {
-        origin: NetworkId("peer-1".to_string()),
+        origin: MeshAddress::new("peer-1".to_string()),
         request: make_fake_request(),
         channel_id: "ch-1".to_string(),
     })
@@ -148,7 +148,7 @@ async fn test_auth_failure_records_offense() {
     let (tx, _storage_rx, mut egress_rx, mut trust_rx, handle) = build_retrieval_actor(gov);
 
     tx.send(RetrievalCommand::SecureRetrieval {
-        origin: NetworkId("peer-attacker".to_string()),
+        origin: MeshAddress::new("peer-attacker".to_string()),
         request: make_fake_request(),
         channel_id: "ch-auth".to_string(),
     })
@@ -238,7 +238,7 @@ async fn test_storage_closed_sends_not_found() {
 
     retrieval_tx
         .send(RetrievalCommand::SecureRetrieval {
-            origin: NetworkId("peer-1".to_string()),
+            origin: MeshAddress::new("peer-1".to_string()),
             request: make_fake_request(),
             channel_id: "ch-storage".to_string(),
         })
@@ -287,7 +287,7 @@ async fn test_multiple_requests_each_get_response() {
 
     for i in 0..3u32 {
         tx.send(RetrievalCommand::SecureRetrieval {
-            origin: NetworkId(format!("peer-{}", i)),
+            origin: MeshAddress::new(format!("peer-{}", i)),
             request: make_fake_request(),
             channel_id: format!("ch-{}", i),
         })

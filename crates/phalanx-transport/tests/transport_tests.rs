@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use phalanx_proto::identity::NetworkId;
+use phalanx_proto::identity::MeshAddress;
 use phalanx_proto::network::EgressPort;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::topic::MeshTopic;
@@ -28,7 +28,7 @@ use tokio::sync::{mpsc, RwLock};
 // ─── MockAdapter mesh simulation ──────────────────────────────────────────
 
 fn setup_mesh(
-    peer_ids: &[NetworkId],
+    peer_ids: &[MeshAddress],
 ) -> (
     Vec<MockAdapter>,
     Vec<mpsc::Receiver<NetworkEvent>>,
@@ -63,9 +63,9 @@ fn setup_mesh(
 
 #[tokio::test]
 async fn mesh_publish_subscribe_roundtrip() {
-    let peer_a = NetworkId("peer_a".into());
-    let peer_b = NetworkId("peer_b".into());
-    let peer_c = NetworkId("peer_c".into());
+    let peer_a = MeshAddress::new("peer_a");
+    let peer_b = MeshAddress::new("peer_b");
+    let peer_c = MeshAddress::new("peer_c");
 
     let (adapters, mut receivers, _bus) =
         setup_mesh(&[peer_a.clone(), peer_b.clone(), peer_c.clone()]);
@@ -113,12 +113,11 @@ fn peer_mapper_roundtrip() {
     let keypair = Keypair::generate_ed25519();
     let peer_id = PeerId::from(keypair.public());
 
-    let network_id = PeerMapper::to_network_id(&peer_id);
-    let recovered =
-        PeerMapper::from_network_id(&network_id).expect("should convert back to PeerId");
+    let address = PeerMapper::to_mesh_address(&peer_id);
+    let recovered = PeerMapper::from_mesh_address(&address).expect("should convert back to PeerId");
 
     assert_eq!(
         recovered, peer_id,
-        "PeerId → NetworkId → PeerId roundtrip must be lossless"
+        "PeerId → MeshAddress → PeerId roundtrip must be lossless"
     );
 }

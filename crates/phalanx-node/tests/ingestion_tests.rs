@@ -24,7 +24,7 @@ use phalanx_node::config::NodeConfig;
 use phalanx_node::trust::ReputationProjection;
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::evidence::{ChunkType, ShardChunk};
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity};
+use phalanx_proto::identity::{MeshAddress, PhalanxIdentity};
 use phalanx_proto::prelude::{Did, EncodingSymbolId, MeshTopic, PhalanxTimestamp, ShardId};
 use phalanx_proto::trust::TrustLevel;
 use phalanx_proto::types::{PowerState, SystemStress};
@@ -120,7 +120,7 @@ async fn test_valid_video_topic_reaches_storage() {
     let handle = tokio::spawn(actor.run());
 
     tx.send(IngestionCommand::ProcessChunk {
-        peer_id: NetworkId("peer-1".to_string()),
+        peer_id: MeshAddress::new("peer-1".to_string()),
         data,
         topic: video_topic,
     })
@@ -150,7 +150,7 @@ async fn test_valid_audio_topic_reaches_storage() {
     let handle = tokio::spawn(actor.run());
 
     tx.send(IngestionCommand::ProcessChunk {
-        peer_id: NetworkId("peer-1".to_string()),
+        peer_id: MeshAddress::new("peer-1".to_string()),
         data,
         topic: audio_topic,
     })
@@ -178,7 +178,7 @@ async fn test_invalid_topic_dropped() {
     let handle = tokio::spawn(actor.run());
 
     tx.send(IngestionCommand::ProcessChunk {
-        peer_id: NetworkId("peer-1".to_string()),
+        peer_id: MeshAddress::new("peer-1".to_string()),
         data,
         topic: MeshTopic::new("/phalanx/bogus"),
     })
@@ -208,7 +208,7 @@ async fn test_control_topic_rejected_by_ingestion() {
     let handle = tokio::spawn(actor.run());
 
     tx.send(IngestionCommand::ProcessChunk {
-        peer_id: NetworkId("peer-1".to_string()),
+        peer_id: MeshAddress::new("peer-1".to_string()),
         data,
         topic: control_topic,
     })
@@ -238,7 +238,7 @@ async fn test_garbage_bytes_dropped() {
     let handle = tokio::spawn(actor.run());
 
     tx.send(IngestionCommand::ProcessChunk {
-        peer_id: NetworkId("peer-1".to_string()),
+        peer_id: MeshAddress::new("peer-1".to_string()),
         data: vec![0xFF, 0xFE, 0xFD, 0xFC], // Not valid postcard
         topic: video_topic,
     })
@@ -287,7 +287,7 @@ async fn test_stale_shard_dropped() {
     let data = postcard::to_allocvec(std::slice::from_ref(&stale_chunk)).unwrap_or_default();
 
     tx.send(IngestionCommand::ProcessChunk {
-        peer_id: NetworkId("peer-1".to_string()),
+        peer_id: MeshAddress::new("peer-1".to_string()),
         data,
         topic: video_topic,
     })
@@ -348,7 +348,7 @@ async fn test_leaf_power_state_rejects_remote_traffic() {
 
     ingestion_tx
         .send(IngestionCommand::ProcessChunk {
-            peer_id: NetworkId("remote-peer".to_string()), // Not the local peer
+            peer_id: MeshAddress::new("remote-peer".to_string()), // Not the local peer
             data,
             topic: video_topic,
         })
@@ -376,13 +376,13 @@ async fn test_ingress_governor_rejects_under_critical_stress() {
     let mut governor = IngressGovernor::new(10);
 
     // Under Critical stress, capacity = 1
-    let peer_a = NetworkId("peer-a".to_string());
+    let peer_a = MeshAddress::new("peer-a".to_string());
     let result_a =
         governor.try_allocate(peer_a.clone(), TrustLevel::Verified, SystemStress::Critical);
     assert!(result_a.is_ok(), "First peer should get the single slot");
 
     // Second peer should fail
-    let peer_b = NetworkId("peer-b".to_string());
+    let peer_b = MeshAddress::new("peer-b".to_string());
     let result_b = governor.try_allocate(peer_b, TrustLevel::Verified, SystemStress::Critical);
     assert!(
         result_b.is_err(),
@@ -391,7 +391,7 @@ async fn test_ingress_governor_rejects_under_critical_stress() {
 
     // Release first slot, second should now succeed
     governor.release_slot(&peer_a);
-    let peer_c = NetworkId("peer-c".to_string());
+    let peer_c = MeshAddress::new("peer-c".to_string());
     let result_c = governor.try_allocate(peer_c, TrustLevel::Verified, SystemStress::Critical);
     assert!(result_c.is_ok(), "Slot should be available after release");
 }
@@ -402,7 +402,7 @@ async fn test_ingress_governor_nominal_full_capacity() {
     let mut governor = IngressGovernor::new(10);
 
     for i in 0..10u32 {
-        let peer = NetworkId(format!("peer-{}", i));
+        let peer = MeshAddress::new(format!("peer-{}", i));
         let result = governor.try_allocate(peer, TrustLevel::Verified, SystemStress::Nominal);
         assert!(
             result.is_ok(),
@@ -412,7 +412,7 @@ async fn test_ingress_governor_nominal_full_capacity() {
     }
 
     // 11th peer should fail
-    let overflow = NetworkId("peer-overflow".to_string());
+    let overflow = MeshAddress::new("peer-overflow".to_string());
     let result = governor.try_allocate(overflow, TrustLevel::Verified, SystemStress::Nominal);
     assert!(result.is_err(), "Should fail when all slots consumed");
 }
@@ -436,8 +436,8 @@ async fn test_ingress_governor_fair_stress_reduces_capacity() {
 #[tokio::test]
 async fn test_traffic_governor_normal_accepts_all() {
     let gov = TrafficGovernor::new(); // Defaults to Normal
-    let local = NetworkId("local".to_string());
-    let remote = NetworkId("remote".to_string());
+    let local = MeshAddress::new("local".to_string());
+    let remote = MeshAddress::new("remote".to_string());
 
     assert!(
         gov.should_accept(&remote, &local),
@@ -454,8 +454,8 @@ async fn test_traffic_governor_normal_accepts_all() {
 async fn test_traffic_governor_dormant_rejects_remote() {
     let mut gov = TrafficGovernor::new();
     gov.set_state(PowerState::Dormant);
-    let local = NetworkId("local".to_string());
-    let remote = NetworkId("remote".to_string());
+    let local = MeshAddress::new("local".to_string());
+    let remote = MeshAddress::new("remote".to_string());
 
     assert!(
         !gov.should_accept(&remote, &local),
@@ -485,7 +485,7 @@ async fn test_multiple_chunks_from_different_peers() {
         let owner_did = Did::new(&format!("did:key:z6MkOwner{}", i));
         let data = make_chunk(&owner_did, 128);
         tx.send(IngestionCommand::ProcessChunk {
-            peer_id: NetworkId(format!("peer-{}", i)),
+            peer_id: MeshAddress::new(format!("peer-{}", i)),
             data,
             topic: video_topic.clone(),
         })

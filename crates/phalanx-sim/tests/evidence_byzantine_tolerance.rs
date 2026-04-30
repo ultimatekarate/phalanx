@@ -97,7 +97,7 @@ async fn seed_authentic_recording(
     };
     let evidence = Evidence::Video(shard);
     let envelope =
-        WitnessEnvelope::sign_envelope(evidence, &signer, signer.network_id.clone(), None)
+        WitnessEnvelope::sign_envelope(evidence, &signer, signer.witness_id.clone(), None)
             .expect("sign_envelope");
 
     // Sanity: the envelope we produce must itself pass verification,
