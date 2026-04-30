@@ -166,7 +166,7 @@ impl RedbStore {
             // Apply mutations
             for key in keys_to_delete {
                 providers_table.remove(key.as_slice())?;
-                pruned_count += 1;
+                pruned_count = pruned_count.saturating_add(1);
             }
 
             for (key, bytes) in keys_to_update {
