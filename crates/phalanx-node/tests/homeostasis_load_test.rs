@@ -67,7 +67,10 @@ use tokio::time::Instant;
 
 const NODE_COUNT: usize = 3;
 const DISCOVERY_WAIT_SECS: u64 = 10;
-const SAMPLE_DURATION_SECS: u64 = 240;
+// Reduced from 240 → 60 for the bottleneck-attribution arc: the question is
+// drain rate (which stabilizes well within 60s), not RaptorQ recovery margin
+// over a long steady-state window. See `docs/bottleneck-attribution-arc.md`.
+const SAMPLE_DURATION_SECS: u64 = 60;
 const TOPIC: &str = "test/homeostasis";
 const SYMBOL_SIZE: usize = 1200;
 const SYMBOLS_PER_FRAME: usize = 215;
@@ -93,6 +96,7 @@ fn make_config(base_port: u16, node_index: usize) -> MeshTransportConfig {
         adapter: AdapterConfig {
             enable_wake_log: true,
             enable_io_log: true,
+            enable_publish_timing: true,
             poll_cadence: None,
             ..AdapterConfig::default()
         },
@@ -285,6 +289,13 @@ async fn homeostasis_load_test() {
     let bytes_sent_arc = publisher_egress.socket_bytes_sent();
     let bytes_recv_arc = publisher_egress.socket_bytes_received();
     let queue_depth_arc = publisher_egress.outbound_queue_depth();
+    let io_ops_arc = publisher_egress.socket_io_ops();
+    // Per-publish timing — present because `enable_publish_timing: true` was
+    // set on the publisher's AdapterConfig in `make_config`. Drives the E1
+    // dispositive measurement: R = mean_call_us × drain_rate / 1e6.
+    let publish_timing = publisher_egress
+        .publish_timing()
+        .expect("publish_timing must be Some when enable_publish_timing=true");
 
     // Vitals-update task: ticks at the governor's recommended interval
     // (5/15/30/60s depending on PowerState). Spawned on the publisher's
@@ -351,7 +362,11 @@ async fn homeostasis_load_test() {
     // `bytes_recv_delta` is the diagnostic for graylisting: if peers stay
     // connected, gossipsub heartbeats keep this non-zero. If it flatlines
     // along with `bytes_sent_delta`, the publisher has been fully disconnected.
-    println!("t_sec,fps_target,power_state,composite_stress,publish_attempts_delta,publish_errors_delta,bytes_sent_delta,bytes_recv_delta,queue_depth");
+    // `mean_call_us` and `io_ops_per_publish` are the E1 dispositive metrics:
+    // see `docs/bottleneck-attribution-arc.md`. `mean_call_us` is the per-window
+    // mean wall-time of the swarm-task `gossipsub.publish()` call;
+    // `io_ops_per_publish` is the swarm-side socket-op-to-publish-attempt ratio.
+    println!("t_sec,fps_target,power_state,composite_stress,publish_attempts_delta,publish_errors_delta,bytes_sent_delta,bytes_recv_delta,queue_depth,mean_call_us,io_ops_per_publish");
 
     // Per-second sampling loop on the test task.
     let test_start = Instant::now();
@@ -359,6 +374,9 @@ async fn homeostasis_load_test() {
     let mut last_errors = 0u64;
     let mut last_bytes_sent = 0u64;
     let mut last_bytes_recv = 0u64;
+    let mut last_io_ops = 0u64;
+    let mut last_call_nanos_total = 0u64;
+    let mut last_call_count = 0u64;
     // (attempts_delta, errors_delta) per second — used for per-window analysis.
     let mut window_log: Vec<(u64, u64)> = Vec::new();
 
@@ -372,21 +390,43 @@ async fn homeostasis_load_test() {
         let bytes_sent = bytes_sent_arc.load(Ordering::Relaxed);
         let bytes_recv = bytes_recv_arc.load(Ordering::Relaxed);
         let queue = queue_depth_arc.load(Ordering::Relaxed);
+        let io_ops = io_ops_arc.load(Ordering::Relaxed);
+        let call_nanos_total = publish_timing.call_nanos_total.load(Ordering::Relaxed);
+        let call_count = publish_timing.call_count.load(Ordering::Relaxed);
         let attempts_delta = attempts.saturating_sub(last_attempts);
         let errors_delta = errors.saturating_sub(last_errors);
         let bytes_sent_delta = bytes_sent.saturating_sub(last_bytes_sent);
         let bytes_recv_delta = bytes_recv.saturating_sub(last_bytes_recv);
+        let io_ops_delta = io_ops.saturating_sub(last_io_ops);
+        let call_nanos_delta = call_nanos_total.saturating_sub(last_call_nanos_total);
+        let call_count_delta = call_count.saturating_sub(last_call_count);
         last_attempts = attempts;
         last_errors = errors;
         last_bytes_sent = bytes_sent;
         last_bytes_recv = bytes_recv;
+        last_io_ops = io_ops;
+        last_call_nanos_total = call_nanos_total;
+        last_call_count = call_count;
 
         let power = governor.current_power_state();
         let stress = governor.composite_stress();
         let fps = target_fps(Fps::new(BASE_FPS), power);
 
+        // mean_call_us = (call_nanos_delta / call_count_delta) / 1000.
+        // Guarded against div-by-zero in the warmup tick where call_count_delta=0.
+        let mean_call_us = if call_count_delta > 0 {
+            (call_nanos_delta as f64) / (call_count_delta as f64) / 1000.0
+        } else {
+            0.0
+        };
+        let io_ops_per_publish = if call_count_delta > 0 {
+            (io_ops_delta as f64) / (call_count_delta as f64)
+        } else {
+            0.0
+        };
+
         println!(
-            "{t_sec},{},{:?},{:.3},{attempts_delta},{errors_delta},{bytes_sent_delta},{bytes_recv_delta},{queue}",
+            "{t_sec},{},{:?},{:.3},{attempts_delta},{errors_delta},{bytes_sent_delta},{bytes_recv_delta},{queue},{mean_call_us:.2},{io_ops_per_publish:.2}",
             fps.get(),
             power,
             stress
