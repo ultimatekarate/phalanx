@@ -19,7 +19,7 @@ use phalanx_node::config::NodeConfig;
 use phalanx_node::persistence::vault::derive_vault_key;
 use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::SystemGovernor;
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId};
+use phalanx_proto::identity::{MeshAddress, PhalanxIdentity, RecordingId};
 use phalanx_proto::network::{EgressPort, IngressPort, NetworkEvent};
 use phalanx_proto::prelude::{MeshTopic, RecordingResponse};
 use std::sync::Arc;
@@ -50,7 +50,7 @@ impl EgressPort for TestEgress {
     async fn publish(&self, _topic: &MeshTopic, _data: Vec<u8>) -> Result<(), String> {
         Ok(())
     }
-    async fn ban_peer(&self, _peer: &NetworkId) {}
+    async fn ban_peer(&self, _peer: &MeshAddress) {}
     async fn send_response(
         &self,
         _channel_id: &str,
@@ -66,7 +66,7 @@ impl EgressPort for TestEgress {
     }
     async fn send_request(
         &self,
-        _target: &NetworkId,
+        _target: &MeshAddress,
         _request: phalanx_proto::retrieval::RecordingRequest,
     ) -> Result<(), String> {
         Ok(())

@@ -1,4 +1,4 @@
-use crate::identity::NetworkId;
+use crate::identity::MeshAddress;
 use crate::identity::RecordingId;
 use crate::prelude::ShardChunk;
 use crate::types::{ByteCapacity, UnitInterval, VitalityRate};
@@ -44,44 +44,44 @@ pub enum DiscoverySource {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SimEvent {
     ChunkIngested {
-        origin: NetworkId,
+        origin: MeshAddress,
         chunk: ShardChunk,
     },
     Heartbeat {
-        origin: NetworkId,
+        origin: MeshAddress,
         uptime: u64,
         health: VitalityRate,
     },
     OffloadComplete {
-        origin: NetworkId,
-        target: NetworkId,
+        origin: MeshAddress,
+        target: MeshAddress,
         size: ByteCapacity,
     },
     PeerDiscovered {
-        peer: NetworkId,
+        peer: MeshAddress,
         source: DiscoverySource,
         role: crate::identity::NodeRole,
     }, // Note: Role included for dashboard telemetry
     ShardProcessed {
-        peer_id: NetworkId,
+        peer_id: MeshAddress,
         byte_size: ByteCapacity,
     },
     CrucibleFinalized {
         recording_id: RecordingId,
     },
     AttackAttemptBlocked {
-        attacker: NetworkId,
-        target: NetworkId,
+        attacker: MeshAddress,
+        target: MeshAddress,
         reason: String,
     },
     SystemStressUpdate(UnitInterval),
     Shutdown,
     ChaosUpdate {
-        target: NetworkId,
+        target: MeshAddress,
         mode: ChaosMode,
     },
     ShardPublished {
-        origin: NetworkId,
+        origin: MeshAddress,
         chunk: ShardChunk,
     },
 }
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn sim_event_heartbeat_preserves_origin_and_uptime() {
         use crate::types::VitalityRate;
-        let origin = NetworkId("node-alpha".into());
+        let origin = MeshAddress::new("node-alpha");
         let original = SimEvent::Heartbeat {
             origin: origin.clone(),
             uptime: 9_999_u64,

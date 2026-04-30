@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use phalanx_proto::identity::NetworkId;
+use phalanx_proto::identity::MeshAddress;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::retrieval::{RecordingRequest, RecordingResponse};
 use phalanx_proto::telemetry::DiscoverySource;
@@ -122,7 +122,11 @@ async fn route_publish(connections: &ConnectionMap, topic: MeshTopic, data: Vec<
 }
 
 /// Route a request to a specific peer.
-async fn route_request(connections: &ConnectionMap, target: NetworkId, request: RecordingRequest) {
+async fn route_request(
+    connections: &ConnectionMap,
+    target: MeshAddress,
+    request: RecordingRequest,
+) {
     let conns = connections.read().await;
     if let Some(sender) = conns.get(&target) {
         let msg = QuicWireMessage::Request {
@@ -154,7 +158,7 @@ async fn route_response(
     // channel_id format: "{network_id}:{seq}" — extract network_id to route.
     let target_id = extract_network_id_from_channel(&channel_id);
     let conns = connections.read().await;
-    if let Some(sender) = conns.get(&NetworkId(target_id.clone())) {
+    if let Some(sender) = conns.get(&MeshAddress::new(target_id.clone())) {
         let msg = QuicWireMessage::Response {
             channel_id,
             response,
@@ -208,9 +212,9 @@ fn subnet_bucket_from_addr(addr: SocketAddr) -> SubnetBucket {
 /// Waits for the first bidirectional stream, reads an Identify message,
 /// and validates timestamp freshness (P5 FIX: prevent replay of captured frames).
 ///
-/// Returns the peer's `NetworkId` on success, or `None` if the handshake fails.
+/// Returns the peer's `MeshAddress` on success, or `None` if the handshake fails.
 #[allow(clippy::cast_possible_truncation)] // Epoch millis fits in u64 for centuries
-async fn perform_identity_handshake(connection: &mut s2n_quic::Connection) -> Option<NetworkId> {
+async fn perform_identity_handshake(connection: &mut s2n_quic::Connection) -> Option<MeshAddress> {
     // Phase 1: Identity handshake — first stream must carry an Identify message.
     // P5 FIX: Verify timestamp freshness to prevent replay of captured Identify frames.
     let stream_result = connection.accept_bidirectional_stream().await;
@@ -266,7 +270,7 @@ async fn perform_identity_handshake(connection: &mut s2n_quic::Connection) -> Op
                 );
                 return None;
             }
-            Some(NetworkId(network_id))
+            Some(MeshAddress::new(network_id))
         }
         Ok(_other) => {
             tracing::warn!(
@@ -425,7 +429,7 @@ async fn server_connection_handler(
 async fn handle_incoming_message(
     stream: &mut s2n_quic::stream::BidirectionalStream,
     event_tx: &mpsc::Sender<NetworkEvent>,
-    origin: &NetworkId,
+    origin: &MeshAddress,
 ) {
     match read_frame(stream).await {
         Ok(QuicWireMessage::Publish { topic, data }) => {

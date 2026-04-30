@@ -19,7 +19,7 @@ use phalanx_forensics::Homeostasis;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::evidence::{ChunkType, ShardChunk};
-use phalanx_proto::identity::{NetworkId, NodeRole};
+use phalanx_proto::identity::{MeshAddress, NodeRole};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::{Did, EncodingSymbolId, PhalanxTimestamp, ShardId};
 use phalanx_proto::types::PowerState;
@@ -51,7 +51,7 @@ fn make_test_chunk(owner_did: &Did, payload_size: usize) -> Vec<u8> {
 async fn inject_chunk(
     harness: &phalanx_sim::SimulationHarness,
     target_did: &Did,
-    origin_network_id: &NetworkId,
+    origin_network_id: &MeshAddress,
     config: &NodeConfig,
     payload_size: usize,
 ) {

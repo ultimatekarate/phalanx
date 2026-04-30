@@ -15,7 +15,7 @@ use phalanx_node::actors::egress::{EgressActor, EgressCommand};
 use phalanx_node::actors::shutdown::ShutdownSignal;
 use phalanx_node::clock::TrustedClock;
 use phalanx_node::vitals::SystemGovernor;
-use phalanx_proto::identity::{NetworkId, RecordingId};
+use phalanx_proto::identity::{MeshAddress, RecordingId};
 use phalanx_proto::network::EgressPort;
 use phalanx_proto::prelude::{MeshTopic, PhalanxTimestamp, RecordingResponse};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,7 +34,7 @@ impl EgressPort for SuccessEgress {
     async fn publish(&self, _: &MeshTopic, _: Vec<u8>) -> Result<(), String> {
         Ok(())
     }
-    async fn ban_peer(&self, _: &NetworkId) {}
+    async fn ban_peer(&self, _: &MeshAddress) {}
     async fn send_response(&self, _: &str, _: RecordingResponse) -> Result<(), String> {
         Ok(())
     }
@@ -46,7 +46,7 @@ impl EgressPort for SuccessEgress {
     }
     async fn send_request(
         &self,
-        _: &NetworkId,
+        _: &MeshAddress,
         _: phalanx_proto::retrieval::RecordingRequest,
     ) -> Result<(), String> {
         Ok(())
@@ -62,7 +62,7 @@ impl EgressPort for FailingEgress {
     async fn publish(&self, _: &MeshTopic, _: Vec<u8>) -> Result<(), String> {
         Err("transport down".to_string())
     }
-    async fn ban_peer(&self, _: &NetworkId) {}
+    async fn ban_peer(&self, _: &MeshAddress) {}
     async fn send_response(&self, _: &str, _: RecordingResponse) -> Result<(), String> {
         Err("transport down".to_string())
     }
@@ -74,7 +74,7 @@ impl EgressPort for FailingEgress {
     }
     async fn send_request(
         &self,
-        _: &NetworkId,
+        _: &MeshAddress,
         _: phalanx_proto::retrieval::RecordingRequest,
     ) -> Result<(), String> {
         Err("transport down".to_string())
@@ -92,7 +92,7 @@ impl EgressPort for CountingEgress {
     async fn publish(&self, _: &MeshTopic, _: Vec<u8>) -> Result<(), String> {
         Ok(())
     }
-    async fn ban_peer(&self, _: &NetworkId) {}
+    async fn ban_peer(&self, _: &MeshAddress) {}
     async fn send_response(&self, _: &str, _: RecordingResponse) -> Result<(), String> {
         self.dispatch_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -105,7 +105,7 @@ impl EgressPort for CountingEgress {
     }
     async fn send_request(
         &self,
-        _: &NetworkId,
+        _: &MeshAddress,
         _: phalanx_proto::retrieval::RecordingRequest,
     ) -> Result<(), String> {
         Ok(())
@@ -222,7 +222,7 @@ async fn test_dht_announce_dedup() {
         async fn publish(&self, _: &MeshTopic, _: Vec<u8>) -> Result<(), String> {
             Ok(())
         }
-        async fn ban_peer(&self, _: &NetworkId) {}
+        async fn ban_peer(&self, _: &MeshAddress) {}
         async fn send_response(&self, _: &str, _: RecordingResponse) -> Result<(), String> {
             Ok(())
         }
@@ -235,7 +235,7 @@ async fn test_dht_announce_dedup() {
         }
         async fn send_request(
             &self,
-            _: &NetworkId,
+            _: &MeshAddress,
             _: phalanx_proto::retrieval::RecordingRequest,
         ) -> Result<(), String> {
             Ok(())

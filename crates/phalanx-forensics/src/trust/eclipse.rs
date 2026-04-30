@@ -9,7 +9,7 @@ use phalanx_proto::prelude::*;
 use std::collections::{HashMap, VecDeque};
 
 /// Lightweight fingerprint of the peer set at a point in time.
-/// ~40 bytes per snapshot instead of ~7KB for a full HashSet<NetworkId>.
+/// ~40 bytes per snapshot instead of ~7KB for a full HashSet<MeshAddress>.
 pub struct MeshFingerprint {
     /// Hash of sorted peer NetworkIds — detects set changes without storing the set.
     pub peer_set_hash: u64,
@@ -102,7 +102,7 @@ impl EclipseProbe {
 
 /// Hash a sorted set of peer IDs into a u64 for fingerprinting.
 /// Deterministic — same set always produces the same hash.
-pub fn hash_peer_set(peers: &mut Vec<&NetworkId>) -> u64 {
+pub fn hash_peer_set(peers: &mut Vec<&MeshAddress>) -> u64 {
     use std::hash::{Hash, Hasher};
     peers.sort_by_key(|a| a.to_string());
     let mut hasher = std::collections::hash_map::DefaultHasher::new();

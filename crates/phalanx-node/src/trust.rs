@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use phalanx_proto::prelude::NetworkId;
+use phalanx_proto::prelude::MeshAddress;
 use std::sync::{Arc, RwLock as StdRwLock};
 
 /// Community trust data: pairs of (baseline_trust, member_dids) for each community.
@@ -26,8 +26,8 @@ pub struct PeerReputationInfo {
 
 #[derive(Clone, Default, Debug)]
 pub struct ReputationProjection {
-    scores: Arc<StdRwLock<HashMap<NetworkId, PeerReputationInfo>>>,
-    did_to_network_id: Arc<StdRwLock<HashMap<Did, NetworkId>>>,
+    scores: Arc<StdRwLock<HashMap<MeshAddress, PeerReputationInfo>>>,
+    did_to_mesh_address: Arc<StdRwLock<HashMap<Did, MeshAddress>>>,
     /// Community data for effective_trust calculation.
     communities: Arc<StdRwLock<CommunityTrustData>>,
 }
@@ -48,8 +48,8 @@ pub trait TrustOracle: Send + Sync {
 impl TrustOracle for ReputationProjection {
     fn is_blacklisted_by_did(&self, did: &Did) -> bool {
         // Poisoned lock → treat as blacklisted (fail-secure).
-        let Ok(did_map) = self.did_to_network_id.read() else {
-            tracing::error!("did_to_network_id lock poisoned — failing secure");
+        let Ok(did_map) = self.did_to_mesh_address.read() else {
+            tracing::error!("did_to_mesh_address lock poisoned — failing secure");
             return true;
         };
         if let Some(network_id) = did_map.get(did) {
@@ -66,8 +66,8 @@ impl TrustOracle for ReputationProjection {
 
     fn check_trust_by_did(&self, did: &Did) -> TrustLevel {
         // Poisoned lock → Blocked (fail-secure).
-        let Ok(did_map) = self.did_to_network_id.read() else {
-            tracing::error!("did_to_network_id lock poisoned — failing secure");
+        let Ok(did_map) = self.did_to_mesh_address.read() else {
+            tracing::error!("did_to_mesh_address lock poisoned — failing secure");
             return TrustLevel::Blocked;
         };
         if let Some(network_id) = did_map.get(did) {
@@ -119,7 +119,7 @@ impl ReputationProjection {
 }
 
 impl PeerEvaluator for ReputationProjection {
-    fn evaluate_reputation(&self, peer_id: &NetworkId) -> f32 {
+    fn evaluate_reputation(&self, peer_id: &MeshAddress) -> f32 {
         // Poisoned lock → minimum trust score (fail-secure).
         let Ok(scores) = self.scores.read() else {
             tracing::error!("scores lock poisoned — failing secure");
@@ -303,7 +303,7 @@ impl TrustRegistry {
     }
 
     fn sync_projection_for(projection: &ReputationProjection, did: &Did, record: &PeerRecord) {
-        let network_id = did.to_network_id();
+        let network_id = did.to_mesh_address();
 
         let score_normalized = if record.reputation.is_blacklisted {
             0.0
@@ -323,10 +323,10 @@ impl TrustRegistry {
             tracing::error!("scores lock poisoned — cannot sync projection");
         }
 
-        if let Ok(mut did_map) = projection.did_to_network_id.write() {
+        if let Ok(mut did_map) = projection.did_to_mesh_address.write() {
             did_map.insert(did.clone(), network_id);
         } else {
-            tracing::error!("did_to_network_id lock poisoned — cannot sync projection");
+            tracing::error!("did_to_mesh_address lock poisoned — cannot sync projection");
         }
     }
 
@@ -591,8 +591,8 @@ impl TrustRegistry {
 
     /// Checks if a network-level ID is blacklisted by resolving it to a DID.
     #[must_use]
-    pub fn is_network_id_blacklisted(&self, network_id: &NetworkId) -> bool {
-        let target_did = Did::from_network_id(network_id);
+    pub fn is_network_id_blacklisted(&self, network_id: &MeshAddress) -> bool {
+        let target_did = Did::from_mesh_address(network_id);
         self.is_blacklisted(&target_did)
     }
 
@@ -631,8 +631,8 @@ impl TrustRegistry {
 }
 
 impl PeerEvaluator for TrustRegistry {
-    fn evaluate_reputation(&self, peer_id: &NetworkId) -> f32 {
-        let target_did = Did::from_network_id(peer_id);
+    fn evaluate_reputation(&self, peer_id: &MeshAddress) -> f32 {
+        let target_did = Did::from_mesh_address(peer_id);
 
         let record = match self.peers.get(&target_did) {
             Some(r) => r,
@@ -788,7 +788,7 @@ mod tests {
         // trust), not 1.0. Without this, a Sybil attacker gets full trust on
         // first contact and can use it to pre-empt verified peers.
         let projection = ReputationProjection::default();
-        let stranger = NetworkId::from("fresh-sybil".to_string());
+        let stranger = MeshAddress::new("fresh-sybil".to_string());
         let score = projection.evaluate_reputation(&stranger);
         assert!(
             (score - 0.1).abs() < f32::EPSILON,
@@ -803,11 +803,11 @@ mod tests {
         // community-elevation path would whitelist banned members.
         let projection = ReputationProjection::default();
         let banned_did = Did::from("did:phx:banned");
-        let banned_nid = NetworkId::from("nid-banned".to_string());
+        let banned_nid = MeshAddress::new("nid-banned".to_string());
 
         // Seed: banned DID maps to a blocked PeerReputationInfo.
         {
-            let mut did_map = projection.did_to_network_id.write().unwrap();
+            let mut did_map = projection.did_to_mesh_address.write().unwrap();
             did_map.insert(banned_did.clone(), banned_nid.clone());
         }
         {

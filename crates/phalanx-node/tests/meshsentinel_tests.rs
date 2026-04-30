@@ -20,7 +20,7 @@ use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::WitnessEnvelope;
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId, ShardId};
+use phalanx_proto::identity::{MeshAddress, PhalanxIdentity, RecordingId, ShardId};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::RecordingResponse;
 use phalanx_proto::storage::GuardianError;
@@ -131,7 +131,7 @@ async fn test_ingress_valid_chunk_forwarded_to_storage() {
 
     ingress_tx
         .send(NetworkEvent::DataReceived {
-            origin: NetworkId::random(),
+            origin: MeshAddress::random(),
             topic,
             data: chunk_bytes,
         })
@@ -162,7 +162,7 @@ async fn test_ingress_rejected_in_leaf_mode() {
 
     ingress_tx
         .send(NetworkEvent::DataReceived {
-            origin: NetworkId::from("foreign-peer"),
+            origin: MeshAddress::new("foreign-peer"),
             topic,
             data: chunk_bytes,
         })
@@ -213,7 +213,7 @@ async fn test_pure_vault_retrieval_contract() {
 async fn test_sentinel_egress_promotion_logic() {
     // --- Setup Smart Guard Context ---
     let (my_id, _) = PhalanxIdentity::generate().unwrap();
-    let local_net_id = my_id.network_id;
+    let local_net_id = my_id.witness_id;
     let stress = SystemStress::Nominal;
     let trust = TrustLevel::Ally;
 
@@ -252,7 +252,7 @@ async fn test_sentinel_egress_promotion_logic() {
 #[tokio::test]
 async fn test_sentinel_blocks_untrusted_egress() {
     let (my_id, _) = PhalanxIdentity::generate().unwrap();
-    let local_net_id = my_id.network_id;
+    let local_net_id = my_id.witness_id;
 
     // SOCIAL GATE: Blocked peer
     let trust = TrustLevel::Blocked;

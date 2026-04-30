@@ -4,7 +4,7 @@
 // Holds the in-memory mesh topology, virtual transport channels between nodes,
 // and the chaos injection state for each link.
 
-use phalanx_proto::identity::NetworkId;
+use phalanx_proto::identity::MeshAddress;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::{Did, MeshTopic};
 use phalanx_proto::telemetry::ChaosMode;
@@ -22,9 +22,9 @@ pub struct SimulationWorld {
     /// Used by `route_publish()` to forward data to all other nodes.
     pub ingress_routes: HashMap<Did, mpsc::Sender<NetworkEvent>>,
 
-    /// Maps each node's DID to its forensic NetworkId.
+    /// Maps each node's DID to its forensic MeshAddress.
     /// Used by `resolve_did()` and for constructing `DataReceived` events.
-    pub identity_map: HashMap<Did, NetworkId>,
+    pub identity_map: HashMap<Did, MeshAddress>,
 
     /// Per-node chaos mode. Defaults to `ChaosMode::Stable` when absent.
     /// Checked during `route_publish()` to apply packet loss, byzantine failure, etc.
@@ -46,15 +46,15 @@ impl SimulationWorld {
     pub fn register_node(
         &mut self,
         did: Did,
-        network_id: NetworkId,
+        network_id: MeshAddress,
         ingress_tx: mpsc::Sender<NetworkEvent>,
     ) {
         self.identity_map.insert(did.clone(), network_id);
         self.ingress_routes.insert(did, ingress_tx);
     }
 
-    /// Look up a node's NetworkId by its DID.
-    pub fn lookup_network_id(&self, did: &Did) -> Option<NetworkId> {
+    /// Look up a node's MeshAddress by its DID.
+    pub fn lookup_network_id(&self, did: &Did) -> Option<MeshAddress> {
         self.identity_map.get(did).cloned()
     }
 
@@ -71,7 +71,7 @@ impl SimulationWorld {
     pub async fn route_publish(
         &self,
         source_did: &Did,
-        source_network_id: NetworkId,
+        source_network_id: MeshAddress,
         topic: MeshTopic,
         data: Vec<u8>,
     ) -> Result<(), String> {

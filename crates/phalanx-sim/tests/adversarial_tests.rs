@@ -19,7 +19,7 @@ use phalanx_forensics::bloom::RotatingBloomFilter;
 use phalanx_forensics::topology_gate::{AnchorEligible, TopologyGate, TransportBalance};
 use phalanx_node::config::NodeConfig;
 use phalanx_proto::evidence::{ChunkType, ShardChunk};
-use phalanx_proto::identity::{NetworkId, NodeRole};
+use phalanx_proto::identity::{MeshAddress, NodeRole};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::{Did, EncodingSymbolId, PhalanxTimestamp, ShardId};
 use phalanx_proto::topology::{SubnetBucket, SubnetQuota, TransportClass};
@@ -285,7 +285,7 @@ fn eclipse_attack_limited_by_subnet_diversity() {
 
     // Attacker tries to fill all 50 slots from one subnet
     for i in 0..30u8 {
-        let peer = NetworkId::from(format!("attacker-{i}"));
+        let peer = MeshAddress::new(format!("attacker-{i}"));
         if gate
             .try_admit(
                 peer,
@@ -310,7 +310,7 @@ fn eclipse_attack_limited_by_subnet_diversity() {
     // Legitimate peers from diverse subnets should still have room
     let mut legitimate_admitted = 0usize;
     for i in 0..20u8 {
-        let peer = NetworkId::from(format!("legit-{i}"));
+        let peer = MeshAddress::new(format!("legit-{i}"));
         let bucket = SubnetBucket::test_bucket(100 + i);
         if gate
             .try_admit(
@@ -351,7 +351,7 @@ fn anchored_attacker_does_not_block_legitimate_admissions() {
     // Attacker fills 8 slots (subnet quota) and anchors them
     let attacker_subnet = SubnetBucket::test_bucket(7);
     for i in 0..8u8 {
-        let peer = NetworkId::from(format!("attacker-{i}"));
+        let peer = MeshAddress::new(format!("attacker-{i}"));
         gate.try_admit(
             peer.clone(),
             TrustLevel::Ignored,
@@ -367,7 +367,7 @@ fn anchored_attacker_does_not_block_legitimate_admissions() {
     // Legitimate peers from diverse subnets should fill remaining Internet slots
     let mut admitted = 0usize;
     for i in 0..20u8 {
-        let peer = NetworkId::from(format!("legit-{i}"));
+        let peer = MeshAddress::new(format!("legit-{i}"));
         let bucket = SubnetBucket::test_bucket(50 + i);
         if gate
             .try_admit(
@@ -584,7 +584,7 @@ async fn rapid_identity_churn_does_not_exhaust_resources() {
 
     // Inject chunks from 50 distinct "peers" (different NetworkIds)
     for i in 0..50u32 {
-        let fake_peer = NetworkId::from(format!("ephemeral-peer-{i}"));
+        let fake_peer = MeshAddress::new(format!("ephemeral-peer-{i}"));
         let chunk = make_test_chunk(&victim, 128);
         let _ = harness
             .inject_event(
@@ -674,7 +674,7 @@ async fn coordinated_kill_attempt() {
     let mut sybil_nets = Vec::new();
     for subnet in 0..10u8 {
         for i in 0..30u32 {
-            let sybil_peer = NetworkId::from(format!("sybil-s{subnet}-{i}"));
+            let sybil_peer = MeshAddress::new(format!("sybil-s{subnet}-{i}"));
             let _ = harness
                 .inject_event(
                     &victim,
@@ -692,7 +692,7 @@ async fn coordinated_kill_attempt() {
 
     // 1b. Pivot: 500 Sybil peers from fully diverse subnets
     for i in 0..500u32 {
-        let sybil_peer = NetworkId::from(format!("sybil-diverse-{i}"));
+        let sybil_peer = MeshAddress::new(format!("sybil-diverse-{i}"));
         let subnet_a = ((i >> 8) & 0xFF) as u8;
         let subnet_b = (i & 0xFF) as u8;
         let _ = harness
@@ -711,7 +711,7 @@ async fn coordinated_kill_attempt() {
 
     // 1c. Simultaneous LocalMesh eclipse — attack both transport classes
     for i in 0..100u32 {
-        let sybil_peer = NetworkId::from(format!("sybil-local-{i}"));
+        let sybil_peer = MeshAddress::new(format!("sybil-local-{i}"));
         let _ = harness
             .inject_event(
                 &victim,
@@ -757,7 +757,7 @@ async fn coordinated_kill_attempt() {
     // Flood oversized garbage from Sybil peers — hammer bandwidth integral
     // 100 peers x 4 MiB each = 400 MiB of raw bandwidth pressure
     for i in 0..100u32 {
-        let attacker = NetworkId::from(format!("sybil-diverse-{i}"));
+        let attacker = MeshAddress::new(format!("sybil-diverse-{i}"));
         let garbage = vec![0xDE; 4 * 1024 * 1024];
         let _ = harness
             .inject_event(
@@ -773,7 +773,7 @@ async fn coordinated_kill_attempt() {
 
     // Don't let it breathe — hit it again immediately with no time advance
     for i in 100..200u32 {
-        let attacker = NetworkId::from(format!("sybil-diverse-{i}"));
+        let attacker = MeshAddress::new(format!("sybil-diverse-{i}"));
         let garbage = vec![0xAB; 2 * 1024 * 1024];
         let _ = harness
             .inject_event(
@@ -816,7 +816,7 @@ async fn coordinated_kill_attempt() {
         let impostor_did = Did::from(format!("did:key:z_impostor_{impostor}"));
         for i in 0..5u32 {
             let idx = impostor * 5 + i;
-            let attacker = NetworkId::from(format!("sybil-diverse-{idx}"));
+            let attacker = MeshAddress::new(format!("sybil-diverse-{idx}"));
             let spoofed = make_spoofed_chunk(&impostor_did, 1024);
             let _ = harness
                 .inject_event(
@@ -833,7 +833,7 @@ async fn coordinated_kill_attempt() {
 
     // 3b. Reflection attack: 50 chunks claiming to be from the VICTIM's own DID
     for i in 50..100u32 {
-        let attacker = NetworkId::from(format!("sybil-diverse-{i}"));
+        let attacker = MeshAddress::new(format!("sybil-diverse-{i}"));
         let reflected = make_spoofed_chunk(&victim, 2048);
         let _ = harness
             .inject_event(
@@ -852,7 +852,7 @@ async fn coordinated_kill_attempt() {
         let replay_payload = make_test_chunk(&victim, 256 + variant as usize);
         for rep in 0..20u32 {
             let idx = 100 + variant * 20 + rep;
-            let attacker = NetworkId::from(format!("sybil-diverse-{}", idx % 500));
+            let attacker = MeshAddress::new(format!("sybil-diverse-{}", idx % 500));
             let _ = harness
                 .inject_event(
                     &victim,
@@ -868,7 +868,7 @@ async fn coordinated_kill_attempt() {
 
     // 3d. Malformed garbage — not even valid postcard, just random bytes
     for i in 0..100u32 {
-        let attacker = NetworkId::from(format!("sybil-diverse-{}", i % 500));
+        let attacker = MeshAddress::new(format!("sybil-diverse-{}", i % 500));
         let mut malformed = vec![0u8; 4096];
         // Fill with pseudo-random pattern to defeat any accidental structure
         for (j, byte) in malformed.iter_mut().enumerate() {
@@ -947,7 +947,7 @@ async fn coordinated_kill_attempt() {
         // Simultaneous data flood — 100 chunks per tick at 256 KB each
         for j in 0..100u32 {
             let idx = tick * 100 + j;
-            let attacker = NetworkId::from(format!("sybil-diverse-{}", idx % 500));
+            let attacker = MeshAddress::new(format!("sybil-diverse-{}", idx % 500));
             let _ = harness
                 .inject_event(
                     &victim,

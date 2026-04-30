@@ -19,7 +19,7 @@ pub trait ReputationGate {
 
 /// Boundary: Used by Kademlia to rank peers during routing.
 pub trait PeerEvaluator: Send + Sync {
-    fn evaluate_reputation(&self, peer_id: &NetworkId) -> f32;
+    fn evaluate_reputation(&self, peer_id: &MeshAddress) -> f32;
 }
 
 // ── Reciprocity Floor ──────────────────────────────────────────────────

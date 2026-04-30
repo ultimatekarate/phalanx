@@ -17,7 +17,7 @@ use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
 use phalanx_proto::evidence::{
     EnvelopeState, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
 };
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId, ShardId};
+use phalanx_proto::identity::{PhalanxIdentity, RecordingId, ShardId, WitnessId};
 use phalanx_proto::time::{SystemClock, TrustedClock};
 use phalanx_proto::types::Fps;
 use std::sync::Arc;
@@ -51,7 +51,7 @@ async fn test_out_of_sequence_salvage_on_node_death() {
     let env_1 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_1),
         &identity,
-        NetworkId::random(),
+        WitnessId::random(),
         None,
     )
     .unwrap();
@@ -62,7 +62,7 @@ async fn test_out_of_sequence_salvage_on_node_death() {
     let env_2 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_2),
         &identity,
-        NetworkId::random(),
+        WitnessId::random(),
         Some(hash_1),
     )
     .unwrap();
@@ -92,7 +92,7 @@ async fn test_stronghold_crash_recovery() {
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
     let vault_key = derive_vault_key(&identity, &[0u8; 32]);
-    let peer_id = NetworkId::random();
+    let peer_id = WitnessId::random();
     let seq = StorageSequence(101);
     let vid = RecordingId::new("crash_recording");
 

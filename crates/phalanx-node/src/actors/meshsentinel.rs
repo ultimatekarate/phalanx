@@ -109,7 +109,7 @@ pub struct MeshSentinel<I: IngressPort> {
 
     // DHT: Provider discovery forwarding to the active PlaybackCoordinator.
     // Replaced with a fresh channel on each spawn_playback() call.
-    providers_tx: mpsc::Sender<(RecordingId, Vec<NetworkId>)>,
+    providers_tx: mpsc::Sender<(RecordingId, Vec<MeshAddress>)>,
 
     // Shield Wall: Trust channel for dispatching spectral anomaly offenses.
     pub trust_tx: mpsc::Sender<TrustCommand>,
@@ -144,10 +144,10 @@ pub struct MeshSentinel<I: IngressPort> {
     pub clock: Arc<TrustedClock>,
 
     // ── Silent Canary ──────────────────────────────────────────────────
-    /// Lightweight peer identity cache: NetworkId → Did.
+    /// Lightweight peer identity cache: MeshAddress → Did.
     /// Populated from WitnessEnvelope signatures during shard ingestion.
     /// MUST NEVER be persisted to disk — memory-only, dies with the process.
-    peer_did_cache: std::collections::HashMap<NetworkId, Did>,
+    peer_did_cache: std::collections::HashMap<MeshAddress, Did>,
     /// Community-scoped dead man's switch. Monitors mesh presence of
     /// community peers during active recordings.
     pub canary: CanaryMonitor,
@@ -158,14 +158,14 @@ pub struct MeshSentinel<I: IngressPort> {
     // ── Revocation Replay ─────────────────────────────────────────────
     /// Peers we have already replayed revocation tokens to in this session.
     /// Prevents redundant gossipsub floods on peer reconnect.
-    revocation_synced_peers: std::collections::HashSet<NetworkId>,
+    revocation_synced_peers: std::collections::HashSet<MeshAddress>,
 
     // ── Reciprocity Floor ────────────────────────────────────────────
     /// First-seen timestamp (epoch seconds) per peer. Used to compute
     /// connection age for the reciprocity grace period.
     /// Never cleared on disconnect (prevents grace-period-reset attacks).
     /// Capped at 10,000 entries; oldest evicted on overflow.
-    peer_first_seen: std::collections::HashMap<NetworkId, u64>,
+    peer_first_seen: std::collections::HashMap<MeshAddress, u64>,
 }
 
 impl<I: IngressPort> MeshSentinel<I> {
@@ -180,7 +180,8 @@ impl<I: IngressPort> MeshSentinel<I> {
         let shutdown = ShutdownSignal::new();
 
         let local_did = deps.identity.did.clone();
-        let local_network_id = deps.identity.to_network_id();
+        let _local_network_id = deps.identity.to_mesh_address();
+        let local_witness_id = deps.identity.witness_id.clone();
         let reassembler = Reassembler::new();
         let raw_clock = TrustedClock::new();
         let clock_handle = Arc::new(raw_clock);
@@ -313,7 +314,7 @@ impl<I: IngressPort> MeshSentinel<I> {
         let media_actor = MediaEgressActor::new(
             deps.egress.clone(),
             arc_identity.clone(),
-            local_network_id.clone(),
+            local_witness_id.clone(),
             MediaEgressConfig {
                 video_rx,
                 audio_rx,
@@ -641,7 +642,7 @@ impl<I: IngressPort> MeshSentinel<I> {
     /// Handles incoming data: oversized message rejection, control message
     /// spectral analysis, and bandwidth-gated ingestion forwarding.
     #[allow(clippy::arithmetic_side_effects)] // Size comparisons and memory pressure recording.
-    async fn handle_data_received(&mut self, origin: NetworkId, topic: MeshTopic, data: Vec<u8>) {
+    async fn handle_data_received(&mut self, origin: MeshAddress, topic: MeshTopic, data: Vec<u8>) {
         // P5 FIX: Reject oversized messages before any processing.
         if data.len() > self.config.network.max_chunk_size_bytes * 2 {
             tracing::warn!(
@@ -686,7 +687,7 @@ impl<I: IngressPort> MeshSentinel<I> {
     }
 
     #[allow(clippy::arithmetic_side_effects)] // Memory pressure arithmetic.
-    fn handle_data_chunk(&mut self, origin: NetworkId, topic: MeshTopic, data: Vec<u8>) {
+    fn handle_data_chunk(&mut self, origin: MeshAddress, topic: MeshTopic, data: Vec<u8>) {
         // Shield Wall: record data volume for spectral observation
         self.health_tracker
             .spectral
@@ -715,7 +716,7 @@ impl<I: IngressPort> MeshSentinel<I> {
     }
 
     /// Cryptographic Forgetting: process an inbound revocation token from gossipsub.
-    async fn handle_revocation(&mut self, origin: NetworkId, data: &[u8]) {
+    async fn handle_revocation(&mut self, origin: MeshAddress, data: &[u8]) {
         // 1. Deserialize
         let token: phalanx_proto::revocation::RevocationToken =
             match phalanx_forensics::gate::unmarshal_checked(data, "revocation_token") {
@@ -781,7 +782,7 @@ impl<I: IngressPort> MeshSentinel<I> {
     #[allow(clippy::arithmetic_side_effects)] // Rate limit counter increment.
     async fn handle_peer_discovered(
         &mut self,
-        peer: NetworkId,
+        peer: MeshAddress,
         source: DiscoverySource,
         bucket: SubnetBucket,
         transport: TransportClass,
@@ -935,9 +936,9 @@ impl<I: IngressPort> MeshSentinel<I> {
     fn handle_providers_discovered(
         &mut self,
         recording_id: RecordingId,
-        providers: Vec<NetworkId>,
+        providers: Vec<MeshAddress>,
     ) {
-        let local_id = self.identity.to_network_id();
+        let local_id = self.identity.to_mesh_address();
         let remote_providers: Vec<_> = providers.into_iter().filter(|p| *p != local_id).collect();
         if !remote_providers.is_empty() {
             tracing::info!(
@@ -967,7 +968,11 @@ impl<I: IngressPort> MeshSentinel<I> {
     /// bounded mpsc to storage: if storage cannot drain, MeshSentinel
     /// blocks on the mpsc — not on disk — and the queue depth stays
     /// bounded by the channel capacity rather than by per-write latency.
-    async fn handle_shard_response(&mut self, origin: NetworkId, envelopes: Vec<WitnessEnvelope>) {
+    async fn handle_shard_response(
+        &mut self,
+        origin: MeshAddress,
+        envelopes: Vec<WitnessEnvelope>,
+    ) {
         let count = envelopes.len();
         tracing::info!(
             peer = %origin,
@@ -1002,7 +1007,7 @@ impl<I: IngressPort> MeshSentinel<I> {
         );
     }
 
-    async fn handle_peer_disconnected(&mut self, peer: NetworkId) {
+    async fn handle_peer_disconnected(&mut self, peer: MeshAddress) {
         tracing::info!(
             event = "peer_disconnected",
             peer = %peer,
@@ -1033,7 +1038,7 @@ impl<I: IngressPort> MeshSentinel<I> {
 
     /// Update the peer DID cache and register a canary contribution if the
     /// peer is a verified community member with an active recording.
-    fn register_canary_contribution(&mut self, origin: &NetworkId, envelope: &WitnessEnvelope) {
+    fn register_canary_contribution(&mut self, origin: &MeshAddress, envelope: &WitnessEnvelope) {
         use crate::trust::TrustOracle;
         use phalanx_forensics::crucible::EvidenceExt;
         use phalanx_proto::trust::TrustLevel;
@@ -1254,7 +1259,7 @@ impl<I: IngressPort> MeshSentinel<I> {
 
     /// Promote long-lived high-reputation peers to anchor status.
     fn promote_anchor_candidates(&mut self) {
-        let peer_ids: Vec<NetworkId> = self.topology_gate.peer_ids().cloned().collect();
+        let peer_ids: Vec<MeshAddress> = self.topology_gate.peer_ids().cloned().collect();
         for peer_id in &peer_ids {
             if self.topology_gate.is_anchored(peer_id) {
                 continue;
@@ -1275,7 +1280,7 @@ impl<I: IngressPort> MeshSentinel<I> {
 
     /// Snapshot the peer set topology and evaluate eclipse risk.
     async fn evaluate_eclipse_risk(&mut self) {
-        let mut peer_ids: Vec<&NetworkId> = self.health_tracker.heartbeats.keys().collect();
+        let mut peer_ids: Vec<&MeshAddress> = self.health_tracker.heartbeats.keys().collect();
         let peer_set_hash = eclipse::hash_peer_set(&mut peer_ids);
         let peer_count = peer_ids.len();
         let subnet_distribution = self.topology_gate.subnet_counts().clone();
@@ -1370,7 +1375,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             }
         };
 
-        let admitted_peers: Vec<NetworkId> = self.topology_gate.peer_ids().cloned().collect();
+        let admitted_peers: Vec<MeshAddress> = self.topology_gate.peer_ids().cloned().collect();
 
         for peer_id in &admitted_peers {
             let first_seen = self

@@ -1,7 +1,7 @@
 use crate::evidence::SignatureHash;
 use crate::evidence::WitnessEnvelope;
-use crate::identity::NetworkId;
 use crate::identity::PhalanxIdentity;
+use crate::identity::WitnessId;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -68,7 +68,7 @@ impl TrustedClock for SystemClock {
 pub struct CausalitySession {
     #[serde(skip, default = "default_identity")]
     pub identity: Arc<PhalanxIdentity>,
-    pub peer_id: NetworkId,
+    pub peer_id: WitnessId,
     pub last_hash: Option<SignatureHash>,
 }
 
@@ -77,7 +77,7 @@ fn default_identity() -> Arc<PhalanxIdentity> {
 }
 
 impl CausalitySession {
-    pub fn new(identity: Arc<PhalanxIdentity>, peer_id: NetworkId) -> Self {
+    pub fn new(identity: Arc<PhalanxIdentity>, peer_id: WitnessId) -> Self {
         Self {
             identity,
             peer_id,
@@ -154,7 +154,7 @@ impl MonotonicClock {
 mod causality_tests {
     use super::*;
     use crate::evidence::{Evidence, ForensicGap, StorageSequence, WitnessEnvelope};
-    use crate::identity::{NetworkId, PhalanxIdentity, RecordingId};
+    use crate::identity::{PhalanxIdentity, RecordingId, WitnessId};
     use crate::revocation::RevocationKey;
 
     fn stub_envelope(
@@ -171,7 +171,7 @@ mod causality_tests {
                 detected_at: PhalanxTimestamp::from_millis(1_700_000_000_000),
             }),
             evidence_hash,
-            witness_peer_id: NetworkId("test-peer".into()),
+            witness_peer_id: WitnessId::new("test-peer"),
             witness_signature: vec![],
             did: PhalanxIdentity::new_ephemeral().did,
             prev_hash,
@@ -181,7 +181,7 @@ mod causality_tests {
 
     fn fresh_session() -> CausalitySession {
         let identity = Arc::new(PhalanxIdentity::new_ephemeral());
-        CausalitySession::new(identity, NetworkId("peer-under-test".into()))
+        CausalitySession::new(identity, WitnessId::new("peer-under-test"))
     }
 
     #[test]

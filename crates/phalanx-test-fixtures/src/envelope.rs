@@ -27,7 +27,7 @@ pub fn witness_envelope_synthetic() -> (WitnessEnvelope, PhalanxIdentity) {
     let now = SystemClock.now();
     let evidence = video_evidence_for_recording(&rid, 0, now);
     let env =
-        WitnessEnvelope::sign_envelope(evidence, &identity, identity.network_id.clone(), None)
+        WitnessEnvelope::sign_envelope(evidence, &identity, identity.witness_id.clone(), None)
             .expect("signing should not fail with synthetic evidence");
     (env, identity)
 }
@@ -46,7 +46,7 @@ pub fn witness_envelope_for_recording(
 ) -> WitnessEnvelope {
     let now = SystemClock.now();
     let evidence = video_evidence_for_recording(recording_id, seq, now);
-    WitnessEnvelope::sign_envelope(evidence, identity, identity.network_id.clone(), prev_hash)
+    WitnessEnvelope::sign_envelope(evidence, identity, identity.witness_id.clone(), prev_hash)
         .expect("signing should not fail with synthetic evidence")
 }
 

@@ -1,6 +1,6 @@
 // crates/phalanx-proto/src/kademlia.rs
 
-use crate::identity::NetworkId;
+use crate::identity::MeshAddress;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Hash, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,7 +27,12 @@ impl DhtPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProviderEntry {
-    pub network_id: NetworkId,
+    /// Field name kept for wire-format backwards compatibility on the DHT.
+    /// The Rust type is the canonical mesh-addressing form; the on-disk /
+    /// on-wire key remains "network_id" so older nodes' encoded provider
+    /// sets continue to deserialize.
+    #[serde(rename = "network_id")]
+    pub address: MeshAddress,
     pub expiration: u64,
     pub reputation_score: f32,
 }
@@ -72,7 +77,7 @@ mod tests {
 
     fn dummy_provider(i: u64) -> ProviderEntry {
         ProviderEntry {
-            network_id: NetworkId(format!("peer_{i}")),
+            address: MeshAddress::new(format!("peer_{i}")),
             expiration: 1000 + i,
             reputation_score: 1.0,
         }
@@ -88,7 +93,7 @@ mod tests {
         set.enforce_wire_bounds();
         assert_eq!(set.providers.len(), DhtProviderSet::MAX_PROVIDERS);
         // Preserves the first MAX_PROVIDERS entries (truncation, not sampling).
-        assert_eq!(set.providers[0].network_id, NetworkId("peer_0".into()));
+        assert_eq!(set.providers[0].address, MeshAddress::new("peer_0"));
     }
 
     #[test]

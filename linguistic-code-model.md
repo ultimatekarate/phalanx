@@ -13,10 +13,10 @@ This document establishes the "Linguistic Model" of Phalanx. All code must be pa
 Every element of Phalanx code maps to a linguistic role. Understanding these parts of speech is prerequisite to understanding the crate structure, placement rules, and governance commands that follow.
 
 ### I.a. Parts of Speech
-- **Noun** — A data type, trait contract, or error type. Things that exist. `WitnessEnvelope`, `NetworkId`, `TransientJournal`, `GuardianError`. Nouns live in the Dictionary (`phalanx-proto`).
+- **Noun** — A data type, trait contract, or error type. Things that exist. `WitnessEnvelope`, `WitnessId`, `MeshAddress`, `TransientJournal`, `GuardianError`. Nouns live in the Dictionary (`phalanx-proto`).
 - **Adjective** — A qualifier that narrows a noun's meaning. Type-state markers (`Verified`, `Sealed`, `Ephemeral`), configuration types, and constructor suffixes (`new_verified()`, `new_ephemeral()`). Adjectives attach to nouns — they describe *what kind* of noun you have.
 - **Verb** — Pure logic that acts on nouns. Validation, verification, transformation, encoding. `check_integrity()`, `fountain_chunkify()`, `authorize()`. Verbs live in the Laboratory (`phalanx-forensics`). A verb never touches the filesystem or network.
-- **Preposition** — The directional relationships that define how nouns move through the system. Routing, codecs, adapter boundary mappings, serialization. The `PeerId` → `NetworkId` translation at the libp2p boundary. Postcard encoding of envelopes into wire bytes. The routing switchboard that delivers events to the correct actor. `from_<source>()` constructors. Prepositions live in the Post Office (`phalanx-transport`) and at the edges of the Sentence (`phalanx-node`).
+- **Preposition** — The directional relationships that define how nouns move through the system. Routing, codecs, adapter boundary mappings, serialization. The `PeerId` → `MeshAddress` translation at the libp2p boundary. Postcard encoding of envelopes into wire bytes. The routing switchboard that delivers events to the correct actor. `from_<source>()` constructors. Prepositions live in the Post Office (`phalanx-transport`) and at the edges of the Sentence (`phalanx-node`).
 - **Conjunction** — Monadic gates that chain verbs together and short-circuit the pipeline on failure. `LensGate`, `IntegrityGate`, `TopologyGate`. A conjunction says "and" between verbs — verify integrity *and* check provenance *and* gate bandwidth. If any conjunction fails, the sentence stops. Conjunctions live in the Laboratory.
 - **Interjection** — Forensic telemetry that observes and records without altering control flow. `tracing::error!("CRITICAL: Integrity validation failed")`, `tracing::warn!("P5: Oversized message rejected")`. Interjections are exclamations — they announce that something noteworthy happened but do not change what happens next.
 
@@ -82,7 +82,7 @@ Every `#[allow(clippy::...)]` in the codebase has a comment explaining why the s
 
 ## IV. GOVERNANCE COMMANDS
 
-1. **NEVER** allow libp2p types to leak into the Lab or the Dictionary. Map them to `NetworkId` in the Adapter.
+1. **NEVER** allow libp2p types to leak into the Lab or the Dictionary. Map them to `MeshAddress` in the Adapter.
 2. **NEVER** allow filesystem IO (`std::fs`, `tokio::fs`) or network IO (`std::net`, `tokio::net`) into the Lab. In-memory byte assembly (`std::io::Cursor`, `std::io::Write` on `Vec<u8>`) is permitted when required by codec dependencies. For persistence, use the `TransientJournal` trait.
 3. **ALWAYS** define reassembly strategies as `Mold` implementations in the Lab.
 4. **PREFER** the `prelude` for cross-crate imports of first-class Nouns. Import persistence contracts, scheduling types, and operational state directly from their defining module.
@@ -117,7 +117,7 @@ Types belong where the linguistic model places them, not where they are consumed
 - **Capability contracts are Nouns.** A trait that defines what a component *can do* (persist state, provide a clock, enforce wire bounds) is a contract — a shape of interaction. Contracts belong in the Dictionary alongside the types they operate on. *Example:* `TransientJournal` (persistence contract) is defined in `phalanx-proto/src/storage.rs`, not in `phalanx-node` where `FileJournal` implements it. `WireBound` (structural enforcement) is defined in `phalanx-proto/src/wire.rs`. `IngressPort`, `EgressPort`, and `LocalMeshPort` (network contracts) are defined in `phalanx-proto/src/network.rs`, not in `phalanx-transport` where `Libp2pAdapter` implements them.
 - **Operational state is not a first-class Noun.** Retry queues, scheduling metadata, and actor-internal bookkeeping serve the implementation, not the domain model. They belong in their implementing crate, not in shared contracts. *Example:* `OutboundQueue` (WAL-backed retry queue for failed publishes) is defined in `phalanx-node/src/persistence/outbound.rs`. `PendingEgress` lives in `phalanx-proto/src/storage.rs` because it crosses the `TransientJournal` trait boundary, but it is explicitly excluded from the prelude — consumers import it directly from `phalanx_proto::storage::PendingEgress`.
 - **Consumer gravity is a drift pattern.** When a type is used heavily in one module, the temptation is to move it closer. Resist this — check the model first. If the type is a Tense, it stays with the Tenses regardless of who reads it most. *Example:* `PhalanxTimestamp` is used pervasively in `phalanx-node` (vault, outbound queue, actors) but remains defined in `phalanx-proto/src/time.rs`. Its `now()` constructor is `pub(crate)` — external consumers must obtain timestamps through a `TrustedClock` implementor, which reinforces the placement boundary.
-- **Trait signatures in the Dictionary should reference domain types, not runtime-specific types.** If a trait requires a runtime type in its signature, refactor the signature to use domain-shaped abstractions rather than exempting the trait from placement rules. *Example:* `EgressPort::publish()` takes `&MeshTopic` and `EgressPort::disconnect_peer()` takes `&NetworkId` — domain types defined in the Dictionary. The trait never references `libp2p::PeerId` or `Multiaddr`; the `Libp2pAdapter` in `phalanx-transport` maps between domain types and runtime types at the boundary.
+- **Trait signatures in the Dictionary should reference domain types, not runtime-specific types.** If a trait requires a runtime type in its signature, refactor the signature to use domain-shaped abstractions rather than exempting the trait from placement rules. *Example:* `EgressPort::publish()` takes `&MeshTopic` and `EgressPort::disconnect_peer()` takes `&MeshAddress` — domain types defined in the Dictionary. The trait never references `libp2p::PeerId` or `Multiaddr`; the `Libp2pAdapter` in `phalanx-transport` maps between domain types and runtime types at the boundary.
 
 ---
 
@@ -142,7 +142,7 @@ The following sections are a module-level inventory of each crate. The file list
 
 **Identity & Evidence — Who, What, Where:**
 
-- **identity.rs:** Who is talking? (`Did`, `NetworkId`, `PhalanxIdentity`, `RecordingId`, `ShardId`)
+- **identity.rs:** Who is talking? (`Did`, `WitnessId`, `MeshAddress`, `PhalanxIdentity`, `RecordingId`, `ShardId`)
 - **evidence.rs:** What are they saying? (`WitnessEnvelope`, `ShardChunk`, `VideoShard`, `AudioShard`, `Evidence`)
 - **topic.rs:** Where are they saying it? (`MeshTopic`)
 - **retrieval.rs:** What are they asking for? (`RecordingRequest`, `RecordingResponse`)
@@ -218,7 +218,7 @@ The following sections are a module-level inventory of each crate. The file list
 
 **Adapters — Protocol Boundaries:**
 
-- **adapters/libp2p.rs:** `Libp2pAdapter` implementing mesh publish/subscribe and direct peer messaging. Translates `PeerId` to `NetworkId` at the boundary.
+- **adapters/libp2p.rs:** `Libp2pAdapter` implementing mesh publish/subscribe and direct peer messaging. Translates `PeerId` to `MeshAddress` at the boundary.
 - **adapters/quic/:** Standalone QUIC transport for direct phone-to-Stronghold connections bypassing the libp2p mesh. Split into `client.rs`, `server.rs`, and `wire.rs`.
 - **adapters/local_mesh.rs:** BLE and WiFi Direct adapters via FFI (mobile) with no-op fallback (desktop).
 - **adapters/mock.rs:** Test double for transport-layer integration tests.
@@ -237,7 +237,7 @@ The following sections are a module-level inventory of each crate. The file list
 
 - **kademlia.rs:** `KademliaGovernor` with reputation-weighted provider insertion and temporal decay.
 - **dht.rs:** Re-exports of libp2p DHT types for custom backend implementations.
-- **identity_ext.rs:** Extension trait converting `PhalanxIdentity` to libp2p keypairs and `NetworkId`s.
+- **identity_ext.rs:** Extension trait converting `PhalanxIdentity` to libp2p keypairs and `MeshAddress`es.
 
 ### The Sentence (phalanx-node)
 

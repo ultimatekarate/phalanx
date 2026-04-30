@@ -354,7 +354,7 @@ mod tests {
         let physics = PhalanxPhysics::default_wan();
 
         let local_peer_id = keypair.public().to_peer_id();
-        let network_id = NetworkId(local_peer_id.to_string());
+        let network_id = MeshAddress::new(local_peer_id.to_string());
 
         // STRICT BOUNDARY: Use MemoryStore to isolate transport testing
         let store = MemoryStore::new(local_peer_id);

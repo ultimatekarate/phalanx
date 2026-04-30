@@ -21,7 +21,7 @@ pub fn setup_transport(
 ) -> Result<(Libp2pIngress, Libp2pEgress), TransportError> {
     // Persistent Kademlia Store Construction
     let dht_db_path = Path::new(&config.storage.vault_path).join("dht_store.redb");
-    let local_network_id = identity.to_network_id();
+    let local_network_id = identity.to_mesh_address();
     let persistent_store = RedbStore::new(&dht_db_path, local_network_id, evaluator)
         .map_err(|e| TransportError::Internal(format!("DHT store: {e}")))?;
 

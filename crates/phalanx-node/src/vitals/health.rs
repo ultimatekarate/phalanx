@@ -10,7 +10,7 @@ use tokio::time::Instant;
 use tracing::Level;
 use tracing_subscriber::{filter::Targets, fmt, prelude::*};
 
-use phalanx_proto::identity::NetworkId;
+use phalanx_proto::identity::MeshAddress;
 use phalanx_proto::prelude::PhalanxPhysics;
 use phalanx_proto::telemetry::SimEvent;
 use phalanx_proto::types::VitalityRate;
@@ -48,9 +48,9 @@ pub fn init_observability() {
 }
 
 pub struct HealthTracker {
-    pub heartbeats: HashMap<NetworkId, Instant>,
-    pub capacities: HashMap<NetworkId, ControlMessage>,
-    pub peer_contracts: HashMap<NetworkId, VitalityRate>,
+    pub heartbeats: HashMap<MeshAddress, Instant>,
+    pub capacities: HashMap<MeshAddress, ControlMessage>,
+    pub peer_contracts: HashMap<MeshAddress, VitalityRate>,
 
     pub last_sent_load: f32,
     pub last_sent_storage: u64,
@@ -103,7 +103,7 @@ impl HealthTracker {
 
     #[must_use]
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Duration jitter arithmetic.
-    pub fn is_peer_stale(&self, peer_id: &NetworkId, physics: &PhalanxPhysics) -> bool {
+    pub fn is_peer_stale(&self, peer_id: &MeshAddress, physics: &PhalanxPhysics) -> bool {
         let last_time = match self.heartbeats.get(peer_id) {
             Some(t) => t,
             None => return true,
@@ -139,8 +139,8 @@ impl Default for HealthTracker {
 mod tests {
     use super::*;
 
-    fn peer(name: &str) -> NetworkId {
-        NetworkId::from(name.to_string())
+    fn peer(name: &str) -> MeshAddress {
+        MeshAddress::new(name.to_string())
     }
 
     #[test]

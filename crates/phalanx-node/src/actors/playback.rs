@@ -4,7 +4,7 @@ use crate::actors::egress::EgressCommand;
 use crate::actors::storage::StorageCommand;
 use phalanx_proto::crypto::{SealedLocator, SymmetricKey};
 use phalanx_proto::evidence::{DataPayload, Evidence, StorageSequence};
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId};
+use phalanx_proto::identity::{MeshAddress, PhalanxIdentity, RecordingId};
 use phalanx_proto::playback::PlaybackSink;
 use phalanx_proto::retrieval::RecordingRequest;
 
@@ -34,7 +34,7 @@ pub struct PlaybackCoordinator<V: PlaybackSink, A: PlaybackSink> {
     video_sink: V,
     audio_sink: A,
     discovery_tx: mpsc::Sender<(RecordingId, StorageSequence)>,
-    providers_rx: mpsc::Receiver<(RecordingId, Vec<NetworkId>)>,
+    providers_rx: mpsc::Receiver<(RecordingId, Vec<MeshAddress>)>,
     identity: Arc<PhalanxIdentity>,
     current_sequence: StorageSequence,
     /// Number of times the current sequence has been retried without success.
@@ -52,7 +52,7 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
         video_sink: V,
         audio_sink: A,
         discovery_tx: mpsc::Sender<(RecordingId, StorageSequence)>,
-        providers_rx: mpsc::Receiver<(RecordingId, Vec<NetworkId>)>,
+        providers_rx: mpsc::Receiver<(RecordingId, Vec<MeshAddress>)>,
         identity: Arc<PhalanxIdentity>,
     ) -> Self {
         Self {
@@ -284,7 +284,7 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
     async fn request_shards_from_providers(
         &self,
         recording_id: &RecordingId,
-        providers: Vec<NetworkId>,
+        providers: Vec<MeshAddress>,
     ) {
         // 1. Construct SealedLocator with real crypto.
         // A null key produces a grant that anyone can unseal — never allow this.

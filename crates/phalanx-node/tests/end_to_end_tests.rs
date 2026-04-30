@@ -123,7 +123,7 @@ async fn ingestion_to_storage_channel_wiring() {
             lens_metrics: ForensicMetrics::default(),
         });
         let env =
-            WitnessEnvelope::sign_envelope(evidence, &identity, identity.network_id.clone(), None)
+            WitnessEnvelope::sign_envelope(evidence, &identity, identity.witness_id.clone(), None)
                 .expect("sign");
 
         storage_tx

@@ -52,11 +52,11 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         let revocation_key = RevocationKey(revocation_signing.verifying_key().to_bytes());
 
         let did = Did::derive_did_key(&public_key_bytes);
-        let network_id = did.to_network_id();
+        let witness_id = did.to_witness_id();
 
         Ok((
             PhalanxIdentity {
-                network_id,
+                witness_id,
                 version: IDENTITY_VERSION,
                 did,
                 keypair: signing_key,
@@ -86,10 +86,10 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         let revocation_key = RevocationKey(revocation_signing.verifying_key().to_bytes());
 
         let did = Did::derive_did_key(&public_key_bytes);
-        let network_id = did.to_network_id();
+        let witness_id = did.to_witness_id();
 
         Ok(PhalanxIdentity {
-            network_id,
+            witness_id,
             version: IDENTITY_VERSION,
             did,
             keypair: signing_key,

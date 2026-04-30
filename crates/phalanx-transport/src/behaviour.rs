@@ -50,7 +50,7 @@ where
     /// # Sentinel Argument
     /// The `local_node_id` must be passed explicitly. This ensures the
     /// forensic log is always signed by the caller's verified identity.
-    pub fn announce_stronghold(&mut self, local_node_id: &NetworkId) -> Option<kad::QueryId> {
+    pub fn announce_stronghold(&mut self, local_node_id: &MeshAddress) -> Option<kad::QueryId> {
         let record_key = RecordKey::new(&STRONGHOLD_NAMESPACE);
 
         tracing::info!(

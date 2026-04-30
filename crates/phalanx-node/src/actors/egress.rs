@@ -1,7 +1,7 @@
 use crate::actors::shutdown::ShutdownSignal;
 use crate::clock::TrustedClock;
 use crate::vitals::{Homeostasis, SystemGovernor};
-use phalanx_proto::identity::{NetworkId, RecordingId};
+use phalanx_proto::identity::{MeshAddress, RecordingId};
 use phalanx_proto::kademlia::DhtPayload;
 use phalanx_proto::network::EgressPort;
 use phalanx_proto::prelude::*;
@@ -25,11 +25,11 @@ pub enum EgressCommand {
     FindProviders(RecordingId),
     /// Send a shard retrieval request to a specific peer.
     RequestShards {
-        target: NetworkId,
+        target: MeshAddress,
         request: RecordingRequest,
     },
     /// Eclipse remediation: actively disconnect a peer rejected or evicted by TopologyGate.
-    DisconnectPeer(NetworkId),
+    DisconnectPeer(MeshAddress),
     /// Eclipse remediation: re-dial bootstrap peers and trigger Kademlia random walk.
     ReBootstrap(Vec<String>),
     /// Cryptographic Forgetting: publish a revocation token to the gossipsub topic.
@@ -227,7 +227,7 @@ impl<E: EgressPort> EgressActor<E> {
         }
     }
 
-    async fn handle_request_shards(&mut self, target: NetworkId, request: RecordingRequest) {
+    async fn handle_request_shards(&mut self, target: MeshAddress, request: RecordingRequest) {
         if let Err(e) = self.port.send_request(&target, request).await {
             tracing::warn!(
                 peer = %target,

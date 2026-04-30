@@ -10,7 +10,7 @@ pub trait WitnessAuthority {
     fn sign_envelope(
         evidence: Evidence,
         identity: &PhalanxIdentity,
-        peer_id: NetworkId,
+        peer_id: WitnessId,
         prev_hash: Option<SignatureHash>,
     ) -> Result<WitnessEnvelope, ShardError>;
 
@@ -33,7 +33,7 @@ impl WitnessAuthority for WitnessEnvelope {
     fn sign_envelope(
         evidence: Evidence,
         identity: &PhalanxIdentity,
-        peer_id: NetworkId,
+        peer_id: WitnessId,
         prev_hash: Option<SignatureHash>,
     ) -> Result<Self, ShardError> {
         let data_to_sign = postcard::to_allocvec(&evidence)?;
@@ -146,7 +146,7 @@ mod tests {
         let env = WitnessEnvelope::sign_envelope(
             Evidence::Video(shard),
             &identity,
-            identity.network_id.clone(),
+            identity.witness_id.clone(),
             None,
         )
         .expect("signing should succeed");

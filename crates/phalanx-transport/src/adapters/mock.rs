@@ -9,13 +9,13 @@ use tokio::sync::{mpsc, RwLock};
 
 #[derive(Clone)]
 pub struct MockAdapter {
-    id: NetworkId,
+    id: MeshAddress,
     mesh_bus: Arc<RwLock<MeshRoutingTable>>,
 }
 
 impl MockAdapter {
     pub fn new(
-        id: NetworkId,
+        id: MeshAddress,
         _ingress_rx: mpsc::Receiver<NetworkEvent>,
         mesh_bus: Arc<RwLock<MeshRoutingTable>>,
     ) -> Self {
@@ -38,7 +38,7 @@ impl EgressPort for MockAdapter {
         Ok(())
     }
 
-    async fn ban_peer(&self, _peer: &NetworkId) {
+    async fn ban_peer(&self, _peer: &MeshAddress) {
         // No-op in simulation mock
     }
 
@@ -66,7 +66,7 @@ impl EgressPort for MockAdapter {
 
     async fn send_request(
         &self,
-        _target: &NetworkId,
+        _target: &MeshAddress,
         _request: phalanx_proto::retrieval::RecordingRequest,
     ) -> Result<(), String> {
         Ok(())

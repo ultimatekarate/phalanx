@@ -2,7 +2,7 @@ use crate::RecordingResponse;
 // crates/phalanx-proto/src/storage.rs
 use crate::evidence::{ShardChunk, SignatureHash, StorageSequence};
 use crate::identity::{Did, RecordingId};
-use crate::prelude::NetworkId;
+use crate::prelude::MeshAddress;
 use crate::prelude::PhalanxTimestamp;
 use crate::prelude::ShardError;
 use crate::revocation::RevocationToken;
@@ -74,8 +74,8 @@ pub struct PendingEgress {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StorageAck {
-    Success(RecordingId, NetworkId),
-    Failure(ShardError, NetworkId),
+    Success(RecordingId, MeshAddress),
+    Failure(ShardError, MeshAddress),
 }
 
 /// The Transient Journal: A high-speed, volatile storage contract.

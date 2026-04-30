@@ -40,7 +40,7 @@ fn make_test_envelope(seq: u32, recording_id: &str) -> WitnessEnvelope {
         payload: DataPayload::Clear(vec![0xDE, 0xAD, 0xBE, 0xEF]),
         lens_metrics: ForensicMetrics::default(),
     });
-    WitnessEnvelope::sign_envelope(evidence, &identity, identity.network_id.clone(), None)
+    WitnessEnvelope::sign_envelope(evidence, &identity, identity.witness_id.clone(), None)
         .expect("signing should not fail")
 }
 
@@ -144,7 +144,7 @@ fn identity_did_key_prefix() {
 fn causality_session_chain_integrity() {
     let identity = PhalanxIdentity::new_ephemeral();
     let identity_arc = Arc::new(PhalanxIdentity::new_ephemeral());
-    let mut session = CausalitySession::new(identity_arc, identity.network_id.clone());
+    let mut session = CausalitySession::new(identity_arc, identity.witness_id.clone());
 
     let rid = phalanx_proto::identity::RecordingId::new("causality_test");
 
@@ -164,7 +164,7 @@ fn causality_session_chain_integrity() {
         let env = WitnessEnvelope::sign_envelope(
             evidence,
             &identity,
-            identity.network_id.clone(),
+            identity.witness_id.clone(),
             prev_hash,
         )
         .expect("sign");

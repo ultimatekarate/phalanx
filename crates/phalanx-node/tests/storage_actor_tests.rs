@@ -23,7 +23,7 @@ use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::evidence::{
     ChunkType, DataPayload, Evidence, ForensicMetrics, StorageSequence, VideoShard,
 };
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId, ShardId};
+use phalanx_proto::identity::{PhalanxIdentity, RecordingId, ShardId, WitnessId};
 use phalanx_proto::prelude::{EncodingSymbolId, RepairRatio, ShardChunk, ShardError, SymbolSize};
 use phalanx_proto::retrieval::RecordingResponse;
 use phalanx_proto::storage::GuardianError;
@@ -142,7 +142,7 @@ async fn test_pillar_salvage_under_disk_pressure() {
     };
 
     let envelope = Evidence::Video(video_shard)
-        .seal(&identity, identity.to_network_id(), None)
+        .seal(&identity, identity.witness_id.clone(), None)
         .expect("Failed to seal forensic evidence");
 
     // 3. Setup the Guardian & Actor
@@ -194,7 +194,7 @@ async fn test_reputation_gate_signature_mismatch() {
     let config = NodeConfig::test_defaults();
     let (my_identity, _) = PhalanxIdentity::generate().unwrap();
     let (attacker_identity, _) = PhalanxIdentity::generate().unwrap();
-    let attacker_net_id = attacker_identity.to_network_id();
+    let attacker_net_id = attacker_identity.witness_id.clone();
 
     // 2. Create "Poisoned" Evidence
     let video_shard = VideoShard {
@@ -333,7 +333,7 @@ async fn test_salvage_on_node_death() {
     };
 
     let envelope = Evidence::Video(real_shard)
-        .seal(&identity, NetworkId::random(), None)
+        .seal(&identity, WitnessId::random(), None)
         .unwrap();
 
     let serialized_envelope = postcard::to_allocvec(&envelope).unwrap();
@@ -472,7 +472,7 @@ async fn test_stronghold_ingestion_and_persistence() {
 
     // 2. Prepare Mock Data (A legitimate chunk from an external peer)
     let (peer_identity, _) = PhalanxIdentity::generate().unwrap();
-    let peer_net_id = peer_identity.to_network_id();
+    let peer_net_id = peer_identity.witness_id.clone();
 
     let video_shard = phalanx_forensics::reassembler::create_video_shard(
         vec![vec![0xDE, 0xAD, 0xBE, 0xEF]],
@@ -607,7 +607,7 @@ async fn test_storage_actor_metric_pipeline() {
     config.storage.vault_path = temp.path().to_string_lossy().into_owned();
 
     let (identity, _) = PhalanxIdentity::generate().unwrap();
-    let local_peer_id = identity.to_network_id();
+    let local_peer_id = identity.witness_id.clone();
 
     let storage_load = Arc::new(AtomicUsize::new(0));
 
@@ -746,7 +746,7 @@ async fn test_pure_vault_ingest_contract() {
     };
 
     let envelope = Evidence::Video(video_shard)
-        .seal(&identity, NetworkId::random(), None)
+        .seal(&identity, WitnessId::random(), None)
         .expect("Failed to seal forensic evidence");
 
     let valid_envelope_data = postcard::to_allocvec(&envelope).expect("Serialization failed");
@@ -790,7 +790,7 @@ mod ingress_boundary_tests {
     use phalanx_proto::evidence::{
         DataPayload, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
     };
-    use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId, ShardId};
+    use phalanx_proto::identity::{PhalanxIdentity, RecordingId, ShardId, WitnessId};
     use phalanx_proto::prelude::ShardChunk;
     use phalanx_proto::time::PhalanxTimestamp;
     use phalanx_proto::types::{ForensicUnit, Unverified, Verified};
@@ -818,7 +818,7 @@ mod ingress_boundary_tests {
         let envelope = WitnessEnvelope::sign_envelope(
             Evidence::Video(video_shard),
             &identity,
-            NetworkId::random(),
+            WitnessId::random(),
             None,
         )
         .expect("Failed to seal evidence");

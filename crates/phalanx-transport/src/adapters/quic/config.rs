@@ -4,7 +4,7 @@
 
 use std::net::SocketAddr;
 
-use phalanx_proto::identity::NetworkId;
+use phalanx_proto::identity::MeshAddress;
 
 /// Configuration for a QUIC server (Stronghold mode).
 pub struct QuicServerConfig {
@@ -30,9 +30,9 @@ pub struct QuicClientConfig {
     /// CA certificate in PEM format for server TLS verification.
     pub ca_cert_pem: Vec<u8>,
     /// This client's forensic network identity.
-    pub local_network_id: NetworkId,
+    pub local_network_id: MeshAddress,
     /// The server's forensic network identity (for event attribution).
-    pub server_network_id: NetworkId,
+    pub server_network_id: MeshAddress,
     /// Event channel capacity (default: 2048).
     pub event_channel_capacity: usize,
     /// Maximum reconnection attempts before giving up. `None` = infinite.

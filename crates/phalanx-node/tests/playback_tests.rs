@@ -46,7 +46,7 @@ use phalanx_proto::evidence::{
     DataPayload, EnvelopeState, Evidence, ForensicMetrics, StorageSequence, VideoShard,
     WitnessEnvelope,
 };
-use phalanx_proto::identity::{NetworkId, PhalanxIdentity, RecordingId};
+use phalanx_proto::identity::{PhalanxIdentity, RecordingId, WitnessId};
 use phalanx_proto::playback::PlaybackSink;
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock, TrustedClock};
 use phalanx_proto::types::{ChannelCount, Fps, SampleRate};
@@ -160,7 +160,7 @@ fn make_video_envelope(
     let envelope = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard),
         identity,
-        NetworkId::random(),
+        WitnessId::random(),
         prev_hash,
     )
     .unwrap();
@@ -195,7 +195,7 @@ fn make_audio_envelope(
     let envelope = WitnessEnvelope::sign_envelope(
         Evidence::Audio(shard),
         identity,
-        NetworkId::random(),
+        WitnessId::random(),
         prev_hash,
     )
     .unwrap();
@@ -280,7 +280,7 @@ async fn test_exodus_resurrection_logic() {
     let envelope_1 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_1),
         &identity,
-        NetworkId::random(),
+        WitnessId::random(),
         None,
     )
     .unwrap();
@@ -322,7 +322,7 @@ async fn test_exodus_resurrection_logic() {
     let envelope_2 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_2),
         &identity,
-        NetworkId::random(),
+        WitnessId::random(),
         Some(hash_1),
     )
     .unwrap();
@@ -416,7 +416,7 @@ async fn test_playback_resurrection_with_mesh_gap() {
     let envelope_1 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_1),
         &identity,
-        NetworkId::random(),
+        WitnessId::random(),
         None,
     )
     .unwrap();
@@ -458,7 +458,7 @@ async fn test_playback_resurrection_with_mesh_gap() {
     let envelope_2 = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard_2),
         &identity,
-        NetworkId::random(),
+        WitnessId::random(),
         Some(hash_1),
     )
     .unwrap();
@@ -540,7 +540,7 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
         let envelope = WitnessEnvelope::sign_envelope(
             Evidence::Video(shard),
             &identity_main,
-            NetworkId::random(),
+            WitnessId::random(),
             last_hash,
         )
         .unwrap();
@@ -745,7 +745,7 @@ async fn test_encrypted_playback_round_trip() {
     let envelope = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard),
         &identity,
-        NetworkId::random(),
+        WitnessId::random(),
         None,
     )
     .unwrap();
@@ -863,7 +863,7 @@ async fn test_encrypted_playback_wrong_key_fails() {
     let envelope = WitnessEnvelope::sign_envelope(
         Evidence::Video(shard),
         &identity,
-        NetworkId::random(),
+        WitnessId::random(),
         None,
     )
     .unwrap();
