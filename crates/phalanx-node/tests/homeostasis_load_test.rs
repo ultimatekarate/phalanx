@@ -72,6 +72,11 @@ const DISCOVERY_WAIT_SECS: u64 = 10;
 // over a long steady-state window. See `docs/bottleneck-attribution-arc.md`.
 const SAMPLE_DURATION_SECS: u64 = 60;
 const TOPIC: &str = "test/homeostasis";
+// Un-bundled production-current parameters: 1200-byte RaptorQ symbols at
+// 215 per frame × 30 fps target. The known cliff regime where gossipsub
+// rejects ~99.9% of publishes after the mesh-prune cascade fires (see
+// `docs/bundling-diagnostic-arc.md`). Used here to characterize the
+// per-variant rejection breakdown via `PublishErrorCounters`.
 const SYMBOL_SIZE: usize = 1200;
 const SYMBOLS_PER_FRAME: usize = 215;
 const BASE_FPS: u32 = 30;
@@ -296,6 +301,9 @@ async fn homeostasis_load_test() {
     let publish_timing = publisher_egress
         .publish_timing()
         .expect("publish_timing must be Some when enable_publish_timing=true");
+    // Per-variant breakdown of gossipsub publish failures. Always-on; only
+    // the failure path increments.
+    let publish_error_breakdown = publisher_egress.publish_error_breakdown();
 
     // Vitals-update task: ticks at the governor's recommended interval
     // (5/15/30/60s depending on PowerState). Spawned on the publisher's
@@ -366,7 +374,9 @@ async fn homeostasis_load_test() {
     // see `docs/bottleneck-attribution-arc.md`. `mean_call_us` is the per-window
     // mean wall-time of the swarm-task `gossipsub.publish()` call;
     // `io_ops_per_publish` is the swarm-side socket-op-to-publish-attempt ratio.
-    println!("t_sec,fps_target,power_state,composite_stress,publish_attempts_delta,publish_errors_delta,bytes_sent_delta,bytes_recv_delta,queue_depth,mean_call_us,io_ops_per_publish");
+    // `err_*` columns are per-variant rejection-cause breakdowns. Sum to
+    // `publish_errors_delta` (modulo small read races).
+    println!("t_sec,fps_target,power_state,composite_stress,publish_attempts_delta,publish_errors_delta,bytes_sent_delta,bytes_recv_delta,queue_depth,mean_call_us,io_ops_per_publish,err_all_queues_full,err_no_peers_subscribed,err_message_too_large,err_duplicate,err_signing,err_transform_failed");
 
     // Per-second sampling loop on the test task.
     let test_start = Instant::now();
@@ -377,6 +387,12 @@ async fn homeostasis_load_test() {
     let mut last_io_ops = 0u64;
     let mut last_call_nanos_total = 0u64;
     let mut last_call_count = 0u64;
+    let mut last_err_aqf = 0u64;
+    let mut last_err_nps = 0u64;
+    let mut last_err_mtl = 0u64;
+    let mut last_err_dup = 0u64;
+    let mut last_err_sig = 0u64;
+    let mut last_err_xfm = 0u64;
     // (attempts_delta, errors_delta) per second — used for per-window analysis.
     let mut window_log: Vec<(u64, u64)> = Vec::new();
 
@@ -393,6 +409,22 @@ async fn homeostasis_load_test() {
         let io_ops = io_ops_arc.load(Ordering::Relaxed);
         let call_nanos_total = publish_timing.call_nanos_total.load(Ordering::Relaxed);
         let call_count = publish_timing.call_count.load(Ordering::Relaxed);
+        let err_aqf = publish_error_breakdown
+            .all_queues_full
+            .load(Ordering::Relaxed);
+        let err_nps = publish_error_breakdown
+            .no_peers_subscribed
+            .load(Ordering::Relaxed);
+        let err_mtl = publish_error_breakdown
+            .message_too_large
+            .load(Ordering::Relaxed);
+        let err_dup = publish_error_breakdown.duplicate.load(Ordering::Relaxed);
+        let err_sig = publish_error_breakdown
+            .signing_error
+            .load(Ordering::Relaxed);
+        let err_xfm = publish_error_breakdown
+            .transform_failed
+            .load(Ordering::Relaxed);
         let attempts_delta = attempts.saturating_sub(last_attempts);
         let errors_delta = errors.saturating_sub(last_errors);
         let bytes_sent_delta = bytes_sent.saturating_sub(last_bytes_sent);
@@ -400,6 +432,12 @@ async fn homeostasis_load_test() {
         let io_ops_delta = io_ops.saturating_sub(last_io_ops);
         let call_nanos_delta = call_nanos_total.saturating_sub(last_call_nanos_total);
         let call_count_delta = call_count.saturating_sub(last_call_count);
+        let err_aqf_delta = err_aqf.saturating_sub(last_err_aqf);
+        let err_nps_delta = err_nps.saturating_sub(last_err_nps);
+        let err_mtl_delta = err_mtl.saturating_sub(last_err_mtl);
+        let err_dup_delta = err_dup.saturating_sub(last_err_dup);
+        let err_sig_delta = err_sig.saturating_sub(last_err_sig);
+        let err_xfm_delta = err_xfm.saturating_sub(last_err_xfm);
         last_attempts = attempts;
         last_errors = errors;
         last_bytes_sent = bytes_sent;
@@ -407,6 +445,12 @@ async fn homeostasis_load_test() {
         last_io_ops = io_ops;
         last_call_nanos_total = call_nanos_total;
         last_call_count = call_count;
+        last_err_aqf = err_aqf;
+        last_err_nps = err_nps;
+        last_err_mtl = err_mtl;
+        last_err_dup = err_dup;
+        last_err_sig = err_sig;
+        last_err_xfm = err_xfm;
 
         let power = governor.current_power_state();
         let stress = governor.composite_stress();
@@ -426,7 +470,7 @@ async fn homeostasis_load_test() {
         };
 
         println!(
-            "{t_sec},{},{:?},{:.3},{attempts_delta},{errors_delta},{bytes_sent_delta},{bytes_recv_delta},{queue},{mean_call_us:.2},{io_ops_per_publish:.2}",
+            "{t_sec},{},{:?},{:.3},{attempts_delta},{errors_delta},{bytes_sent_delta},{bytes_recv_delta},{queue},{mean_call_us:.2},{io_ops_per_publish:.2},{err_aqf_delta},{err_nps_delta},{err_mtl_delta},{err_dup_delta},{err_sig_delta},{err_xfm_delta}",
             fps.get(),
             power,
             stress
@@ -503,6 +547,55 @@ async fn homeostasis_load_test() {
         );
     } else {
         eprintln!("  (no publishes in steady-state window — test likely failed to drive load)");
+    }
+
+    // Per-variant rejection breakdown (cumulative over the run). Diagnoses
+    // *why* gossipsub.publish() rejected — see PublishErrorCounters in
+    // crates/phalanx-transport/src/adapters/libp2p.rs.
+    eprintln!("\n-- Publish-error variant breakdown (cumulative) --");
+    let total_errs = publish_errors.load(Ordering::Relaxed);
+    let aqf = publish_error_breakdown
+        .all_queues_full
+        .load(Ordering::Relaxed);
+    let aqf_peers = publish_error_breakdown
+        .all_queues_full_peers_attempted
+        .load(Ordering::Relaxed);
+    let nps = publish_error_breakdown
+        .no_peers_subscribed
+        .load(Ordering::Relaxed);
+    let mtl = publish_error_breakdown
+        .message_too_large
+        .load(Ordering::Relaxed);
+    let dup = publish_error_breakdown.duplicate.load(Ordering::Relaxed);
+    let sig = publish_error_breakdown
+        .signing_error
+        .load(Ordering::Relaxed);
+    let xfm = publish_error_breakdown
+        .transform_failed
+        .load(Ordering::Relaxed);
+    let pct = |n: u64| -> String {
+        if total_errs == 0 {
+            "  -  ".to_string()
+        } else {
+            format!("{:5.1}%", 100.0 * n as f64 / total_errs as f64)
+        }
+    };
+    eprintln!("  total_errors          = {total_errs}");
+    eprintln!("  all_queues_full       = {aqf:>8}  ({})", pct(aqf));
+    if aqf > 0 {
+        let mean_n = aqf_peers as f64 / aqf as f64;
+        eprintln!("    mean peers attempted at saturation = {mean_n:.2} (sum n = {aqf_peers})");
+    }
+    eprintln!("  no_peers_subscribed   = {nps:>8}  ({})", pct(nps));
+    eprintln!("  message_too_large     = {mtl:>8}  ({})", pct(mtl));
+    eprintln!("  duplicate             = {dup:>8}  ({})", pct(dup));
+    eprintln!("  signing_error         = {sig:>8}  ({})", pct(sig));
+    eprintln!("  transform_failed      = {xfm:>8}  ({})", pct(xfm));
+    let breakdown_sum = aqf + nps + mtl + dup + sig + xfm;
+    if breakdown_sum != total_errs {
+        eprintln!(
+            "  NOTE: breakdown sum ({breakdown_sum}) != total ({total_errs}) — small read race"
+        );
     }
 
     eprintln!("\n=== homeostasis_load_test complete ===");
