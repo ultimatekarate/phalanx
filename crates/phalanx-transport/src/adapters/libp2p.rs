@@ -82,6 +82,40 @@ pub struct PublishTimingCounters {
     pub call_count: Arc<AtomicU64>,
 }
 
+/// Per-variant breakdown of `gossipsub.publish()` errors. Operational type
+/// (not a Dictionary Noun) per the Linguistic Model; lives in phalanx-transport.
+///
+/// Always-on — each `fetch_add` is `Relaxed` and fires only on the failure
+/// path; the success path pays nothing. Diagnoses the *reason* for an
+/// elevated rejection rate without requiring a tracing subscriber.
+///
+/// The sum of all six variant counters equals
+/// `Libp2pAdapter::gossipsub_publish_errors` (up to small read-races). The
+/// match arm in `handle_command!` is exhaustive — adding a new variant in a
+/// future libp2p bump is a compile error here, which is the point.
+#[derive(Clone, Debug, Default)]
+pub struct PublishErrorCounters {
+    /// `PublishError::Duplicate` — caller bug: same message-id published twice.
+    pub duplicate: Arc<AtomicU64>,
+    /// `PublishError::SigningError` — local keypair failed to sign.
+    pub signing_error: Arc<AtomicU64>,
+    /// `PublishError::NoPeersSubscribedToTopic` — mesh has no subscribers
+    /// on the topic right now (transient during peer churn or post-prune).
+    pub no_peers_subscribed: Arc<AtomicU64>,
+    /// `PublishError::MessageTooLarge` — payload exceeds `max_transmit_size`.
+    pub message_too_large: Arc<AtomicU64>,
+    /// `PublishError::TransformFailed` — custom transform error. Phalanx
+    /// uses no transform; should be zero in practice.
+    pub transform_failed: Arc<AtomicU64>,
+    /// `PublishError::AllQueuesFull` — every connected peer's outbound
+    /// priority queue is full (transient burst overrun).
+    pub all_queues_full: Arc<AtomicU64>,
+    /// Sum of the `usize` values from `AllQueuesFull(n)`. Mean
+    /// peers-attempted-at-failure = `all_queues_full_peers_attempted /
+    /// all_queues_full`.
+    pub all_queues_full_peers_attempted: Arc<AtomicU64>,
+}
+
 #[derive(Clone)]
 pub struct Libp2pAdapter {
     command_tx: mpsc::Sender<TransportCommand>,
@@ -129,6 +163,10 @@ pub struct Libp2pAdapter {
     /// otherwise. Mirrors the `swarm_wake_log` opt-in pattern: production
     /// builds default to `None` and pay zero hot-path cost.
     pub publish_timing: Option<PublishTimingCounters>,
+    /// Per-variant breakdown of failed `gossipsub.publish()` calls. Always on
+    /// — only the failure path increments. Diagnoses why publishes are being
+    /// rejected (`AllQueuesFull` vs `NoPeersSubscribedToTopic` vs ...).
+    pub publish_error_breakdown: PublishErrorCounters,
 }
 
 /// Extract a `SubnetBucket` from a libp2p `Multiaddr`.
@@ -387,6 +425,9 @@ impl Libp2pAdapter {
         };
         let publish_timing_task = publish_timing.clone();
 
+        let publish_error_breakdown = PublishErrorCounters::default();
+        let publish_error_breakdown_task = publish_error_breakdown.clone();
+
         let poll_cadence = config.poll_cadence;
 
         tokio::spawn(async move {
@@ -413,6 +454,46 @@ impl Libp2pAdapter {
                             let timing_start = publish_timing_task.as_ref().map(|_| Instant::now());
                             if let Err(publish_error) = swarm.behaviour_mut().gossipsub.publish(ident_topic, data) {
                                 gossipsub_publish_errors_task.fetch_add(1, Ordering::Relaxed);
+                                // Per-variant attribution. Match is exhaustive — a future
+                                // libp2p bump that adds a PublishError variant becomes a
+                                // compile error here, prompting an explicit decision.
+                                use libp2p::gossipsub::PublishError;
+                                match &publish_error {
+                                    PublishError::Duplicate => {
+                                        publish_error_breakdown_task
+                                            .duplicate
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    PublishError::SigningError(_) => {
+                                        publish_error_breakdown_task
+                                            .signing_error
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    PublishError::NoPeersSubscribedToTopic => {
+                                        publish_error_breakdown_task
+                                            .no_peers_subscribed
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    PublishError::MessageTooLarge => {
+                                        publish_error_breakdown_task
+                                            .message_too_large
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    PublishError::TransformFailed(_) => {
+                                        publish_error_breakdown_task
+                                            .transform_failed
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    PublishError::AllQueuesFull(n) => {
+                                        publish_error_breakdown_task
+                                            .all_queues_full
+                                            .fetch_add(1, Ordering::Relaxed);
+                                        let n_u64 = u64::try_from(*n).unwrap_or(u64::MAX);
+                                        publish_error_breakdown_task
+                                            .all_queues_full_peers_attempted
+                                            .fetch_add(n_u64, Ordering::Relaxed);
+                                    }
+                                }
                                 tracing::error!(
                                     target: "phalanx::transport",
                                     "Gossipsub publish failed for topic {}: {:?}",
@@ -743,6 +824,7 @@ impl Libp2pAdapter {
             gossipsub_publish_errors,
             response_channels_lost,
             publish_timing,
+            publish_error_breakdown,
         }
     }
 
@@ -960,6 +1042,13 @@ impl Libp2pEgress {
     /// compute `mean_call_nanos = call_nanos_total / call_count`.
     pub fn publish_timing(&self) -> Option<PublishTimingCounters> {
         self.adapter.publish_timing.clone()
+    }
+
+    /// Returns the per-variant breakdown of failed `gossipsub.publish()`
+    /// calls. Always available — only the failure path increments. The sum
+    /// of all variant counts equals `gossipsub_publish_errors`.
+    pub fn publish_error_breakdown(&self) -> PublishErrorCounters {
+        self.adapter.publish_error_breakdown.clone()
     }
 
     /// Returns the monotonic count of retrieval responses that could not be
