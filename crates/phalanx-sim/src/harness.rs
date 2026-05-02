@@ -49,6 +49,13 @@ impl IngressPort for SimIngress {
 //  SimEgress — EgressPort adapter for simulated nodes
 // ===========================================================================
 
+/// Per-node publish capture log. Every (topic, payload) emitted via
+/// `SimEgress::publish` is recorded so tests can inspect the wire-format
+/// publishes — heartbeat ciphertexts, canary alerts, fountain symbols, etc.
+/// Shared between the harness (which holds the master Arc) and each
+/// `SimEgress` clone.
+pub type PublishLog = Arc<tokio::sync::Mutex<Vec<(MeshTopic, Vec<u8>)>>>;
+
 /// Virtual egress port that routes publishes through the SimulationWorld.
 /// Each node gets a clone with its own `source_did`/`source_network_id`.
 /// The shared `Arc<RwLock<SimulationWorld>>` handles routing and chaos filtering.
@@ -58,11 +65,22 @@ pub struct SimEgress {
     source_did: Did,
     source_network_id: MeshAddress,
     telemetry_tx: mpsc::Sender<SimEvent>,
+    /// Always-on capture: every publish is mirrored here for test inspection.
+    /// Production never builds `SimEgress` — it's sim-only — so the cost is
+    /// scoped to tests.
+    publish_log: PublishLog,
 }
 
 #[async_trait::async_trait]
 impl EgressPort for SimEgress {
     async fn publish(&self, topic: &MeshTopic, data: Vec<u8>) -> Result<(), String> {
+        // Capture before routing so tests see the publish even if routing
+        // is suppressed (chaos drop, no subscribers, etc.).
+        self.publish_log
+            .lock()
+            .await
+            .push((topic.clone(), data.clone()));
+
         let world = self.world.read().await;
         world
             .route_publish(
@@ -491,6 +509,9 @@ pub struct SimulationHarness {
     /// `retrieve_evidence` / `await_replication` to query each node's
     /// persisted envelopes without piercing actor encapsulation.
     storage_txs: HashMap<Did, mpsc::Sender<StorageCommand>>,
+    /// Per-node publish capture logs. Each `SimEgress` instance shares its
+    /// log with this map; tests read via `captured_publishes()`.
+    publish_logs: HashMap<Did, PublishLog>,
 }
 
 impl SimulationHarness {
@@ -518,6 +539,7 @@ impl SimulationHarness {
             node_temps: Vec::new(),
             governors: HashMap::new(),
             storage_txs: HashMap::new(),
+            publish_logs: HashMap::new(),
         };
 
         (harness, collector)
@@ -534,6 +556,21 @@ impl SimulationHarness {
         &mut self,
         name: &str,
         role: NodeRole,
+    ) -> Result<Did, Box<dyn std::error::Error + Send + Sync>> {
+        self.spawn_node_with_communities(name, role, Vec::new())
+            .await
+    }
+
+    /// Spawn a simulated node, seeding the sentinel's heartbeat keyset
+    /// with `extra_community_ids` on top of any communities derived from
+    /// the trust registry. Used by Phase 3 sim tests that need
+    /// community-encrypted heartbeats to round-trip — three peers sharing
+    /// one CommunityId will mutually decrypt each other's heartbeats.
+    pub async fn spawn_node_with_communities(
+        &mut self,
+        name: &str,
+        role: NodeRole,
+        extra_community_ids: Vec<phalanx_proto::community::CommunityId>,
     ) -> Result<Did, Box<dyn std::error::Error + Send + Sync>> {
         let identity = PhalanxIdentity::new_ephemeral();
         let node_did = identity.did.clone();
@@ -566,11 +603,15 @@ impl SimulationHarness {
 
         // Build transport adapters
         let sim_ingress = SimIngress { rx: ingress_rx };
+        let publish_log: PublishLog = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        self.publish_logs
+            .insert(node_did.clone(), publish_log.clone());
         let sim_egress = SimEgress {
             world: self.world.clone(),
             source_did: node_did.clone(),
             source_network_id: network_id.clone(),
             telemetry_tx: self.telemetry_tx.clone(),
+            publish_log,
         };
 
         // Build the full MeshSentinel actor constellation
@@ -593,6 +634,12 @@ impl SimulationHarness {
             prnu_posterior: std::sync::Arc::new(std::sync::Mutex::new(
                 phalanx_proto::evidence::PrnuPosterior::new_uninformed(),
             )),
+            extra_community_ids: extra_community_ids.clone(),
+            // Sim binds the witness_id-derived MeshAddress so heartbeats'
+            // claimed `sender` matches `network_id` on receive (the form
+            // used by `SimulationWorld`'s routing). See SentinelDependencies
+            // field docs for why mixing encodings silently breaks heartbeats.
+            local_mesh_address: network_id.clone(),
         };
 
         let mut sentinel = MeshSentinel::new(deps).await.map_err(
@@ -624,6 +671,17 @@ impl SimulationHarness {
             .await;
 
         Ok(node_did)
+    }
+
+    /// Snapshot every `(MeshTopic, payload)` pair this node has emitted via
+    /// its `SimEgress`. Tests inspect the list to verify publish-side
+    /// behavior — community-encrypted heartbeats, fountain symbols, canary
+    /// alerts, etc. Returns an empty `Vec` for an unknown DID.
+    pub async fn captured_publishes(&self, did: &Did) -> Vec<(MeshTopic, Vec<u8>)> {
+        match self.publish_logs.get(did) {
+            Some(log) => log.lock().await.clone(),
+            None => Vec::new(),
+        }
     }
 
     /// Resolve a node's forensic MeshAddress from its DID.
@@ -728,6 +786,10 @@ impl SimulationHarness {
         name: &str,
         role: NodeRole,
     ) -> Result<(Did, mpsc::Sender<NetworkEvent>), Box<dyn std::error::Error + Send + Sync>> {
+        // No community-id seeding here yet — local-mesh tests don't need
+        // heartbeat round-trip. If they ever do, mirror the
+        // `spawn_node_with_communities` parameter pattern.
+        let extra_community_ids: Vec<phalanx_proto::community::CommunityId> = Vec::new();
         let identity = PhalanxIdentity::new_ephemeral();
         let node_did = identity.did.clone();
         // Sim has no real mesh transport, so its NetworkEvent and World keys
@@ -753,11 +815,15 @@ impl SimulationHarness {
 
         // Build transport adapters
         let sim_ingress = SimIngress { rx: ingress_rx };
+        let publish_log: PublishLog = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        self.publish_logs
+            .insert(node_did.clone(), publish_log.clone());
         let sim_egress = SimEgress {
             world: self.world.clone(),
             source_did: node_did.clone(),
             source_network_id: network_id.clone(),
             telemetry_tx: self.telemetry_tx.clone(),
+            publish_log,
         };
 
         // Local mesh adapter — channel bridge for test injection
@@ -784,6 +850,12 @@ impl SimulationHarness {
             prnu_posterior: std::sync::Arc::new(std::sync::Mutex::new(
                 phalanx_proto::evidence::PrnuPosterior::new_uninformed(),
             )),
+            extra_community_ids: extra_community_ids.clone(),
+            // Sim binds the witness_id-derived MeshAddress so heartbeats'
+            // claimed `sender` matches `network_id` on receive (the form
+            // used by `SimulationWorld`'s routing). See SentinelDependencies
+            // field docs for why mixing encodings silently breaks heartbeats.
+            local_mesh_address: network_id.clone(),
         };
 
         let mut sentinel = MeshSentinel::new(deps).await.map_err(

@@ -254,6 +254,23 @@ async fn test_sentinel_egress_promotion_logic() {
 // Heartbeat Spoofing Defense (Tier 2 Shield Wall)
 // ============================================================================
 
+/// Domain-separated heartbeat key derivation, mirroring
+/// `MeshSentinel::handle_control_message` and the vitals task publisher.
+/// Wire layout: 24-byte XChaCha20 nonce ++ ChaCha20-Poly1305 ciphertext.
+fn encrypt_heartbeat(
+    msg: &phalanx_proto::vitals::ControlMessage,
+    cid: &phalanx_proto::community::CommunityId,
+) -> Vec<u8> {
+    let plaintext = postcard::to_allocvec(msg).unwrap();
+    let key =
+        SymmetricKey::from_bytes(blake3::derive_key("phalanx.heartbeat.v1.community", &cid.0));
+    let (nonce, ciphertext) =
+        phalanx_forensics::cryptography::encrypt_bytes(&key, &plaintext).unwrap();
+    let mut payload = nonce;
+    payload.extend(ciphertext);
+    payload
+}
+
 /// A `ControlMessage` whose body claims `sender = V` but arrives via libp2p
 /// `propagation_source = P` (P ≠ V) is a spoofing attempt: an attacker P
 /// frames victim V by filing a forged heartbeat under V's identity.
@@ -263,6 +280,14 @@ async fn test_sentinel_egress_promotion_logic() {
 async fn test_control_message_origin_mismatch_drops_spoofed_heartbeat() {
     let (ingress_tx, ingress_rx) = mpsc::channel(10);
     let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
+
+    // Seed the sentinel with a known community ID so the receive-side
+    // decryption path succeeds. The fresh test sentinel has an empty
+    // community list; without this, every encrypted heartbeat decryption
+    // would fast-fail and the test could never observe the strict-binding
+    // branch we're trying to verify.
+    let cid = phalanx_proto::community::CommunityId([0xCC; 32]);
+    sentinel.community_ids = vec![cid];
 
     let topic = sentinel.config.network.control_topic.clone();
     let origin = MeshAddress::new("attacker-P".to_string());
@@ -277,7 +302,7 @@ async fn test_control_message_origin_mismatch_drops_spoofed_heartbeat() {
         is_leaf: false,
         integral_summary: None,
     };
-    let data = postcard::to_allocvec(&msg).unwrap();
+    let data = encrypt_heartbeat(&msg, &cid);
 
     ingress_tx
         .send(NetworkEvent::DataReceived {
@@ -309,13 +334,17 @@ async fn test_control_message_origin_mismatch_drops_spoofed_heartbeat() {
 }
 
 /// Sanity-check the negative test above: when origin == sender (honest
-/// path), the heartbeat IS registered. This protects the negative test
-/// from passing trivially (e.g., if a refactor accidentally disabled the
-/// register_activity call entirely).
+/// path) AND the receiver holds the matching community key, the heartbeat
+/// IS registered. This protects the negative test from passing trivially
+/// (e.g., if a refactor accidentally disabled the register_activity call
+/// entirely).
 #[tokio::test]
 async fn test_control_message_genuine_origin_registers_heartbeat() {
     let (ingress_tx, ingress_rx) = mpsc::channel(10);
     let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
+
+    let cid = phalanx_proto::community::CommunityId([0xCC; 32]);
+    sentinel.community_ids = vec![cid];
 
     let topic = sentinel.config.network.control_topic.clone();
     let peer = MeshAddress::new("honest-peer".to_string());
@@ -328,7 +357,7 @@ async fn test_control_message_genuine_origin_registers_heartbeat() {
         is_leaf: false,
         integral_summary: None,
     };
-    let data = postcard::to_allocvec(&msg).unwrap();
+    let data = encrypt_heartbeat(&msg, &cid);
 
     ingress_tx
         .send(NetworkEvent::DataReceived {
@@ -345,6 +374,50 @@ async fn test_control_message_genuine_origin_registers_heartbeat() {
     assert!(
         sentinel.health_tracker.heartbeats.contains_key(&peer),
         "Honest heartbeat must register under the matched origin/sender"
+    );
+}
+
+/// A node with no community keys silently drops every encrypted heartbeat,
+/// regardless of validity. Confirms that open-mesh-only nodes opt out of
+/// Tier 2 / canary / eclipse via the encryption gate.
+#[tokio::test]
+async fn test_no_community_keys_drops_all_heartbeats() {
+    let (ingress_tx, ingress_rx) = mpsc::channel(10);
+    let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
+    assert!(
+        sentinel.community_ids.is_empty(),
+        "Fresh test sentinel must have no community keys"
+    );
+
+    let topic = sentinel.config.network.control_topic.clone();
+    let peer = MeshAddress::new("would-be-honest-peer".to_string());
+
+    let cid = phalanx_proto::community::CommunityId([0xCC; 32]);
+    let msg = phalanx_proto::vitals::ControlMessage {
+        sender: peer.clone(),
+        load_factor: phalanx_proto::vitals::StressLoad(0.25),
+        storage_remaining_mb: 4096,
+        heartbeat_ms: 5_000,
+        is_leaf: false,
+        integral_summary: None,
+    };
+    let data = encrypt_heartbeat(&msg, &cid);
+
+    ingress_tx
+        .send(NetworkEvent::DataReceived {
+            origin: peer.clone(),
+            topic,
+            data,
+        })
+        .await
+        .unwrap();
+    ingress_tx.send(NetworkEvent::Shutdown).await.unwrap();
+
+    sentinel.run().await.unwrap();
+
+    assert!(
+        !sentinel.health_tracker.heartbeats.contains_key(&peer),
+        "Heartbeat from non-shared community must not register"
     );
 }
 

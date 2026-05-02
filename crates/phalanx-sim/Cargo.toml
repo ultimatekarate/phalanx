@@ -31,5 +31,10 @@ serde = { version = "1.0", features = ["derive"] }
 # Per-node vault temp directories
 tempfile = "3"
 
+# Heartbeat encryption test fixtures: derive per-community keys identically
+# to MeshSentinel's vitals task and `handle_control_message` decrypt loop.
+[dev-dependencies]
+blake3 = "1.8"
+
 [lints]
 workspace = true
