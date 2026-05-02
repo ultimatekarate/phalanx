@@ -14,7 +14,7 @@ use phalanx_proto::identity::MeshAddress;
 use phalanx_proto::prelude::PhalanxPhysics;
 use phalanx_proto::telemetry::SimEvent;
 use phalanx_proto::types::VitalityRate;
-use phalanx_proto::vitals::ControlMessage;
+use phalanx_proto::vitals::{ControlMessage, StressLoad};
 
 use super::spectral::SpectralObserver;
 
@@ -52,10 +52,6 @@ pub struct HealthTracker {
     pub capacities: HashMap<MeshAddress, ControlMessage>,
     pub peer_contracts: HashMap<MeshAddress, VitalityRate>,
 
-    pub last_sent_load: f32,
-    pub last_sent_storage: u64,
-    pub last_sent_at: Instant,
-
     /// Shield Wall: spectral behavioral observer for Byzantine detection.
     pub spectral: SpectralObserver,
 }
@@ -67,26 +63,8 @@ impl HealthTracker {
             heartbeats: HashMap::new(),
             capacities: HashMap::new(),
             peer_contracts: HashMap::new(),
-            last_sent_at: Instant::now(),
-            last_sent_load: 0.0,
-            last_sent_storage: 0,
             spectral: SpectralObserver::new(),
         }
-    }
-
-    pub fn should_broadcast_self(&mut self, current_load: f32, current_storage: u64) -> bool {
-        let load_delta = (current_load - self.last_sent_load).abs();
-        let time_since = self.last_sent_at.elapsed();
-
-        // SIGNIFICANCE: Did my stress change by more than 10%?
-        // STALENESS: Has it been 30 seconds since I checked in?
-        if load_delta > 0.10 || time_since > Duration::from_secs(30) {
-            self.last_sent_load = current_load;
-            self.last_sent_storage = current_storage;
-            self.last_sent_at = Instant::now();
-            return true;
-        }
-        false
     }
 
     pub fn register_activity(&mut self, msg: ControlMessage) {
@@ -128,6 +106,56 @@ impl Default for HealthTracker {
     }
 }
 
+/// Significance gate for outbound heartbeats. Owned by the publisher
+/// (the vitals task), not by `HealthTracker` — heartbeat publishing is
+/// a publisher-side concern, not a peer-tracking concern.
+///
+/// A broadcast fires when either:
+/// - load delta since the last broadcast exceeds 0.10, OR
+/// - 30 seconds have elapsed since the last broadcast.
+///
+/// The first call always fires (`last_at = None`) so a fresh node
+/// advertises its presence on the first vitals tick rather than
+/// waiting up to 30s for the elapsed branch when load is stable.
+pub struct BroadcastGate {
+    last_load: StressLoad,
+    last_at: Option<Instant>,
+}
+
+impl BroadcastGate {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            last_load: StressLoad(0.0),
+            last_at: None,
+        }
+    }
+
+    /// Returns `true` if a broadcast should fire now. Updates internal
+    /// state only when returning `true` (a `false` leaves the gate
+    /// unchanged so the next call sees the same baseline).
+    pub fn should_broadcast(&mut self, current_load: StressLoad) -> bool {
+        let fire = match self.last_at {
+            None => true,
+            Some(at) => {
+                let load_delta = (current_load.as_f32() - self.last_load.as_f32()).abs();
+                load_delta > 0.10 || at.elapsed() > Duration::from_secs(30)
+            }
+        };
+        if fire {
+            self.last_load = current_load;
+            self.last_at = Some(Instant::now());
+        }
+        fire
+    }
+}
+
+impl Default for BroadcastGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::indexing_slicing,
@@ -144,42 +172,42 @@ mod tests {
     }
 
     #[test]
-    fn should_broadcast_self_true_on_significant_load_change() {
+    fn broadcast_gate_first_call_always_fires() {
+        // Fresh gate (`last_at = None`) advertises presence on the first
+        // vitals tick rather than waiting up to 30s for the elapsed branch.
+        let mut gate = BroadcastGate::new();
+        assert!(gate.should_broadcast(StressLoad(0.0)));
+    }
+
+    #[test]
+    fn broadcast_gate_fires_on_significant_load_change() {
         // Significance rule: load delta > 0.10 triggers a broadcast.
-        let mut tracker = HealthTracker::new();
-        tracker.last_sent_load = 0.10;
-
+        let mut gate = BroadcastGate::new();
+        // Burn the always-fires-first slot at baseline.
+        let _ = gate.should_broadcast(StressLoad(0.10));
         // Delta 0.30 → exceeds 0.10 threshold.
-        assert!(tracker.should_broadcast_self(0.40, 100));
+        assert!(gate.should_broadcast(StressLoad(0.40)));
     }
 
     #[test]
-    fn should_broadcast_self_false_when_load_stable_and_time_fresh() {
-        // No significant change AND no staleness → no broadcast.
-        // Fresh tracker has last_sent_at = now, so elapsed << 30s.
-        let mut tracker = HealthTracker::new();
-        tracker.last_sent_load = 0.50;
-
-        // Delta 0.05 < 0.10; elapsed < 1s < 30s → should not broadcast.
-        assert!(!tracker.should_broadcast_self(0.55, 100));
+    fn broadcast_gate_skips_when_load_stable_and_time_fresh() {
+        // After the first call updates `last_at`, a stable load within
+        // 30s must not re-fire.
+        let mut gate = BroadcastGate::new();
+        let _ = gate.should_broadcast(StressLoad(0.50));
+        // Delta 0.05 < 0.10; elapsed < 1s < 30s → no broadcast.
+        assert!(!gate.should_broadcast(StressLoad(0.55)));
     }
 
     #[test]
-    fn should_broadcast_self_updates_stored_state_on_broadcast() {
-        // When a broadcast fires, the tracker must record what it just sent,
-        // otherwise the next call will re-fire against the same delta.
-        let mut tracker = HealthTracker::new();
-        tracker.last_sent_load = 0.0;
-        tracker.last_sent_storage = 0;
-
-        let fired = tracker.should_broadcast_self(0.75, 512);
-        assert!(fired);
-        assert_eq!(tracker.last_sent_load, 0.75);
-        assert_eq!(tracker.last_sent_storage, 512);
-
-        // Second call with same inputs must not re-fire — delta is now 0.
-        let fired_again = tracker.should_broadcast_self(0.75, 512);
-        assert!(!fired_again);
+    fn broadcast_gate_records_state_on_fire() {
+        // When a broadcast fires, the gate must record what it sent;
+        // otherwise the next call re-fires against the same delta.
+        let mut gate = BroadcastGate::new();
+        // First call always fires (initial baseline 0.0 → 0.75).
+        assert!(gate.should_broadcast(StressLoad(0.75)));
+        // Second call with the same value: delta 0.0 < 0.10, elapsed << 30s.
+        assert!(!gate.should_broadcast(StressLoad(0.75)));
     }
 
     #[test]
@@ -199,7 +227,7 @@ mod tests {
         let pid = peer("live");
         let msg = ControlMessage {
             sender: pid.clone(),
-            load_factor: 0.1,
+            load_factor: phalanx_proto::vitals::StressLoad(0.1),
             storage_remaining_mb: 1024,
             heartbeat_ms: 5_000,
             is_leaf: false,
@@ -224,7 +252,7 @@ mod tests {
         let pid = peer("low-rtt-peer");
         let msg = ControlMessage {
             sender: pid.clone(),
-            load_factor: 0.1,
+            load_factor: phalanx_proto::vitals::StressLoad(0.1),
             storage_remaining_mb: 1024,
             heartbeat_ms: 5_000,
             is_leaf: false,

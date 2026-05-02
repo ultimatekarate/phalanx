@@ -59,6 +59,7 @@ fn build_test_actor<J: TransientJournal + Send + 'static>(
             phalanx_forensics::bloom::RotatingBloomFilter::DEFAULT_CAPACITY,
         ),
         shutdown: ShutdownSignal::new(),
+        used_bytes_gauge: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     (actor, storage_rx, storage_tx)
