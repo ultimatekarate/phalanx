@@ -41,6 +41,12 @@ pub struct StorageActor<J: TransientJournal> {
     /// Shared cancellation signal. The run loop's select! polls this arm with
     /// `biased;` priority so cancel wins deterministically at shutdown.
     pub shutdown: Arc<ShutdownSignal>,
+    /// Local-bytes gauge mirrored from `guardian.ledger.total_local_bytes()`.
+    /// Refreshed on the 1s maintenance tick. Read by the vitals task (in
+    /// `MeshSentinel`) to populate `ControlMessage::storage_remaining_mb`
+    /// without a per-tick channel round-trip. At most 1s stale, which is
+    /// well inside the heartbeat cadence.
+    pub used_bytes_gauge: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -144,6 +150,14 @@ impl<J: TransientJournal> StorageActor<J> {
                 _ = maintenance_timer.tick() => {
                     self.replay_filter.rotate();
                     let _ = self.guardian.check_and_finalize_recording(self.current_tolerance).await;
+                    // Mirror the ledger total into the gauge for the vitals
+                    // task. Cheap: one ledger read + one atomic store per
+                    // second. Mirror, not authoritative store — Guardian's
+                    // ledger remains the source of truth.
+                    self.used_bytes_gauge.store(
+                        self.guardian.ledger.total_local_bytes(),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                 }
             }
         }

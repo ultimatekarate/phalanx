@@ -79,9 +79,9 @@ impl SpectralObserver {
             obs.heartbeat_times.pop_front();
         }
 
-        obs.claimed_load = msg.load_factor;
+        obs.claimed_load = msg.load_factor.as_f32();
         obs.claimed_is_leaf = msg.is_leaf;
-        obs.claimed_integrals = msg.integral_summary;
+        obs.claimed_integrals = msg.integral_summary.map(|s| s.as_array());
 
         // Reset data volume window if expired
         if obs.window_start.elapsed() > self.window_duration {
@@ -206,7 +206,7 @@ mod shield_wall_tests {
     fn make_control(load: f32, is_leaf: bool) -> ControlMessage {
         ControlMessage {
             sender: MeshAddress("peer-1".to_string()),
-            load_factor: load,
+            load_factor: phalanx_proto::vitals::StressLoad(load),
             storage_remaining_mb: 1000,
             heartbeat_ms: 5000,
             is_leaf,

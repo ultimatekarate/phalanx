@@ -61,6 +61,7 @@ fn build_test_actor<J: TransientJournal + Send + 'static>(
             phalanx_forensics::bloom::RotatingBloomFilter::DEFAULT_CAPACITY,
         ),
         shutdown: ShutdownSignal::new(),
+        used_bytes_gauge: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     (actor, storage_rx, storage_tx)
@@ -247,6 +248,104 @@ async fn test_sentinel_egress_promotion_logic() {
     } else {
         panic!("Response should have been Success");
     }
+}
+
+// ============================================================================
+// Heartbeat Spoofing Defense (Tier 2 Shield Wall)
+// ============================================================================
+
+/// A `ControlMessage` whose body claims `sender = V` but arrives via libp2p
+/// `propagation_source = P` (P ≠ V) is a spoofing attempt: an attacker P
+/// frames victim V by filing a forged heartbeat under V's identity.
+/// `handle_control_message` must drop the message and leave
+/// `health_tracker.heartbeats` unmutated for both P and V.
+#[tokio::test]
+async fn test_control_message_origin_mismatch_drops_spoofed_heartbeat() {
+    let (ingress_tx, ingress_rx) = mpsc::channel(10);
+    let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
+
+    let topic = sentinel.config.network.control_topic.clone();
+    let origin = MeshAddress::new("attacker-P".to_string());
+    let forged_sender = MeshAddress::new("victim-V".to_string());
+
+    let msg = phalanx_proto::vitals::ControlMessage {
+        // Body claims to be from V, but propagation source will be P.
+        sender: forged_sender.clone(),
+        load_factor: phalanx_proto::vitals::StressLoad(0.95),
+        storage_remaining_mb: 0,
+        heartbeat_ms: 5_000,
+        is_leaf: false,
+        integral_summary: None,
+    };
+    let data = postcard::to_allocvec(&msg).unwrap();
+
+    ingress_tx
+        .send(NetworkEvent::DataReceived {
+            origin: origin.clone(),
+            topic,
+            data,
+        })
+        .await
+        .unwrap();
+    ingress_tx.send(NetworkEvent::Shutdown).await.unwrap();
+
+    sentinel.run().await.unwrap();
+
+    // Strict-binding policy: spoofed heartbeat must not register under
+    // either the propagation origin OR the forged sender. Both keys
+    // absent proves the early-return branch fired, not the
+    // success-path-with-wrong-key branch.
+    assert!(
+        !sentinel.health_tracker.heartbeats.contains_key(&origin),
+        "Spoofed heartbeat must not register under propagation origin"
+    );
+    assert!(
+        !sentinel
+            .health_tracker
+            .heartbeats
+            .contains_key(&forged_sender),
+        "Spoofed heartbeat must not register under forged sender"
+    );
+}
+
+/// Sanity-check the negative test above: when origin == sender (honest
+/// path), the heartbeat IS registered. This protects the negative test
+/// from passing trivially (e.g., if a refactor accidentally disabled the
+/// register_activity call entirely).
+#[tokio::test]
+async fn test_control_message_genuine_origin_registers_heartbeat() {
+    let (ingress_tx, ingress_rx) = mpsc::channel(10);
+    let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
+
+    let topic = sentinel.config.network.control_topic.clone();
+    let peer = MeshAddress::new("honest-peer".to_string());
+
+    let msg = phalanx_proto::vitals::ControlMessage {
+        sender: peer.clone(),
+        load_factor: phalanx_proto::vitals::StressLoad(0.25),
+        storage_remaining_mb: 4096,
+        heartbeat_ms: 5_000,
+        is_leaf: false,
+        integral_summary: None,
+    };
+    let data = postcard::to_allocvec(&msg).unwrap();
+
+    ingress_tx
+        .send(NetworkEvent::DataReceived {
+            origin: peer.clone(),
+            topic,
+            data,
+        })
+        .await
+        .unwrap();
+    ingress_tx.send(NetworkEvent::Shutdown).await.unwrap();
+
+    sentinel.run().await.unwrap();
+
+    assert!(
+        sentinel.health_tracker.heartbeats.contains_key(&peer),
+        "Honest heartbeat must register under the matched origin/sender"
+    );
 }
 
 #[tokio::test]

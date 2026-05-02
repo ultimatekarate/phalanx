@@ -68,6 +68,12 @@ pub struct NetworkConfig {
     /// Topic for revocation token propagation (Cryptographic Forgetting).
     #[serde(default = "default_revocation_topic")]
     pub revocation_topic: MeshTopic,
+    /// Heartbeat publishing on the control topic. Receivers use this for Tier 2
+    /// Shield Wall spectral consistency and heartbeat-driven peer staleness.
+    /// Default false: broadcasting load/storage/leaf state plus integral summary
+    /// is metadata that an adversary can use; operators must opt in.
+    #[serde(default)]
+    pub heartbeat_publish_enabled: bool,
 }
 
 #[derive(Debug)]
@@ -196,6 +202,7 @@ impl Default for NetworkConfig {
             symbol_bundle_size: SymbolBundleSize::default(),
             listen_addresses: default_listen_addresses(),
             revocation_topic: default_revocation_topic(),
+            heartbeat_publish_enabled: false,
         }
     }
 }

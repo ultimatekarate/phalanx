@@ -21,7 +21,7 @@ use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::{Did, EncodingSymbolId, PhalanxTimestamp, ShardId};
 use phalanx_proto::telemetry::{ChaosMode, SimEvent};
 use phalanx_proto::types::ByteCapacity;
-use phalanx_proto::vitals::ControlMessage;
+use phalanx_proto::vitals::{ControlMessage, StressLoad};
 use phalanx_sim::physics::PhalanxPhysics;
 use phalanx_sim::SimulationHarness;
 
@@ -49,7 +49,7 @@ fn make_test_chunk(owner_did: &Did, payload_size: usize) -> Vec<u8> {
 fn make_control_heartbeat(sender: &MeshAddress) -> Vec<u8> {
     let msg = ControlMessage {
         sender: sender.clone(),
-        load_factor: 0.3,
+        load_factor: StressLoad(0.3),
         storage_remaining_mb: 1024,
         heartbeat_ms: 5000,
         is_leaf: false,
@@ -63,7 +63,7 @@ fn make_control_heartbeat(sender: &MeshAddress) -> Vec<u8> {
 fn make_lying_heartbeat(sender: &MeshAddress) -> Vec<u8> {
     let msg = ControlMessage {
         sender: sender.clone(),
-        load_factor: 0.9,
+        load_factor: StressLoad(0.9),
         storage_remaining_mb: 1024,
         heartbeat_ms: 5000,
         is_leaf: true,

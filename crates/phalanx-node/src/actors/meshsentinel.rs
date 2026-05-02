@@ -220,6 +220,11 @@ impl<I: IngressPort> MeshSentinel<I> {
             );
         }
 
+        // Used-bytes gauge: mirrors guardian.ledger.total_local_bytes() into
+        // a shared atomic so the vitals task can read it without a channel
+        // round-trip. Refreshed on StorageActor's 1s maintenance tick.
+        let used_bytes_gauge = Arc::new(std::sync::atomic::AtomicU64::new(0));
+
         // Vault instantiation (Pure IO configuration)
         let storage_actor = StorageActor {
             reassembler,
@@ -234,6 +239,7 @@ impl<I: IngressPort> MeshSentinel<I> {
                 phalanx_forensics::bloom::RotatingBloomFilter::DEFAULT_CAPACITY,
             ),
             shutdown: shutdown.clone(),
+            used_bytes_gauge: used_bytes_gauge.clone(),
         };
 
         let storage_handle = tokio::spawn(async move {
@@ -247,6 +253,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             salvaged_queue,
             deps.system_governor.clone(),
             clock_handle.clone(),
+            deps.config.network.control_topic.clone(),
             shutdown.clone(),
         );
 
@@ -346,9 +353,26 @@ impl<I: IngressPort> MeshSentinel<I> {
         // Uses dynamic sleep instead of fixed interval to adapt each cycle.
         // select! with biased cancel-first so shutdown wakes the daemon out of
         // its sleep immediately instead of waiting for the tick.
+        //
+        // The vitals task also publishes Tier 2 Shield Wall heartbeats on the
+        // control topic when `heartbeat_publish_enabled` is set. Heartbeats
+        // ride the same cadence as vitals updates (one timer, two side-effects)
+        // and are gated by `BroadcastGate` so a stable load suppresses
+        // sub-30s republishes. Note: gossipsub `MessageAuthenticity::Signed`
+        // attaches a sequence number per publish, so identical-body
+        // heartbeats keep distinct message_ids — receivers' staleness
+        // windows refresh correctly. Do NOT switch the gossipsub
+        // `message_id_fn` to a body-hash; that would silently dedupe
+        // consecutive identical heartbeats.
         let vitals_governor = deps.system_governor.clone();
         let vitals_shutdown = shutdown.clone();
+        let vitals_egress_tx = egress_tx.clone();
+        let vitals_used_bytes = used_bytes_gauge.clone();
+        let vitals_max_storage = deps.config.storage.max_storage_bytes;
+        let vitals_heartbeat_enabled = deps.config.network.heartbeat_publish_enabled;
+        let vitals_local_addr = arc_identity.to_mesh_address();
         let vitals_handle = tokio::spawn(async move {
+            let mut gate = crate::vitals::health::BroadcastGate::new();
             loop {
                 let interval = vitals_governor.vitals_polling_interval();
                 tokio::select! {
@@ -356,6 +380,42 @@ impl<I: IngressPort> MeshSentinel<I> {
                     _ = vitals_shutdown.cancelled() => break,
                     _ = tokio::time::sleep(interval) => {
                         vitals_governor.update_vitals();
+                        if vitals_heartbeat_enabled {
+                            let load = vitals_governor.load_factor();
+                            if gate.should_broadcast(load) {
+                                // Compute storage only when actually publishing —
+                                // saves the atomic load + arithmetic during the
+                                // ~30s no-broadcast intervals.
+                                let used = vitals_used_bytes
+                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                let remaining_bytes = vitals_max_storage
+                                    .as_u64()
+                                    .saturating_sub(used);
+                                // Cap the wire value at u32::MAX MB (~4 PiB)
+                                // even when max_storage_bytes is uncapped.
+                                let storage_remaining_mb = (remaining_bytes / 1_048_576)
+                                    .min(u32::MAX as u64);
+                                // `as_millis()` returns u128, but `vitals_polling_interval`
+                                // produces 5–60 second values that fit comfortably in u64.
+                                #[allow(clippy::cast_possible_truncation)]
+                                let heartbeat_ms = phalanx_proto::vitals::HeartbeatInterval(
+                                    interval.as_millis() as u64,
+                                )
+                                .as_u64();
+                                let msg = phalanx_proto::vitals::ControlMessage {
+                                    sender: vitals_local_addr.clone(),
+                                    load_factor: load,
+                                    storage_remaining_mb,
+                                    heartbeat_ms,
+                                    is_leaf: vitals_governor.is_leaf_state(),
+                                    integral_summary: Some(
+                                        vitals_governor.integral_summary(),
+                                    ),
+                                };
+                                let _ = vitals_egress_tx
+                                    .try_send(EgressCommand::PublishHeartbeat(msg));
+                            }
+                        }
                     }
                 }
             }
@@ -655,7 +715,7 @@ impl<I: IngressPort> MeshSentinel<I> {
         }
 
         if topic.as_str() == self.config.network.control_topic.as_str() {
-            self.handle_control_message(&data);
+            self.handle_control_message(origin, &data);
         } else if topic.as_str() == self.config.network.revocation_topic.as_str() {
             self.handle_revocation(origin, &data).await;
         } else {
@@ -663,25 +723,45 @@ impl<I: IngressPort> MeshSentinel<I> {
         }
     }
 
-    fn handle_control_message(&mut self, data: &[u8]) {
-        if let Ok(msg) =
-            phalanx_forensics::gate::unmarshal::<ControlMessage>(data, "control_message")
-        {
-            let peer_id_for_spectral = msg.sender.clone();
-            self.health_tracker.register_activity(msg);
+    /// Strict-binding policy: a heartbeat is only accepted if the body's
+    /// claimed sender equals the libp2p propagation source. This means
+    /// heartbeats only propagate one gossipsub hop — peers behind a relay
+    /// never observe each other's load/leaf state. Deliberate: heartbeats
+    /// are local-presence signals, and accepting unsigned multi-hop
+    /// heartbeats would let any peer frame any other peer in the mesh
+    /// (origin = honest relay, sender = forged victim).
+    fn handle_control_message(&mut self, origin: MeshAddress, data: &[u8]) {
+        let Ok(msg) = phalanx_forensics::gate::unmarshal::<ControlMessage>(data, "control_message")
+        else {
+            return;
+        };
+        if msg.sender != origin {
+            tracing::warn!(
+                target: "phalanx::shield_wall",
+                event = "control_message_origin_mismatch",
+                claimed = %msg.sender,
+                origin = %origin,
+                "Heartbeat sender != propagation origin — dropping"
+            );
+            // Do NOT record a Trust offense on `origin` here. Honest relays
+            // forward adversary-authored spoofs; punishing the relay lets
+            // attackers frame any peer in the mesh.
+            return;
+        }
+        let peer_id_for_spectral = origin.clone();
+        self.health_tracker.register_activity(msg);
 
-            // Shield Wall: evaluate spectral consistency
-            if let Some(residual) = self.health_tracker.spectral.evaluate(&peer_id_for_spectral) {
-                if residual > self.health_tracker.spectral.anomaly_threshold {
-                    self.system_governor
-                        .record_spectral_anomaly(&peer_id_for_spectral.to_string(), residual);
-                    tracing::warn!(
-                        target: "phalanx::shield_wall",
-                        peer = %peer_id_for_spectral,
-                        residual = %residual,
-                        "SPECTRAL_ANOMALY_DETECTED"
-                    );
-                }
+        // Shield Wall: evaluate spectral consistency
+        if let Some(residual) = self.health_tracker.spectral.evaluate(&peer_id_for_spectral) {
+            if residual > self.health_tracker.spectral.anomaly_threshold {
+                self.system_governor
+                    .record_spectral_anomaly(&peer_id_for_spectral.to_string(), residual);
+                tracing::warn!(
+                    target: "phalanx::shield_wall",
+                    peer = %peer_id_for_spectral,
+                    residual = %residual,
+                    "SPECTRAL_ANOMALY_DETECTED"
+                );
             }
         }
     }

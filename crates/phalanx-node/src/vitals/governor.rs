@@ -412,6 +412,56 @@ impl SystemGovernor {
         });
     }
 
+    /// Bounded composite stress as a `StressLoad`, suitable for outbound
+    /// `ControlMessage` heartbeats. Clamps `composite_stress()` to `[0, 1]`.
+    pub fn load_factor(&self) -> phalanx_proto::vitals::StressLoad {
+        phalanx_proto::vitals::StressLoad::from_clamped(self.composite_stress())
+    }
+
+    /// True when the recommended power state is at or below `Leaf`.
+    /// `Dormant` is treated as leaf for advertised-capacity purposes:
+    /// a Dormant node is not contributing capacity by definition.
+    /// Mirrors the reciprocity-floor sweep pattern in MeshSentinel.
+    pub fn is_leaf_state(&self) -> bool {
+        matches!(
+            self.current_power_state(),
+            PowerState::Leaf | PowerState::Dormant
+        )
+    }
+
+    /// Eight integral observations in fixed wire order `[s, d, e, l, m, w, b, c]`,
+    /// each normalized by its critical threshold and clamped to `[0, 1]`.
+    /// Suitable for outbound `ControlMessage::integral_summary` (Tier 2 Shield Wall).
+    ///
+    /// Order is locked by `IntegralSummary`'s named accessors. Do not reshuffle
+    /// without bumping the protocol version.
+    ///
+    /// `e` (entry/sybil) normalizes by `psi_max` because there is no `e_crit`;
+    /// `l` (latency) normalizes by `max_temporal_tolerance` converted to seconds.
+    #[allow(clippy::cast_possible_truncation)] // values are clamped to [0, 1] before cast.
+    pub fn integral_summary(&self) -> phalanx_proto::vitals::IntegralSummary {
+        let now = self.now_secs();
+        let l_crit_secs = self
+            .config
+            .max_temporal_tolerance
+            .as_secs_f64()
+            .max(f64::EPSILON);
+        let arr = self.with_state(|s| {
+            let norm = |v: f64, crit: f64| (v / crit.max(f64::EPSILON)).clamp(0.0, 1.0) as f32;
+            [
+                norm(s.s.current_value(now), self.config.s_crit),
+                norm(s.d.current_value(now), self.config.d_crit),
+                norm(s.e.current_value(now), self.config.psi_max),
+                norm(s.l.current_value(now), l_crit_secs),
+                norm(s.m.current_value(now), self.config.m_crit),
+                norm(s.w.current_value(now), self.config.w_crit),
+                norm(s.b.current_value(now), self.config.b_crit),
+                norm(s.c.current_value(now), self.config.c_crit),
+            ]
+        });
+        phalanx_proto::vitals::IntegralSummary(arr)
+    }
+
     /// Weighted composite of all integral pressures for power state transitions.
     /// Returns 0.0 (idle) to 1.0+ (saturated).
     pub fn composite_stress(&self) -> f64 {
@@ -1664,5 +1714,110 @@ mod tests {
             c_before,
             c_after
         );
+    }
+
+    // ---------------- Heartbeat accessor tests ----------------
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        clippy::float_cmp
+    )]
+    mod heartbeat_accessor_tests {
+        use super::*;
+
+        #[test]
+        fn load_factor_clamps_composite_stress_into_unit_interval() {
+            let gov = SystemGovernor::new();
+            // Slam memory to a multiple of m_crit so composite_stress saturates
+            // at or above 1.0; load_factor must clamp to 1.0.
+            let m_crit_bytes = (gov.config.m_crit * 1024.0 * 1024.0) as usize;
+            for _ in 0..50 {
+                gov.record_memory_pressure(m_crit_bytes * 4);
+            }
+            let load = gov.load_factor();
+            assert!(
+                (0.0..=1.0).contains(&load.as_f32()),
+                "load_factor must be clamped to [0, 1], got {}",
+                load.as_f32()
+            );
+
+            // A fresh governor with no pressure should report near zero.
+            let fresh = SystemGovernor::new();
+            let zero = fresh.load_factor();
+            assert!(
+                zero.as_f32() < 0.5,
+                "fresh governor's load_factor should be well below 0.5, got {}",
+                zero.as_f32()
+            );
+        }
+
+        #[test]
+        fn is_leaf_state_tracks_current_power_state() {
+            let gov = SystemGovernor::new();
+            // Default fresh state is Normal — not leaf, not dormant.
+            assert_eq!(gov.current_power_state(), PowerState::Normal);
+            assert!(
+                !gov.is_leaf_state(),
+                "Normal power state must not register as leaf"
+            );
+
+            // Forge the recommended state to Leaf via direct write.
+            *gov.recommended_state.write().unwrap() = PowerState::Leaf;
+            assert!(
+                gov.is_leaf_state(),
+                "PowerState::Leaf must register as leaf"
+            );
+
+            // Dormant is also leaf-equivalent for advertised-capacity purposes.
+            *gov.recommended_state.write().unwrap() = PowerState::Dormant;
+            assert!(
+                gov.is_leaf_state(),
+                "PowerState::Dormant must register as leaf for capacity advertisement"
+            );
+        }
+
+        #[test]
+        fn integral_summary_returns_eight_clamped_values_in_locked_order() {
+            let gov = SystemGovernor::new();
+            let summary = gov.integral_summary();
+            let arr = summary.as_array();
+
+            // Every value must be a clamped, finite f32 in [0, 1].
+            for (i, v) in arr.iter().enumerate() {
+                assert!(v.is_finite(), "integral[{}] must be finite, got {}", i, v);
+                assert!(
+                    (0.0..=1.0).contains(v),
+                    "integral[{}] must be in [0, 1], got {}",
+                    i,
+                    v
+                );
+            }
+
+            // Named accessors must agree with array indices — locks the wire
+            // order at the type level. Bit-equality is the right test here:
+            // both sides come from the same `[f32; 8]` slot, so they're not
+            // just close but identical.
+            assert_eq!(summary.s().to_bits(), arr[0].to_bits());
+            assert_eq!(summary.d().to_bits(), arr[1].to_bits());
+            assert_eq!(summary.e().to_bits(), arr[2].to_bits());
+            assert_eq!(summary.l().to_bits(), arr[3].to_bits());
+            assert_eq!(summary.m().to_bits(), arr[4].to_bits());
+            assert_eq!(summary.w().to_bits(), arr[5].to_bits());
+            assert_eq!(summary.b().to_bits(), arr[6].to_bits());
+            assert_eq!(summary.c().to_bits(), arr[7].to_bits());
+
+            // Memory pressure must show up as the m-slot increasing.
+            let m_crit_bytes = (gov.config.m_crit * 1024.0 * 1024.0) as usize;
+            gov.record_memory_pressure(m_crit_bytes * 2);
+            let after = gov.integral_summary();
+            assert!(
+                after.m() > summary.m(),
+                "memory pressure must lift the m integral (before={}, after={})",
+                summary.m(),
+                after.m()
+            );
+        }
     }
 }
