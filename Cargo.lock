@@ -4955,6 +4955,7 @@ name = "phalanx-sim"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "futures",
  "phalanx-forensics",
  "phalanx-node",

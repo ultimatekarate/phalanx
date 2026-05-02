@@ -75,7 +75,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Arc::new(reputation_projection) as Arc<dyn PeerEvaluator>,
     )?;
 
-    // Engine Initialization via Parameter Object
+    // Engine Initialization via Parameter Object.
+    // Compute the local MeshAddress before moving `my_identity` into deps.
+    // Production binds the libp2p PeerId base58 form so heartbeats' claimed
+    // `sender` matches `propagation_source` on receive.
+    let local_mesh_address =
+        phalanx_transport::identity_ext::Libp2pExt::to_mesh_address(&my_identity);
     let deps = SentinelDependencies {
         config,
         identity: my_identity,
@@ -98,6 +103,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         prnu_posterior: std::sync::Arc::new(std::sync::Mutex::new(
             phalanx_proto::evidence::PrnuPosterior::new_uninformed(),
         )),
+        extra_community_ids: Vec::new(),
+        local_mesh_address,
     };
 
     let mut engine = MeshSentinel::new(deps).await?;

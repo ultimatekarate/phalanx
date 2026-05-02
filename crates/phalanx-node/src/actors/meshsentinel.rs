@@ -57,6 +57,24 @@ pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJourn
     /// Bayesian PRNU posterior — shared with the FFI capture path.
     /// MediaEgressActor reads this for luminance-conditioned provenance checks.
     pub prnu_posterior: Arc<Mutex<PrnuPosterior>>,
+    /// Additional `CommunityId`s to seed into the sentinel's heartbeat
+    /// keyset, on top of those derived from the trust registry. Production
+    /// callers pass an empty `Vec`; integration tests use this to wire a
+    /// known community key without standing up a full `TrustRegistry`
+    /// `Community` object (which has substantial cryptographic invariants).
+    pub extra_community_ids: Vec<phalanx_proto::community::CommunityId>,
+    /// The MeshAddress form this node will claim as `sender` on outbound
+    /// heartbeats. Must match the form used for `origin` on the receive
+    /// side, since strict-binding requires `msg.sender == origin`.
+    /// - Production (libp2p): `Libp2pExt::to_mesh_address(&identity)` —
+    ///   libp2p PeerId base58 (`12D3KooW...`), matching
+    ///   `PeerMapper::to_mesh_address(&propagation_source)` on receive.
+    /// - Simulation: the harness's `network_id`, typically
+    ///   `MeshAddress::new(identity.witness_id.0.clone())` (multibase
+    ///   `z6Mk...`), matching what `SimulationWorld` routes with.
+    /// The two encodings are different renderings of the same Ed25519
+    /// public key; mixing them silently breaks every heartbeat.
+    pub local_mesh_address: MeshAddress,
 }
 
 pub struct MeshSentinel<I: IngressPort> {
@@ -151,9 +169,11 @@ pub struct MeshSentinel<I: IngressPort> {
     /// Community-scoped dead man's switch. Monitors mesh presence of
     /// community peers during active recordings.
     pub canary: CanaryMonitor,
-    /// Community IDs for canary key derivation. Snapshot taken at construction;
-    /// only members who imported the community can derive the alert decryption key.
-    community_ids: Vec<phalanx_proto::community::CommunityId>,
+    /// Community IDs for canary key derivation and heartbeat encryption.
+    /// Snapshot taken at construction; only members who imported the community
+    /// can derive the relevant decryption keys. `pub` so integration tests
+    /// can seed a known community without standing up a full TrustRegistry.
+    pub community_ids: Vec<phalanx_proto::community::CommunityId>,
 
     // ── Revocation Replay ─────────────────────────────────────────────
     /// Peers we have already replayed revocation tokens to in this session.
@@ -174,6 +194,10 @@ impl<I: IngressPort> MeshSentinel<I> {
         E: EgressPort + 'static,
         J: TransientJournal + Send + 'static,
     {
+        // Captured early so the vitals task spawn block (later in this
+        // function) can use it without reaching back into `deps`.
+        let local_mesh_address = deps.local_mesh_address.clone();
+
         // Shared cancellation signal — cloned into every spawned task so
         // `shutdown()` can signal them all at once. See ShutdownSignal docs
         // for why this is Arc<Notify>+AtomicBool and not tokio-util.
@@ -253,7 +277,6 @@ impl<I: IngressPort> MeshSentinel<I> {
             salvaged_queue,
             deps.system_governor.clone(),
             clock_handle.clone(),
-            deps.config.network.control_topic.clone(),
             shutdown.clone(),
         );
 
@@ -265,8 +288,21 @@ impl<I: IngressPort> MeshSentinel<I> {
 
         // Trust Manager Actor
         let reputation_projection = deps.trust_registry.projection_handle();
-        // Silent Canary: snapshot community IDs before moving the registry.
-        let community_ids: Vec<_> = deps.trust_registry.communities.keys().copied().collect();
+        // Silent Canary + heartbeat encryption: snapshot community IDs from
+        // the trust registry, plus any explicitly seeded by the caller
+        // (integration tests use this to wire a known community key without
+        // constructing a full `Community` object). HashSet dedupes;
+        // `CommunityId` is `Hash + Eq` but not `Ord`.
+        let mut seen = std::collections::HashSet::new();
+        let mut community_ids: Vec<_> = deps
+            .trust_registry
+            .communities
+            .keys()
+            .copied()
+            .chain(deps.extra_community_ids.drain(..))
+            .filter(|cid| seen.insert(*cid))
+            .collect();
+        community_ids.sort_by_key(|cid| cid.0);
         let trust_registry = deps.trust_registry;
         let trust_actor = TrustActor::new(trust_registry, trust_rx, shutdown.clone());
         let trust_handle = tokio::spawn(trust_actor.run());
@@ -355,22 +391,28 @@ impl<I: IngressPort> MeshSentinel<I> {
         // its sleep immediately instead of waiting for the tick.
         //
         // The vitals task also publishes Tier 2 Shield Wall heartbeats on the
-        // control topic when `heartbeat_publish_enabled` is set. Heartbeats
-        // ride the same cadence as vitals updates (one timer, two side-effects)
-        // and are gated by `BroadcastGate` so a stable load suppresses
-        // sub-30s republishes. Note: gossipsub `MessageAuthenticity::Signed`
-        // attaches a sequence number per publish, so identical-body
-        // heartbeats keep distinct message_ids — receivers' staleness
-        // windows refresh correctly. Do NOT switch the gossipsub
-        // `message_id_fn` to a body-hash; that would silently dedupe
-        // consecutive identical heartbeats.
+        // control topic, encrypted per-community. Heartbeats ride the same
+        // cadence as vitals updates (one timer, two side-effects) and are
+        // gated by `BroadcastGate` so a stable load suppresses sub-30s
+        // republishes. A node not in any community publishes nothing —
+        // heartbeats only serve community-scoped consumers (Tier 2 Shield
+        // Wall, silent canary, eclipse fingerprinting). Note: gossipsub
+        // `MessageAuthenticity::Signed` attaches a sequence number per
+        // publish, so identical-body heartbeats keep distinct message_ids —
+        // receivers' staleness windows refresh correctly. Do NOT switch the
+        // gossipsub `message_id_fn` to a body-hash; that would silently
+        // dedupe consecutive identical heartbeats.
         let vitals_governor = deps.system_governor.clone();
         let vitals_shutdown = shutdown.clone();
         let vitals_egress_tx = egress_tx.clone();
         let vitals_used_bytes = used_bytes_gauge.clone();
         let vitals_max_storage = deps.config.storage.max_storage_bytes;
-        let vitals_heartbeat_enabled = deps.config.network.heartbeat_publish_enabled;
-        let vitals_local_addr = arc_identity.to_mesh_address();
+        // Prefer the explicit local_mesh_address (set by the harness in sim,
+        // by the FFI in production). Both ultimately route to the same
+        // Ed25519 key, but the wire encoding differs between sim and prod.
+        let vitals_local_addr = local_mesh_address.clone();
+        let vitals_control_topic = deps.config.network.control_topic.clone();
+        let vitals_community_ids = community_ids.clone();
         let vitals_handle = tokio::spawn(async move {
             let mut gate = crate::vitals::health::BroadcastGate::new();
             loop {
@@ -380,40 +422,79 @@ impl<I: IngressPort> MeshSentinel<I> {
                     _ = vitals_shutdown.cancelled() => break,
                     _ = tokio::time::sleep(interval) => {
                         vitals_governor.update_vitals();
-                        if vitals_heartbeat_enabled {
-                            let load = vitals_governor.load_factor();
-                            if gate.should_broadcast(load) {
-                                // Compute storage only when actually publishing —
-                                // saves the atomic load + arithmetic during the
-                                // ~30s no-broadcast intervals.
-                                let used = vitals_used_bytes
-                                    .load(std::sync::atomic::Ordering::Relaxed);
-                                let remaining_bytes = vitals_max_storage
-                                    .as_u64()
-                                    .saturating_sub(used);
-                                // Cap the wire value at u32::MAX MB (~4 PiB)
-                                // even when max_storage_bytes is uncapped.
-                                let storage_remaining_mb = (remaining_bytes / 1_048_576)
-                                    .min(u32::MAX as u64);
-                                // `as_millis()` returns u128, but `vitals_polling_interval`
-                                // produces 5–60 second values that fit comfortably in u64.
-                                #[allow(clippy::cast_possible_truncation)]
-                                let heartbeat_ms = phalanx_proto::vitals::HeartbeatInterval(
-                                    interval.as_millis() as u64,
-                                )
-                                .as_u64();
-                                let msg = phalanx_proto::vitals::ControlMessage {
-                                    sender: vitals_local_addr.clone(),
-                                    load_factor: load,
-                                    storage_remaining_mb,
-                                    heartbeat_ms,
-                                    is_leaf: vitals_governor.is_leaf_state(),
-                                    integral_summary: Some(
-                                        vitals_governor.integral_summary(),
-                                    ),
-                                };
-                                let _ = vitals_egress_tx
-                                    .try_send(EgressCommand::PublishHeartbeat(msg));
+                        if vitals_community_ids.is_empty() {
+                            // Open-mesh-only node: no community keys, no heartbeats.
+                            // Tier 2 / silent canary / eclipse all degrade gracefully.
+                            continue;
+                        }
+                        let load = vitals_governor.load_factor();
+                        if gate.should_broadcast(load) {
+                            // Compute storage only when actually publishing —
+                            // saves the atomic load + arithmetic during the
+                            // ~30s no-broadcast intervals.
+                            let used = vitals_used_bytes
+                                .load(std::sync::atomic::Ordering::Relaxed);
+                            let remaining_bytes = vitals_max_storage
+                                .as_u64()
+                                .saturating_sub(used);
+                            // Cap the wire value at u32::MAX MB (~4 PiB)
+                            // even when max_storage_bytes is uncapped.
+                            let storage_remaining_mb = (remaining_bytes / 1_048_576)
+                                .min(u32::MAX as u64);
+                            // `as_millis()` returns u128, but `vitals_polling_interval`
+                            // produces 5–60 second values that fit comfortably in u64.
+                            #[allow(clippy::cast_possible_truncation)]
+                            let heartbeat_ms = phalanx_proto::vitals::HeartbeatInterval(
+                                interval.as_millis() as u64,
+                            )
+                            .as_u64();
+                            let msg = phalanx_proto::vitals::ControlMessage {
+                                sender: vitals_local_addr.clone(),
+                                load_factor: load,
+                                storage_remaining_mb,
+                                heartbeat_ms,
+                                is_leaf: vitals_governor.is_leaf_state(),
+                                integral_summary: Some(
+                                    vitals_governor.integral_summary(),
+                                ),
+                            };
+                            let plaintext = match postcard::to_allocvec(&msg) {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "Heartbeat: serialize failed");
+                                    continue;
+                                }
+                            };
+                            // One ciphertext per community — receivers try-decrypt
+                            // with each key they hold. Different domain-separation
+                            // label from canary alerts: same trust circle, different
+                            // purpose, no key reuse.
+                            for cid in &vitals_community_ids {
+                                let key = SymmetricKey::from_bytes(blake3::derive_key(
+                                    "phalanx.heartbeat.v1.community",
+                                    &cid.0,
+                                ));
+                                let (nonce, ciphertext) =
+                                    match phalanx_forensics::cryptography::encrypt_bytes(
+                                        &key, &plaintext,
+                                    ) {
+                                        Ok(p) => p,
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                error = %e,
+                                                "Heartbeat: encryption failed"
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                let mut payload = nonce;
+                                payload.extend(ciphertext);
+                                let _ = vitals_egress_tx.try_send(
+                                    EgressCommand::PublishMesh {
+                                        topic: vitals_control_topic.clone(),
+                                        data: payload,
+                                    },
+                                );
                             }
                         }
                     }
@@ -723,47 +804,85 @@ impl<I: IngressPort> MeshSentinel<I> {
         }
     }
 
-    /// Strict-binding policy: a heartbeat is only accepted if the body's
-    /// claimed sender equals the libp2p propagation source. This means
-    /// heartbeats only propagate one gossipsub hop — peers behind a relay
-    /// never observe each other's load/leaf state. Deliberate: heartbeats
-    /// are local-presence signals, and accepting unsigned multi-hop
-    /// heartbeats would let any peer frame any other peer in the mesh
-    /// (origin = honest relay, sender = forged victim).
+    /// Heartbeat receiver: decrypt with each held community key, then
+    /// apply strict-binding origin check.
+    ///
+    /// **Encryption gating**: heartbeats are encrypted per-community with
+    /// `blake3::derive_key("phalanx.heartbeat.v1.community", &community_id)`
+    /// (canary alert pattern). A node not in any community holds no keys
+    /// and silently drops every inbound heartbeat — Tier 2 Shield Wall,
+    /// silent canary, and eclipse fingerprinting all degrade gracefully.
+    ///
+    /// **Strict-binding policy**: a heartbeat is only accepted if the
+    /// decrypted body's claimed sender equals the libp2p propagation
+    /// source. Heartbeats therefore propagate exactly one gossipsub hop.
+    /// Deliberate: heartbeats are local-presence signals, and the
+    /// receive-side consumers (Tier 2 spectral consistency, peer
+    /// staleness, eclipse fingerprinting) all depend on direct-neighbor
+    /// observation that a multi-hop forwarded claim can't substantiate.
     fn handle_control_message(&mut self, origin: MeshAddress, data: &[u8]) {
-        let Ok(msg) = phalanx_forensics::gate::unmarshal::<ControlMessage>(data, "control_message")
-        else {
-            return;
-        };
-        if msg.sender != origin {
-            tracing::warn!(
-                target: "phalanx::shield_wall",
-                event = "control_message_origin_mismatch",
-                claimed = %msg.sender,
-                origin = %origin,
-                "Heartbeat sender != propagation origin — dropping"
-            );
-            // Do NOT record a Trust offense on `origin` here. Honest relays
-            // forward adversary-authored spoofs; punishing the relay lets
-            // attackers frame any peer in the mesh.
+        // Min frame: 24-byte XChaCha20 nonce + 16-byte Poly1305 tag.
+        if data.len() < 40 {
             return;
         }
-        let peer_id_for_spectral = origin.clone();
-        self.health_tracker.register_activity(msg);
+        let (nonce, ciphertext) = data.split_at(24);
 
-        // Shield Wall: evaluate spectral consistency
-        if let Some(residual) = self.health_tracker.spectral.evaluate(&peer_id_for_spectral) {
-            if residual > self.health_tracker.spectral.anomaly_threshold {
-                self.system_governor
-                    .record_spectral_anomaly(&peer_id_for_spectral.to_string(), residual);
+        for cid in &self.community_ids {
+            let key = SymmetricKey::from_bytes(blake3::derive_key(
+                "phalanx.heartbeat.v1.community",
+                &cid.0,
+            ));
+            let Ok(plaintext) =
+                phalanx_forensics::cryptography::decrypt_bytes(&key, nonce, ciphertext)
+            else {
+                // Wrong key for this ciphertext — try the next community.
+                // Poly1305 tag mismatch is the fast-fail path; not an attack signal.
+                continue;
+            };
+            let Ok(msg) =
+                phalanx_forensics::gate::unmarshal::<ControlMessage>(&plaintext, "control_message")
+            else {
+                // Decrypted but malformed — log once. A successful decryption
+                // identifies the community, so trying further keys is redundant.
                 tracing::warn!(
                     target: "phalanx::shield_wall",
-                    peer = %peer_id_for_spectral,
-                    residual = %residual,
-                    "SPECTRAL_ANOMALY_DETECTED"
+                    "Heartbeat decrypted but failed to deserialize"
                 );
+                return;
+            };
+            if msg.sender != origin {
+                tracing::warn!(
+                    target: "phalanx::shield_wall",
+                    event = "control_message_origin_mismatch",
+                    claimed = %msg.sender,
+                    origin = %origin,
+                    "Heartbeat sender != propagation origin — dropping"
+                );
+                // Do NOT record a Trust offense on `origin` here. Honest
+                // relays forward adversary-authored spoofs; punishing the
+                // relay lets attackers frame any peer in the mesh.
+                return;
             }
+            let peer_id_for_spectral = origin.clone();
+            self.health_tracker.register_activity(msg);
+
+            // Shield Wall: evaluate spectral consistency.
+            if let Some(residual) = self.health_tracker.spectral.evaluate(&peer_id_for_spectral) {
+                if residual > self.health_tracker.spectral.anomaly_threshold {
+                    self.system_governor
+                        .record_spectral_anomaly(&peer_id_for_spectral.to_string(), residual);
+                    tracing::warn!(
+                        target: "phalanx::shield_wall",
+                        peer = %peer_id_for_spectral,
+                        residual = %residual,
+                        "SPECTRAL_ANOMALY_DETECTED"
+                    );
+                }
+            }
+            return;
         }
+        // No held community key decrypts — heartbeat is from a community
+        // we're not in, or unrelated traffic on the topic. Silent drop.
     }
 
     #[allow(clippy::arithmetic_side_effects)] // Memory pressure arithmetic.

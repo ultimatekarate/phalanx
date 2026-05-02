@@ -89,6 +89,7 @@ pub async fn build_test_sentinel(
     let vault_key = derive_vault_key(&identity, &[0u8; 32]);
     let trust_registry = TrustRegistry::build(&config).await;
 
+    let local_mesh_address = phalanx_transport::identity_ext::Libp2pExt::to_mesh_address(&identity);
     let deps = SentinelDependencies {
         config,
         identity,
@@ -102,6 +103,8 @@ pub async fn build_test_sentinel(
         prnu_posterior: Arc::new(std::sync::Mutex::new(
             phalanx_proto::evidence::PrnuPosterior::new_uninformed(),
         )),
+        extra_community_ids: Vec::new(),
+        local_mesh_address,
     };
 
     (

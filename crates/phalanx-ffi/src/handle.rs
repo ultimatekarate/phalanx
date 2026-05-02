@@ -356,6 +356,11 @@ async fn bootstrap(
     let handle_identity = Arc::new(identity.clone());
 
     // Build SentinelDependencies (mirrors sentinel.rs lines 74-84)
+    // local_mesh_address: production binds the libp2p PeerId base58 form
+    // so heartbeats' claimed `sender` matches `propagation_source` on
+    // receive. See the field doc on SentinelDependencies for why mixing
+    // encodings silently breaks every heartbeat.
+    let local_mesh_address = phalanx_transport::identity_ext::Libp2pExt::to_mesh_address(&identity);
     let deps = SentinelDependencies {
         config,
         identity,
@@ -367,6 +372,8 @@ async fn bootstrap(
         vault_key,
         local_mesh: Some(Box::new(local_mesh_adapter)),
         prnu_posterior: prnu_posterior.clone(),
+        extra_community_ids: Vec::new(),
+        local_mesh_address,
     };
 
     let engine = MeshSentinel::new(deps)

@@ -38,15 +38,15 @@ pub enum EgressCommand {
     WithdrawProvider(RecordingId),
     /// Cryptographic Forgetting: publish a DHT tombstone for a revoked recording.
     AnnounceTombstone(RecordingId, DhtPayload),
-    /// Silent Canary: publish an encrypted alert on a mesh topic.
+    /// Silent Canary / Heartbeat: publish an encrypted blob on a mesh-style
+    /// topic. The payload is opaque to the EgressActor — the publisher (e.g.
+    /// `MeshSentinel::broadcast_canary_alert`, `vitals_handle` heartbeat
+    /// loop) handles community-key derivation and ChaCha20-Poly1305
+    /// encryption upstream.
     PublishMesh {
         topic: phalanx_proto::topic::MeshTopic,
         data: Vec<u8>,
     },
-    /// Heartbeat: publish a `ControlMessage` on the configured control topic.
-    /// Symmetric with `PublishRevocation` — typed payload, topic resolved
-    /// internally from the configured `control_topic`.
-    PublishHeartbeat(phalanx_proto::vitals::ControlMessage),
 }
 
 pub struct EgressActor<E: EgressPort> {
@@ -61,9 +61,6 @@ pub struct EgressActor<E: EgressPort> {
     last_announce_clear: Instant,
     /// Trusted clock for forensic timestamps.
     clock: Arc<TrustedClock>,
-    /// Configured control topic for heartbeat publishes. Cached once at
-    /// construction so the handler doesn't re-resolve it per-publish.
-    control_topic: phalanx_proto::topic::MeshTopic,
     /// Shared cancellation signal. The run loop's select! polls this arm with
     /// `biased;` priority so cancel wins deterministically at shutdown.
     shutdown: Arc<ShutdownSignal>,
@@ -83,7 +80,6 @@ impl<E: EgressPort> EgressActor<E> {
         salvaged: Vec<PendingEgress>,
         system_governor: Arc<SystemGovernor>,
         clock: Arc<TrustedClock>,
-        control_topic: phalanx_proto::topic::MeshTopic,
         shutdown: Arc<ShutdownSignal>,
     ) -> Self {
         Self {
@@ -94,7 +90,6 @@ impl<E: EgressPort> EgressActor<E> {
             announced: HashSet::new(),
             last_announce_clear: Instant::now(),
             clock,
-            control_topic,
             shutdown,
         }
     }
@@ -198,22 +193,6 @@ impl<E: EgressPort> EgressActor<E> {
                         topic = %topic,
                         error = %e,
                         "Failed to publish mesh message"
-                    );
-                }
-            }
-            EgressCommand::PublishHeartbeat(msg) => {
-                let data = match postcard::to_allocvec(&msg) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Heartbeat: serialize failed");
-                        return false;
-                    }
-                };
-                if let Err(e) = self.port.publish(&self.control_topic, data).await {
-                    tracing::warn!(
-                        sender = %msg.sender,
-                        error = %e,
-                        "Heartbeat: publish failed"
                     );
                 }
             }
