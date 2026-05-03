@@ -225,6 +225,10 @@ impl TrustActor {
                             self.registry
                                 .live_projection
                                 .sync_communities(community_data);
+                            // Phase 4: republish the live community-key
+                            // snapshot so heartbeat publishers/receivers see
+                            // the new community without sentinel restart.
+                            self.registry.refresh_community_ids_snapshot();
                             ImportOutcome::Ok(fingerprint)
                         }
                         Err(e) => {
@@ -267,6 +271,10 @@ impl TrustActor {
                         self.registry
                             .live_projection
                             .sync_communities(community_data);
+                        // Phase 4: republish the live community-key snapshot
+                        // so dissolved communities stop being decryptable /
+                        // encrypt-targetable without sentinel restart.
+                        self.registry.refresh_community_ids_snapshot();
                         DissolveOutcome::Ok(community_id)
                     } else {
                         DissolveOutcome::NotFound
