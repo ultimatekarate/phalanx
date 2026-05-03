@@ -186,6 +186,22 @@ pub struct TrustRegistry {
     #[serde(skip)]
     pub communities:
         HashMap<phalanx_proto::community::CommunityId, phalanx_proto::community::Community>,
+    /// Live broadcast of the current community-key set. Refreshed whenever
+    /// `communities` is mutated (Import / Dissolve / expiry). Subscribers
+    /// (MeshSentinel main loop, vitals task, canary broadcaster) clone the
+    /// receiver and read the latest snapshot per access — so a community
+    /// dissolved at runtime stops being decryptable / encrypt-targetable
+    /// without a sentinel restart.
+    /// Sender field; subscribers take a `Receiver` via `community_ids_subscribe()`.
+    /// Initialized in `build()`; no `Default` needed because every code path
+    /// constructs through `Self { .. }`.
+    #[serde(skip, default = "default_community_ids_channel")]
+    pub community_ids_tx: tokio::sync::watch::Sender<Vec<phalanx_proto::community::CommunityId>>,
+}
+
+fn default_community_ids_channel(
+) -> tokio::sync::watch::Sender<Vec<phalanx_proto::community::CommunityId>> {
+    tokio::sync::watch::channel(Vec::new()).0
 }
 
 impl TrustRegistry {
@@ -200,12 +216,20 @@ impl TrustRegistry {
 
         let storage_path = vault.join("trust_registry.bin");
 
+        // Initial empty snapshot — communities aren't persisted (#[serde(skip)]
+        // on the HashMap), so a freshly-booted node legitimately starts with
+        // no communities until the first ImportCommunity command. The watch
+        // sender survives `load()` because `load()` only deserializes into
+        // `self.peers`.
+        let (community_ids_tx, _initial_rx) = tokio::sync::watch::channel(Vec::new());
+
         let mut registry = Self {
             peers: HashMap::new(),
             pet_name_index: HashMap::new(),
             live_projection: ReputationProjection::default(),
             storage_path,
             communities: HashMap::new(),
+            community_ids_tx,
         };
 
         if let Err(e) = registry.load().await {
@@ -220,8 +244,26 @@ impl TrustRegistry {
         registry
     }
 
+    /// Subscribe to the live community-key snapshot. Receivers see the latest
+    /// `Vec<CommunityId>` published by mutation sites (Import / Dissolve /
+    /// expiry); use `borrow().clone()` to read — never hold the borrow guard
+    /// across an `.await` (deadlocks the watch system).
+    pub fn community_ids_subscribe(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Vec<phalanx_proto::community::CommunityId>> {
+        self.community_ids_tx.subscribe()
+    }
+
+    /// Republish the current community-key snapshot. Call after every
+    /// `self.communities` mutation that should be visible to heartbeat
+    /// publishers / receivers / canary broadcasters.
+    pub(crate) fn refresh_community_ids_snapshot(&self) {
+        let snapshot: Vec<_> = self.communities.keys().copied().collect();
+        let _ = self.community_ids_tx.send(snapshot);
+    }
+
     /// Dissolve all expired communities. Zeroes membership data and removes from HashMap.
-    /// Called on boot, on maintenance tick, and checked on every effective_trust() access.
+    /// Called on boot (via `build()`) and on TrustActor maintenance ticks.
     pub fn dissolve_expired_communities(&mut self, now: phalanx_proto::time::PhalanxTimestamp) {
         let expired_ids: Vec<_> = self
             .communities
@@ -230,6 +272,7 @@ impl TrustRegistry {
             .map(|(id, _)| *id)
             .collect();
 
+        let any_expired = !expired_ids.is_empty();
         for id in expired_ids {
             if let Some(community) = self.communities.remove(&id) {
                 tracing::info!(
@@ -239,6 +282,9 @@ impl TrustRegistry {
                 );
                 community.dissolve(); // Consumes and zeroizes
             }
+        }
+        if any_expired {
+            self.refresh_community_ids_snapshot();
         }
     }
 
@@ -831,6 +877,127 @@ mod tests {
             effective,
             TrustLevel::Blocked,
             "Blocked peers must stay Blocked even in an Ally community"
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Phase 4: live community-key snapshot (tokio::sync::watch)
+    // ────────────────────────────────────────────────────────────────────
+
+    /// Construct a minimal `TrustRegistry` with a watch sender wired up,
+    /// without going through `TrustRegistry::build()` (which requires
+    /// filesystem access). Mirrors what `build()` puts in the `Self { .. }`
+    /// literal, just without the `load()` round-trip.
+    fn fresh_test_registry() -> TrustRegistry {
+        let (community_ids_tx, _initial_rx) = tokio::sync::watch::channel(Vec::new());
+        TrustRegistry {
+            peers: HashMap::new(),
+            pet_name_index: HashMap::new(),
+            live_projection: ReputationProjection::default(),
+            storage_path: std::path::PathBuf::from("/tmp/phalanx-test-trust-registry.bin"),
+            communities: HashMap::new(),
+            community_ids_tx,
+        }
+    }
+
+    /// Build a synthetic `Community` directly, bypassing the
+    /// import-time vouch verification. Tests the watch wiring, not the
+    /// signature checks.
+    fn synthetic_community(
+        cid: phalanx_proto::community::CommunityId,
+        expires_at_ms: u64,
+        name: &str,
+    ) -> phalanx_proto::community::Community {
+        phalanx_proto::community::Community {
+            fingerprint: cid,
+            name: phalanx_proto::trust::PetName::new(name).expect("valid pet name"),
+            quorum: phalanx_proto::community::Quorum::new(1).expect("valid quorum"),
+            members: Vec::new(),
+            stronghold_did: None,
+            baseline_trust: TrustLevel::Ally,
+            grants: phalanx_proto::community::CommunityGrants::default(),
+            expires_at: phalanx_proto::time::PhalanxTimestamp::from_millis(expires_at_ms),
+        }
+    }
+
+    /// Mutating `communities` directly and calling `refresh_community_ids_snapshot`
+    /// must publish a snapshot containing the inserted CommunityId. Sanity
+    /// check for the helper before testing the dissolve path.
+    #[tokio::test]
+    async fn refresh_publishes_current_keys() {
+        let mut registry = fresh_test_registry();
+        let mut rx = registry.community_ids_subscribe();
+        // Initial snapshot is empty (channel created with `Vec::new()`).
+        assert!(
+            rx.borrow_and_update().is_empty(),
+            "fresh registry must publish an empty initial snapshot"
+        );
+
+        let cid = phalanx_proto::community::CommunityId([0xAB; 32]);
+        registry
+            .communities
+            .insert(cid, synthetic_community(cid, u64::MAX / 2, "test"));
+        registry.refresh_community_ids_snapshot();
+
+        // Wait for the watch to deliver.
+        rx.changed()
+            .await
+            .expect("watch sender must still be alive");
+        let snapshot = rx.borrow().clone();
+        assert_eq!(
+            snapshot,
+            vec![cid],
+            "refresh must publish the current keyset"
+        );
+    }
+
+    /// `dissolve_expired_communities` must publish an updated snapshot
+    /// when something actually expired — verifies the third mutation site
+    /// (the one TrustActor's command handlers don't intercept).
+    #[tokio::test]
+    async fn dissolve_expired_publishes_snapshot() {
+        let mut registry = fresh_test_registry();
+        let mut rx = registry.community_ids_subscribe();
+        rx.borrow_and_update(); // consume the initial empty snapshot
+
+        // Insert a community whose `expires_at` is in the past.
+        let cid = phalanx_proto::community::CommunityId([0xCD; 32]);
+        registry
+            .communities
+            .insert(cid, synthetic_community(cid, 0, "expired"));
+        registry.refresh_community_ids_snapshot();
+        rx.changed()
+            .await
+            .expect("insert must publish a non-empty snapshot");
+        assert_eq!(rx.borrow_and_update().clone(), vec![cid]);
+
+        // Now expire it.
+        let now = phalanx_proto::time::PhalanxTimestamp::from_millis(1_000_000_000);
+        registry.dissolve_expired_communities(now);
+
+        rx.changed()
+            .await
+            .expect("dissolve_expired must publish a snapshot when something expired");
+        assert!(rx.borrow().is_empty(), "post-expiry snapshot must be empty");
+        assert!(
+            !registry.communities.contains_key(&cid),
+            "expired community must be removed from the HashMap too"
+        );
+    }
+
+    /// `dissolve_expired_communities` must NOT publish when nothing
+    /// expired — avoids redundant churn on every maintenance tick.
+    #[tokio::test]
+    async fn dissolve_expired_noop_does_not_publish() {
+        let mut registry = fresh_test_registry();
+        let rx = registry.community_ids_subscribe();
+        // The initial channel value is the empty Vec we constructed it with.
+        // No mutation has happened, so `has_changed()` should report false.
+        let now = phalanx_proto::time::PhalanxTimestamp::from_millis(1_000_000_000);
+        registry.dissolve_expired_communities(now);
+        assert!(
+            !rx.has_changed().expect("watch sender alive"),
+            "no-op dissolve must not bump the watch version"
         );
     }
 }

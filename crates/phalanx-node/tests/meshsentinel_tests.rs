@@ -287,7 +287,7 @@ async fn test_control_message_origin_mismatch_drops_spoofed_heartbeat() {
     // would fast-fail and the test could never observe the strict-binding
     // branch we're trying to verify.
     let cid = phalanx_proto::community::CommunityId([0xCC; 32]);
-    sentinel.community_ids = vec![cid];
+    sentinel.extra_community_ids = vec![cid];
 
     let topic = sentinel.config.network.control_topic.clone();
     let origin = MeshAddress::new("attacker-P".to_string());
@@ -344,7 +344,7 @@ async fn test_control_message_genuine_origin_registers_heartbeat() {
     let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
 
     let cid = phalanx_proto::community::CommunityId([0xCC; 32]);
-    sentinel.community_ids = vec![cid];
+    sentinel.extra_community_ids = vec![cid];
 
     let topic = sentinel.config.network.control_topic.clone();
     let peer = MeshAddress::new("honest-peer".to_string());
@@ -384,9 +384,17 @@ async fn test_control_message_genuine_origin_registers_heartbeat() {
 async fn test_no_community_keys_drops_all_heartbeats() {
     let (ingress_tx, ingress_rx) = mpsc::channel(10);
     let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
+    // Phase 4: the live registry-derived snapshot must be empty AND the
+    // static seeds must be empty for "no keys at all" to hold. If either
+    // grows, the test invariant ("non-member nodes drop everything")
+    // weakens silently.
     assert!(
-        sentinel.community_ids.is_empty(),
-        "Fresh test sentinel must have no community keys"
+        sentinel.community_ids_rx.borrow().is_empty(),
+        "Fresh test sentinel must have no registry-derived community keys"
+    );
+    assert!(
+        sentinel.extra_community_ids.is_empty(),
+        "Fresh test sentinel must have no static-seed community keys"
     );
 
     let topic = sentinel.config.network.control_topic.clone();

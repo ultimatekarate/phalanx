@@ -169,11 +169,20 @@ pub struct MeshSentinel<I: IngressPort> {
     /// Community-scoped dead man's switch. Monitors mesh presence of
     /// community peers during active recordings.
     pub canary: CanaryMonitor,
-    /// Community IDs for canary key derivation and heartbeat encryption.
-    /// Snapshot taken at construction; only members who imported the community
-    /// can derive the relevant decryption keys. `pub` so integration tests
-    /// can seed a known community without standing up a full TrustRegistry.
-    pub community_ids: Vec<phalanx_proto::community::CommunityId>,
+    /// Live registry-derived community keyset. The watch sender lives on
+    /// `TrustRegistry` and republishes whenever the HashMap mutates
+    /// (Import / Dissolve / expiry). Reading: `borrow().clone()` in a
+    /// single statement — never hold the `Ref<'_, T>` across `.await`,
+    /// it deadlocks the watch system.
+    pub community_ids_rx: tokio::sync::watch::Receiver<Vec<phalanx_proto::community::CommunityId>>,
+    /// Static seeds layered on top of the live registry snapshot. Used by
+    /// integration tests that don't stand up a full `TrustRegistry`
+    /// `Community` object. Production callers pass an empty `Vec`. Read
+    /// live on the receive path (`current_community_ids()` reads
+    /// `&self.extra_community_ids`); the vitals task captures its own
+    /// clone at spawn time, so runtime mutations affect receive but not
+    /// publish
+    pub extra_community_ids: Vec<phalanx_proto::community::CommunityId>,
 
     // ── Revocation Replay ─────────────────────────────────────────────
     /// Peers we have already replayed revocation tokens to in this session.
@@ -288,21 +297,12 @@ impl<I: IngressPort> MeshSentinel<I> {
 
         // Trust Manager Actor
         let reputation_projection = deps.trust_registry.projection_handle();
-        // Silent Canary + heartbeat encryption: snapshot community IDs from
-        // the trust registry, plus any explicitly seeded by the caller
-        // (integration tests use this to wire a known community key without
-        // constructing a full `Community` object). HashSet dedupes;
-        // `CommunityId` is `Hash + Eq` but not `Ord`.
-        let mut seen = std::collections::HashSet::new();
-        let mut community_ids: Vec<_> = deps
-            .trust_registry
-            .communities
-            .keys()
-            .copied()
-            .chain(deps.extra_community_ids.drain(..))
-            .filter(|cid| seen.insert(*cid))
-            .collect();
-        community_ids.sort_by_key(|cid| cid.0);
+        // Subscribe to the live community-key watch BEFORE
+        // `trust_registry` moves into TrustActor. Subscribers see the
+        // initial snapshot (empty Vec on a fresh node — communities aren't
+        // persisted) and every subsequent Import/Dissolve/expiry refresh.
+        let community_ids_rx = deps.trust_registry.community_ids_subscribe();
+        let extra_community_ids: Vec<_> = deps.extra_community_ids.drain(..).collect();
         let trust_registry = deps.trust_registry;
         let trust_actor = TrustActor::new(trust_registry, trust_rx, shutdown.clone());
         let trust_handle = tokio::spawn(trust_actor.run());
@@ -412,7 +412,13 @@ impl<I: IngressPort> MeshSentinel<I> {
         // Ed25519 key, but the wire encoding differs between sim and prod.
         let vitals_local_addr = local_mesh_address.clone();
         let vitals_control_topic = deps.config.network.control_topic.clone();
-        let vitals_community_ids = community_ids.clone();
+        // Phase 4: subscribe to the live community-key watch (Receiver is
+        // Clone). The vitals task captures its own `extra_community_ids`
+        // clone for the static test seeds — runtime mutation of
+        // `MeshSentinel::extra_community_ids` is reflected on the receive
+        // path but NOT here (asymmetric by design — see plan §Caveats).
+        let vitals_community_ids_rx = community_ids_rx.clone();
+        let vitals_extra = extra_community_ids.clone();
         let vitals_handle = tokio::spawn(async move {
             let mut gate = crate::vitals::health::BroadcastGate::new();
             loop {
@@ -422,7 +428,19 @@ impl<I: IngressPort> MeshSentinel<I> {
                     _ = vitals_shutdown.cancelled() => break,
                     _ = tokio::time::sleep(interval) => {
                         vitals_governor.update_vitals();
-                        if vitals_community_ids.is_empty() {
+                        // CRITICAL: read+clone in a single statement. Watch's
+                        // `borrow()` returns a `Ref<'_, T>` holding an
+                        // internal RwLock guard. Holding it across `.await`
+                        // would deadlock the watch system. The `.clone()` on
+                        // the next token releases the guard immediately.
+                        let mut snapshot: Vec<phalanx_proto::community::CommunityId> =
+                            vitals_community_ids_rx.borrow().clone();
+                        for cid in &vitals_extra {
+                            if !snapshot.contains(cid) {
+                                snapshot.push(*cid);
+                            }
+                        }
+                        if snapshot.is_empty() {
                             // Open-mesh-only node: no community keys, no heartbeats.
                             // Tier 2 / silent canary / eclipse all degrade gracefully.
                             continue;
@@ -469,7 +487,7 @@ impl<I: IngressPort> MeshSentinel<I> {
                             // with each key they hold. Different domain-separation
                             // label from canary alerts: same trust circle, different
                             // purpose, no key reuse.
-                            for cid in &vitals_community_ids {
+                            for cid in &snapshot {
                                 let key = SymmetricKey::from_bytes(blake3::derive_key(
                                     "phalanx.heartbeat.v1.community",
                                     &cid.0,
@@ -570,7 +588,8 @@ impl<I: IngressPort> MeshSentinel<I> {
             clock: clock_handle.clone(),
             peer_did_cache: std::collections::HashMap::new(),
             canary: CanaryMonitor::new(2), // 2 consecutive stale ticks to confirm
-            community_ids,
+            community_ids_rx,
+            extra_community_ids,
             revocation_synced_peers: std::collections::HashSet::new(),
             peer_first_seen: std::collections::HashMap::new(),
         })
@@ -804,6 +823,24 @@ impl<I: IngressPort> MeshSentinel<I> {
         }
     }
 
+    /// Merge the live registry-derived community keyset (from the watch)
+    /// with this sentinel's static `extra_community_ids` (test seeds /
+    /// integration overrides). Linear-contains dedup — typical N+M ≤ 4
+    /// makes a HashSet wasteful.
+    ///
+    /// **Watch discipline:** read+clone in a single statement. Holding the
+    /// `Ref<'_, T>` returned by `borrow()` across `.await` deadlocks the
+    /// watch system. The `.clone()` releases the guard immediately.
+    fn current_community_ids(&self) -> Vec<phalanx_proto::community::CommunityId> {
+        let mut ids = self.community_ids_rx.borrow().clone();
+        for cid in &self.extra_community_ids {
+            if !ids.contains(cid) {
+                ids.push(*cid);
+            }
+        }
+        ids
+    }
+
     /// Heartbeat receiver: decrypt with each held community key, then
     /// apply strict-binding origin check.
     ///
@@ -827,7 +864,10 @@ impl<I: IngressPort> MeshSentinel<I> {
         }
         let (nonce, ciphertext) = data.split_at(24);
 
-        for cid in &self.community_ids {
+        // Live-snapshot the keyset (registry watch + static extras). Reads
+        // current state per inbound message, so a community dissolved at
+        // runtime stops being decryptable on the next heartbeat.
+        for cid in &self.current_community_ids() {
             let key = SymmetricKey::from_bytes(blake3::derive_key(
                 "phalanx.heartbeat.v1.community",
                 &cid.0,
@@ -1336,7 +1376,9 @@ impl<I: IngressPort> MeshSentinel<I> {
         // sorted founding DIDs) — high entropy. Canary alert confidentiality
         // depends on this; if CommunityId ever becomes human-readable, this
         // derivation must include a shared secret.
-        for cid in &self.community_ids {
+        // Live-snapshot the keyset (registry watch + static extras) so a
+        // community dissolved at runtime stops emitting canary alerts.
+        for cid in &self.current_community_ids() {
             let canary_key = SymmetricKey::from_bytes(blake3::derive_key(
                 "phalanx.canary.v1.community-alert",
                 &cid.0,
