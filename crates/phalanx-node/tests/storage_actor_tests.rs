@@ -31,7 +31,6 @@ use phalanx_proto::storage::PendingEgress;
 use phalanx_proto::storage::TransientJournal;
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
 use phalanx_proto::types::{ForensicUnit, Fps, Verified};
-use phalanx_transport::identity_ext::Libp2pExt;
 use tokio::sync::{mpsc, oneshot};
 
 fn build_test_actor<J: TransientJournal + Send + 'static>(

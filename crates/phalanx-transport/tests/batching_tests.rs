@@ -23,9 +23,13 @@
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
-    clippy::too_many_lines
+    clippy::float_cmp,
+    clippy::too_many_lines,
+    clippy::while_let_loop,
+    clippy::cognitive_complexity
 )]
 
 use std::collections::HashMap;
