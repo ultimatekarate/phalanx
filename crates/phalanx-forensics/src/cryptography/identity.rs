@@ -7,6 +7,7 @@
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use phalanx_proto::crypto::{CryptoError, SymmetricKey};
+use phalanx_proto::error::IdentityError;
 use phalanx_proto::identity::{IdentityDiskFormat, PhalanxIdentity};
 use rand_core::{OsRng, RngCore};
 use zeroize::Zeroize;
@@ -78,13 +79,21 @@ pub fn seal_identity(identity: &PhalanxIdentity, passphrase: &str) -> Result<Vec
 /// Expects: `[16-byte salt][24-byte nonce][ciphertext]`
 ///
 /// Pure crypto — caller handles file IO.
+///
+/// Returns `IdentityError::CryptoError` on decryption failure (wrong
+/// passphrase, corrupt file). Returns `IdentityError::SchemaUpgradeRequired`
+/// when the file decrypts cleanly but predates the v2 schema; the caller
+/// should prompt for a BIP39 phrase re-restore. Returns
+/// `IdentityError::UnknownVersion` for forward-incompatible files.
 pub fn unseal_identity(
     file_bytes: &[u8],
     passphrase: &str,
-) -> Result<PhalanxIdentity, CryptoError> {
+) -> Result<PhalanxIdentity, IdentityError> {
     // Minimum: 16 (salt) + 24 (nonce) + at least 1 byte ciphertext.
     if file_bytes.len() < 41 {
-        return Err(CryptoError::DecryptionFailure);
+        return Err(IdentityError::CryptoError(
+            "Identity file too short to contain salt + nonce + ciphertext".into(),
+        ));
     }
 
     let (salt, rest) = file_bytes.split_at(16);
@@ -95,11 +104,12 @@ pub fn unseal_identity(
     let mut key_bytes = [0u8; 32];
     argon2
         .hash_password_into(passphrase.as_bytes(), salt, &mut key_bytes)
-        .map_err(|_| CryptoError::DecryptionFailure)?;
+        .map_err(|e| IdentityError::CryptoError(format!("Argon2 derive failed: {e}")))?;
     let key = SymmetricKey::from_bytes(key_bytes);
 
     // Decrypt. AEAD tag validation catches wrong passphrases and corrupt files.
-    let plaintext = decrypt_bytes(&key, nonce, ciphertext)?;
+    let plaintext = decrypt_bytes(&key, nonce, ciphertext)
+        .map_err(|e: CryptoError| IdentityError::CryptoError(e.to_string()))?;
 
     // Defense-in-depth: wipes the stack copy of the key bytes. The
     // SymmetricKey wrapper wipes its own copy via ZeroizeOnDrop. Both
@@ -107,10 +117,11 @@ pub fn unseal_identity(
     key_bytes.zeroize();
 
     // Deserialize.
-    let disk_format: IdentityDiskFormat =
-        postcard::from_bytes(&plaintext).map_err(|_| CryptoError::DecryptionFailure)?;
+    let disk_format: IdentityDiskFormat = postcard::from_bytes(&plaintext)
+        .map_err(|e| IdentityError::SerializationError(e.to_string()))?;
 
-    Ok(disk_format.into_identity())
+    // Typed schema-version errors flow through.
+    disk_format.into_identity()
 }
 
 #[cfg(test)]

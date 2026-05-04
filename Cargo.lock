@@ -4859,6 +4859,7 @@ dependencies = [
  "fdk-aac",
  "flate2",
  "hex",
+ "hkdf",
  "lz4_flex",
  "mp4",
  "openh264",

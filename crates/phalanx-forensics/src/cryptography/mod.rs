@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod dek;
 pub mod grant;
 pub mod identity;
 

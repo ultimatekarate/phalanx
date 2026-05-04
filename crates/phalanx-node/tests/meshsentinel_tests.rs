@@ -85,6 +85,7 @@ async fn setup_mock_storage() -> (
         identity.did.clone(),
         Arc::new(SystemClock),
         vault_key,
+        identity.dek_master.clone(),
     );
 
     let (actor, cmd_rx, cmd_tx) = build_test_actor(config, identity, NoOpJournal, guardian);

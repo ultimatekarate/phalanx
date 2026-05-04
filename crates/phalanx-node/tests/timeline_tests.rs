@@ -39,6 +39,7 @@ async fn test_reliability_timeline_integrity() {
         identity.did.clone(),
         Arc::new(SystemClock),
         vault_key,
+        identity.dek_master.clone(),
     );
     let recording_id = RecordingId::new("v_timeline");
 

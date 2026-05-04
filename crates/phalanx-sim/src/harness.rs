@@ -616,6 +616,7 @@ impl SimulationHarness {
 
         // Build the full MeshSentinel actor constellation
         let vault_key = derive_vault_key(&identity, &[0u8; 32]);
+        let dek_master = identity.dek_master.clone();
         let trust_registry = TrustRegistry::build(&node_config).await;
 
         let governor = Arc::new(SystemGovernor::new());
@@ -630,6 +631,7 @@ impl SimulationHarness {
             trust_registry,
             system_governor: governor,
             vault_key,
+            dek_master,
             local_mesh: None,
             prnu_posterior: std::sync::Arc::new(std::sync::Mutex::new(
                 phalanx_proto::evidence::PrnuPosterior::new_uninformed(),
@@ -832,6 +834,7 @@ impl SimulationHarness {
 
         // Build the full MeshSentinel actor constellation
         let vault_key = derive_vault_key(&identity, &[0u8; 32]);
+        let dek_master = identity.dek_master.clone();
         let trust_registry = TrustRegistry::build(&node_config).await;
 
         let governor = Arc::new(SystemGovernor::new());
@@ -846,6 +849,7 @@ impl SimulationHarness {
             trust_registry,
             system_governor: governor,
             vault_key,
+            dek_master,
             local_mesh: Some(Box::new(local_mesh_adapter)),
             prnu_posterior: std::sync::Arc::new(std::sync::Mutex::new(
                 phalanx_proto::evidence::PrnuPosterior::new_uninformed(),

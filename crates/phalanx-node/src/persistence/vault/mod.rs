@@ -17,7 +17,7 @@ use phalanx_forensics::crucible::Crucible;
 use phalanx_forensics::crucible::RecordingAmalgam;
 use phalanx_forensics::crucible::{EnvelopeHashExt, EvidenceExt};
 use phalanx_forensics::gate::PromotionGate;
-use phalanx_proto::crypto::SymmetricKey;
+use phalanx_proto::crypto::{DekMaster, SymmetricKey};
 use phalanx_proto::evidence::PrnuPosterior;
 use phalanx_proto::evidence::Recording;
 use phalanx_proto::evidence::StorageSequence;
@@ -126,6 +126,11 @@ pub struct Guardian {
     pub local_did: Did,
     pub clock: Arc<dyn TrustedClock>,
     pub vault_key: SymmetricKey,
+    /// HKDF master used to derive per-recording DEKs deterministically. This
+    /// is what makes recordings phrase-recoverable: a fresh-restored sentinel
+    /// rebuilds `dek_master` from the BIP39 phrase and decrypts every own
+    /// recording without needing the local keyring file.
+    pub dek_master: DekMaster,
     /// Per-node storage accounting for fairness and eviction policy.
     pub ledger: StorageLedger,
     /// Append-only recording logs, one per recording. Keyed by RecordingId.
@@ -133,7 +138,10 @@ pub struct Guardian {
     /// Revoked recordings: future shards for these recordings are rejected.
     /// Public for StorageActor bootstrap (recovering revocations from journal).
     pub revoked_recordings: HashSet<RecordingId>,
-    /// Per-recording content encryption keys (DEKs). vault_key acts as KEK.
+    /// Per-recording content encryption keys (DEKs) for FOREIGN recordings
+    /// (and legacy own recordings made before the deterministic-DEK regime).
+    /// Own derived recordings are absent from this map — their DEKs are
+    /// recomputed via `content_key_for(recording_id)` on every read.
     /// Uses `[u8; 32]` instead of `SymmetricKey` to allow Serialize/Deserialize
     /// (respects M5 no-Serialize invariant on SymmetricKey).
     pub content_keyring: BTreeMap<RecordingId, [u8; 32]>,
@@ -146,6 +154,7 @@ impl Guardian {
         local_did: Did,
         clock: Arc<dyn TrustedClock>,
         vault_key: SymmetricKey,
+        dek_master: DekMaster,
     ) -> Self {
         Self {
             crucible: Crucible::new(RecordingAmalgam, Duration::from_secs(5), 1000),
@@ -153,6 +162,7 @@ impl Guardian {
             local_did,
             clock,
             vault_key,
+            dek_master,
             ledger: StorageLedger::default(),
             recording_logs: BTreeMap::new(),
             revoked_recordings: HashSet::new(),
@@ -221,15 +231,34 @@ impl Guardian {
 
     // ── Content keyring (per-recording DEKs) ──────────────────────────
 
-    /// Generate and store a new random content key for a recording.
-    pub fn generate_content_key(&mut self, recording_id: &RecordingId) -> SymmetricKey {
+    /// Derive the deterministic DEK for an OWN recording.
+    ///
+    /// Pure function of `dek_master` + `recording_id`; no randomness is
+    /// consumed and nothing is written to the keyring. Identical inputs
+    /// always yield the identical key — that's the property a fresh-
+    /// restored device relies on.
+    pub fn content_key_for(&self, recording_id: &RecordingId) -> SymmetricKey {
+        phalanx_forensics::derive_recording_dek(&self.dek_master, recording_id)
+    }
+
+    /// Mint a random DEK for a FOREIGN recording's relay storage and
+    /// register it in the keyring.
+    ///
+    /// We are not the owner of this recording, so we cannot derive its DEK
+    /// from our own `dek_master` — the foreign owner's master is unknown to
+    /// us. Instead we mint a per-relay random key, persist it locally, and
+    /// use it whenever we read or rewrite the recording on this device.
+    pub fn mint_foreign_content_key(&mut self, recording_id: &RecordingId) -> SymmetricKey {
         let mut key_bytes = [0u8; 32];
         OsRng.fill_bytes(&mut key_bytes);
         self.content_keyring.insert(recording_id.clone(), key_bytes);
         SymmetricKey::from_bytes(key_bytes)
     }
 
-    /// Retrieve the content key for a recording, if it exists.
+    /// Retrieve the keyring-resident content key for a recording, if any.
+    ///
+    /// Hits only legacy own recordings and foreign recordings — own derived
+    /// recordings are intentionally absent here.
     pub fn get_content_key(&self, recording_id: &RecordingId) -> Option<SymmetricKey> {
         self.content_keyring
             .get(recording_id)
@@ -237,7 +266,11 @@ impl Guardian {
     }
 
     /// Destroy the content key for a recording (crypto-shredding moment).
-    /// Zeroizes the key bytes in memory before removal. Returns `true` if a key existed.
+    /// Zeroizes the keyring entry if present. Returns `true` if a keyring
+    /// entry existed; for own derived recordings this returns `false` —
+    /// crypto-shredding for those is achieved by deleting the encrypted
+    /// blobs (the DEK itself remains derivable until the BIP39 phrase is
+    /// destroyed, which is the user's responsibility).
     pub fn destroy_content_key(&mut self, recording_id: &RecordingId) -> bool {
         if let Some(key_bytes) = self.content_keyring.get_mut(recording_id) {
             key_bytes.zeroize();
@@ -249,10 +282,21 @@ impl Guardian {
     }
 
     /// Resolve the encryption key for a recording.
-    /// Returns per-recording ContentKey if available, else vault_key (legacy fallback).
+    ///
+    /// Lookup chain (in order):
+    /// 1. **Keyring hit** — foreign recordings always live here; legacy own
+    ///    recordings (made under the random-DEK regime) also live here.
+    /// 2. **Derive from dek_master** — own recordings under the deterministic
+    ///    regime have no keyring entry; they derive on demand. The invariant
+    ///    "own derived recordings are absent from the keyring" makes this
+    ///    branch safe to take without an explicit own-vs-foreign signal: if
+    ///    we somehow derive for a foreign recording (caller bug), AEAD
+    ///    authentication on the wrong key fails cleanly downstream.
     pub fn resolve_encryption_key(&self, recording_id: &RecordingId) -> SymmetricKey {
-        self.get_content_key(recording_id)
-            .unwrap_or_else(|| self.vault_key.clone())
+        if let Some(k) = self.get_content_key(recording_id) {
+            return k;
+        }
+        self.content_key_for(recording_id)
     }
 
     /// Persist the entire keyring to disk, encrypted with vault_key (KEK).
@@ -545,6 +589,7 @@ mod tests {
             identity.did.clone(),
             Arc::new(SystemClock),
             vault_key,
+            identity.dek_master.clone(),
         );
 
         // Define a specific RecordingId for this stream
@@ -602,6 +647,7 @@ mod tests {
             identity.did.clone(),
             Arc::new(SystemClock),
             vault_key,
+            identity.dek_master.clone(),
         );
 
         let shard = VideoShard {

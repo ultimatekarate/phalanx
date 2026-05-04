@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use phalanx_proto::crypto::SymmetricKey;
+use phalanx_proto::crypto::{DekMaster, SymmetricKey};
 use phalanx_proto::evidence::{AudioShard, PrnuPosterior, StorageSequence, VideoShard};
 use std::error::Error;
 use std::sync::Mutex;
@@ -47,6 +47,10 @@ pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJourn
     pub trust_registry: TrustRegistry,
     pub system_governor: Arc<SystemGovernor>,
     pub vault_key: SymmetricKey,
+    /// HKDF master used by Guardian to derive per-recording DEKs. Threaded
+    /// from `identity.dek_master` so the construction order (identity →
+    /// Guardian) doesn't have to grow a hidden coupling.
+    pub dek_master: DekMaster,
     /// Optional local mesh transport (BLE, WiFi Direct).
     /// Default: `None` (desktop/non-BLE platforms).
     /// When `Some`, MeshSentinel polls for local mesh events alongside network ingress.
@@ -194,6 +198,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             local_did,
             clock_handle.clone(),
             deps.vault_key.clone(),
+            deps.dek_master.clone(),
         );
         let phys_capacity = deps.system_governor.config.pipeline_capacity();
 

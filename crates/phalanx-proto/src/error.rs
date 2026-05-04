@@ -49,6 +49,13 @@ pub enum IdentityError {
     SerializationError(String),
     #[error("Identity data corruption: {0}")]
     Corruption(String),
+    #[error(
+        "Identity file is from an older schema (v{from}) and must be upgraded to v{to}; \
+         re-restore from your BIP39 phrase to derive the DEK master"
+    )]
+    SchemaUpgradeRequired { from: u32, to: u32 },
+    #[error("Identity file declares unsupported schema version: {0}")]
+    UnknownVersion(u32),
 }
 
 #[cfg(test)]

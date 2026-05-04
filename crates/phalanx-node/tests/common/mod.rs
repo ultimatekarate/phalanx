@@ -101,6 +101,7 @@ pub async fn build_test_sentinel_with_communities(
 
     let identity = PhalanxIdentity::new_ephemeral();
     let vault_key = derive_vault_key(&identity, &[0u8; 32]);
+    let dek_master = identity.dek_master.clone();
     let trust_registry = TrustRegistry::build(&config).await;
 
     let local_mesh_address = phalanx_transport::identity_ext::Libp2pExt::to_mesh_address(&identity);
@@ -113,6 +114,7 @@ pub async fn build_test_sentinel_with_communities(
         trust_registry,
         system_governor: Arc::new(SystemGovernor::new()),
         vault_key,
+        dek_master,
         local_mesh: None,
         prnu_posterior: Arc::new(std::sync::Mutex::new(
             phalanx_proto::evidence::PrnuPosterior::new_uninformed(),
