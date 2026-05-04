@@ -387,7 +387,7 @@ async fn bootstrap(
     let trust_tx = engine.trust_tx.clone();
     let storage_tx = engine.storage_tx.clone();
     let egress_tx = engine.egress_tx.clone();
-    let content_key_tx = engine.content_key_tx.clone();
+    let content_key_tx = engine.content_key_tx();
     let video_tx = Some(engine.video_tx.clone());
     let audio_tx = Some(engine.audio_tx.clone());
 

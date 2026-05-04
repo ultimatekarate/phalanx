@@ -81,6 +81,20 @@ impl EgressPort for TestEgress {
 pub async fn build_test_sentinel(
     ingress_rx: mpsc::Receiver<NetworkEvent>,
 ) -> (MeshSentinel<TestIngress>, tempfile::TempDir) {
+    build_test_sentinel_with_communities(ingress_rx, Vec::new()).await
+}
+
+/// Same as `build_test_sentinel`, but seeds the sentinel with static
+/// community-id extras at construction time. Use this when a test needs the
+/// receive-side decryption path (community heartbeats / canary alerts) to
+/// recognise a community without standing up a full `TrustRegistry::Community`.
+/// Constructor-time injection is required: the corresponding `Vec` is also
+/// cloned into `CanarySupervisor` at spawn, so post-construction field
+/// mutation would not reach the canary actor.
+pub async fn build_test_sentinel_with_communities(
+    ingress_rx: mpsc::Receiver<NetworkEvent>,
+    extra_community_ids: Vec<phalanx_proto::community::CommunityId>,
+) -> (MeshSentinel<TestIngress>, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
     let mut config = NodeConfig::default();
     config.storage.vault_path = temp.path().to_string_lossy().to_string();
@@ -103,7 +117,7 @@ pub async fn build_test_sentinel(
         prnu_posterior: Arc::new(std::sync::Mutex::new(
             phalanx_proto::evidence::PrnuPosterior::new_uninformed(),
         )),
-        extra_community_ids: Vec::new(),
+        extra_community_ids,
         local_mesh_address,
     };
 
