@@ -32,7 +32,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 
-use common::build_test_sentinel;
+use common::{build_test_sentinel, build_test_sentinel_with_communities};
 
 // --- Storage Test Helpers (unchanged) ---
 
@@ -279,15 +279,16 @@ fn encrypt_heartbeat(
 #[tokio::test]
 async fn test_control_message_origin_mismatch_drops_spoofed_heartbeat() {
     let (ingress_tx, ingress_rx) = mpsc::channel(10);
-    let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
-
-    // Seed the sentinel with a known community ID so the receive-side
-    // decryption path succeeds. The fresh test sentinel has an empty
-    // community list; without this, every encrypted heartbeat decryption
-    // would fast-fail and the test could never observe the strict-binding
-    // branch we're trying to verify.
+    // Seed the sentinel with a known community ID at construction so the
+    // receive-side decryption path succeeds. The fresh test sentinel has
+    // an empty community list; without this, every encrypted heartbeat
+    // decryption would fast-fail and the test could never observe the
+    // strict-binding branch we're trying to verify. Constructor-time
+    // injection is required because the same `Vec` is cloned into
+    // `CanarySupervisor` at spawn — post-construction field mutation
+    // would not reach the canary actor.
     let cid = phalanx_proto::community::CommunityId([0xCC; 32]);
-    sentinel.extra_community_ids = vec![cid];
+    let (mut sentinel, _temp) = build_test_sentinel_with_communities(ingress_rx, vec![cid]).await;
 
     let topic = sentinel.config.network.control_topic.clone();
     let origin = MeshAddress::new("attacker-P".to_string());
@@ -321,14 +322,11 @@ async fn test_control_message_origin_mismatch_drops_spoofed_heartbeat() {
     // absent proves the early-return branch fired, not the
     // success-path-with-wrong-key branch.
     assert!(
-        !sentinel.health_tracker.heartbeats.contains_key(&origin),
+        !sentinel.health_tracker.has_heartbeat(&origin),
         "Spoofed heartbeat must not register under propagation origin"
     );
     assert!(
-        !sentinel
-            .health_tracker
-            .heartbeats
-            .contains_key(&forged_sender),
+        !sentinel.health_tracker.has_heartbeat(&forged_sender),
         "Spoofed heartbeat must not register under forged sender"
     );
 }
@@ -341,10 +339,8 @@ async fn test_control_message_origin_mismatch_drops_spoofed_heartbeat() {
 #[tokio::test]
 async fn test_control_message_genuine_origin_registers_heartbeat() {
     let (ingress_tx, ingress_rx) = mpsc::channel(10);
-    let (mut sentinel, _temp) = build_test_sentinel(ingress_rx).await;
-
     let cid = phalanx_proto::community::CommunityId([0xCC; 32]);
-    sentinel.extra_community_ids = vec![cid];
+    let (mut sentinel, _temp) = build_test_sentinel_with_communities(ingress_rx, vec![cid]).await;
 
     let topic = sentinel.config.network.control_topic.clone();
     let peer = MeshAddress::new("honest-peer".to_string());
@@ -372,7 +368,7 @@ async fn test_control_message_genuine_origin_registers_heartbeat() {
     sentinel.run().await.unwrap();
 
     assert!(
-        sentinel.health_tracker.heartbeats.contains_key(&peer),
+        sentinel.health_tracker.has_heartbeat(&peer),
         "Honest heartbeat must register under the matched origin/sender"
     );
 }
@@ -424,7 +420,7 @@ async fn test_no_community_keys_drops_all_heartbeats() {
     sentinel.run().await.unwrap();
 
     assert!(
-        !sentinel.health_tracker.heartbeats.contains_key(&peer),
+        !sentinel.health_tracker.has_heartbeat(&peer),
         "Heartbeat from non-shared community must not register"
     );
 }

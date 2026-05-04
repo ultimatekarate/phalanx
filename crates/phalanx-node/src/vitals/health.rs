@@ -1,9 +1,36 @@
 // crates/phalanx-node/src/vitals/health.rs
 //
 // Observability (telemetry initialization) and health tracking.
+//
+// ── Lock discipline ────────────────────────────────────────────────────────
+// HealthTracker is shared across actors via `Arc<HealthTracker>`. Each field
+// is wrapped in `std::sync::RwLock` so multiple actors can read concurrently
+// without coarse mutex contention.
+//
+// **NEVER hold a `RwLock` guard across an `.await`.** A single async task
+// suspending while holding a write-lock will deadlock any other task
+// attempting to acquire the same lock — including read-locks.
+//
+// CORRECT — acquire, copy/test, drop in one statement:
+//
+//     let peers: Vec<MeshAddress> =
+//         self.heartbeats.read().unwrap().keys().cloned().collect();
+//     // …iterate `peers` without holding the lock…
+//
+// WRONG — guard held across .await, deadlocks if anyone tries to write:
+//
+//     let guard = self.heartbeats.read().unwrap();
+//     for peer in guard.keys() {
+//         some_async_call(peer).await;
+//     }
+//
+// All accessor methods on `HealthTracker` follow the correct pattern: they
+// acquire the lock, do their work, and drop the guard before returning.
+// Callers that need to compose their own logic should retrieve the data they
+// need via these accessors rather than reaching for raw fields.
 
 use std::collections::HashMap;
-use std::sync::{Once, OnceLock};
+use std::sync::{Once, OnceLock, RwLock};
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::time::Instant;
@@ -47,48 +74,64 @@ pub fn init_observability() {
     });
 }
 
+/// Per-peer health and spectral observer state. Designed for `Arc<HealthTracker>`
+/// sharing across actors. See the lock-discipline note at the top of this file.
 pub struct HealthTracker {
-    pub heartbeats: HashMap<MeshAddress, Instant>,
-    pub capacities: HashMap<MeshAddress, ControlMessage>,
-    pub peer_contracts: HashMap<MeshAddress, VitalityRate>,
+    heartbeats: RwLock<HashMap<MeshAddress, Instant>>,
+    capacities: RwLock<HashMap<MeshAddress, ControlMessage>>,
+    peer_contracts: RwLock<HashMap<MeshAddress, VitalityRate>>,
 
     /// Shield Wall: spectral behavioral observer for Byzantine detection.
-    pub spectral: SpectralObserver,
+    spectral: RwLock<SpectralObserver>,
 }
 
 impl HealthTracker {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            heartbeats: HashMap::new(),
-            capacities: HashMap::new(),
-            peer_contracts: HashMap::new(),
-            spectral: SpectralObserver::new(),
+            heartbeats: RwLock::new(HashMap::new()),
+            capacities: RwLock::new(HashMap::new()),
+            peer_contracts: RwLock::new(HashMap::new()),
+            spectral: RwLock::new(SpectralObserver::new()),
         }
     }
 
-    pub fn register_activity(&mut self, msg: ControlMessage) {
+    /// Record a heartbeat from a peer. Updates `heartbeats`, `peer_contracts`,
+    /// `capacities`, and the spectral observer atomically (each lock briefly).
+    pub fn register_activity(&self, msg: ControlMessage) {
         let peer_id = msg.sender.clone();
-        self.heartbeats.insert(peer_id.clone(), Instant::now());
+        self.heartbeats
+            .write()
+            .unwrap()
+            .insert(peer_id.clone(), Instant::now());
         self.peer_contracts
+            .write()
+            .unwrap()
             .insert(peer_id.clone(), VitalityRate::new(msg.heartbeat_ms));
 
-        // Shield Wall: record heartbeat for spectral consistency evaluation
-        self.spectral.record_heartbeat(peer_id.clone(), &msg);
+        // Shield Wall: record heartbeat for spectral consistency evaluation.
+        self.spectral
+            .write()
+            .unwrap()
+            .record_heartbeat(peer_id.clone(), &msg);
 
-        self.capacities.insert(peer_id, msg);
+        self.capacities.write().unwrap().insert(peer_id, msg);
     }
 
+    /// Whether the peer has missed its heartbeat contract by more than the
+    /// physics-derived grace period. Returns `true` for unknown peers.
     #[must_use]
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Duration jitter arithmetic.
     pub fn is_peer_stale(&self, peer_id: &MeshAddress, physics: &PhalanxPhysics) -> bool {
-        let last_time = match self.heartbeats.get(peer_id) {
-            Some(t) => t,
+        let last_time = match self.heartbeats.read().unwrap().get(peer_id) {
+            Some(t) => *t,
             None => return true,
         };
 
         let contract = self
             .peer_contracts
+            .read()
+            .unwrap()
             .get(peer_id)
             .cloned()
             .unwrap_or_else(|| VitalityRate::new(5000));
@@ -97,6 +140,47 @@ impl HealthTracker {
         let grace_period = contract.as_duration() * jitter_multiplier;
 
         last_time.elapsed() > grace_period
+    }
+
+    /// Snapshot of all peers we have heard a heartbeat from. The lock is
+    /// released before the returned `Vec` is constructed.
+    #[must_use]
+    pub fn peer_addresses(&self) -> Vec<MeshAddress> {
+        self.heartbeats.read().unwrap().keys().cloned().collect()
+    }
+
+    /// Whether we have observed at least one heartbeat from `peer`.
+    #[must_use]
+    pub fn has_heartbeat(&self, peer: &MeshAddress) -> bool {
+        self.heartbeats.read().unwrap().contains_key(peer)
+    }
+
+    // ── Spectral observer accessors ────────────────────────────────────────
+
+    /// Record a data-volume sample for spectral consistency evaluation.
+    pub fn record_data_received(&self, peer_id: MeshAddress, bytes: usize) {
+        self.spectral
+            .write()
+            .unwrap()
+            .record_data_received(peer_id, bytes);
+    }
+
+    /// Run a spectral consistency evaluation against accumulated samples.
+    /// Returns `None` until `min_observations` heartbeats have been recorded.
+    #[must_use]
+    pub fn evaluate_spectral(&self, peer_id: &MeshAddress) -> Option<f64> {
+        self.spectral.read().unwrap().evaluate(peer_id)
+    }
+
+    /// Threshold above which a residual triggers an anomaly impulse.
+    #[must_use]
+    pub fn spectral_anomaly_threshold(&self) -> f64 {
+        self.spectral.read().unwrap().anomaly_threshold
+    }
+
+    /// Drop all spectral observations for a peer (called on peer disconnect).
+    pub fn remove_spectral_peer(&self, peer_id: &MeshAddress) {
+        self.spectral.write().unwrap().remove_peer(peer_id);
     }
 }
 
@@ -223,7 +307,7 @@ mod tests {
     fn is_peer_stale_returns_false_immediately_after_registration() {
         // Freshly registered peer — elapsed time is microseconds, grace
         // period is measured in seconds.
-        let mut tracker = HealthTracker::new();
+        let tracker = HealthTracker::new();
         let pid = peer("live");
         let msg = ControlMessage {
             sender: pid.clone(),
@@ -248,7 +332,7 @@ mod tests {
         // `(tau_rtt / 10).max(2)`. If tau_rtt drops, the multiplier floor
         // of 2 must still protect us — otherwise fresh peers get flagged
         // as stale on networks with very low RTT.
-        let mut tracker = HealthTracker::new();
+        let tracker = HealthTracker::new();
         let pid = peer("low-rtt-peer");
         let msg = ControlMessage {
             sender: pid.clone(),

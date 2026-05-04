@@ -1,11 +1,15 @@
 // crates/phalanx-node/src/lib.rs
 
 pub mod actors {
+    pub mod canary_supervisor;
+    pub mod eclipse_router;
     pub mod egress;
     pub mod ingestion;
     pub mod media_egress;
+    pub mod mesh_policy;
     pub mod meshsentinel;
     pub mod playback;
+    pub mod recording_session;
     pub mod retrieval;
     pub mod shutdown;
     pub mod storage;

@@ -628,27 +628,25 @@ pub unsafe extern "C" fn phalanx_set_recording_state(
 
     h.runtime.block_on(async {
         let mut sentinel = sentinel_ref.lock().await;
-        if let Some(ref id) = rec_id {
-            tracing::info!(target: "phalanx::ffi", recording = %id, "Recording started — enabling proximity capture");
-        } else {
-            // Flush proximity witnesses captured during this recording.
-            let witnesses = std::mem::take(&mut sentinel.proximity_witnesses);
-            if !witnesses.is_empty() {
-                tracing::info!(
-                    target: "phalanx::ffi",
-                    count = witnesses.len(),
-                    "Recording stopped — flushed {} proximity witnesses", witnesses.len()
-                );
-                // Proximity witnesses are stored locally for later export to Stronghold.
-                // They'll be included in the C2PA export or sent via grant to the Stronghold.
-                // For now, they're logged. The Stronghold aggregation path will consume them.
+        match rec_id {
+            Some(id) => {
+                tracing::info!(target: "phalanx::ffi", recording = %id, "Recording started — enabling proximity capture");
+                sentinel.start_recording(id, None);
+            }
+            None => {
+                let witnesses = sentinel.stop_recording();
+                if !witnesses.is_empty() {
+                    tracing::info!(
+                        target: "phalanx::ffi",
+                        count = witnesses.len(),
+                        "Recording stopped — flushed {} proximity witnesses", witnesses.len()
+                    );
+                    // Proximity witnesses are stored locally for later export to Stronghold.
+                    // They'll be included in the C2PA export or sent via grant to the Stronghold.
+                    // For now, they're logged. The Stronghold aggregation path will consume them.
+                }
             }
         }
-        if rec_id.is_none() {
-            // Silent Canary: clear watched state when recording stops.
-            sentinel.canary.clear();
-        }
-        sentinel.active_recording_id = rec_id;
     });
 
     0 // Success
