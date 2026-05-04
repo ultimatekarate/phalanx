@@ -25,6 +25,7 @@ use phalanx_node::actors::storage::StorageCommand;
 
 use phalanx_node::hardware::camera::target_fps;
 use phalanx_proto::crypto::SymmetricKey;
+use phalanx_proto::evidence::RecordingOptions;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::prelude::RecordingId;
 use phalanx_proto::time::PhalanxTimestamp;
@@ -61,7 +62,7 @@ pub enum PixelFormat {
     Nv12 = 1,
 }
 
-/// Starts a new recording session.
+/// Starts a new recording session with default policy (publishable to mesh).
 ///
 /// Generates a unique `RecordingId` and sets the handle into recording mode.
 /// Returns the recording ID through `out_recording_id` (caller frees with `phalanx_free_string`).
@@ -74,7 +75,60 @@ pub unsafe extern "C" fn phalanx_start_recording(
     handle: *mut PhalanxHandle,
     out_recording_id: *mut *mut c_char,
 ) -> i32 {
-    let Some(h) = handle.as_ref() else {
+    // SAFETY: contract identical to phalanx_start_recording_with_options.
+    // `handle` and `out_recording_id` validity is the caller's
+    // responsibility; this function defers all dereferencing to the
+    // shared inner helper, which checks each pointer before use.
+    unsafe { start_recording_inner(handle, out_recording_id, RecordingOptions::default()) }
+}
+
+/// Starts a new recording session with explicit policy.
+///
+/// Identical to `phalanx_start_recording` except the caller may opt the
+/// recording out of mesh publication (`publishable = 0`). Recordings
+/// captured with `publishable = 0` stay vault-local and are never gossipped
+/// to the mesh, even after restart. Use this for sensitive captures the
+/// operator wants kept on-device.
+///
+/// `publishable` is treated as a boolean: `0` = local-only, any non-zero
+/// value = publishable.
+///
+/// # Safety
+/// * `handle` must be a valid pointer from `phalanx_create`.
+/// * `out_recording_id` must be a valid pointer to receive the C string.
+#[no_mangle]
+pub unsafe extern "C" fn phalanx_start_recording_with_options(
+    handle: *mut PhalanxHandle,
+    publishable: i32,
+    out_recording_id: *mut *mut c_char,
+) -> i32 {
+    let options = RecordingOptions {
+        publishable: publishable != 0,
+    };
+    // SAFETY: `handle` and `out_recording_id` validity are the caller's
+    // responsibility; the inner helper null-checks both before any
+    // dereference and treats `handle` as a `&PhalanxHandle` only after
+    // a successful `as_ref`.
+    unsafe { start_recording_inner(handle, out_recording_id, options) }
+}
+
+/// Internal helper shared by the two FFI entry points. Pure Rust — `unsafe`
+/// only because of the raw-pointer contract surfaced to C.
+///
+/// # Safety
+/// * `handle` must be a valid pointer from `phalanx_create`.
+/// * `out_recording_id` must be a valid pointer to receive the C string.
+unsafe fn start_recording_inner(
+    handle: *mut PhalanxHandle,
+    out_recording_id: *mut *mut c_char,
+    options: RecordingOptions,
+) -> i32 {
+    // SAFETY: `as_ref` on a raw pointer is safe to call but unsafe to
+    // trust — it returns `None` on null, otherwise a reference whose
+    // lifetime the caller is responsible for. Caller's contract guarantees
+    // the pointer is either null or points to a valid `PhalanxHandle`
+    // produced by `phalanx_create`.
+    let Some(h) = (unsafe { handle.as_ref() }) else {
         return PhalanxError::NullPointer.code();
     };
 
@@ -112,8 +166,9 @@ pub unsafe extern "C" fn phalanx_start_recording(
     let key_result = h.runtime.block_on(async {
         let (tx, rx) = tokio::sync::oneshot::channel();
         storage_tx
-            .send(StorageCommand::StartRecording {
+            .send(StorageCommand::StartRecordingWithOptions {
                 recording_id: recording_id.clone(),
+                options,
                 reply_to: tx,
             })
             .await
@@ -142,7 +197,8 @@ pub unsafe extern "C" fn phalanx_start_recording(
     // Return recording ID to caller
     match CString::new(id_str) {
         Ok(cstr) => {
-            *out_recording_id = cstr.into_raw();
+            // SAFETY: caller-provided out-param; null-checked above.
+            unsafe { *out_recording_id = cstr.into_raw() };
             PhalanxError::Ok.code()
         }
         Err(_) => PhalanxError::InvalidUtf8.code(),

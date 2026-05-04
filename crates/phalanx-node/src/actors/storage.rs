@@ -8,6 +8,7 @@ use phalanx_forensics::crucible::EvidenceExt;
 use phalanx_forensics::prelude::*;
 use phalanx_proto::evidence::EnvelopeState;
 use phalanx_proto::evidence::PrnuPosterior;
+use phalanx_proto::evidence::RecordingOptions;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::PhalanxIdentity;
@@ -33,7 +34,14 @@ pub struct StorageActor<J: TransientJournal> {
     pub identity: PhalanxIdentity,
     pub current_tolerance: Duration,
     pub system_governor: Arc<SystemGovernor>,
-    /// Fires after each successful shard write. MeshSentinel uses this for DHT announcements.
+    /// Fires after each successful shard write **for publishable recordings**.
+    /// MeshSentinel translates each notify into an `EgressCommand::AnnounceRecording`,
+    /// so this channel is the security-relevant publish gate: only recording IDs
+    /// flowing through here are gossipped to the mesh. Senders MUST consult
+    /// `Guardian::is_recording_publishable` before calling `try_send` — see
+    /// `handle_ingest` and `handle_write_shard`. Bypassing the gate would
+    /// silently re-enable mesh announcement for a recording the operator
+    /// marked local-only.
     pub commit_notify_tx: Option<mpsc::Sender<RecordingId>>,
     /// Replay detection: rotating Bloom filter for evidence_hash dedup.
     /// 1M bits per generation (~125KB × 2 = ~250KB fixed). Rotates on maintenance tick.
@@ -92,6 +100,14 @@ pub enum StorageCommand {
     /// persists the keyring, and returns the raw key bytes.
     StartRecording {
         recording_id: RecordingId,
+        reply_to: oneshot::Sender<Result<[u8; 32], ShardError>>,
+    },
+    /// Like `StartRecording` but lets the caller pin per-recording policy
+    /// (e.g. `publishable: false` to keep a sensitive recording local).
+    /// The metadata entry is persisted before the key is returned.
+    StartRecordingWithOptions {
+        recording_id: RecordingId,
+        options: RecordingOptions,
         reply_to: oneshot::Sender<Result<[u8; 32], ShardError>>,
     },
     /// Retrieve the content key for a recording (for playback decryption).
@@ -239,6 +255,17 @@ impl<J: TransientJournal> StorageActor<J> {
             );
         }
 
+        // Per-recording policy metadata (e.g. `publishable`). Local-only;
+        // a fresh-restored device starts with an empty map and every
+        // recording reverts to default policy.
+        if let Err(e) = self.guardian.load_recording_metadata().await {
+            tracing::error!(
+                target: "phalanx::storage",
+                error = %e,
+                "Failed to load recording metadata"
+            );
+        }
+
         // Rebuild in-memory indexes by scanning .recording files in the vault
         // directory. Without this, playback after an app restart finds no shards
         // (recording_logs starts empty).
@@ -348,7 +375,17 @@ impl<J: TransientJournal> StorageActor<J> {
                 recording_id,
                 reply_to,
             } => {
-                let result = self.handle_start_recording(&recording_id).await;
+                let result = self
+                    .handle_start_recording(&recording_id, RecordingOptions::default())
+                    .await;
+                let _ = reply_to.send(result);
+            }
+            StorageCommand::StartRecordingWithOptions {
+                recording_id,
+                options,
+                reply_to,
+            } => {
+                let result = self.handle_start_recording(&recording_id, options).await;
                 let _ = reply_to.send(result);
             }
             StorageCommand::GetContentKey {
@@ -627,8 +664,13 @@ impl<J: TransientJournal> StorageActor<J> {
                         self.guardian.append_shard(envelope).await?;
                         self.replay_filter.insert(&envelope.evidence_hash);
                         let recording_id = envelope.evidence.recording_id().clone();
-                        if let Some(ref tx) = self.commit_notify_tx {
-                            let _ = tx.try_send(recording_id);
+                        // Publish gate: skip the mesh notify for recordings
+                        // the operator marked local-only. Recordings without
+                        // an explicit metadata entry default to publishable.
+                        if self.guardian.is_recording_publishable(&recording_id) {
+                            if let Some(ref tx) = self.commit_notify_tx {
+                                let _ = tx.try_send(recording_id);
+                            }
                         }
                     }
                 }
@@ -695,8 +737,12 @@ impl<J: TransientJournal> StorageActor<J> {
         // 1. Disk first
         self.guardian.append_shard(&envelope).await?;
         let recording_id = envelope.evidence.recording_id().clone();
-        if let Some(ref tx) = self.commit_notify_tx {
-            let _ = tx.try_send(recording_id);
+        // Publish gate (mirrors handle_ingest): skip the mesh notify for
+        // recordings the operator marked local-only.
+        if self.guardian.is_recording_publishable(&recording_id) {
+            if let Some(ref tx) = self.commit_notify_tx {
+                let _ = tx.try_send(recording_id);
+            }
         }
         // 2. Verify in memory (data is already safely on disk)
         let result = self
@@ -793,23 +839,40 @@ impl<J: TransientJournal> StorageActor<J> {
     }
 
     /// Derive (deterministically, from `dek_master`) the per-recording
-    /// content key for a new own recording.
+    /// content key for a new own recording, and pin its policy metadata.
     ///
     /// The DEK is NOT written to the keyring — it's recomputable from the
     /// BIP39 phrase, which is what makes the recording mesh-recoverable
     /// after device loss. The keyring is reserved for foreign and legacy
     /// random-DEK recordings.
+    ///
+    /// `options` carries per-recording policy (currently `publishable`).
+    /// Default options preserve the historical implicit-publish behaviour;
+    /// the explicit-options API path lets the operator opt out per
+    /// recording. The metadata entry is persisted *before* the key is
+    /// returned so a crash between key derivation and the first commit
+    /// does not leave a recording mis-classified as publishable.
     async fn handle_start_recording(
         &mut self,
         recording_id: &RecordingId,
+        options: RecordingOptions,
     ) -> Result<[u8; 32], ShardError> {
         if self.guardian.revoked_recordings.contains(recording_id) {
             return Err(ShardError::RecordingRevoked);
         }
         let key = self.guardian.content_key_for(recording_id);
+
+        self.guardian
+            .set_recording_metadata(recording_id.clone(), options.into_metadata());
+        self.guardian
+            .persist_recording_metadata()
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
+
         tracing::info!(
             target: "phalanx::storage",
             recording = %recording_id,
+            publishable = options.publishable,
             "Content key derived for new recording"
         );
         Ok(*key.as_bytes())
