@@ -42,6 +42,33 @@ impl std::fmt::Debug for SymmetricKey {
     }
 }
 
+/// HKDF-derived master from which every per-recording DEK is expanded.
+///
+/// Derived once from the BIP39 seed at identity genesis/restore (via
+/// `phalanx_forensics::cryptography::dek::derive_dek_master`). Persisted on
+/// disk inside `IdentityDiskFormat`, sealed under the same Argon2id
+/// passphrase wall as the keypair. Distinct from `SymmetricKey` at the type
+/// level: a `DekMaster` is never used directly as an AEAD key — it is only
+/// the input to per-recording `derive_recording_dek`.
+#[derive(Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+pub struct DekMaster([u8; 32]);
+
+impl DekMaster {
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for DekMaster {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("DekMaster").field(&"[REDACTED]").finish()
+    }
+}
+
 /// Permission flags on a sealed locator.
 ///
 /// Authenticated via AAD in the ECDH seal — a MITM cannot modify

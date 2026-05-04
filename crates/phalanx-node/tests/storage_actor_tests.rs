@@ -83,6 +83,7 @@ async fn setup_mock_storage() -> (
         identity.did.clone(),
         Arc::new(SystemClock),
         vault_key,
+        identity.dek_master.clone(),
     );
 
     let (actor, cmd_rx, cmd_tx) = build_test_actor(config, identity, NoOpJournal, guardian);
@@ -153,6 +154,7 @@ async fn test_pillar_salvage_under_disk_pressure() {
         identity.did.clone(),
         Arc::new(SystemClock),
         vault_key,
+        identity.dek_master.clone(),
     );
 
     let (actor, storage_rx, storage_tx) =
@@ -237,6 +239,7 @@ async fn test_reputation_gate_signature_mismatch() {
         my_identity.did.clone(),
         Arc::new(SystemClock),
         vault_key,
+        my_identity.dek_master.clone(),
     );
     let (actor, storage_rx, storage_tx) =
         build_test_actor(config.clone(), my_identity.clone(), NoOpJournal, guardian);
@@ -366,6 +369,7 @@ async fn test_salvage_on_node_death() {
             identity.did.clone(),
             Arc::new(SystemClock),
             vault_key.clone(),
+            identity.dek_master.clone(),
         );
 
         let (actor, storage_rx, storage_tx) =
@@ -411,6 +415,7 @@ async fn test_salvage_on_node_death() {
             identity.did.clone(),
             Arc::new(SystemClock),
             vault_key.clone(),
+            identity.dek_master.clone(),
         );
 
         let (actor2, storage_rx2, storage_tx2) =
@@ -509,6 +514,7 @@ async fn test_stronghold_ingestion_and_persistence() {
         identity.did.clone(),
         Arc::new(SystemClock),
         vault_key,
+        identity.dek_master.clone(),
     );
 
     let (actor, storage_rx, storage_tx) =
@@ -624,6 +630,7 @@ async fn test_storage_actor_metric_pipeline() {
         identity.did.clone(),
         Arc::new(SystemClock),
         vault_key,
+        identity.dek_master.clone(),
     );
     // 3. Initialize StorageActor
     let (storage_actor, command_rx, command_tx) =

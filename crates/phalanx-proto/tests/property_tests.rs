@@ -96,7 +96,7 @@ fn did_derive_deterministic() {
 
     // Re-derive from same keypair bytes
     let disk_format = phalanx_proto::identity::IdentityDiskFormat::from_identity(&identity_a);
-    let identity_b = disk_format.into_identity();
+    let identity_b = disk_format.into_identity().expect("v2 round-trip");
 
     assert_eq!(
         identity_b.did, did_a,

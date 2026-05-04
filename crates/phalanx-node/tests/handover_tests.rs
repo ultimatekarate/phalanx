@@ -49,6 +49,7 @@ async fn test_legal_identity_handover() {
         identity_a.did.clone(),
         Arc::new(SystemClock),
         vault_key.clone(),
+        identity_a.dek_master.clone(),
     );
 
     // PHASE 1: Identity A owns the stream
@@ -168,6 +169,7 @@ async fn test_illegal_identity_swap_rejected() {
         identity_a.did.clone(),
         Arc::new(SystemClock),
         vault_key,
+        identity_a.dek_master.clone(),
     );
 
     // -- Frame 1 (Identity A) --

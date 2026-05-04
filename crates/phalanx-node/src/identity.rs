@@ -1,14 +1,25 @@
 use bip39::Mnemonic;
 use ed25519_dalek::SigningKey;
 use phalanx_forensics::cryptography::identity::{seal_identity, unseal_identity};
+use phalanx_forensics::derive_dek_master;
 use phalanx_proto::identity::PhalanxLocator;
+use phalanx_proto::identity::IDENTITY_VERSION;
 use phalanx_proto::prelude::{Did, IdentityError, PhalanxIdentity};
 use phalanx_proto::revocation::RevocationKey;
 use phalanx_proto::RecordingRequest;
 use rand::Rng;
 use std::fs;
 use std::path::Path;
-pub const IDENTITY_VERSION: u32 = 1;
+use zeroize::Zeroize;
+
+/// BIP39 passphrase choice, pinned as a versioned constant.
+///
+/// We currently support only the empty-passphrase ("25th word disabled")
+/// branch of BIP39. Pinning it as a constant prevents accidental changes
+/// (which would silently fork all derivations — keypair, revocation key,
+/// dek_master). A future identity v3 could offer a non-empty passphrase
+/// flow under a distinct constant.
+pub const BIP39_PASSPHRASE_V1: &str = "";
 
 pub trait PhalanxNodeIdentityExt: Sized {
     fn generate() -> Result<(Self, String), IdentityError>;
@@ -34,7 +45,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         let mnemonic = Mnemonic::from_entropy(&entropy)
             .map_err(|e: bip39::Error| IdentityError::EntropyError(e.to_string()))?;
         let phrase = mnemonic.to_string();
-        let seed = mnemonic.to_seed("");
+        let mut seed = mnemonic.to_seed(BIP39_PASSPHRASE_V1);
 
         let secret_bytes: [u8; 32] = seed[0..32]
             .try_into()
@@ -51,8 +62,18 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         let revocation_signing = SigningKey::from_bytes(&revocation_bytes);
         let revocation_key = RevocationKey(revocation_signing.verifying_key().to_bytes());
 
+        // Derive dek_master from the entire seed via HKDF, domain-separated
+        // from the keypair/revocation slice derivations.
+        let dek_master = derive_dek_master(&seed);
+
         let did = Did::derive_did_key(&public_key_bytes);
         let witness_id = did.to_witness_id();
+
+        // Wipe the seed before returning. Defense in depth — the BIP39 seed
+        // is the universal recovery secret; nothing downstream should hold
+        // it. Local stack copies in `secret_bytes`/`revocation_bytes` go out
+        // of scope at function end without zeroize but are short-lived.
+        seed.zeroize();
 
         Ok((
             PhalanxIdentity {
@@ -61,6 +82,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
                 did,
                 keypair: signing_key,
                 revocation_key,
+                dek_master,
             },
             phrase,
         ))
@@ -69,7 +91,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
     fn restore(phrase: &str) -> Result<Self, IdentityError> {
         let mnemonic = Mnemonic::parse(phrase)
             .map_err(|e: bip39::Error| IdentityError::MnemonicError(e.to_string()))?;
-        let seed = mnemonic.to_seed("");
+        let mut seed = mnemonic.to_seed(BIP39_PASSPHRASE_V1);
         let secret_bytes: [u8; 32] = seed[0..32]
             .try_into()
             .map_err(|_| IdentityError::CryptoError("Seed fail".into()))?;
@@ -85,8 +107,13 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         let revocation_signing = SigningKey::from_bytes(&revocation_bytes);
         let revocation_key = RevocationKey(revocation_signing.verifying_key().to_bytes());
 
+        // Derive dek_master from the entire seed.
+        let dek_master = derive_dek_master(&seed);
+
         let did = Did::derive_did_key(&public_key_bytes);
         let witness_id = did.to_witness_id();
+
+        seed.zeroize();
 
         Ok(PhalanxIdentity {
             witness_id,
@@ -94,6 +121,7 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
             did,
             keypair: signing_key,
             revocation_key,
+            dek_master,
         })
     }
 
@@ -127,11 +155,17 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
             ))
         })?;
 
-        unseal_identity(&file_bytes, passphrase).map_err(|_| {
-            IdentityError::CryptoError(
+        // Schema-version errors (SchemaUpgradeRequired, UnknownVersion)
+        // propagate verbatim so the caller can prompt for re-restore.
+        // Crypto errors get a clearer "wrong passphrase or corrupt file"
+        // message than the underlying CryptoError detail.
+        match unseal_identity(&file_bytes, passphrase) {
+            Ok(identity) => Ok(identity),
+            Err(IdentityError::CryptoError(_)) => Err(IdentityError::CryptoError(
                 "Failed to decrypt identity. Incorrect passphrase or corrupt file.".to_string(),
-            )
-        })
+            )),
+            Err(other) => Err(other),
+        }
     }
 
     fn verify_retrieval_auth(&self, request: &RecordingRequest) -> Result<(), IdentityError> {
@@ -190,11 +224,13 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
     fn revocation_signing_key(phrase: &str) -> Result<SigningKey, IdentityError> {
         let mnemonic = Mnemonic::parse(phrase)
             .map_err(|e: bip39::Error| IdentityError::MnemonicError(e.to_string()))?;
-        let seed = mnemonic.to_seed("");
+        let mut seed = mnemonic.to_seed(BIP39_PASSPHRASE_V1);
         let revocation_bytes: [u8; 32] = seed[32..64]
             .try_into()
             .map_err(|_| IdentityError::CryptoError("Revocation seed fail".into()))?;
-        Ok(SigningKey::from_bytes(&revocation_bytes))
+        let key = SigningKey::from_bytes(&revocation_bytes);
+        seed.zeroize();
+        Ok(key)
     }
 }
 

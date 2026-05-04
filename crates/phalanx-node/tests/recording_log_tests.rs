@@ -49,6 +49,7 @@ fn setup_guardian(identity: &PhalanxIdentity, temp: &tempfile::TempDir) -> Guard
         identity.did.clone(),
         Arc::new(SystemClock),
         vault_key,
+        identity.dek_master.clone(),
     )
 }
 

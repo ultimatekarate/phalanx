@@ -81,6 +81,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // `sender` matches `propagation_source` on receive.
     let local_mesh_address =
         phalanx_transport::identity_ext::Libp2pExt::to_mesh_address(&my_identity);
+    let dek_master = my_identity.dek_master.clone();
     let deps = SentinelDependencies {
         config,
         identity: my_identity,
@@ -98,6 +99,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .with_queue_depth(egress.outbound_queue_depth()),
         ),
         vault_key,
+        dek_master,
         local_mesh: None, // NoOp — BLE/WiFi Direct injected during mobile integration
         egress,
         prnu_posterior: std::sync::Arc::new(std::sync::Mutex::new(

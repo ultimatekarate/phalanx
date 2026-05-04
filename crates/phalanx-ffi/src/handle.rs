@@ -361,6 +361,7 @@ async fn bootstrap(
     // receive. See the field doc on SentinelDependencies for why mixing
     // encodings silently breaks every heartbeat.
     let local_mesh_address = phalanx_transport::identity_ext::Libp2pExt::to_mesh_address(&identity);
+    let dek_master = identity.dek_master.clone();
     let deps = SentinelDependencies {
         config,
         identity,
@@ -370,6 +371,7 @@ async fn bootstrap(
         trust_registry,
         system_governor: governor.clone(),
         vault_key,
+        dek_master,
         local_mesh: Some(Box::new(local_mesh_adapter)),
         prnu_posterior: prnu_posterior.clone(),
         extra_community_ids: Vec::new(),

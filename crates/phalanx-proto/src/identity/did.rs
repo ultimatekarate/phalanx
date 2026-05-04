@@ -1,11 +1,21 @@
+use crate::crypto::DekMaster;
+use crate::error::IdentityError;
 use crate::revocation::RevocationKey;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-pub const IDENTITY_VERSION: u32 = 1;
+/// Schema version of the on-disk identity format.
+///
+/// v1: legacy random-DEK regime; per-recording DEKs lived only in the
+///     content keyring on the local device.
+/// v2: deterministic DEK derivation; `dek_master_bytes` is persisted so a
+///     cold-booted node can derive per-recording keys without re-typing the
+///     BIP39 phrase. v1 files require re-restore from phrase to upgrade.
+pub const IDENTITY_VERSION: u32 = 2;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize, Default,
@@ -311,6 +321,11 @@ pub struct PhalanxIdentity {
     /// The public half of the revocation keypair. Derived from BIP39 mnemonic
     /// (seed bytes [32..64]). Default (all zeros) for ephemeral identities.
     pub revocation_key: RevocationKey,
+    /// HKDF-derived master from which every per-recording DEK is expanded.
+    /// Computed once from the BIP39 seed at genesis/restore. Persisted in
+    /// `IdentityDiskFormat` under the same Argon2id passphrase wall as the
+    /// keypair, so cold-boot can derive without re-typing the phrase.
+    pub dek_master: DekMaster,
 }
 
 impl PhalanxIdentity {
@@ -339,12 +354,20 @@ impl PhalanxIdentity {
         let did = Did::derive_did_key(&public_key_bytes);
         let witness_id = did.to_witness_id();
 
+        // Ephemeral identities have no BIP39 mnemonic, so the dek_master is
+        // random — recordings made under an ephemeral identity are not
+        // phrase-recoverable (no phrase exists). Tests that need
+        // recoverability use the persistent `generate()`/`restore()` path.
+        let mut dek_master_bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut dek_master_bytes);
+
         Self {
             version: IDENTITY_VERSION,
             did,
             witness_id,
             keypair: signing_key,
             revocation_key: RevocationKey::default(),
+            dek_master: DekMaster::from_bytes(dek_master_bytes),
         }
     }
 }
@@ -380,6 +403,11 @@ pub struct IdentityDiskFormat {
     /// existing identity files load with `RevocationKey::default()`.
     #[serde(default)]
     pub revocation_key: RevocationKey,
+    /// HKDF-derived DEK master, persisted under the passphrase wall.
+    /// Present only in v2+ files. v1 files lack this field; the v1 → v2
+    /// upgrade requires re-restore from the BIP39 phrase.
+    #[serde(default)]
+    pub dek_master_bytes: [u8; 32],
 }
 
 impl IdentityDiskFormat {
@@ -391,6 +419,7 @@ impl IdentityDiskFormat {
             witness_id: identity.witness_id.clone(),
             keypair_bytes: identity.keypair.to_bytes(),
             revocation_key: identity.revocation_key,
+            dek_master_bytes: *identity.dek_master.as_bytes(),
         }
     }
 
@@ -404,17 +433,33 @@ impl IdentityDiskFormat {
     /// multibase prefix) migrate transparently on load: the canonical
     /// multibase form is computed from the `did` and the on-disk
     /// `witness_id` value is discarded.
-    pub fn into_identity(self) -> PhalanxIdentity {
-        // M-FIX (encoding canonicalization): derive the canonical forensic
-        // identifier from the persisted `did` rather than trusting whatever
-        // was previously written to disk.
-        let witness_id = self.did.to_witness_id();
-        PhalanxIdentity {
-            version: self.version,
-            did: self.did,
-            witness_id,
-            keypair: SigningKey::from_bytes(&self.keypair_bytes),
-            revocation_key: self.revocation_key,
+    ///
+    /// Schema version handling:
+    /// - v2 (current): all fields present; reconstructs directly.
+    /// - v1: lacks `dek_master_bytes`; returns `SchemaUpgradeRequired`. The
+    ///   caller must re-restore from the BIP39 phrase to derive the master.
+    /// - other: returns `UnknownVersion`.
+    pub fn into_identity(self) -> Result<PhalanxIdentity, IdentityError> {
+        match self.version {
+            IDENTITY_VERSION => {
+                // M-FIX (encoding canonicalization): derive the canonical
+                // forensic identifier from the persisted `did` rather than
+                // trusting whatever was previously written to disk.
+                let witness_id = self.did.to_witness_id();
+                Ok(PhalanxIdentity {
+                    version: self.version,
+                    did: self.did,
+                    witness_id,
+                    keypair: SigningKey::from_bytes(&self.keypair_bytes),
+                    revocation_key: self.revocation_key,
+                    dek_master: DekMaster::from_bytes(self.dek_master_bytes),
+                })
+            }
+            1 => Err(IdentityError::SchemaUpgradeRequired {
+                from: 1,
+                to: IDENTITY_VERSION,
+            }),
+            other => Err(IdentityError::UnknownVersion(other)),
         }
     }
 }
@@ -667,7 +712,7 @@ mod tests {
 
     #[test]
     fn identity_disk_format_migrates_legacy_raw_encoding() {
-        // Simulate a legacy identity file: same did + keypair, but the
+        // Simulate a legacy v2 identity file: same did + keypair, but the
         // persisted `witness_id` is the old raw-pubkey base58 form.
         let identity = PhalanxIdentity::new_ephemeral();
         let raw_pubkey_b58 =
@@ -678,10 +723,11 @@ mod tests {
             witness_id: WitnessId::new(raw_pubkey_b58.clone()),
             keypair_bytes: identity.keypair.to_bytes(),
             revocation_key: identity.revocation_key,
+            dek_master_bytes: *identity.dek_master.as_bytes(),
         };
         // The on-load migration must discard the raw form and re-derive the
         // canonical multibase form from the `did`.
-        let restored = legacy_disk.into_identity();
+        let restored = legacy_disk.into_identity().unwrap();
         assert_ne!(restored.witness_id.0, raw_pubkey_b58);
         assert!(restored.witness_id.0.starts_with('z'));
         assert_eq!(restored.witness_id, restored.did.to_witness_id());
@@ -691,9 +737,49 @@ mod tests {
     fn phalanx_identity_round_trips_through_disk_format() {
         let identity = PhalanxIdentity::new_ephemeral();
         let disk = IdentityDiskFormat::from_identity(&identity);
-        let restored = disk.into_identity();
+        let restored = disk.into_identity().unwrap();
         assert_eq!(restored.did, identity.did);
         assert_eq!(restored.witness_id, identity.witness_id);
         assert_eq!(restored.version, identity.version);
+        assert_eq!(
+            restored.dek_master.as_bytes(),
+            identity.dek_master.as_bytes()
+        );
+    }
+
+    #[test]
+    fn v1_identity_file_returns_schema_upgrade_required() {
+        let identity = PhalanxIdentity::new_ephemeral();
+        let v1_disk = IdentityDiskFormat {
+            version: 1,
+            did: identity.did.clone(),
+            witness_id: identity.witness_id.clone(),
+            keypair_bytes: identity.keypair.to_bytes(),
+            revocation_key: identity.revocation_key,
+            dek_master_bytes: [0u8; 32],
+        };
+        match v1_disk.into_identity() {
+            Err(IdentityError::SchemaUpgradeRequired { from: 1, to }) => {
+                assert_eq!(to, IDENTITY_VERSION);
+            }
+            other => panic!("expected SchemaUpgradeRequired, got {:?}", other.is_ok()),
+        }
+    }
+
+    #[test]
+    fn future_identity_version_returns_unknown_version() {
+        let identity = PhalanxIdentity::new_ephemeral();
+        let future_disk = IdentityDiskFormat {
+            version: 999,
+            did: identity.did.clone(),
+            witness_id: identity.witness_id.clone(),
+            keypair_bytes: identity.keypair.to_bytes(),
+            revocation_key: identity.revocation_key,
+            dek_master_bytes: *identity.dek_master.as_bytes(),
+        };
+        assert!(matches!(
+            future_disk.into_identity(),
+            Err(IdentityError::UnknownVersion(999))
+        ));
     }
 }

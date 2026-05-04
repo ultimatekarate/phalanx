@@ -44,6 +44,7 @@ async fn test_out_of_sequence_salvage_on_node_death() {
         identity.did.clone(),
         Arc::new(SystemClock),
         vault_key,
+        identity.dek_master.clone(),
     );
 
     // 1. CREATE VALID CHAIN: Seq 1 -> Seq 2
@@ -102,6 +103,7 @@ async fn test_stronghold_crash_recovery() {
         identity.did.clone(),
         Arc::new(SystemClock),
         vault_key.clone(),
+        identity.dek_master.clone(),
     );
 
     let shard = create_video_shard(
@@ -133,6 +135,7 @@ async fn test_stronghold_crash_recovery() {
         identity.did.clone(),
         Arc::new(SystemClock),
         vault_key,
+        identity.dek_master.clone(),
     );
 
     // Replay: re-ingest the same envelope into the fresh Guardian

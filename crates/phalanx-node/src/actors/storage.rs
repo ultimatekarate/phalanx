@@ -95,7 +95,11 @@ pub enum StorageCommand {
         reply_to: oneshot::Sender<Result<[u8; 32], ShardError>>,
     },
     /// Retrieve the content key for a recording (for playback decryption).
-    /// Returns `None` if no content key exists (legacy recording → use vault_key).
+    ///
+    /// Resolution chain: keyring (foreign + legacy own) → derived (own under
+    /// the deterministic regime). Always returns `Some` under the v2
+    /// regime; the `Option` is preserved for callers' historical
+    /// vault_key-fallback paths but `None` is no longer emitted.
     GetContentKey {
         recording_id: RecordingId,
         reply_to: oneshot::Sender<Option<[u8; 32]>>,
@@ -351,10 +355,16 @@ impl<J: TransientJournal> StorageActor<J> {
                 recording_id,
                 reply_to,
             } => {
-                let key = self
-                    .guardian
-                    .get_content_key(&recording_id)
-                    .map(|k| *k.as_bytes());
+                // resolve_encryption_key always returns a key (keyring hit
+                // or derived). We wrap in Some to preserve the existing
+                // channel signature; callers that fell back to vault_key
+                // on None are now dead-branch but still compile.
+                let key = Some(
+                    *self
+                        .guardian
+                        .resolve_encryption_key(&recording_id)
+                        .as_bytes(),
+                );
                 let _ = reply_to.send(key);
             }
             StorageCommand::ListRecordings { reply_to } => {
@@ -665,13 +675,20 @@ impl<J: TransientJournal> StorageActor<J> {
 
     /// Writes a single shard to the recording log, notifies DHT, and verifies in-memory.
     async fn handle_write_shard(&mut self, envelope: WitnessEnvelope) -> Result<(), GuardianError> {
-        // Ensure a content key exists for this recording (generates one for foreign recordings
-        // on first shard arrival). Local recordings already have keys from StartRecording.
+        // Foreign recordings must have a keyring entry on first shard
+        // arrival (their DEK is random — we cannot derive the foreign
+        // owner's master). Own recordings are absent from the keyring by
+        // design: their DEK is derived from `dek_master` on every read.
+        // The own-vs-foreign branch is the load-bearing invariant for
+        // `resolve_encryption_key` — if we mint a random DEK for an own
+        // recording here, every subsequent read returns the wrong key.
         let rid = envelope.evidence.recording_id();
-        if self.guardian.get_content_key(rid).is_none()
+        let is_foreign = envelope.did != self.guardian.local_did;
+        if is_foreign
+            && self.guardian.get_content_key(rid).is_none()
             && !self.guardian.revoked_recordings.contains(rid)
         {
-            self.guardian.generate_content_key(rid);
+            self.guardian.mint_foreign_content_key(rid);
             self.guardian.persist_keyring().await?;
         }
 
@@ -775,7 +792,13 @@ impl<J: TransientJournal> StorageActor<J> {
         Ok(())
     }
 
-    /// Generate a per-recording content key and persist the keyring.
+    /// Derive (deterministically, from `dek_master`) the per-recording
+    /// content key for a new own recording.
+    ///
+    /// The DEK is NOT written to the keyring — it's recomputable from the
+    /// BIP39 phrase, which is what makes the recording mesh-recoverable
+    /// after device loss. The keyring is reserved for foreign and legacy
+    /// random-DEK recordings.
     async fn handle_start_recording(
         &mut self,
         recording_id: &RecordingId,
@@ -783,15 +806,11 @@ impl<J: TransientJournal> StorageActor<J> {
         if self.guardian.revoked_recordings.contains(recording_id) {
             return Err(ShardError::RecordingRevoked);
         }
-        let key = self.guardian.generate_content_key(recording_id);
-        self.guardian
-            .persist_keyring()
-            .await
-            .map_err(|e| ShardError::Io(e.to_string()))?;
+        let key = self.guardian.content_key_for(recording_id);
         tracing::info!(
             target: "phalanx::storage",
             recording = %recording_id,
-            "Content key generated for new recording"
+            "Content key derived for new recording"
         );
         Ok(*key.as_bytes())
     }
