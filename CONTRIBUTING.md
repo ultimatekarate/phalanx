@@ -217,7 +217,7 @@ PRNU sensor fingerprinting, Kolmogorov-Smirnov testing, spectral analysis, and c
 | `phalanx-forensics/src/trust/corroboration.rs` | Gate 8 multi-device proof generation with K-S statistical testing |
 | `phalanx-proto/src/evidence/corroboration.rs` | Corroboration proof types and temporal event windows |
 | `phalanx-node/src/vitals/spectral.rs` | Spectral analysis for vitals frequency-domain monitoring |
-| `phalanx-lens/src/scalar.rs` | Scalar PRNU computation |
+| `phalanx-lens/src/scalar.rs` | PRNU and Moire Pattern detection |
 | `phalanx-transport/src/counting.rs` | Statistical counting utilities |
 | `phalanx-ffi/src/calibrate.rs` | FFI bridge for sensor calibration |
 | `phalanx-stronghold/src/ops/corroborate.rs` | Stronghold-side corroboration proof assembly |
