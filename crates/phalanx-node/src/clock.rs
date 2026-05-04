@@ -229,7 +229,10 @@ impl Default for TrustedClock {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::arithmetic_side_effects
 )]
 mod tests {
     use super::*;

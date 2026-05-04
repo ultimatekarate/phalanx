@@ -1,3 +1,14 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::float_cmp
+)]
 //! End-to-end retrieval request/response round-trip tests.
 //!
 //! These cover the `Libp2pEgress::send_response` fix: previously a no-op,
@@ -15,13 +26,6 @@
 //! `RR2` is a fail-soft check: calling `send_response` with an unknown
 //! `channel_id` must increment the `response_channels_lost` counter and not
 //! panic.
-
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing
-)]
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;

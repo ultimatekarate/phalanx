@@ -15,6 +15,6 @@ Phalanx is a distributed forensic evidence provenance system. The codebase follo
 ## Working with this codebase
 
 - Read `linguistic-code-model.md` for the full architectural governance rules.
-- Always `cargo check --workspace` after structural changes.
+- Always `cargo clippy --workspace --all-targets -- -D warnings` after structural changes.
 - Always `cargo test --workspace` before considering work complete.
 - When referencing a method signature in a plan, read the actual definition first. Do not infer constructor names from type names.

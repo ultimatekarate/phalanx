@@ -263,12 +263,9 @@ async fn homeostasis_load_test() {
     // Drain ingresses after warmup so accumulated traffic doesn't skew the
     // initial CSV samples.
     for ingress in ingresses.iter_mut() {
-        loop {
-            match tokio::time::timeout(Duration::from_millis(1), ingress.next_event()).await {
-                Ok(Some(_)) => continue,
-                _ => break,
-            }
-        }
+        while let Ok(Some(_)) =
+            tokio::time::timeout(Duration::from_millis(1), ingress.next_event()).await
+        {}
     }
 
     // The publisher's `SystemGovernor` wired to its adapter's `IoCounters`.

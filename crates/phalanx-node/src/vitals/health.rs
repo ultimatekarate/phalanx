@@ -7,19 +7,25 @@
 // is wrapped in `std::sync::RwLock` so multiple actors can read concurrently
 // without coarse mutex contention.
 //
+// **Poison handling:** lock acquisition uses `unwrap_or_else(|e| e.into_inner())`
+// (matching SystemGovernor / ReputationProjection convention) so a panic in
+// one actor cannot cascade into permanent unavailability for the rest. The
+// data is recovered as-of the panic and operation continues.
+//
 // **NEVER hold a `RwLock` guard across an `.await`.** A single async task
 // suspending while holding a write-lock will deadlock any other task
 // attempting to acquire the same lock — including read-locks.
 //
 // CORRECT — acquire, copy/test, drop in one statement:
 //
-//     let peers: Vec<MeshAddress> =
-//         self.heartbeats.read().unwrap().keys().cloned().collect();
+//     let peers: Vec<MeshAddress> = self.heartbeats
+//         .read().unwrap_or_else(|e| e.into_inner())
+//         .keys().cloned().collect();
 //     // …iterate `peers` without holding the lock…
 //
 // WRONG — guard held across .await, deadlocks if anyone tries to write:
 //
-//     let guard = self.heartbeats.read().unwrap();
+//     let guard = self.heartbeats.read().unwrap_or_else(|e| e.into_inner());
 //     for peer in guard.keys() {
 //         some_async_call(peer).await;
 //     }
@@ -102,20 +108,23 @@ impl HealthTracker {
         let peer_id = msg.sender.clone();
         self.heartbeats
             .write()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(peer_id.clone(), Instant::now());
         self.peer_contracts
             .write()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(peer_id.clone(), VitalityRate::new(msg.heartbeat_ms));
 
         // Shield Wall: record heartbeat for spectral consistency evaluation.
         self.spectral
             .write()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .record_heartbeat(peer_id.clone(), &msg);
 
-        self.capacities.write().unwrap().insert(peer_id, msg);
+        self.capacities
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(peer_id, msg);
     }
 
     /// Whether the peer has missed its heartbeat contract by more than the
@@ -123,7 +132,12 @@ impl HealthTracker {
     #[must_use]
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Duration jitter arithmetic.
     pub fn is_peer_stale(&self, peer_id: &MeshAddress, physics: &PhalanxPhysics) -> bool {
-        let last_time = match self.heartbeats.read().unwrap().get(peer_id) {
+        let last_time = match self
+            .heartbeats
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(peer_id)
+        {
             Some(t) => *t,
             None => return true,
         };
@@ -131,7 +145,7 @@ impl HealthTracker {
         let contract = self
             .peer_contracts
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(peer_id)
             .cloned()
             .unwrap_or_else(|| VitalityRate::new(5000));
@@ -146,13 +160,21 @@ impl HealthTracker {
     /// released before the returned `Vec` is constructed.
     #[must_use]
     pub fn peer_addresses(&self) -> Vec<MeshAddress> {
-        self.heartbeats.read().unwrap().keys().cloned().collect()
+        self.heartbeats
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Whether we have observed at least one heartbeat from `peer`.
     #[must_use]
     pub fn has_heartbeat(&self, peer: &MeshAddress) -> bool {
-        self.heartbeats.read().unwrap().contains_key(peer)
+        self.heartbeats
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(peer)
     }
 
     // ── Spectral observer accessors ────────────────────────────────────────
@@ -161,7 +183,7 @@ impl HealthTracker {
     pub fn record_data_received(&self, peer_id: MeshAddress, bytes: usize) {
         self.spectral
             .write()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .record_data_received(peer_id, bytes);
     }
 
@@ -169,18 +191,27 @@ impl HealthTracker {
     /// Returns `None` until `min_observations` heartbeats have been recorded.
     #[must_use]
     pub fn evaluate_spectral(&self, peer_id: &MeshAddress) -> Option<f64> {
-        self.spectral.read().unwrap().evaluate(peer_id)
+        self.spectral
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .evaluate(peer_id)
     }
 
     /// Threshold above which a residual triggers an anomaly impulse.
     #[must_use]
     pub fn spectral_anomaly_threshold(&self) -> f64 {
-        self.spectral.read().unwrap().anomaly_threshold
+        self.spectral
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .anomaly_threshold
     }
 
     /// Drop all spectral observations for a peer (called on peer disconnect).
     pub fn remove_spectral_peer(&self, peer_id: &MeshAddress) {
-        self.spectral.write().unwrap().remove_peer(peer_id);
+        self.spectral
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove_peer(peer_id);
     }
 }
 
