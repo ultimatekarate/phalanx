@@ -874,3 +874,142 @@ mod ingress_boundary_tests {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Publishable gate: the security-relevant publish path. Any rid
+// flowing through `commit_notify_tx` is destined for mesh announcement,
+// so the gate at storage.rs:WriteShard / Ingest is what stands between an
+// operator's "local-only" decision and an unintended gossip leak.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// `publishable: false` recordings must NOT trigger a commit notify, even
+/// after a successful shard write. `publishable: true` recordings (the
+/// default) must trigger one notify per shard.
+#[tokio::test]
+async fn publishable_flag_gates_commit_notify() {
+    use phalanx_proto::evidence::RecordingOptions;
+    use phalanx_test_fixtures::envelope::witness_envelope_for_recording;
+
+    // Setup
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = NodeConfig::test_defaults();
+    config.storage.vault_path = temp.path().to_string_lossy().into_owned();
+
+    let (identity, _) = PhalanxIdentity::generate().unwrap();
+    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
+    let guardian = Guardian::new(
+        &config.storage.vault_path,
+        &config,
+        identity.did.clone(),
+        Arc::new(SystemClock),
+        vault_key,
+        identity.dek_master.clone(),
+    );
+
+    // Wire up the notify channel directly. This is what MeshSentinel reads
+    // in production; here the test reads it.
+    let (notify_tx, mut notify_rx) = mpsc::channel::<RecordingId>(8);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<StorageCommand>(16);
+
+    let actor = StorageActor {
+        reassembler: Reassembler::new(),
+        guardian,
+        journal: NoOpJournal,
+        config: config.clone(),
+        identity: identity.clone(),
+        current_tolerance: Duration::from_millis(1000),
+        system_governor: Arc::new(SystemGovernor::new()),
+        commit_notify_tx: Some(notify_tx),
+        replay_filter: phalanx_forensics::bloom::RotatingBloomFilter::new(
+            phalanx_forensics::bloom::RotatingBloomFilter::DEFAULT_CAPACITY,
+        ),
+        shutdown: ShutdownSignal::new(),
+        used_bytes_gauge: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    };
+
+    let actor_handle = tokio::spawn(async move {
+        actor.run(cmd_rx).await;
+    });
+
+    let public_rid = RecordingId::new("rec-public");
+    let private_rid = RecordingId::new("rec-private");
+
+    // Public: default options → publishable.
+    let (key_tx_a, key_rx_a) = oneshot::channel();
+    cmd_tx
+        .send(StorageCommand::StartRecording {
+            recording_id: public_rid.clone(),
+            reply_to: key_tx_a,
+        })
+        .await
+        .unwrap();
+    key_rx_a.await.unwrap().unwrap();
+
+    // Private: explicit publishable=false.
+    let (key_tx_b, key_rx_b) = oneshot::channel();
+    cmd_tx
+        .send(StorageCommand::StartRecordingWithOptions {
+            recording_id: private_rid.clone(),
+            options: RecordingOptions { publishable: false },
+            reply_to: key_tx_b,
+        })
+        .await
+        .unwrap();
+    key_rx_b.await.unwrap().unwrap();
+
+    // Two shards, one per recording, signed by the same identity (own
+    // recordings — `handle_write_shard` ownership branch returns
+    // `is_foreign = false` so no keyring mint occurs).
+    let env_public = witness_envelope_for_recording(&identity, &public_rid, 0, None);
+    let env_private = witness_envelope_for_recording(&identity, &private_rid, 0, None);
+
+    let (rep_a, rep_a_rx) = oneshot::channel();
+    cmd_tx
+        .send(StorageCommand::WriteShard {
+            envelope: env_public,
+            reply_to: rep_a,
+        })
+        .await
+        .unwrap();
+    let _ = rep_a_rx.await;
+
+    let (rep_b, rep_b_rx) = oneshot::channel();
+    cmd_tx
+        .send(StorageCommand::WriteShard {
+            envelope: env_private,
+            reply_to: rep_b,
+        })
+        .await
+        .unwrap();
+    let _ = rep_b_rx.await;
+
+    // Drain notifies. The publishable rid arrives; the private rid must
+    // never arrive. Use a short timeout to bound the "never" assertion.
+    let mut seen_public = false;
+    let mut seen_private = false;
+    let drain_deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+    loop {
+        let remaining = drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, notify_rx.recv()).await {
+            Ok(Some(rid)) if rid == public_rid => seen_public = true,
+            Ok(Some(rid)) if rid == private_rid => seen_private = true,
+            Ok(Some(other)) => panic!("Unexpected rid on notify channel: {other}"),
+            Ok(None) | Err(_) => break, // channel closed or timeout
+        }
+    }
+
+    assert!(
+        seen_public,
+        "Expected the publishable recording to fire a commit_notify"
+    );
+    assert!(
+        !seen_private,
+        "publishable=false must not produce a commit_notify (would leak to mesh)"
+    );
+
+    drop(cmd_tx);
+    let _ = tokio::time::timeout(Duration::from_millis(500), actor_handle).await;
+}

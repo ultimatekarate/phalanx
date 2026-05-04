@@ -5,12 +5,14 @@
 // content keyring (per-recording DEKs), and storage accounting.
 
 mod crypto;
+mod metadata;
 mod recording_log;
 mod wal;
 
 // Re-export public API from submodules
 pub(crate) use crypto::atomic_encrypted_write;
 pub use crypto::{derive_vault_key, load_or_create_vault_salt, read_encrypted_file};
+pub(crate) use metadata::RecordingMetadataStore;
 
 use crate::NodeConfig;
 use phalanx_forensics::crucible::Crucible;
@@ -20,6 +22,7 @@ use phalanx_forensics::gate::PromotionGate;
 use phalanx_proto::crypto::{DekMaster, SymmetricKey};
 use phalanx_proto::evidence::PrnuPosterior;
 use phalanx_proto::evidence::Recording;
+use phalanx_proto::evidence::RecordingMetadata;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::RecordingId;
@@ -145,6 +148,9 @@ pub struct Guardian {
     /// Uses `[u8; 32]` instead of `SymmetricKey` to allow Serialize/Deserialize
     /// (respects M5 no-Serialize invariant on SymmetricKey).
     pub content_keyring: BTreeMap<RecordingId, [u8; 32]>,
+    /// Per-recording policy state (e.g. `publishable`). Local-only; gone
+    /// after a fresh-restore. Persisted to `recording_metadata.bin`.
+    pub(crate) recording_metadata: RecordingMetadataStore,
 }
 
 impl Guardian {
@@ -167,6 +173,7 @@ impl Guardian {
             recording_logs: BTreeMap::new(),
             revoked_recordings: HashSet::new(),
             content_keyring: BTreeMap::new(),
+            recording_metadata: RecordingMetadataStore::default(),
         }
     }
 
@@ -317,6 +324,40 @@ impl Guardian {
         self.content_keyring = postcard::from_bytes(&plaintext)
             .map_err(|e| GuardianError::SerializationError(e.to_string()))?;
         Ok(())
+    }
+
+    // ── Recording metadata (per-recording policy) ──────────────────────
+
+    /// Whether the recording is publishable.
+    ///
+    /// Recordings without a metadata entry default to `true` — preserving
+    /// implicit-publish behaviour for legacy data and for the no-options
+    /// `start_recording` path.
+    pub fn is_recording_publishable(&self, recording_id: &RecordingId) -> bool {
+        self.recording_metadata.is_publishable(recording_id)
+    }
+
+    /// Insert (or replace) the policy entry for a recording.
+    pub fn set_recording_metadata(
+        &mut self,
+        recording_id: RecordingId,
+        metadata: RecordingMetadata,
+    ) {
+        self.recording_metadata.insert(recording_id, metadata);
+    }
+
+    /// Persist the metadata map to disk, encrypted with vault_key.
+    pub async fn persist_recording_metadata(&self) -> Result<(), GuardianError> {
+        self.recording_metadata
+            .persist(&self.vault_path, &self.vault_key)
+            .await
+    }
+
+    /// Load the metadata map from disk. Called during bootstrap.
+    pub async fn load_recording_metadata(&mut self) -> Result<(), GuardianError> {
+        self.recording_metadata
+            .load(&self.vault_path, &self.vault_key)
+            .await
     }
 
     /// Persist the Bayesian PRNU posterior to disk, encrypted with vault_key.
@@ -475,6 +516,21 @@ impl Guardian {
 
         // 4. Mark as revoked (blocks future ingestion)
         self.revoked_recordings.insert(recording_id.clone());
+
+        // 5. Drop the policy metadata entry. It's local-only state and no
+        //    longer meaningful once the recording is revoked.
+        if self.recording_metadata.remove(recording_id).is_some() {
+            // Best-effort persist — failure here is non-fatal because the
+            // entry only governs local publish behaviour for a recording
+            // that has already been crypto-shredded.
+            if let Err(e) = self.persist_recording_metadata().await {
+                tracing::warn!(
+                    target: "phalanx::vault",
+                    error = %e,
+                    "Failed to persist recording metadata after revocation"
+                );
+            }
+        }
 
         Ok(())
     }

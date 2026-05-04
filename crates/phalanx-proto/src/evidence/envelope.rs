@@ -306,6 +306,71 @@ pub struct Recording {
     pub is_complete: bool,
 }
 
+/// Local-only per-recording policy state.
+///
+/// Persisted in the vault next to `content_keyring.bin`, encrypted under
+/// `vault_key`. Distinct from `Recording` — that struct is the forensic
+/// noun (evidence content), this struct is operator-policy metadata that
+/// must never leak into signed evidence.
+///
+/// On a fresh-restored device the file is gone, so all recordings revert
+/// to default policy. The operator can re-mark anything they want kept
+/// local after recovery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordingMetadata {
+    /// Schema version of this metadata entry. Starts at 1; bump on field
+    /// additions and gate decode on the version.
+    pub schema_version: u16,
+    /// Agency lever: when `true` (default), a successful shard write
+    /// notifies MeshSentinel which announces the recording on the mesh.
+    /// When `false`, the recording stays vault-local and is never gossiped
+    /// — useful for sensitive captures the sentinel does not want
+    /// replicated even in encrypted form.
+    pub publishable: bool,
+}
+
+/// The pinned schema version of `RecordingMetadata`. Bump alongside any
+/// field addition.
+pub const RECORDING_METADATA_VERSION: u16 = 1;
+
+impl Default for RecordingMetadata {
+    fn default() -> Self {
+        Self {
+            schema_version: RECORDING_METADATA_VERSION,
+            publishable: true,
+        }
+    }
+}
+
+/// Per-recording options surfaced at `start_recording_with_options`.
+///
+/// Distinct from `RecordingMetadata`: this is the *capture-time input*
+/// shape (what the FFI / CLI accepts), while `RecordingMetadata` is the
+/// *persisted shape* (what lives on disk). Today the two have one field
+/// in common; keeping them separate means future capture-only options
+/// (e.g. a transient session-key flag) don't bloat the on-disk schema.
+#[derive(Debug, Clone, Copy)]
+pub struct RecordingOptions {
+    pub publishable: bool,
+}
+
+impl Default for RecordingOptions {
+    fn default() -> Self {
+        Self { publishable: true }
+    }
+}
+
+impl RecordingOptions {
+    /// Convenience: project the options onto a fresh `RecordingMetadata`.
+    #[must_use]
+    pub fn into_metadata(self) -> RecordingMetadata {
+        RecordingMetadata {
+            schema_version: RECORDING_METADATA_VERSION,
+            publishable: self.publishable,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MediaType {
     #[serde(rename = "video/mp4")]
