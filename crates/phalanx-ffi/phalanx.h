@@ -106,6 +106,13 @@ enum PhalanxError {
    * the wire type, not caller error.
    */
   SERIALIZATION_FAILURE = -16,
+  /**
+   * Recovery walk is already in progress; duplicate `phalanx_start_recovery`
+   * or attempt to start a recording / playback while recovery is mid-walk.
+   * Both producer (capture) and the playback path are gated so the
+   * single-tenant providers channel can't be reassigned mid-recovery.
+   */
+  ALREADY_RECOVERING = -17,
 };
 typedef int32_t PhalanxError;
 
@@ -922,6 +929,61 @@ int32_t phalanx_poll_audio_frame(struct PlaybackSession *session,
  * * Must be called exactly once per session. Null is a safe no-op.
  */
  void phalanx_stop_playback(struct PlaybackSession *session) ;
+
+/**
+ * Start a recovery walk: locate the per-identity manifest on the mesh,
+ * walk it, and pull every cataloged child recording into the local vault.
+ *
+ * Returns:
+ * * `0` on success — the walk has been spawned. Poll
+ *   `phalanx_recovery_status` to track progress.
+ * * `PhalanxError::NullPointer` if `handle` is null.
+ * * `PhalanxError::NotRunning` if the engine isn't running.
+ * * `PhalanxError::AlreadyRecording` if a recording is currently active.
+ * * `PhalanxError::AlreadyRecovering` if a previous recovery is still
+ *   running.
+ * * `PhalanxError::InvalidState` if the engine state is otherwise wrong.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ */
+ int32_t phalanx_start_recovery(const struct PhalanxHandle *handle) ;
+
+/**
+ * Postcard-encode a snapshot of the current recovery status. Caller frees
+ * the returned bytes via `phalanx_free_bytes` (same lifetime contract as
+ * `phalanx_sign_vouch`).
+ *
+ * Returns:
+ * * `0` on success — `*out_ptr` and `*out_len` describe a freshly-malloc'd
+ *   postcard buffer.
+ * * `PhalanxError::NullPointer` if any pointer is null.
+ * * `PhalanxError::SerializationFailure` if postcard fails (indicates a
+ *   bug in the wire type, not caller error).
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `out_ptr` and `out_len` must be writable pointers.
+ */
+
+int32_t phalanx_recovery_status(const struct PhalanxHandle *handle,
+                                uint8_t **out_ptr,
+                                uint32_t *out_len)
+;
+
+/**
+ * Cancel an in-progress recovery walk. Idempotent: calling twice or
+ * calling when no recovery is active is a no-op that returns `0`.
+ *
+ * The orchestrator observes the cancel on its next poll iteration
+ * (within ~1s) and exits with `state = Cancelled`. Partial state on disk
+ * is preserved — a subsequent `phalanx_start_recovery` resumes from
+ * where this one left off.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ */
+ int32_t phalanx_cancel_recovery(const struct PhalanxHandle *handle) ;
 
 /**
  * Returns the current power state as an integer.
