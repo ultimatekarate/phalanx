@@ -615,7 +615,7 @@ impl Guardian {
         // during playback. This `.sealed` file is a Crucible-finalized snapshot
         // for archival/export — a completely different format (full Recording struct
         // encrypted as a single blob).
-        let file_name = format!("{}.sealed", recording.id);
+        let file_name = format!("{}.sealed", recording.id.to_safe_name());
         let path = std::path::PathBuf::from(&self.vault_path)
             .join(recording.owner_did.to_safe_name())
             .join(file_name);

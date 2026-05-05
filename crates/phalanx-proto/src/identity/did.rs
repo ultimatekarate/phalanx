@@ -37,6 +37,47 @@ impl RecordingId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Sanitizes the recording-id string for use in file paths. Mirrors
+    /// `Did::to_safe_name` — non-`[a-zA-Z0-9_-]` chars become `_`, any
+    /// surviving non-`Component::Normal` path falls back to a DJB2 hash,
+    /// and an empty result becomes `"_empty_"`.
+    ///
+    /// Wire form is preserved by `as_str()` / `Display`; this method is
+    /// strictly for fs-path construction.
+    #[must_use]
+    pub fn to_safe_name(&self) -> String {
+        let sanitized: String = self
+            .0
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+
+        if std::path::Path::new(&sanitized)
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return format!("_hash_{:08x}", {
+                let mut h: u32 = 5381;
+                for b in self.0.as_bytes() {
+                    h = h.wrapping_mul(33).wrapping_add(u32::from(*b));
+                }
+                h
+            });
+        }
+
+        if sanitized.is_empty() {
+            "_empty_".to_string()
+        } else {
+            sanitized
+        }
+    }
 }
 
 impl std::str::FromStr for RecordingId {
@@ -634,6 +675,44 @@ mod tests {
         let did = Did::new("");
         let safe = did.to_safe_name();
         assert_eq!(safe, "_empty_");
+    }
+
+    #[test]
+    fn test_recording_id_to_safe_name_normal() {
+        let id = RecordingId::new("rec_2026_session_42");
+        assert_eq!(id.to_safe_name(), "rec_2026_session_42");
+    }
+
+    #[test]
+    fn test_recording_id_to_safe_name_traversal_unix() {
+        let id = RecordingId::new("../../../etc/passwd");
+        let safe = id.to_safe_name();
+        assert!(!safe.contains(".."));
+        assert!(!safe.contains('/'));
+    }
+
+    #[test]
+    fn test_recording_id_to_safe_name_traversal_windows() {
+        let id = RecordingId::new("..\\..\\windows\\system32");
+        let safe = id.to_safe_name();
+        assert!(!safe.contains(".."));
+        assert!(!safe.contains('\\'));
+    }
+
+    #[test]
+    fn test_recording_id_to_safe_name_absolute_path() {
+        let id = RecordingId::new("/absolute/path");
+        let safe = id.to_safe_name();
+        assert!(!safe.contains('/'));
+        assert!(safe
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+    }
+
+    #[test]
+    fn test_recording_id_to_safe_name_empty() {
+        let id = RecordingId::new("");
+        assert_eq!(id.to_safe_name(), "_empty_");
     }
 
     #[test]
