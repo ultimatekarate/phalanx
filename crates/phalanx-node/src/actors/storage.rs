@@ -6,7 +6,10 @@ use crate::vitals::{Homeostasis, SystemGovernor};
 use phalanx_forensics::bloom::RotatingBloomFilter;
 use phalanx_forensics::crucible::EvidenceExt;
 use phalanx_forensics::prelude::*;
+use phalanx_forensics::witness::WitnessAuthority;
 use phalanx_proto::evidence::EnvelopeState;
+use phalanx_proto::evidence::Evidence;
+use phalanx_proto::evidence::ManifestEntry;
 use phalanx_proto::evidence::PrnuPosterior;
 use phalanx_proto::evidence::RecordingOptions;
 use phalanx_proto::evidence::StorageSequence;
@@ -869,6 +872,15 @@ impl<J: TransientJournal> StorageActor<J> {
             .await
             .map_err(|e| ShardError::Io(e.to_string()))?;
 
+        // PR C: catalog publishable recordings in the per-identity manifest
+        // so a fresh-restored sentinel can enumerate what to fetch from the
+        // mesh. Unpublishable recordings get no manifest entry — they're
+        // not on the mesh, so their absence from the catalog is correct
+        // and avoids leaking their existence in the published manifest.
+        if options.publishable {
+            self.append_manifest_entry(recording_id).await?;
+        }
+
         tracing::info!(
             target: "phalanx::storage",
             recording = %recording_id,
@@ -876,6 +888,91 @@ impl<J: TransientJournal> StorageActor<J> {
             "Content key derived for new recording"
         );
         Ok(*key.as_bytes())
+    }
+
+    /// Append a `ManifestEntry` shard to this identity's deterministic
+    /// manifest recording.
+    ///
+    /// The manifest's `RecordingId` is `derive_manifest_recording_id(
+    /// dek_master)`; the per-recording AEAD key is the usual derive-path
+    /// (no keyring entry). Each call:
+    ///
+    /// 1. Resolves `(next_seq, prev_hash)` from the manifest's recording
+    ///    log (one disk read on subsequent calls; free on first call).
+    /// 2. Builds and signs a `ManifestEntry` envelope.
+    /// 3. Pins the manifest's `RecordingMetadata { publishable: true }`
+    ///    explicitly — defensive against any future change to the
+    ///    default-publishable semantics. The pin is idempotent.
+    /// 4. Writes the envelope to disk via `append_shard` (bypasses the
+    ///    Crucible reassembler — the manifest is a chain of independent
+    ///    catalog facts, not media to reassemble; same pattern as
+    ///    internally-generated `Evidence::Gap` shards).
+    /// 5. Fires `commit_notify_tx` so MeshSentinel announces the new
+    ///    manifest shard to the mesh.
+    ///
+    /// Errors propagate uniformly. A disk or signing failure here would
+    /// equally block the child's first shard moments later, so there is
+    /// no asymmetric "best-effort" failure mode worth special-casing.
+    async fn append_manifest_entry(
+        &mut self,
+        child_recording_id: &RecordingId,
+    ) -> Result<(), ShardError> {
+        let manifest_id = self.guardian.manifest_recording_id();
+        let (sequence_id, prev_hash) = self
+            .guardian
+            .manifest_chain_state()
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
+
+        let entry = ManifestEntry {
+            timestamp: self.guardian.clock.now(),
+            sequence_id,
+            recording_id: manifest_id.clone(),
+            child_recording_id: child_recording_id.clone(),
+        };
+
+        let envelope = WitnessEnvelope::sign_envelope(
+            Evidence::ManifestEntry(entry),
+            &self.identity,
+            self.identity.witness_id.clone(),
+            prev_hash,
+        )?;
+
+        // Pin manifest's publishability explicitly. Idempotent — re-set
+        // on every append so a missing or corrupted metadata file
+        // recovers on the next start. The cost is one BTreeMap insert
+        // per start_recording call.
+        self.guardian.set_recording_metadata(
+            manifest_id.clone(),
+            RecordingOptions { publishable: true }.into_metadata(),
+        );
+        self.guardian
+            .persist_recording_metadata()
+            .await
+            .map_err(|e| ShardError::Io(e.to_string()))?;
+
+        self.guardian
+            .append_shard(&envelope)
+            .await
+            .map_err(|e| ShardError::Io(format!("manifest append: {e}")))?;
+
+        // Note: no ledger update. The storage ledger tracks
+        // fountain-chunk bytes via `handle_ingest` only; shard-on-disk
+        // writes (this path and `handle_write_shard`) intentionally skip
+        // it. Adding `record_own_ingestion` here would over-count
+        // manifest bytes relative to other shard writes.
+
+        // Publish gate. We just pinned the manifest to publishable=true
+        // above, so this branch is taken — but consult the gate
+        // uniformly so future policy plumbing (operator override) is
+        // honoured here too.
+        if self.guardian.is_recording_publishable(&manifest_id) {
+            if let Some(ref tx) = self.commit_notify_tx {
+                let _ = tx.try_send(manifest_id);
+            }
+        }
+
+        Ok(())
     }
 
     /// Persists network state to the WAL and salvages Guardian data.

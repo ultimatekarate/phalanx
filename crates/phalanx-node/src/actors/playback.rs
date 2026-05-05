@@ -113,6 +113,7 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                         Evidence::Gap(_) => "Gap",
                         Evidence::Handover(_) => "Handover",
                         Evidence::Proximity(_) => "Proximity",
+                        Evidence::ManifestEntry(_) => "ManifestEntry",
                     };
                     eprintln!(
                         "[Phalanx Playback] seq {}: got {} shard",
@@ -138,7 +139,10 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                                 let ch = a.channels.get();
                                 (a.payload, true, 0u64, 0u64, sr, ch)
                             }
-                            Evidence::Gap(_) | Evidence::Handover(_) | Evidence::Proximity(_) => {
+                            Evidence::Gap(_)
+                            | Evidence::Handover(_)
+                            | Evidence::Proximity(_)
+                            | Evidence::ManifestEntry(_) => {
                                 self.current_sequence.0 += 1;
                                 continue;
                             }

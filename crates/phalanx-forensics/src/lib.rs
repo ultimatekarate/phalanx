@@ -43,7 +43,9 @@ pub use trust::revocation;
 // Re-export primary structures for ergonomic use
 
 pub use crucible::{Crucible, Mold, RecordingAmalgam};
-pub use cryptography::dek::{derive_dek_master, derive_recording_dek};
+pub use cryptography::dek::{
+    derive_dek_master, derive_manifest_recording_id, derive_recording_dek,
+};
 pub use cryptography::{decrypt_bytes, encrypt_bytes, generate_session_key};
 pub use judge::{decode_payload, HandoverJudge, PayloadCipher};
 pub use policy::TrafficGovernor;

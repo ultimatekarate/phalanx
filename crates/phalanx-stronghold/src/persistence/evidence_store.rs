@@ -68,6 +68,7 @@ impl EvidenceStore {
             Evidence::Gap(g) => g.start_seq,
             Evidence::Handover(_) => StorageSequence(0),
             Evidence::Proximity(_) => StorageSequence(0),
+            Evidence::ManifestEntry(m) => m.sequence_id,
         }
     }
 
@@ -79,6 +80,7 @@ impl EvidenceStore {
             Evidence::Gap(g) => Some(g.recording_id.clone()),
             Evidence::Handover(_) => None,
             Evidence::Proximity(p) => Some(p.recording_id.clone()),
+            Evidence::ManifestEntry(m) => Some(m.recording_id.clone()),
         }
     }
 

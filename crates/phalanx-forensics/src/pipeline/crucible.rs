@@ -51,6 +51,7 @@ impl EvidenceExt for Evidence {
             Evidence::Handover(h) => &h.recording_id,
             Evidence::Gap(g) => &g.recording_id,
             Evidence::Proximity(p) => &p.recording_id,
+            Evidence::ManifestEntry(m) => &m.recording_id,
         }
     }
     fn sequence_id(&self) -> StorageSequence {
@@ -60,12 +61,14 @@ impl EvidenceExt for Evidence {
             Evidence::Handover(h) => h.sequence_id,
             Evidence::Gap(g) => g.start_seq,
             Evidence::Proximity(_) => StorageSequence(u32::MAX), // metadata, not a frame
+            Evidence::ManifestEntry(m) => m.sequence_id,
         }
     }
     fn timestamp(&self, fallback: PhalanxTimestamp) -> PhalanxTimestamp {
         match self {
             Evidence::Video(s) => s.timestamp,
             Evidence::Audio(s) => s.timestamp,
+            Evidence::ManifestEntry(m) => m.timestamp,
             // Non-timed evidence types use the caller-provided fallback.
             // The Laboratory does not reach for system time — the Hands layer
             // provides the timestamp via TrustedClock.
