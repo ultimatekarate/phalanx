@@ -10,7 +10,9 @@ pub mod actors {
     pub mod meshsentinel;
     pub mod playback;
     pub mod recording_session;
+    pub mod recovery;
     pub mod retrieval;
+    pub mod retrieval_request;
     pub mod shutdown;
     pub mod storage;
     pub mod trust_actor;

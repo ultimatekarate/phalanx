@@ -8,6 +8,7 @@ pub mod network; // The Mesh — events, topology, kademlia, wire, topic
 // ─── Cross-cutting ───────────────────────────────────────────────────
 pub mod constants;
 pub mod error; // The Oops
+pub mod recovery; // Recovery walk status (PR D)
 pub mod storage; // The Vault Nouns
 pub mod telemetry;
 pub mod time; // The When
@@ -75,6 +76,9 @@ pub mod prelude {
 
     // Playback Nouns
     pub use crate::evidence::playback::PlaybackSink;
+
+    // Recovery Nouns
+    pub use crate::recovery::{RecoveryState, RecoveryStatus};
 
     // Wire Contract
     pub use crate::network::wire::WireBound;

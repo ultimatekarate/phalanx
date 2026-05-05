@@ -27,5 +27,6 @@ pub mod local_mesh;
 pub mod memory;
 pub mod playback;
 pub mod probe;
+pub mod recovery;
 pub mod status;
 pub mod trust;

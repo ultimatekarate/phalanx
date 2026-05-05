@@ -73,6 +73,21 @@ pub unsafe extern "C" fn phalanx_start_playback(
         return std::ptr::null_mut();
     }
 
+    // Single-tenant providers channel: refuse playback while a recovery
+    // walk is in progress. Mirror gate in capture.rs.
+    {
+        let s = h.recovery_status.lock().unwrap_or_else(|e| e.into_inner());
+        use phalanx_proto::recovery::RecoveryState::{
+            FetchingChildren, FetchingManifest, WalkingManifest,
+        };
+        if matches!(
+            s.state,
+            FetchingManifest | WalkingManifest | FetchingChildren
+        ) {
+            return std::ptr::null_mut();
+        }
+    }
+
     let id_str = match CStr::from_ptr(recording_id).to_str() {
         Ok(s) => s,
         Err(_) => return std::ptr::null_mut(),
