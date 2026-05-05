@@ -28,6 +28,7 @@ use phalanx_node::actors::recovery::{run_recovery, RecoveryContext};
 use phalanx_node::actors::shutdown::ShutdownSignal;
 use phalanx_node::actors::storage::{NoOpJournal, StorageActor, StorageCommand};
 use phalanx_node::config::NodeConfig;
+use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::evidence::{
@@ -410,7 +411,7 @@ async fn recovery_skips_already_on_disk_children() {
 /// `FindProviders` with provider lists, but `RequestShards` finds no
 /// envelopes — nothing ever lands locally. Expect `NoManifestFound`
 /// after the manifest budget elapses.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4, start_paused = true)]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn no_manifest_yields_no_manifest_found() {
     let (identity, _) = PhalanxIdentity::generate().unwrap();
     let identity = Arc::new(identity);

@@ -63,6 +63,7 @@ nalgebra = { version = "0.33", optional = true }
 
 [dev-dependencies]
 phalanx-test-fixtures = { workspace = true }
+tokio = { version = "1.0", features = ["full", "test-util"] }
 
 [lints]
 workspace = true
