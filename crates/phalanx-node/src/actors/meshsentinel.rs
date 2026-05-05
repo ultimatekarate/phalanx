@@ -7,6 +7,7 @@ use crate::actors::media_egress::{MediaEgressActor, MediaEgressConfig};
 use crate::actors::mesh_policy;
 use crate::actors::playback::PlaybackCoordinator;
 use crate::actors::recording_session::RecordingSessionState;
+use crate::actors::recovery::{run_recovery, RecoveryContext, PROVIDERS_CHANNEL_BUFFER};
 use crate::actors::retrieval::{RetrievalActor, RetrievalCommand};
 use crate::actors::shutdown::ShutdownSignal;
 use crate::actors::storage::StorageCommand;
@@ -1273,6 +1274,35 @@ impl<I: IngressPort> MeshSentinel<I> {
                 tracing::error!("Playback Coordinator terminated with error: {:?}", e);
             }
         })
+    }
+
+    /// Spawn a manifest-walk recovery session. Mirrors `spawn_playback`'s
+    /// channel-replacement pattern: replacing `providers_tx` drops the old
+    /// sender, so the previous recovery / playback session's `providers_rx`
+    /// observes its channel close. This enforces the single-tenant
+    /// `providers_rx` invariant — the FFI layer adds symmetric gates so
+    /// recovery / playback / capture cannot be started concurrently.
+    ///
+    /// Status updates land on the shared `Arc<Mutex<RecoveryStatus>>` —
+    /// the FFI's `phalanx_recovery_status` reads a snapshot from this
+    /// same mutex.
+    pub fn spawn_recovery(
+        &mut self,
+        status: Arc<Mutex<phalanx_proto::recovery::RecoveryStatus>>,
+        cancel_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> JoinHandle<()> {
+        let (providers_tx, providers_rx) = mpsc::channel(PROVIDERS_CHANNEL_BUFFER);
+        self.providers_tx = providers_tx;
+
+        let ctx = RecoveryContext {
+            identity: self.identity.clone(),
+            storage_tx: self.storage_tx.clone(),
+            egress_tx: self.egress_tx.clone(),
+            providers_rx,
+            status,
+        };
+
+        tokio::spawn(run_recovery(ctx, cancel_rx))
     }
 
     // ── Transport balance (orchestrator-side; passed to EclipseRouter on TryAdmit) ─

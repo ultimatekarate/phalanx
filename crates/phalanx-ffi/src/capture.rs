@@ -144,6 +144,22 @@ unsafe fn start_recording_inner(
         return PhalanxError::AlreadyRecording.code();
     }
 
+    // Single-tenant providers channel: recovery uses the same
+    // `MeshSentinel::providers_tx` slot, so a recording must not start
+    // while a recovery is mid-walk. Mirror gate in playback.rs.
+    {
+        let s = h.recovery_status.lock().unwrap_or_else(|e| e.into_inner());
+        use phalanx_proto::recovery::RecoveryState::{
+            FetchingChildren, FetchingManifest, WalkingManifest,
+        };
+        if matches!(
+            s.state,
+            FetchingManifest | WalkingManifest | FetchingChildren
+        ) {
+            return PhalanxError::AlreadyRecovering.code();
+        }
+    }
+
     // Generate recording ID from timestamp + node DID prefix
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)

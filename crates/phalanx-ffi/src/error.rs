@@ -48,6 +48,11 @@ pub enum PhalanxError {
     /// Postcard encoding of a response payload failed. Indicates a bug in
     /// the wire type, not caller error.
     SerializationFailure = -16,
+    /// Recovery walk is already in progress; duplicate `phalanx_start_recovery`
+    /// or attempt to start a recording / playback while recovery is mid-walk.
+    /// Both producer (capture) and the playback path are gated so the
+    /// single-tenant providers channel can't be reassigned mid-recovery.
+    AlreadyRecovering = -17,
 }
 
 impl PhalanxError {
@@ -94,6 +99,7 @@ mod tests {
         assert_eq!(PhalanxError::CeremonyFailed.code(), -14);
         assert_eq!(PhalanxError::BufferTooSmall.code(), -15);
         assert_eq!(PhalanxError::SerializationFailure.code(), -16);
+        assert_eq!(PhalanxError::AlreadyRecovering.code(), -17);
     }
 
     #[test]
@@ -116,6 +122,7 @@ mod tests {
             PhalanxError::CeremonyFailed.code(),
             PhalanxError::BufferTooSmall.code(),
             PhalanxError::SerializationFailure.code(),
+            PhalanxError::AlreadyRecovering.code(),
         ];
 
         let mut sorted = codes.clone();
@@ -145,6 +152,7 @@ mod tests {
             PhalanxError::CeremonyFailed,
             PhalanxError::BufferTooSmall,
             PhalanxError::SerializationFailure,
+            PhalanxError::AlreadyRecovering,
         ];
 
         for variant in &error_variants {

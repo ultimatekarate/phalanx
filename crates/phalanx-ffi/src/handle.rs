@@ -29,6 +29,7 @@ use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{AudioShard, ForensicMetrics, PrnuPosterior, VideoShard};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::PhalanxIdentity;
+use phalanx_proto::recovery::RecoveryStatus;
 use phalanx_transport::adapters::local_mesh::{LocalMeshAdapter, OutboundLocalPacket};
 use phalanx_transport::prelude::Libp2pIngress;
 
@@ -118,6 +119,20 @@ pub struct PhalanxHandle {
     /// Updated on every video frame (capture path), read by the egress gate.
     /// 44 bytes of payload; lock held for nanoseconds (6 f64 additions).
     pub(crate) prnu_posterior: Arc<Mutex<PrnuPosterior>>,
+    /// Polled snapshot of the in-progress recovery walk. The orchestrator
+    /// (`run_recovery` in phalanx-node) updates this at every stage
+    /// transition and on every poll iteration; the FFI's
+    /// `phalanx_recovery_status` reads a clone.
+    pub(crate) recovery_status: Arc<Mutex<RecoveryStatus>>,
+    /// Cancel signal for the current recovery. `Some` while a recovery is
+    /// running; `None` otherwise. `phalanx_cancel_recovery` `take()`s and
+    /// fires it (idempotent: a second call is a no-op).
+    pub(crate) recovery_cancel: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Join handle for the current recovery task. Held so a fresh
+    /// `phalanx_start_recovery` after a clean exit can drop the prior
+    /// handle without leaking. Aborted on FFI shutdown via `Drop` of the
+    /// runtime.
+    pub(crate) recovery_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Type-erased reference to the running MeshSentinel.
@@ -422,6 +437,9 @@ async fn bootstrap(
             identity: handle_identity,
             calibration_metrics: Mutex::new(None),
             prnu_posterior,
+            recovery_status: Arc::new(Mutex::new(RecoveryStatus::default())),
+            recovery_cancel: Mutex::new(None),
+            recovery_handle: Mutex::new(None),
         },
         genesis_phrase,
     ))

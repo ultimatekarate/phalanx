@@ -1,17 +1,14 @@
 // crates/phalanx-node/src/actors/playback.rs
 
 use crate::actors::egress::EgressCommand;
+use crate::actors::retrieval_request::build_recording_request;
 use crate::actors::storage::StorageCommand;
-use phalanx_proto::crypto::{SealedLocator, SymmetricKey};
+use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{DataPayload, Evidence, StorageSequence};
 use phalanx_proto::identity::{MeshAddress, PhalanxIdentity, RecordingId};
 use phalanx_proto::playback::PlaybackSink;
-use phalanx_proto::retrieval::RecordingRequest;
-
-use phalanx_forensics::cryptography::grant::GrantAuthority;
 
 use anyhow::{Context, Result};
-use ed25519_dalek::Signer;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -282,58 +279,32 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
 
     /// Construct cryptographically signed retrieval requests and send to each provider.
     ///
-    /// Uses real X25519 ECDH + XChaCha20-Poly1305 via `GrantAuthority::seal()` for the
-    /// SealedLocator, and Ed25519 for the request signature. This is the inverse of
-    /// `verify_retrieval_auth()` in identity.rs.
+    /// Delegates the SealedLocator + Ed25519 signature construction to the
+    /// shared `build_recording_request` helper so playback and recovery
+    /// produce byte-identical requests. The peer's `verify_retrieval_auth`
+    /// gate is the inverse of this builder.
     async fn request_shards_from_providers(
         &self,
         recording_id: &RecordingId,
         providers: Vec<MeshAddress>,
     ) {
-        // 1. Construct SealedLocator with real crypto.
         // A null key produces a grant that anyone can unseal — never allow this.
-        let key_bytes: &[u8; 32] = match self.decryption_key.as_ref() {
-            Some(k) => k.as_bytes(),
+        let dek = match self.decryption_key.as_ref() {
+            Some(k) => k,
             None => {
                 tracing::error!("Cannot request shards: no decryption key available");
                 return;
             }
         };
 
-        let locator = match SealedLocator::seal(
-            recording_id.clone(),
-            key_bytes,
-            &self.identity,
-            self.identity.did.clone(), // self-recovery: recipient is self
-            phalanx_proto::crypto::GrantPermissions::default(),
-        ) {
-            Ok(loc) => loc,
+        let request = match build_recording_request(recording_id, dek, &self.identity) {
+            Ok(r) => r,
             Err(e) => {
-                tracing::error!(error = ?e, "Failed to seal locator for shard request");
+                tracing::error!(error = %e, "Failed to build recording request");
                 return;
             }
         };
 
-        // 2. Sign (target_did, recording_id, locator) with own key.
-        //    This is the inverse of verify_retrieval_auth() in identity.rs:227-250.
-        let signed_data = (&self.identity.did, recording_id, &locator);
-        let msg = match postcard::to_allocvec(&signed_data) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!(error = ?e, "Failed to serialize shard request for signing");
-                return;
-            }
-        };
-        let signature = self.identity.keypair.sign(&msg).to_bytes().to_vec();
-
-        let request = RecordingRequest {
-            target_did: self.identity.did.clone(),
-            recording_id: recording_id.clone(),
-            locator,
-            signature,
-        };
-
-        // 3. Send to each provider via EgressActor
         for provider in providers {
             let _ = self
                 .egress_tx
