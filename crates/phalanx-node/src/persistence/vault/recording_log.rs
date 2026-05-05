@@ -60,7 +60,11 @@ impl Guardian {
                 .await
                 .map_err(|e| GuardianError::StorageFailure(e.to_string()))?;
 
-            let file_path = dir_path.join(format!("{}.recording", recording_id));
+            // Sanitize id for fs path. Hydration at line reconstructs RecordingId from
+            // file_stem, so this is a no-op round-trip for the alphanumeric ids the FFI generates
+            // today; non-alphanumeric ids would diverge from the canonical id in the envelope body.
+            let file_path = dir_path.join(format!("{}.recording", recording_id.to_safe_name()));
+
             let file = tokio::fs::OpenOptions::new()
                 .create(true)
                 .read(true)
