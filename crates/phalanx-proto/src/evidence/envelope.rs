@@ -85,6 +85,30 @@ pub enum Evidence {
     /// Captured by MeshSentinel during recording, flows through the standard
     /// evidence pipeline (signed, sharded, distributed) to the Stronghold.
     Proximity(crate::corroboration::ProximityWitness),
+    /// Manifest entry: catalogs a publishable child recording at the
+    /// moment it starts. Appended to a deterministic per-identity manifest
+    /// recording so a fresh-restored sentinel can enumerate (and then
+    /// fetch + decrypt) every recording it has ever published, using only
+    /// the BIP39 phrase. See `ManifestEntry` and
+    /// `phalanx_forensics::derive_manifest_recording_id`.
+    ManifestEntry(ManifestEntry),
+}
+
+/// Catalog entry: appended to the manifest recording at the start of every
+/// publishable child recording, so a fresh-restored sentinel can enumerate
+/// what to fetch from the mesh. The `recording_id` field is the manifest's
+/// own (deterministic) id; `child_recording_id` is the recording being
+/// cataloged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestEntry {
+    pub timestamp: PhalanxTimestamp,
+    pub sequence_id: StorageSequence,
+    /// The manifest's recording id — deterministic from the identity's
+    /// `dek_master`. Carried explicitly so `EvidenceExt::recording_id`
+    /// has the same shape as Video/Audio/Gap/Handover/Proximity.
+    pub recording_id: RecordingId,
+    /// The recording being cataloged.
+    pub child_recording_id: RecordingId,
 }
 
 /// Sensor fingerprint metrics computed by the ForensicLens pipeline.

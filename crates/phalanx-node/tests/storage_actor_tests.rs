@@ -885,8 +885,14 @@ mod ingress_boundary_tests {
 /// `publishable: false` recordings must NOT trigger a commit notify, even
 /// after a successful shard write. `publishable: true` recordings (the
 /// default) must trigger one notify per shard.
+///
+/// `StartRecording` for a publishable recording also fires a
+/// notify for the manifest's deterministic RecordingId (the catalog
+/// shard). The test allows that without asserting on it; the
+/// load-bearing assertions remain about public-vs-private gating.
 #[tokio::test]
 async fn publishable_flag_gates_commit_notify() {
+    use phalanx_forensics::derive_manifest_recording_id;
     use phalanx_proto::evidence::RecordingOptions;
     use phalanx_test_fixtures::envelope::witness_envelope_for_recording;
 
@@ -933,6 +939,7 @@ async fn publishable_flag_gates_commit_notify() {
 
     let public_rid = RecordingId::new("rec-public");
     let private_rid = RecordingId::new("rec-private");
+    let manifest_id = derive_manifest_recording_id(&identity.dek_master);
 
     // Public: default options → publishable.
     let (key_tx_a, key_rx_a) = oneshot::channel();
@@ -984,7 +991,8 @@ async fn publishable_flag_gates_commit_notify() {
     let _ = rep_b_rx.await;
 
     // Drain notifies. The publishable rid arrives; the private rid must
-    // never arrive. Use a short timeout to bound the "never" assertion.
+    // never arrive. The manifest's rid is also expected (every
+    // publishable StartRecording fires a manifest-append notify).
     let mut seen_public = false;
     let mut seen_private = false;
     let drain_deadline = tokio::time::Instant::now() + Duration::from_millis(200);
@@ -996,6 +1004,7 @@ async fn publishable_flag_gates_commit_notify() {
         match tokio::time::timeout(remaining, notify_rx.recv()).await {
             Ok(Some(rid)) if rid == public_rid => seen_public = true,
             Ok(Some(rid)) if rid == private_rid => seen_private = true,
+            Ok(Some(rid)) if rid == manifest_id => { /* PR C: expected, no assertion */ }
             Ok(Some(other)) => panic!("Unexpected rid on notify channel: {other}"),
             Ok(None) | Err(_) => break, // channel closed or timeout
         }
@@ -1009,6 +1018,268 @@ async fn publishable_flag_gates_commit_notify() {
         !seen_private,
         "publishable=false must not produce a commit_notify (would leak to mesh)"
     );
+
+    drop(cmd_tx);
+    let _ = tokio::time::timeout(Duration::from_millis(500), actor_handle).await;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Manifest recording (PR C). The manifest is the per-identity catalog of
+// publishable recordings — `Evidence::ManifestEntry` shards appended to
+// a recording whose RecordingId is deterministic from `dek_master`. These
+// tests prove: only publishable children are catalogued; the chain links
+// correctly; the id is phrase-recoverable; the publish gate is honoured.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Spawns a `StorageActor` wired to two channels: the command channel
+/// (driven by the test) and a `commit_notify_tx` channel (drained by the
+/// test). Returns `(cmd_tx, notify_rx, actor_handle, manifest_id, identity, temp)`.
+async fn spawn_actor_for_manifest_tests() -> (
+    mpsc::Sender<StorageCommand>,
+    mpsc::Receiver<RecordingId>,
+    tokio::task::JoinHandle<()>,
+    RecordingId,
+    PhalanxIdentity,
+    tempfile::TempDir,
+) {
+    use phalanx_forensics::derive_manifest_recording_id;
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = NodeConfig::test_defaults();
+    config.storage.vault_path = temp.path().to_string_lossy().into_owned();
+
+    let (identity, _) = PhalanxIdentity::generate().unwrap();
+    let manifest_id = derive_manifest_recording_id(&identity.dek_master);
+    let vault_key = derive_vault_key(&identity, &[0u8; 32]);
+    let guardian = Guardian::new(
+        &config.storage.vault_path,
+        &config,
+        identity.did.clone(),
+        Arc::new(SystemClock),
+        vault_key,
+        identity.dek_master.clone(),
+    );
+
+    let (notify_tx, notify_rx) = mpsc::channel::<RecordingId>(32);
+    let (cmd_tx, cmd_rx) = mpsc::channel::<StorageCommand>(32);
+
+    let actor = StorageActor {
+        reassembler: Reassembler::new(),
+        guardian,
+        journal: NoOpJournal,
+        config,
+        identity: identity.clone(),
+        current_tolerance: Duration::from_millis(1000),
+        system_governor: Arc::new(SystemGovernor::new()),
+        commit_notify_tx: Some(notify_tx),
+        replay_filter: phalanx_forensics::bloom::RotatingBloomFilter::new(
+            phalanx_forensics::bloom::RotatingBloomFilter::DEFAULT_CAPACITY,
+        ),
+        shutdown: ShutdownSignal::new(),
+        used_bytes_gauge: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    };
+    let actor_handle = tokio::spawn(async move {
+        actor.run(cmd_rx).await;
+    });
+
+    (cmd_tx, notify_rx, actor_handle, manifest_id, identity, temp)
+}
+
+/// Issue a `StartRecordingWithOptions` command and wait for the response.
+async fn start_with_options(
+    cmd_tx: &mpsc::Sender<StorageCommand>,
+    rid: &RecordingId,
+    publishable: bool,
+) {
+    use phalanx_proto::evidence::RecordingOptions;
+    let (key_tx, key_rx) = oneshot::channel();
+    cmd_tx
+        .send(StorageCommand::StartRecordingWithOptions {
+            recording_id: rid.clone(),
+            options: RecordingOptions { publishable },
+            reply_to: key_tx,
+        })
+        .await
+        .unwrap();
+    key_rx.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn manifest_appends_only_for_publishable_recordings() {
+    let (cmd_tx, _notify_rx, actor_handle, manifest_id, _identity, _temp) =
+        spawn_actor_for_manifest_tests().await;
+
+    let public_rid = RecordingId::new("rec-public");
+    let private_rid = RecordingId::new("rec-private");
+
+    start_with_options(&cmd_tx, &public_rid, true).await;
+    start_with_options(&cmd_tx, &private_rid, false).await;
+
+    // Read the manifest's recording log via Retrieval. We pass owner_did
+    // = local DID so the storage actor's ownership check passes.
+    let (rep, rep_rx) = oneshot::channel();
+    cmd_tx
+        .send(StorageCommand::Retrieval {
+            recording_id: manifest_id.clone(),
+            owner_did: None,
+            reply_to: rep,
+        })
+        .await
+        .unwrap();
+    let envelopes = rep_rx.await.unwrap();
+
+    assert_eq!(
+        envelopes.len(),
+        1,
+        "Expected exactly one manifest entry (for the publishable recording)"
+    );
+    match &envelopes[0].evidence {
+        phalanx_proto::evidence::Evidence::ManifestEntry(m) => {
+            assert_eq!(m.child_recording_id, public_rid);
+            assert_eq!(m.recording_id, manifest_id);
+            assert_eq!(m.sequence_id, phalanx_proto::evidence::StorageSequence(1));
+        }
+        other => panic!("Expected ManifestEntry, got {:?}", other),
+    }
+
+    drop(cmd_tx);
+    let _ = tokio::time::timeout(Duration::from_millis(500), actor_handle).await;
+}
+
+#[tokio::test]
+async fn manifest_chain_links_correctly() {
+    use phalanx_forensics::crucible::EnvelopeHashExt;
+
+    let (cmd_tx, _notify_rx, actor_handle, manifest_id, _identity, _temp) =
+        spawn_actor_for_manifest_tests().await;
+
+    // Three sequential publishable starts. Each should append one
+    // manifest shard linked via prev_hash to the previous shard.
+    let rid_a = RecordingId::new("rec-a");
+    let rid_b = RecordingId::new("rec-b");
+    let rid_c = RecordingId::new("rec-c");
+
+    start_with_options(&cmd_tx, &rid_a, true).await;
+    start_with_options(&cmd_tx, &rid_b, true).await;
+    start_with_options(&cmd_tx, &rid_c, true).await;
+
+    let (rep, rep_rx) = oneshot::channel();
+    cmd_tx
+        .send(StorageCommand::Retrieval {
+            recording_id: manifest_id.clone(),
+            owner_did: None,
+            reply_to: rep,
+        })
+        .await
+        .unwrap();
+    let envelopes = rep_rx.await.unwrap();
+    assert_eq!(envelopes.len(), 3, "Expected three manifest shards");
+
+    // Shards may not arrive in seq order; sort for chain inspection.
+    let mut sorted = envelopes;
+    sorted.sort_by_key(|e| match &e.evidence {
+        phalanx_proto::evidence::Evidence::ManifestEntry(m) => m.sequence_id.0,
+        _ => 0,
+    });
+
+    // Verify sequence ids 1, 2, 3 and prev_hash chaining.
+    assert!(matches!(
+        &sorted[0].evidence,
+        phalanx_proto::evidence::Evidence::ManifestEntry(m) if m.sequence_id.0 == 1
+    ));
+    assert!(sorted[0].prev_hash.is_none(), "shard 1 has no prev_hash");
+
+    let h1 = sorted[0].signature_hash();
+    let h2 = sorted[1].signature_hash();
+
+    assert_eq!(
+        sorted[1].prev_hash,
+        Some(h1),
+        "shard 2 must chain to shard 1's signature_hash"
+    );
+    assert_eq!(
+        sorted[2].prev_hash,
+        Some(h2),
+        "shard 3 must chain to shard 2's signature_hash"
+    );
+
+    drop(cmd_tx);
+    let _ = tokio::time::timeout(Duration::from_millis(500), actor_handle).await;
+}
+
+#[tokio::test]
+async fn manifest_id_is_phrase_recoverable() {
+    use phalanx_forensics::derive_manifest_recording_id;
+
+    // Genesis device: generate identity, capture phrase + manifest_id.
+    let (identity_a, phrase) = PhalanxIdentity::generate().unwrap();
+    let id_a = derive_manifest_recording_id(&identity_a.dek_master);
+    drop(identity_a);
+
+    // Fresh device: restore from phrase only, derive manifest_id.
+    let identity_b = PhalanxIdentity::restore(&phrase).unwrap();
+    let id_b = derive_manifest_recording_id(&identity_b.dek_master);
+
+    assert_eq!(
+        id_a, id_b,
+        "manifest_id must be deterministic from the BIP39 phrase alone"
+    );
+}
+
+#[tokio::test]
+async fn manifest_publishes_to_commit_notify() {
+    let (cmd_tx, mut notify_rx, actor_handle, manifest_id, _identity, _temp) =
+        spawn_actor_for_manifest_tests().await;
+
+    let rid = RecordingId::new("rec-published");
+    start_with_options(&cmd_tx, &rid, true).await;
+
+    // Drain notifies. We expect *exactly* the manifest's RecordingId on
+    // the channel, NOT the child's — `commit_notify_tx` only fires from
+    // the shard-write paths (`handle_ingest`/`handle_write_shard`). The
+    // child's first notify will arrive later when its first shard is
+    // written; that flow isn't exercised by `start_recording` alone.
+    let mut saw_manifest = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, notify_rx.recv()).await {
+            Ok(Some(got)) if got == manifest_id => saw_manifest = true,
+            Ok(Some(other)) => panic!("Unexpected rid on notify channel: {other}"),
+            Ok(None) | Err(_) => break,
+        }
+    }
+    assert!(
+        saw_manifest,
+        "Expected the manifest's RecordingId on commit_notify"
+    );
+
+    drop(cmd_tx);
+    let _ = tokio::time::timeout(Duration::from_millis(500), actor_handle).await;
+}
+
+#[tokio::test]
+async fn unpublishable_recording_does_not_notify_manifest() {
+    let (cmd_tx, mut notify_rx, actor_handle, _manifest_id, _identity, _temp) =
+        spawn_actor_for_manifest_tests().await;
+
+    let rid = RecordingId::new("rec-local-only");
+    start_with_options(&cmd_tx, &rid, false).await;
+
+    // The unpublishable start must not produce ANY commit_notify — no
+    // child notify (no first shard yet), no manifest notify (the
+    // manifest-append path was skipped).
+    let result = tokio::time::timeout(Duration::from_millis(150), notify_rx.recv()).await;
+    match result {
+        Err(_) => { /* timed out waiting — exactly what we want */ }
+        Ok(Some(rid)) => {
+            panic!("Unexpected commit_notify for unpublishable recording start: {rid}")
+        }
+        Ok(None) => panic!("commit_notify channel closed unexpectedly"),
+    }
 
     drop(cmd_tx);
     let _ = tokio::time::timeout(Duration::from_millis(500), actor_handle).await;

@@ -23,6 +23,7 @@ use phalanx_proto::crypto::{DekMaster, SymmetricKey};
 use phalanx_proto::evidence::PrnuPosterior;
 use phalanx_proto::evidence::Recording;
 use phalanx_proto::evidence::RecordingMetadata;
+use phalanx_proto::evidence::SignatureHash;
 use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::RecordingId;
@@ -358,6 +359,54 @@ impl Guardian {
         self.recording_metadata
             .load(&self.vault_path, &self.vault_key)
             .await
+    }
+
+    // ── Manifest recording ───────────────────────────
+
+    /// The deterministic `RecordingId` of this identity's manifest
+    /// recording. Pure function of the held `dek_master`; computed on
+    /// demand. A fresh-restored sentinel can derive the same id from the
+    /// BIP39 phrase alone.
+    pub fn manifest_recording_id(&self) -> RecordingId {
+        phalanx_forensics::derive_manifest_recording_id(&self.dek_master)
+    }
+
+    /// The `(next_sequence_id, prev_hash)` for an in-progress chain on
+    /// the manifest's recording_log.
+    ///
+    /// Returns `(StorageSequence(1), None)` when the manifest log doesn't
+    /// exist yet (first-ever publishable recording). Otherwise reads the
+    /// latest shard, decrypts it, and recovers its `signature_hash` so
+    /// the next manifest envelope can chain via `prev_hash`. Cheap (~ms)
+    /// and avoids any in-memory state-coherence concerns; the storage
+    /// actor's single-threaded handler loop guarantees no interleaved
+    /// writes.
+    ///
+    /// Takes `&mut self` because `read_shard` does.
+    pub async fn manifest_chain_state(
+        &mut self,
+    ) -> Result<(StorageSequence, Option<SignatureHash>), GuardianError> {
+        use phalanx_forensics::crucible::EnvelopeHashExt;
+
+        let manifest_id = self.manifest_recording_id();
+        let last_seq = self
+            .recording_logs
+            .get(&manifest_id)
+            .and_then(|log| log.index.keys().next_back().copied());
+
+        match last_seq {
+            None => Ok((StorageSequence(1), None)),
+            Some(seq) => {
+                let last_envelope = self.read_shard(&manifest_id, seq, None).await?;
+                let prev_hash = last_envelope.signature_hash();
+                #[allow(clippy::arithmetic_side_effects)]
+                // seq.0 is bounded by u32 and we only call this after at
+                // least one successful append; overflow at u32::MAX is
+                // a non-issue at any realistic capture rate.
+                let next_seq = StorageSequence(seq.0 + 1);
+                Ok((next_seq, Some(prev_hash)))
+            }
+        }
     }
 
     /// Persist the Bayesian PRNU posterior to disk, encrypted with vault_key.
