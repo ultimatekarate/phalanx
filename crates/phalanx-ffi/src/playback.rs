@@ -116,7 +116,18 @@ pub unsafe extern "C" fn phalanx_start_playback(
         phalanx_log!("[Phalanx FFI] Starting playback for {}", rec_id.as_str());
 
         // Resolve per-recording content key for decryption.
-        // Falls back to vault_key for legacy recordings without content keys.
+        //
+        // Under the v2 deterministic-DEK regime (PR A), `GetContentKey`
+        // always returns `Some` — the storage actor's `resolve_encryption_key`
+        // chain is `keyring → derive(dek_master, recording_id)` and never
+        // returns `None`. The `Ok(None)` branch is therefore unreachable in
+        // production; it's retained only as a defensive bridge for any
+        // future callers that choose to emit `None` again. The `Err` arm
+        // covers the genuine failure mode: the storage actor died before
+        // replying. In that case the vault_key is the only key still in
+        // scope here — decryption will almost certainly fail downstream
+        // (it's the wrong key for v2 recordings), but logging the storage
+        // failure is the correct first signal.
         let decryption_key = {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let _ = storage_tx
@@ -131,11 +142,12 @@ pub unsafe extern "C" fn phalanx_start_playback(
                     Some(phalanx_proto::crypto::SymmetricKey::from_bytes(key_bytes))
                 }
                 Ok(None) => {
-                    phalanx_log!("[Phalanx FFI] No content key found, falling back to vault_key");
+                    // Defensive: not emitted by the post-PR-A storage actor.
+                    phalanx_log!("[Phalanx FFI] GetContentKey returned None (unexpected under v2); falling back to vault_key");
                     Some((*vault_key).clone())
                 }
                 Err(e) => {
-                    phalanx_log!("[Phalanx FFI] GetContentKey channel error: {e:?}, falling back to vault_key");
+                    phalanx_log!("[Phalanx FFI] GetContentKey channel error (storage actor down?): {e:?}; falling back to vault_key");
                     Some((*vault_key).clone())
                 }
             }

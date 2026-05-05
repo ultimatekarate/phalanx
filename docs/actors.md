@@ -153,8 +153,9 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 | `IngestEnvelope` | Bypass reassembly (internal Guardian ops) | `Result<(), GuardianError>` |
 | `EmergencySalvage` | Backup egress queues on shutdown | None |
 | `Revoke` | Cryptographic forgetting — destroy recording evidence | `Result<(), GuardianError>` |
-| `StartRecording` | Generate per-recording DEK | `Result<SymmetricKey, GuardianError>` |
-| `GetContentKey` | Retrieve per-recording DEK | `Option<SymmetricKey>` |
+| `StartRecording` | Derive per-recording DEK and (if publishable) append a manifest-catalog shard for fresh-device recovery | `Result<SymmetricKey, GuardianError>` |
+| `StartRecordingWithOptions` | Same as `StartRecording`, but exposes the per-recording `publishable` policy. Unpublishable recordings get no manifest entry and are never gossipped. | `Result<SymmetricKey, GuardianError>` |
+| `GetContentKey` | Resolve per-recording DEK (keyring hit for foreign + legacy own; HKDF-derived from `dek_master` for own under the v2 regime) | `Option<SymmetricKey>` (always `Some` under v2; `Option` retained for callers' historical fallback paths) |
 
 **Ingest pipeline**: Storage pressure gate → hard limit (P6) → foreign storage enforcement → per-owner quota → reassemble via Crucible → persist.
 
