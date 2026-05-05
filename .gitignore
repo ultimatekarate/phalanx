@@ -42,3 +42,7 @@ ed25519_public.pem
 sim_vault/
 storage_vault/
 *.bin
+
+# Claude artifacts - Not trying to hide it, just don't want the noise in the repo 
+.claude/
+CLAUDE.md
