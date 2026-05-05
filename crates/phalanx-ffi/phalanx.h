@@ -91,6 +91,21 @@ enum PhalanxError {
    * Cryptographic Forgetting: revocation failed (bad mnemonic, key mismatch, or storage error).
    */
   REVOCATION_FAILED = -13,
+  /**
+   * Community ceremony failed (invalid vouch, quorum not met, expired, etc.).
+   */
+  CEREMONY_FAILED = -14,
+  /**
+   * Caller-provided output buffer was too small. `*out_len` has been
+   * updated with the required size; retry with a larger buffer.
+   * Part of the two-call query protocol for community query functions.
+   */
+  BUFFER_TOO_SMALL = -15,
+  /**
+   * Postcard encoding of a response payload failed. Indicates a bug in
+   * the wire type, not caller error.
+   */
+  SERIALIZATION_FAILURE = -16,
 };
 typedef int32_t PhalanxError;
 
@@ -201,7 +216,7 @@ int32_t phalanx_calibration_push_frame(const struct PhalanxHandle *handle,
  int32_t phalanx_calibration_finish(const struct PhalanxHandle *handle, float *out_prnu_floor) ;
 
 /**
- * Starts a new recording session.
+ * Starts a new recording session with default policy (publishable to mesh).
  *
  * Generates a unique `RecordingId` and sets the handle into recording mode.
  * Returns the recording ID through `out_recording_id` (caller frees with `phalanx_free_string`).
@@ -211,6 +226,28 @@ int32_t phalanx_calibration_push_frame(const struct PhalanxHandle *handle,
  * * `out_recording_id` must be a valid pointer to receive the C string.
  */
  int32_t phalanx_start_recording(struct PhalanxHandle *handle, char **out_recording_id) ;
+
+/**
+ * Starts a new recording session with explicit policy.
+ *
+ * Identical to `phalanx_start_recording` except the caller may opt the
+ * recording out of mesh publication (`publishable = 0`). Recordings
+ * captured with `publishable = 0` stay vault-local and are never gossipped
+ * to the mesh, even after restart. Use this for sensitive captures the
+ * operator wants kept on-device.
+ *
+ * `publishable` is treated as a boolean: `0` = local-only, any non-zero
+ * value = publishable.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `out_recording_id` must be a valid pointer to receive the C string.
+ */
+
+int32_t phalanx_start_recording_with_options(struct PhalanxHandle *handle,
+                                             int32_t publishable,
+                                             char **out_recording_id)
+;
 
 /**
  * Stops the current recording session.
@@ -356,19 +393,160 @@ int32_t phalanx_debug_recording_info(struct PhalanxHandle *handle,
 ;
 
 /**
+ * Compute a deterministic community fingerprint from founding parameters.
+ *
+ * Pure computation — no handle needed. Any device with the same inputs
+ * produces the same 32-byte fingerprint.
+ *
+ * # Safety
+ * * `name_ptr` must be a valid null-terminated C string.
+ * * `dids_ptr` and `dids_len` must describe a valid postcard-serialized `Vec<String>`.
+ * * `out_id` must point to a caller-allocated 32-byte buffer.
+ */
+
+int32_t phalanx_compute_community_id(const char *name_ptr,
+                                     uint8_t quorum,
+                                     const uint8_t *dids_ptr,
+                                     uintptr_t dids_len,
+                                     uint8_t *out_id)
+;
+
+/**
+ * Sign a vouch for a member using this node's identity.
+ *
+ * Returns a Rust-allocated postcard-serialized `Vouch` that the caller
+ * must free with `phalanx_free_bytes`.
+ *
+ * # Safety
+ * * `handle` must be a valid `PhalanxHandle` pointer.
+ * * `member_did_ptr` must be a valid null-terminated C string.
+ * * `community_id_ptr` must point to exactly 32 bytes.
+ * * `out_ptr` and `out_len` must be valid writable pointers.
+ */
+
+int32_t phalanx_sign_vouch(const struct PhalanxHandle *handle,
+                           const char *member_did_ptr,
+                           const uint8_t *community_id_ptr,
+                           int64_t joined_at,
+                           uint8_t **out_ptr,
+                           uint32_t *out_len)
+;
+
+/**
+ * Assemble a complete community from ceremony inputs.
+ *
+ * Verifies all vouch signatures, enforces quorum with dedup and
+ * self-vouch exclusion, and returns a Rust-allocated postcard-serialized
+ * `Community` token ready for QR distribution.
+ *
+ * Caller must free the output with `phalanx_free_bytes`.
+ *
+ * # Safety
+ * * `name_ptr` must be a valid null-terminated C string.
+ * * `stronghold_did_ptr` may be null (community without Stronghold).
+ * * `members_ptr`/`members_len` must describe a valid postcard-serialized `Vec<CeremonyMember>`.
+ * * `out_ptr` and `out_len` must be valid writable pointers.
+ */
+
+int32_t phalanx_create_community(const char *name_ptr,
+                                 uint8_t quorum,
+                                 int64_t joined_at,
+                                 int64_t expires_at,
+                                 const char *stronghold_did_ptr,
+                                 const uint8_t *members_ptr,
+                                 uintptr_t members_len,
+                                 uint8_t **out_ptr,
+                                 uint32_t *out_len)
+;
+
+/**
+ * Preview a scanned `VouchRequest` for the Review screen.
+ *
+ * Strips the `[VOUCH_REQUEST_VERSION]` envelope, deserializes the
+ * request, checks that `request.voucher_did` matches the handle's
+ * DID (returning `CeremonyError::VoucherMismatch` if not), then
+ * projects to a `VouchRequestPreview` that omits the voucher DID so
+ * the preview type cannot be fed back into
+ * [`phalanx_sign_vouch_request`] by accident.
+ *
+ * Pure call with respect to protocol state — no side effects, no
+ * actor message, no signature produced. Safe to run on every QR
+ * frame if that matches the UI.
+ *
+ * # Safety
+ * * `handle` must be a valid `PhalanxHandle` pointer.
+ * * `bytes_ptr`/`bytes_len` must describe a valid wrapped-envelope
+ *   byte slice.
+ * * `out_len` must be a valid writable pointer.
+ * * `out_buf` may be null (sizing call) or point to `*out_len`
+ *   writable bytes.
+ */
+
+int32_t phalanx_preview_vouch_request(const struct PhalanxHandle *handle,
+                                      const uint8_t *bytes_ptr,
+                                      uintptr_t bytes_len,
+                                      uint8_t *out_buf,
+                                      uintptr_t *out_len)
+;
+
+/**
+ * Sign a scanned `VouchRequest` and return the wrapped `VouchResponse`.
+ *
+ * Strips the request envelope, decodes the `VouchRequest`, calls
+ * `sign_vouch_response(&handle.keypair, &request, SystemClock.now())`
+ * directly (no actor round-trip — matches `phalanx_sign_vouch`),
+ * then produces a `VouchResponse` wrapped with
+ * `[VOUCH_RESPONSE_VERSION]` inside the outer `Result::Ok`.
+ *
+ * The Dart side reads `Result<VouchResponse, CeremonyError>`, checks
+ * the variant, and on `Ok(response)` serializes the wrapped bytes
+ * directly to a QR / file.
+ *
+ * Failure modes encoded in `Result::Err`:
+ * - `UnsupportedVersion { version }` — bad request envelope.
+ * - `VoucherMismatch { expected, actual }` — request targets another
+ *   device's DID.
+ * - `ResponseStale { age_seconds }` — request is already past the
+ *   freshness window.
+ *
+ * # Safety
+ * * `handle` must be a valid `PhalanxHandle` pointer.
+ * * `bytes_ptr`/`bytes_len` must describe a valid wrapped-envelope
+ *   byte slice.
+ * * `out_len` must be a valid writable pointer.
+ * * `out_buf` may be null (sizing call) or point to `*out_len`
+ *   writable bytes.
+ */
+
+int32_t phalanx_sign_vouch_request(const struct PhalanxHandle *handle,
+                                   const uint8_t *bytes_ptr,
+                                   uintptr_t bytes_len,
+                                   uint8_t *out_buf,
+                                   uintptr_t *out_len)
+;
+
+/**
  * Import a community membership from a serialized token (deep link payload).
  *
  * The token is a postcard-serialized `Community` struct, typically received
  * via QR code or deep link during the pre-event vouching ceremony.
  *
+ * Returns an `ImportOutcome` (postcard-encoded) in the caller-provided output
+ * buffer using the two-call protocol: first call with `out_buf = null` to
+ * learn the required size, second call with an adequately sized buffer.
+ *
  * # Safety
  * * `handle` must be a valid `PhalanxHandle` pointer.
  * * `token_ptr` and `token_len` must describe a valid byte slice.
+ * * `out_len` must be a valid writable pointer.
+ * * `out_buf` may be null (sizing call) or point to `*out_len` writable bytes.
  */
 
 int32_t phalanx_import_community(const struct PhalanxHandle *handle,
                                  const uint8_t *token_ptr,
-                                 uintptr_t token_len)
+                                 uintptr_t token_len,
+                                 uint8_t *out_buf,
+                                 uintptr_t *out_len)
 ;
 
 /**
@@ -388,15 +566,79 @@ int32_t phalanx_import_community(const struct PhalanxHandle *handle,
  * Manually dissolve a community (panic button).
  *
  * Zeroes all membership data for the specified community. Does not affect
- * other members — each phone holds only its own credential.
+ * other members — each phone holds only its own credential. Returns a
+ * `DissolveOutcome` (postcard-encoded) in the caller-provided output
+ * buffer using the two-call protocol.
  *
  * # Safety
  * * `handle` must be a valid `PhalanxHandle` pointer.
  * * `community_id_ptr` must point to exactly 32 bytes.
+ * * `out_len` must be a valid writable pointer.
+ * * `out_buf` may be null (sizing call) or point to `*out_len` writable bytes.
  */
 
 int32_t phalanx_dissolve_community(const struct PhalanxHandle *handle,
-                                   const uint8_t *community_id_ptr)
+                                   const uint8_t *community_id_ptr,
+                                   uint8_t *out_buf,
+                                   uintptr_t *out_len)
+;
+
+/**
+ * List all communities currently in the TrustRegistry.
+ *
+ * Returns postcard-encoded `Vec<CommunitySummary>` in the output buffer
+ * using the two-call protocol.
+ *
+ * # Safety
+ * * `handle` must be a valid `PhalanxHandle` pointer.
+ * * `out_len` must be a valid writable pointer.
+ * * `out_buf` may be null (sizing call) or point to `*out_len` writable bytes.
+ */
+
+int32_t phalanx_list_communities(const struct PhalanxHandle *handle,
+                                 uint8_t *out_buf,
+                                 uintptr_t *out_len)
+;
+
+/**
+ * Fetch the full roster for a single community.
+ *
+ * Returns postcard-encoded `Option<CommunityRoster>` — `None` if the id is
+ * unknown — using the two-call protocol.
+ *
+ * # Safety
+ * * `handle` must be a valid `PhalanxHandle` pointer.
+ * * `community_id_ptr` must point to exactly 32 bytes.
+ * * `out_len` must be a valid writable pointer.
+ * * `out_buf` may be null (sizing call) or point to `*out_len` writable bytes.
+ */
+
+int32_t phalanx_get_community(const struct PhalanxHandle *handle,
+                              const uint8_t *community_id_ptr,
+                              uint8_t *out_buf,
+                              uintptr_t *out_len)
+;
+
+/**
+ * Preview a community token WITHOUT registering it.
+ *
+ * Runs the same verification pipeline as import (expiration + vouch
+ * signatures) and projects the roster for the confirmation screen. Pure
+ * call — no handle or registry dependency, safe to invoke before the user
+ * commits to joining. Returns postcard-encoded
+ * `Result<CommunityRoster, CommunityVerifyError>` using the two-call protocol.
+ *
+ * # Safety
+ * * `token_ptr` and `token_len` must describe a valid byte slice.
+ * * `out_len` must be a valid writable pointer.
+ * * `out_buf` may be null (sizing call) or point to `*out_len` writable bytes.
+ */
+
+int32_t phalanx_preview_community(const uint8_t *token_ptr,
+                                  uintptr_t token_len,
+                                  uint64_t now_millis,
+                                  uint8_t *out_buf,
+                                  uintptr_t *out_len)
 ;
 
 /**
