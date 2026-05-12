@@ -13,6 +13,24 @@
 // No JNI. No platform channels. Pure C-ABI. dart:ffi on both platforms.
 // ═══════════════════════════════════════════════════════════════════════
 
+//! # Structural invariant: `MeshSentinel` is unreachable from this crate.
+//!
+//! The audit-driven refactor in `phalanx-node::engine` forces every
+//! sentinel-mutating operation through the `SentinelCommand` mailbox,
+//! and `UnspawnedEngine::spawn(self, …)` consumes the only handle to
+//! the inner sentinel at start time. To keep that property CI-enforced,
+//! the `MeshSentinel` type itself must remain *un-importable* from this
+//! crate.
+//!
+//! ```compile_fail
+//! use phalanx_node::MeshSentinel;
+//! ```
+//!
+//! If the import above ever starts compiling — i.e. a future change
+//! re-exports `MeshSentinel` at the `phalanx_node` crate root — this
+//! doc-test fails and the H1/H2/H3 deadlock class becomes representable
+//! again. Don't restore the re-export.
+
 pub mod logcat;
 
 pub mod ble_auth;
