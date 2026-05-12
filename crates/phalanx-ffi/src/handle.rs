@@ -15,7 +15,7 @@ use crate::probe::MobileProbe;
 
 use phalanx_forensics::PeerEvaluator;
 use phalanx_node::actors::egress::EgressCommand;
-use phalanx_node::actors::meshsentinel::SentinelDependencies;
+use phalanx_node::actors::meshsentinel::{SentinelCommand, SentinelDependencies};
 use phalanx_node::actors::storage::StorageCommand;
 use phalanx_node::actors::trust_actor::TrustCommand;
 use phalanx_node::config::NodeConfig;
@@ -24,7 +24,7 @@ use phalanx_node::network::orchestrator::setup_transport;
 use phalanx_node::persistence::vault::{derive_vault_key, load_or_create_vault_salt};
 use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::{HomeostaticConfig, SystemGovernor, ThermalThresholds};
-use phalanx_node::{FileJournal, MeshSentinel};
+use phalanx_node::{EngineLifecycle, FileJournal, UnspawnedEngine};
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{AudioShard, ForensicMetrics, PrnuPosterior, VideoShard};
 use phalanx_proto::network::NetworkEvent;
@@ -32,6 +32,7 @@ use phalanx_proto::prelude::PhalanxIdentity;
 use phalanx_proto::recovery::RecoveryStatus;
 use phalanx_transport::adapters::local_mesh::{LocalMeshAdapter, OutboundLocalPacket};
 use phalanx_transport::prelude::Libp2pIngress;
+use std::time::Duration;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -48,17 +49,31 @@ use tokio::sync::mpsc;
 
 /// Lifecycle states of the Phalanx engine.
 ///
-/// Transitions: `Booting → Running → Stopped`
-/// Invalid: `Running → Booting`, `Stopped → Running`
+/// Transitions: `Booting → Running → Stopped`. The variant *holds* the
+/// engine state for its phase, so linear ownership is enforced by the
+/// type system:
+/// - `Booting` owns the bootstrapped-but-not-running engine (an
+///   `UnspawnedEngine`). The only way to start the run loop is to
+///   `mem::replace` this variant and consume the inner value.
+/// - `Running` owns the `EngineLifecycle`. The only way to stop is to
+///   `mem::replace` and call the consume-by-value `shutdown(self, …)`.
+/// - `Stopped` is terminal — no engine state, no further transitions.
+///
+/// `MeshSentinel` is never stored in a shared cell (no `Arc<Mutex<…>>`).
+/// The structural impossibility of locking it from FFI is what makes the
+/// H1/H2/H3 deadlock class unrepresentable in this codebase.
 pub(crate) enum HandleState {
-    /// Engine is being initialized. No operations permitted.
-    Booting,
-    /// Engine is running. All operations permitted.
-    Running {
-        /// Send to initiate graceful shutdown.
-        _shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    /// Engine has been bootstrapped but the run loop is not yet spawned.
+    /// `phalanx_start` consumes the inner `UnspawnedEngine`. `Box`ed to
+    /// keep the enum variant sizes balanced — `UnspawnedEngine` is a
+    /// fairly large struct and Stopped is empty.
+    Booting {
+        unspawned: Box<UnspawnedEngine<Libp2pIngress>>,
     },
-    /// Engine has been stopped. Only `phalanx_destroy` is valid.
+    /// Engine run loop is running. `phalanx_stop` consumes the inner
+    /// `EngineLifecycle` to drive a graceful shutdown.
+    Running { lifecycle: EngineLifecycle },
+    /// Terminal — only `phalanx_destroy` is valid from here.
     Stopped,
 }
 
@@ -82,16 +97,20 @@ pub struct PhalanxHandle {
     pub(crate) storage_tx: mpsc::Sender<StorageCommand>,
     /// Egress command channel — DHT provider lookups, mesh distribution.
     pub(crate) egress_tx: mpsc::Sender<EgressCommand>,
+    /// SentinelCommand channel — operations that require `&mut MeshSentinel`
+    /// (start/stop recording, spawn recovery). The engine's `select!` arm
+    /// services these inside its own context, so FFI never needs to lock
+    /// the sentinel itself. This is the structural replacement for the
+    /// deadlock-prone `sentinel_ref.lock().await` pattern that the audit
+    /// found in `ble_auth`, `community::set_recording_state`, and
+    /// `recovery::start_recovery`.
+    pub(crate) sentinel_cmd_tx: mpsc::Sender<SentinelCommand>,
     /// Content key broadcast — per-recording encryption key for MediaEgressActor.
     pub(crate) content_key_tx: tokio::sync::watch::Sender<Option<SymmetricKey>>,
     /// Video shard sender — FFI pushes processed frames here.
     pub(crate) video_tx: Option<mpsc::Sender<VideoShard>>,
     /// Audio shard sender — FFI pushes PCM audio here.
     pub(crate) audio_tx: Option<mpsc::Sender<AudioShard>>,
-    /// The sentinel itself, behind a Mutex for `spawn_playback(&mut self)`.
-    /// This is the only Mutex on PhalanxHandle — justified by genuine
-    /// cross-thread access (FFI thread + h.runtime.spawn() tasks).
-    pub(crate) sentinel: Mutex<Option<SentinelRef>>,
     /// Node DID — immutable after creation.
     pub(crate) node_did: String,
     /// Whether a recording is currently active.
@@ -135,10 +154,6 @@ pub struct PhalanxHandle {
     pub(crate) recovery_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-/// Type-erased reference to the running MeshSentinel.
-/// We need this to call `spawn_playback()`.
-type SentinelRef = Arc<tokio::sync::Mutex<MeshSentinel<Libp2pIngress>>>;
-
 // =====================================================================
 // FFI LIFECYCLE FUNCTIONS
 // =====================================================================
@@ -161,65 +176,90 @@ pub unsafe extern "C" fn phalanx_create(
     passphrase: *const c_char,
     out_genesis_phrase: *mut *mut c_char,
 ) -> *mut PhalanxHandle {
-    // Initialize out-param to null (no genesis phrase by default)
-    if !out_genesis_phrase.is_null() {
-        *out_genesis_phrase = std::ptr::null_mut();
-    }
-
-    // Validate required parameters
-    if storage_path.is_null() || passphrase.is_null() {
-        return std::ptr::null_mut();
-    }
-
-    let storage_str = match CStr::from_ptr(storage_path).to_str() {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    let passphrase_str = match CStr::from_ptr(passphrase).to_str() {
-        Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    // Optional config path — use defaults if null
-    let config = if config_path.is_null() {
-        NodeConfig::default()
-    } else {
-        match CStr::from_ptr(config_path).to_str() {
-            Ok(path) => NodeConfig::load(path).unwrap_or_default(),
-            Err(_) => return std::ptr::null_mut(),
-        }
-    };
-
-    // Build tokio runtime
-    let runtime = match Runtime::new() {
-        Ok(rt) => rt,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    // Run the async bootstrap sequence on the runtime.
-    // Each step returns Result — on failure, prior resources drop naturally.
-    let handle_result =
-        runtime.block_on(async { bootstrap(config, storage_str, passphrase_str).await });
-
-    match handle_result {
-        Ok((mut handle, genesis_phrase)) => {
-            // Move the runtime into the handle (it was created outside the async block)
-            handle.runtime = runtime;
-
-            // Write genesis phrase to out-param if a new identity was created
-            if let Some(phrase) = genesis_phrase {
-                if !out_genesis_phrase.is_null() {
-                    if let Ok(cstr) = CString::new(phrase) {
-                        *out_genesis_phrase = cstr.into_raw();
-                    }
-                }
+    crate::panic_safety::ffi_panic_safe(std::ptr::null_mut(), || {
+        // SAFETY: caller upholds the # Safety contract on the parent
+        // `unsafe extern "C" fn`. The body is wrapped in the panic
+        // boundary because bootstrap touches many third-party crates
+        // (identity, vault, libp2p, postcard) whose panic safety on
+        // corrupt persisted data isn't audited.
+        unsafe {
+            // Initialize out-param to null (no genesis phrase by default)
+            if !out_genesis_phrase.is_null() {
+                *out_genesis_phrase = std::ptr::null_mut();
             }
 
-            Box::into_raw(Box::new(handle))
+            // Validate required parameters
+            if storage_path.is_null() || passphrase.is_null() {
+                return std::ptr::null_mut();
+            }
+
+            let storage_str = match CStr::from_ptr(storage_path).to_str() {
+                Ok(s) => s,
+                Err(_) => return std::ptr::null_mut(),
+            };
+
+            let passphrase_str = match CStr::from_ptr(passphrase).to_str() {
+                Ok(s) => s,
+                Err(_) => return std::ptr::null_mut(),
+            };
+
+            // Optional config path — use defaults if null
+            let config = if config_path.is_null() {
+                NodeConfig::default()
+            } else {
+                match CStr::from_ptr(config_path).to_str() {
+                    Ok(path) => NodeConfig::load(path).unwrap_or_else(|e| {
+                        tracing::warn!(
+                            target: "phalanx::ffi",
+                            config_path = %path,
+                            error = ?e,
+                            "NodeConfig::load failed; falling back to default config"
+                        );
+                        NodeConfig::default()
+                    }),
+                    Err(_) => return std::ptr::null_mut(),
+                }
+            };
+
+            // Build tokio runtime
+            let runtime = match Runtime::new() {
+                Ok(rt) => rt,
+                Err(_) => return std::ptr::null_mut(),
+            };
+
+            // Run the async bootstrap sequence on the runtime.
+            // Each step returns Result — on failure, prior resources drop naturally.
+            let handle_result =
+                runtime.block_on(async { bootstrap(config, storage_str, passphrase_str).await });
+
+            match handle_result {
+                Ok((mut handle, genesis_phrase)) => {
+                    // Move the runtime into the handle (it was created outside the async block)
+                    handle.runtime = runtime;
+
+                    // Write genesis phrase to out-param if a new identity was created.
+                    // BIP39 mnemonics are ASCII space-separated words, so CString::new
+                    // realistically cannot reject one for an interior NUL — but log
+                    // the impossible path so the failure isn't silent if invariants
+                    // ever change.
+                    if let Some(phrase) = genesis_phrase {
+                        if !out_genesis_phrase.is_null() {
+                            match CString::new(phrase) {
+                                Ok(cstr) => *out_genesis_phrase = cstr.into_raw(),
+                                Err(_) => tracing::warn!(
+                                    target: "phalanx::ffi",
+                                    "BIP39 genesis phrase contained an interior NUL; dropping (unreachable path)"
+                                ),
+                            }
+                        }
+                    }
+
+                    Box::into_raw(Box::new(handle))
+                }
+                Err(_) => std::ptr::null_mut(),
+            }
         }
-        Err(_) => std::ptr::null_mut(),
-    }
+    })
 }
 
 /// Internal async bootstrap — mirrors `sentinel.rs` dependency graph.
@@ -393,24 +433,32 @@ async fn bootstrap(
         local_mesh_address,
     };
 
-    let engine = MeshSentinel::new(deps)
+    // Build the engine via the public façade. `UnspawnedEngine` wraps the
+    // MeshSentinel privately — no `Arc<Mutex<MeshSentinel>>` is constructed
+    // anywhere on the FFI side, so the H1/H2/H3 deadlock pattern (FFI
+    // awaiting sentinel.lock() while engine.run() owns the borrow for life)
+    // is unrepresentable. The structural property is what the audit-driven
+    // refactor demands.
+    let unspawned = UnspawnedEngine::build(deps)
         .await
         .map_err(|_| PhalanxError::BootFailed)?;
 
-    // Extract channels before wrapping in Arc<Mutex>.
-    // These clones live on the handle so FFI calls never need to lock the sentinel.
-    // The sentinel run loop holds its tokio::sync::Mutex for its entire lifetime,
-    // so any FFI call that tried sentinel_ref.lock().await would deadlock.
-    let trust_tx = engine.trust_tx.clone();
-    let storage_tx = engine.storage_tx.clone();
-    let egress_tx = engine.egress_tx.clone();
-    let content_key_tx = engine.content_key_tx();
-    let video_tx = Some(engine.video_tx.clone());
-    let audio_tx = Some(engine.audio_tx.clone());
+    // Clone channels from the unspawned engine. The actor tasks inside
+    // MeshSentinel are spawned during `build`, so these channels are
+    // already alive — no need to wait for `phalanx_start`. The handle
+    // retains its own clones so FFI calls (e.g. signing flows that don't
+    // need the orchestrator) work between create and start.
+    let trust_tx = unspawned.trust_tx();
+    let storage_tx = unspawned.storage_tx();
+    let egress_tx = unspawned.egress_tx();
+    let sentinel_cmd_tx = unspawned.sentinel_cmd_tx();
+    let content_key_tx = unspawned.content_key_tx();
+    let video_tx = Some(unspawned.video_tx());
+    let audio_tx = Some(unspawned.audio_tx());
 
-    let sentinel = Arc::new(tokio::sync::Mutex::new(engine));
-
-    // Create a dummy runtime — will be replaced by the caller
+    // Create a dummy runtime — will be replaced by the caller. This is the
+    // same trick the old bootstrap used; we keep it to avoid restructuring
+    // the create/start handoff. The dummy never runs anything.
     let dummy_rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .map_err(|_| PhalanxError::BootFailed)?;
@@ -418,16 +466,18 @@ async fn bootstrap(
     Ok((
         PhalanxHandle {
             runtime: dummy_rt,
-            state: Mutex::new(HandleState::Booting),
+            state: Mutex::new(HandleState::Booting {
+                unspawned: Box::new(unspawned),
+            }),
             governor,
             probe,
             trust_tx,
             storage_tx,
             egress_tx,
+            sentinel_cmd_tx,
             content_key_tx,
             video_tx,
             audio_tx,
-            sentinel: Mutex::new(Some(sentinel)),
             node_did,
             recording_active: AtomicBool::new(false),
             local_mesh_tx: Some(local_mesh_tx),
@@ -447,7 +497,13 @@ async fn bootstrap(
 
 /// Starts the engine's main run loop on a background tokio task.
 ///
-/// Transitions: `Booting → Running`.
+/// Transitions: `Booting → Running`. Consumes the `UnspawnedEngine` stored
+/// in `HandleState::Booting` by `mem::replace`-ing the variant and calling
+/// `unspawned.spawn(&runtime)`. The returned `EngineLifecycle` is stored
+/// in the new `HandleState::Running` variant; `phalanx_stop` consumes it.
+/// The companion `EngineHandle` is discarded — the FFI's flat channel
+/// fields already carry equivalent clones from bootstrap time.
+///
 /// Returns `PhalanxError::AlreadyRunning` if called twice.
 ///
 /// # Safety
@@ -462,57 +518,33 @@ pub unsafe extern "C" fn phalanx_start(handle: *mut PhalanxHandle) -> i32 {
         return PhalanxError::InvalidState.code();
     };
 
-    match &*state {
-        HandleState::Running { .. } => return PhalanxError::AlreadyRunning.code(),
+    // Extract the UnspawnedEngine by `mem::replace`-ing the Booting
+    // variant with a temporary Stopped placeholder. The replace is sound:
+    // if anything below fails we restore the prior state.
+    let unspawned = match std::mem::replace(&mut *state, HandleState::Stopped) {
+        HandleState::Booting { unspawned } => unspawned,
+        prior @ HandleState::Running { .. } => {
+            *state = prior;
+            return PhalanxError::AlreadyRunning.code();
+        }
         HandleState::Stopped => return PhalanxError::InvalidState.code(),
-        HandleState::Booting => {}
-    }
-
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-
-    // Clone the sentinel Arc for the spawned task
-    let sentinel_ref = {
-        let Ok(guard) = h.sentinel.lock() else {
-            return PhalanxError::InvalidState.code();
-        };
-        match guard.as_ref() {
-            Some(s) => s.clone(),
-            None => return PhalanxError::InvalidState.code(),
-        }
     };
 
-    // Spawn the engine's run loop. After the select resolves (either run()
-    // returns or phalanx_stop dropped the shutdown_tx), call shutdown() so
-    // background actor tasks drain within the bounded deadline. Drain
-    // happens INSIDE this task — phalanx_stop itself returns as soon as it
-    // flips state, without observing drain completion.
-    h.runtime.spawn(async move {
-        let mut engine = sentinel_ref.lock().await;
-
-        tokio::select! {
-            result = engine.run() => {
-                if let Err(e) = result {
-                    tracing::error!("MeshSentinel exited with error: {}", e);
-                }
-            }
-            _ = shutdown_rx => {
-                tracing::info!("MeshSentinel shutdown signal received.");
-            }
-        }
-
-        engine.shutdown().await;
-    });
-
-    *state = HandleState::Running {
-        _shutdown_tx: shutdown_tx,
-    };
+    // Spawn the run loop. `UnspawnedEngine::spawn` consumes by value and
+    // moves the sentinel into the tokio task — no shared reference, no
+    // way for any other code to ever lock the sentinel.
+    let (_engine_handle, lifecycle) = (*unspawned).spawn(&h.runtime);
+    *state = HandleState::Running { lifecycle };
 
     PhalanxError::Ok.code()
 }
 
-/// Stops the engine gracefully by dropping the shutdown oneshot sender.
+/// Stops the engine gracefully by consuming the `EngineLifecycle` and
+/// awaiting its bounded-deadline shutdown.
 ///
-/// Transitions: `Running → Stopped`.
+/// Transitions: `Running → Stopped`. The lifecycle's `shutdown(self, …)`
+/// signature enforces single-shot semantics at the type level; the
+/// borrow checker forbids calling it twice.
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
@@ -522,25 +554,50 @@ pub unsafe extern "C" fn phalanx_stop(handle: *mut PhalanxHandle) -> i32 {
         return PhalanxError::NullPointer.code();
     };
 
-    let Ok(mut state) = h.state.lock() else {
-        return PhalanxError::InvalidState.code();
+    // Extract the lifecycle (mem::replace to keep the lock guard short),
+    // then drop the guard before doing async work via block_on.
+    let lifecycle = {
+        let Ok(mut state) = h.state.lock() else {
+            return PhalanxError::InvalidState.code();
+        };
+        match std::mem::replace(&mut *state, HandleState::Stopped) {
+            HandleState::Running { lifecycle } => lifecycle,
+            prior @ (HandleState::Booting { .. } | HandleState::Stopped) => {
+                *state = prior;
+                return PhalanxError::NotRunning.code();
+            }
+        }
     };
 
-    match &*state {
-        HandleState::Running { .. } => {
-            // Replace with Stopped — dropping the old state drops shutdown_tx,
-            // which signals the select! loop to terminate.
-            *state = HandleState::Stopped;
+    // Drive shutdown with a 10s drain deadline. Matches the deadline
+    // `MeshSentinel::shutdown()` already uses internally so the worst-case
+    // is bounded across both layers.
+    match h
+        .runtime
+        .block_on(lifecycle.shutdown(Duration::from_secs(10)))
+    {
+        Ok(()) => PhalanxError::Ok.code(),
+        Err(e) => {
+            tracing::warn!(
+                target: "phalanx::ffi",
+                error = %e,
+                "engine shutdown did not complete cleanly"
+            );
+            // Still return Ok — state is already Stopped; the run-loop
+            // task is either gone or will be cancelled by the runtime
+            // when `phalanx_destroy` drops it.
             PhalanxError::Ok.code()
         }
-        HandleState::Booting => PhalanxError::NotRunning.code(),
-        HandleState::Stopped => PhalanxError::NotRunning.code(),
     }
 }
 
 /// Destroys the handle and frees all resources.
 ///
-/// After this call, the pointer is invalid. Double-destroy is UB.
+/// If the engine is still `Running`, first invokes the equivalent of
+/// `phalanx_stop` so the run-loop task drains within its 10-second
+/// deadline. Skipping that drain (the old destroy-without-stop path)
+/// would cancel in-flight shard writes when the runtime drops. Subsumes
+/// audit finding M2 — the safe path is now the default, not opt-in.
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
@@ -549,8 +606,12 @@ pub unsafe extern "C" fn phalanx_stop(handle: *mut PhalanxHandle) -> i32 {
 #[no_mangle]
 pub unsafe extern "C" fn phalanx_destroy(handle: *mut PhalanxHandle) {
     if !handle.is_null() {
+        // If the engine is still Running, drive shutdown first. Ignore
+        // the return code — destroy proceeds regardless, and the runtime
+        // drop below will force-cancel anything stragglers left over.
+        let _ = phalanx_stop(handle);
         // Reconstruct the Box so Rust drops everything in order:
-        // runtime drop → cancels all spawned tasks → channels close → actors stop
+        // runtime drop → cancels any remaining spawned tasks → channels close → actors stop
         let _ = Box::from_raw(handle);
     }
 }

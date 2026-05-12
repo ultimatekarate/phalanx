@@ -212,12 +212,23 @@ pub unsafe extern "C" fn phalanx_local_mesh_poll_outbound(
 
     match rx.try_recv() {
         Ok(packet) => {
-            // Peer ID → C string (caller frees with phalanx_free_string)
-            match std::ffi::CString::new(packet.target.0) {
+            // Peer ID → C string (caller frees with phalanx_free_string).
+            // libp2p peer IDs are base58 and contain no NULs, so the
+            // CString conversion realistically cannot fail. If it ever
+            // does, the packet is dropped on the floor (already dequeued)
+            // and the caller sees `InvalidUtf8`. Trace the impossible
+            // path so it surfaces if invariants change upstream.
+            match std::ffi::CString::new(packet.target.0.clone()) {
                 Ok(cstr) => {
                     *out_peer = cstr.into_raw();
                 }
                 Err(_) => {
+                    tracing::warn!(
+                        target: "phalanx::ffi",
+                        peer = %packet.target.0,
+                        bytes = packet.data.len(),
+                        "outbound local-mesh packet dropped: peer ID contained interior NUL (unreachable path)"
+                    );
                     *out_data = std::ptr::null_mut();
                     *out_len = 0;
                     *out_peer = std::ptr::null_mut();
@@ -226,12 +237,7 @@ pub unsafe extern "C" fn phalanx_local_mesh_poll_outbound(
             }
 
             // Data → leaked allocation (caller frees with phalanx_free_bytes)
-            #[allow(clippy::cast_possible_truncation)]
-            let len = packet.data.len() as u32;
-            let mut boxed = packet.data.into_boxed_slice();
-            *out_data = boxed.as_mut_ptr();
-            *out_len = len;
-            std::mem::forget(boxed);
+            crate::memory::leak_bytes_to_c(packet.data.into_boxed_slice(), out_data, out_len);
 
             PhalanxError::Ok.code()
         }

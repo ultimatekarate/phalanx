@@ -64,47 +64,56 @@ pub unsafe extern "C" fn phalanx_export_c2pa(
     recording_id: *const c_char,
     out_path: *const c_char,
 ) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    crate::panic_safety::ffi_panic_safe(PhalanxError::Panic.code(), || {
+        // SAFETY: caller upholds the # Safety contract on the parent
+        // `unsafe extern "C" fn`. The body is wrapped in the panic boundary
+        // because the c2pa crate can panic on malformed manifest assertions
+        // and we want a clean status code rather than a process abort.
+        unsafe {
+            let Some(h) = handle.as_ref() else {
+                return PhalanxError::NullPointer.code();
+            };
 
-    if recording_id.is_null() || out_path.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
+            if recording_id.is_null() || out_path.is_null() {
+                return PhalanxError::NullPointer.code();
+            }
 
-    let rec_str = match CStr::from_ptr(recording_id).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
+            let rec_str = match CStr::from_ptr(recording_id).to_str() {
+                Ok(s) => s,
+                Err(_) => return PhalanxError::InvalidUtf8.code(),
+            };
 
-    let path_str = match CStr::from_ptr(out_path).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
+            let path_str = match CStr::from_ptr(out_path).to_str() {
+                Ok(s) => s,
+                Err(_) => return PhalanxError::InvalidUtf8.code(),
+            };
 
-    // Spawn the async pipeline on the runtime and block for the result.
-    // Using spawn + oneshot + blocking_recv avoids re-entrant block_on panics.
-    let vault_key = h.vault_key.clone();
-    let identity = h.identity.clone();
-    let node_did = h.node_did.clone();
-    let rec_id = rec_str.to_string();
-    let out = path_str.to_string();
+            // Spawn the async pipeline on the runtime and block for the result.
+            // Using spawn + oneshot + blocking_recv avoids re-entrant block_on panics.
+            let vault_key = h.vault_key.clone();
+            let identity = h.identity.clone();
+            let node_did = h.node_did.clone();
+            let rec_id = rec_str.to_string();
+            let out = path_str.to_string();
 
-    // Use storage_tx directly from the handle — no sentinel lock needed.
-    let stx = h.storage_tx.clone();
+            // Use storage_tx directly from the handle — no sentinel lock needed.
+            let stx = h.storage_tx.clone();
 
-    let (result_tx, result_rx) = oneshot::channel();
+            let (result_tx, result_rx) = oneshot::channel();
 
-    h.runtime.spawn(async move {
-        let res = build_c2pa_export(&stx, &vault_key, &identity, &node_did, &rec_id, &out).await;
-        let _ = result_tx.send(res);
-    });
+            h.runtime.spawn(async move {
+                let res =
+                    build_c2pa_export(&stx, &vault_key, &identity, &node_did, &rec_id, &out).await;
+                let _ = result_tx.send(res);
+            });
 
-    match result_rx.blocking_recv() {
-        Ok(Ok(())) => PhalanxError::Ok.code(),
-        Ok(Err(e)) => e.code(),
-        Err(_) => PhalanxError::ChannelClosed.code(),
-    }
+            match result_rx.blocking_recv() {
+                Ok(Ok(())) => PhalanxError::Ok.code(),
+                Ok(Err(e)) => e.code(),
+                Err(_) => PhalanxError::ChannelClosed.code(),
+            }
+        }
+    })
 }
 
 /// Returns the file path of the last C2PA export, if any.

@@ -39,6 +39,38 @@ use std::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
 
+/// Commands the FFI (or any external driver) can dispatch to `MeshSentinel`.
+///
+/// Each variant covers an operation that requires `&mut MeshSentinel` —
+/// `start_recording`, `stop_recording`, `spawn_recovery`. The run loop's
+/// `tokio::select!` services this mailbox alongside network events, so
+/// commands execute inside the engine's own context without external
+/// callers needing to acquire any lock on the sentinel.
+///
+/// This is the linguistically-correct entry point for sentinel-mutating
+/// FFI requests: the FFI sends a command (future-tense, enqueued); the
+/// engine handles it (present-tense, single-owner); nothing awaits on a
+/// present-tense lock. See `linguistic-code-model.md` § Governance Command #5.
+pub enum SentinelCommand {
+    /// Set the active recording id. `Some(id)` starts a recording;
+    /// `None` stops the current one. The session-state side effects
+    /// (witness reset, content-key transition, `recording_active`
+    /// atomic flip) run inside the engine's context.
+    SetRecordingState {
+        id: Option<RecordingId>,
+        reply_to: tokio::sync::oneshot::Sender<()>,
+    },
+    /// Spawn a manifest-walk recovery session. The reply carries the
+    /// `JoinHandle` for the spawned task so the FFI can store it (and
+    /// abort on shutdown if needed). Cancellation flows through the
+    /// `cancel_rx` half of a oneshot the caller owns.
+    SpawnRecovery {
+        status: Arc<Mutex<phalanx_proto::recovery::RecoveryStatus>>,
+        cancel_rx: tokio::sync::oneshot::Receiver<()>,
+        reply_to: tokio::sync::oneshot::Sender<JoinHandle<()>>,
+    },
+}
+
 pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJournal> {
     pub config: NodeConfig,
     pub identity: PhalanxIdentity,
@@ -170,6 +202,13 @@ pub struct MeshSentinel<I: IngressPort> {
     /// clone at spawn time, so runtime mutations affect receive but not
     /// publish
     pub extra_community_ids: Vec<phalanx_proto::community::CommunityId>,
+
+    /// Sender for `SentinelCommand`s. Cloned out by `EngineHandle::spawn`
+    /// so the FFI can dispatch operations that need `&mut MeshSentinel`
+    /// without ever acquiring a lock on the sentinel itself.
+    pub sentinel_cmd_tx: mpsc::Sender<SentinelCommand>,
+    /// Receiver half. Read only by the run loop's `select!`.
+    sentinel_cmd_rx: mpsc::Receiver<SentinelCommand>,
 }
 
 impl<I: IngressPort> MeshSentinel<I> {
@@ -214,6 +253,10 @@ impl<I: IngressPort> MeshSentinel<I> {
         let (trust_tx, trust_rx) = mpsc::channel(100);
         let (discovery_tx, discovery_rx) = mpsc::channel(100);
         let (commit_notify_tx, commit_notify_rx) = mpsc::channel(100);
+        // SentinelCommand mailbox — serviced by the run loop's `select!` so
+        // external callers (FFI, sim) can mutate sentinel state via channel
+        // commands instead of locking the sentinel.
+        let (sentinel_cmd_tx, sentinel_cmd_rx) = mpsc::channel(32);
 
         // Stateless Recovery: Pull salvaged egress from the journal
         let salvaged_queue = deps
@@ -597,6 +640,8 @@ impl<I: IngressPort> MeshSentinel<I> {
             clock: clock_handle.clone(),
             community_ids_rx,
             extra_community_ids,
+            sentinel_cmd_tx,
+            sentinel_cmd_rx,
         })
     }
 
@@ -640,6 +685,11 @@ impl<I: IngressPort> MeshSentinel<I> {
                 } => {
                     self.handle_lifecycle_event(lifecycle_event)
                 }
+
+                Some(cmd) = self.sentinel_cmd_rx.recv() => {
+                    self.handle_sentinel_command(cmd);
+                    false
+                }
             };
 
             if should_shutdown {
@@ -647,6 +697,32 @@ impl<I: IngressPort> MeshSentinel<I> {
             }
         }
         Ok(())
+    }
+
+    /// Dispatch a `SentinelCommand` against `&mut self`. Runs inside the
+    /// run loop's `select!` arm, so the caller never needs a lock on the
+    /// sentinel — they just `send` on the command channel and await the
+    /// per-variant `reply_to` oneshot.
+    fn handle_sentinel_command(&mut self, cmd: SentinelCommand) {
+        match cmd {
+            SentinelCommand::SetRecordingState { id, reply_to } => {
+                match id {
+                    Some(rec_id) => self.start_recording(rec_id, None),
+                    None => {
+                        let _ = self.stop_recording();
+                    }
+                }
+                let _ = reply_to.send(());
+            }
+            SentinelCommand::SpawnRecovery {
+                status,
+                cancel_rx,
+                reply_to,
+            } => {
+                let jh = self.spawn_recovery(status, cancel_rx);
+                let _ = reply_to.send(jh);
+            }
+        }
     }
 
     /// Signal all background tasks to exit, then wait for them to drain.

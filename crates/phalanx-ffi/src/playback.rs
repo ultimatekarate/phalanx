@@ -413,14 +413,7 @@ unsafe fn poll_channel(
 ) -> i32 {
     match rx.try_recv() {
         Ok(frame) => {
-            // Frame size will never exceed u32::MAX on mobile devices
-            #[allow(clippy::cast_possible_truncation)]
-            let len = frame.len() as u32;
-            let mut boxed = frame.into_boxed_slice();
-            *out_data = boxed.as_mut_ptr();
-            *out_len = len;
-            // Leak the allocation — caller frees via phalanx_free_bytes
-            std::mem::forget(boxed);
+            crate::memory::leak_bytes_to_c(frame.into_boxed_slice(), out_data, out_len);
             PhalanxError::Ok.code()
         }
         Err(mpsc::error::TryRecvError::Empty) => {
