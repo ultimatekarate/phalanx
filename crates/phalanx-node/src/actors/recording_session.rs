@@ -8,12 +8,15 @@
 use phalanx_proto::corroboration::ProximityWitness;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::identity::RecordingId;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::watch;
 
 /// State for the currently-active recording, if any. Recording is enabled
 /// when `active_recording_id` is `Some`. The fields are only mutated through
 /// the methods on this struct so the invariants (witnesses cleared on stop,
-/// content-key channel signalled on every transition) cannot drift.
+/// content-key channel signalled on every transition, recording-active flag
+/// kept in sync) cannot drift.
 pub struct RecordingSessionState {
     active_recording_id: Option<RecordingId>,
     active_recording_key: Option<[u8; 32]>,
@@ -24,6 +27,13 @@ pub struct RecordingSessionState {
     /// channel keeps the latest value, so simultaneous senders do not
     /// conflict.
     content_key_tx: watch::Sender<Option<SymmetricKey>>,
+    /// Cheap-to-read "is a recording in progress?" flag. The engine flips
+    /// this in `start` / `stop`; FFI consumers obtain an `Arc` clone via
+    /// `recording_active_handle()` and read it lock-free. This is the
+    /// single source of truth — under the post-refactor design FFI never
+    /// writes the flag directly; it sends a `SentinelCommand` and the
+    /// engine flips this atomic as a side effect.
+    recording_active: Arc<AtomicBool>,
 }
 
 impl RecordingSessionState {
@@ -34,6 +44,7 @@ impl RecordingSessionState {
             active_recording_key: None,
             proximity_witnesses: Vec::new(),
             content_key_tx,
+            recording_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -59,6 +70,7 @@ impl RecordingSessionState {
         if let Some(k) = key {
             let _ = self.content_key_tx.send(Some(SymmetricKey::from_bytes(k)));
         }
+        self.recording_active.store(true, Ordering::Release);
     }
 
     /// Stop the recording. Returns drained proximity witnesses, clears the
@@ -69,6 +81,7 @@ impl RecordingSessionState {
         self.active_recording_id = None;
         self.active_recording_key = None;
         let _ = self.content_key_tx.send(None);
+        self.recording_active.store(false, Ordering::Release);
         std::mem::take(&mut self.proximity_witnesses)
     }
 
@@ -83,5 +96,14 @@ impl RecordingSessionState {
     #[must_use]
     pub fn content_key_tx_clone(&self) -> watch::Sender<Option<SymmetricKey>> {
         self.content_key_tx.clone()
+    }
+
+    /// `Arc` clone of the recording-active flag. FFI readers acquire this
+    /// once at engine-handle construction time and observe transitions via
+    /// `AtomicBool::load(Ordering::Acquire)`. The engine is the sole
+    /// writer; readers never store.
+    #[must_use]
+    pub fn recording_active_handle(&self) -> Arc<AtomicBool> {
+        self.recording_active.clone()
     }
 }

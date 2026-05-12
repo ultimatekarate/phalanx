@@ -25,6 +25,7 @@ pub mod forget;
 pub mod handle;
 pub mod local_mesh;
 pub mod memory;
+mod panic_safety;
 pub mod playback;
 pub mod probe;
 pub mod recovery;

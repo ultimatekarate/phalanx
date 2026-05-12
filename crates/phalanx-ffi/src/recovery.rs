@@ -20,6 +20,7 @@ use crate::error::PhalanxError;
 use crate::handle::PhalanxHandle;
 use crate::logcat::phalanx_log;
 
+use phalanx_node::actors::meshsentinel::SentinelCommand;
 use phalanx_proto::recovery::{RecoveryState, RecoveryStatus};
 
 use std::sync::atomic::Ordering;
@@ -74,43 +75,30 @@ pub unsafe extern "C" fn phalanx_start_recovery(handle: *const PhalanxHandle) ->
         *s = RecoveryStatus::default();
     }
 
-    let sentinel_arc = {
-        let Ok(guard) = h.sentinel.lock() else {
-            return PhalanxError::InvalidState.code();
-        };
-        match guard.as_ref() {
-            Some(s) => s.clone(),
-            None => return PhalanxError::InvalidState.code(),
-        }
-    };
-
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     let status = h.recovery_status.clone();
 
-    // Spawn off the runtime, lock the sentinel, call spawn_recovery
-    // (which itself spawns on the runtime), and store the resulting
-    // JoinHandle. The intermediate task exists because spawn_recovery
-    // takes `&mut self` — we need to hold the tokio Mutex on the
-    // sentinel to call it. The sentinel run loop holds the Mutex across
-    // its main `tokio::select!`; spawn_recovery is called from a separate
-    // FFI request path that takes the lock briefly via
-    // `Arc<tokio::sync::Mutex<_>>`. That's the same pattern other FFI
-    // entry points (e.g. trust commands) use.
-    //
-    // NOTE: this design path is the one PlaybackCoordinator's callsite
-    // already establishes. A future cleanup could expose
-    // `spawn_recovery` through a one-shot command on the sentinel
-    // mailbox, but for v1 the lock-and-call pattern matches existing
-    // playback scaffolding.
-    let inner_status = status.clone();
-    let join_handle = h.runtime.spawn(async move {
-        let mut engine = sentinel_arc.lock().await;
-        let recovery_handle = engine.spawn_recovery(inner_status, cancel_rx);
-        drop(engine);
-        // Await completion of the inner recovery so this outer task's
-        // JoinHandle reflects the real recovery lifetime.
-        let _ = recovery_handle.await;
-    });
+    // Dispatch SpawnRecovery to the engine via the SentinelCommand
+    // mailbox. The engine services the command inside its `select!` arm
+    // — `&mut MeshSentinel` is available there without any external
+    // lock — and returns the inner `JoinHandle` via the reply oneshot.
+    // No FFI-side `sentinel.lock().await`, no silent stall on the
+    // engine.run() borrow. (Fixes audit finding H3.)
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if h.sentinel_cmd_tx
+        .blocking_send(SentinelCommand::SpawnRecovery {
+            status,
+            cancel_rx,
+            reply_to: reply_tx,
+        })
+        .is_err()
+    {
+        return PhalanxError::ChannelClosed.code();
+    }
+    let join_handle = match reply_rx.blocking_recv() {
+        Ok(jh) => jh,
+        Err(_) => return PhalanxError::ChannelClosed.code(),
+    };
 
     // Replace any prior cancel/handle. Old task is already terminal
     // (we only get here past the `AlreadyRecovering` gate).
@@ -162,14 +150,7 @@ pub unsafe extern "C" fn phalanx_recovery_status(
         Err(_) => return PhalanxError::SerializationFailure.code(),
     };
 
-    #[allow(clippy::cast_possible_truncation)]
-    let len = serialized.len() as u32;
-    let mut boxed = serialized.into_boxed_slice();
-    let ptr = boxed.as_mut_ptr();
-    std::mem::forget(boxed);
-
-    *out_ptr = ptr;
-    *out_len = len;
+    crate::memory::leak_bytes_to_c(serialized.into_boxed_slice(), out_ptr, out_len);
 
     PhalanxError::Ok.code()
 }

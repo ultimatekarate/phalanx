@@ -5,6 +5,7 @@ use tracing::info;
 
 // Internal Modules from Workspace
 use phalanx_forensics::PeerEvaluator;
+use phalanx_node::actors::meshsentinel::MeshSentinel;
 use phalanx_node::actors::meshsentinel::SentinelDependencies;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
@@ -14,7 +15,6 @@ use phalanx_node::psk::load_swarm_key;
 use phalanx_node::trust::TrustRegistry;
 use phalanx_node::vitals::init_observability;
 use phalanx_node::FileJournal;
-use phalanx_node::MeshSentinel;
 use phalanx_proto::prelude::PhalanxIdentity;
 
 #[tokio::main]

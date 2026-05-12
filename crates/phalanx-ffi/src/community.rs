@@ -8,6 +8,7 @@
 
 use crate::error::PhalanxError;
 use crate::handle::PhalanxHandle;
+use phalanx_node::actors::meshsentinel::SentinelCommand;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
@@ -148,14 +149,7 @@ pub unsafe extern "C" fn phalanx_sign_vouch(
         Err(_) => return PhalanxError::CeremonyFailed.code(),
     };
 
-    #[allow(clippy::cast_possible_truncation)]
-    let len = serialized.len() as u32;
-    let mut boxed = serialized.into_boxed_slice();
-    let ptr = boxed.as_mut_ptr();
-    std::mem::forget(boxed);
-
-    *out_ptr = ptr;
-    *out_len = len;
+    crate::memory::leak_bytes_to_c(serialized.into_boxed_slice(), out_ptr, out_len);
 
     tracing::info!(
         target: "phalanx::ffi",
@@ -277,14 +271,7 @@ pub unsafe extern "C" fn phalanx_create_community(
     };
     let payload = phalanx_forensics::identity::wrap_payload_version(&body);
 
-    #[allow(clippy::cast_possible_truncation)]
-    let len = payload.len() as u32;
-    let mut boxed = payload.into_boxed_slice();
-    let ptr = boxed.as_mut_ptr();
-    std::mem::forget(boxed);
-
-    *out_ptr = ptr;
-    *out_len = len;
+    crate::memory::leak_bytes_to_c(payload.into_boxed_slice(), out_ptr, out_len);
 
     tracing::info!(
         target: "phalanx::ffi",
@@ -607,49 +594,47 @@ pub unsafe extern "C" fn phalanx_set_recording_state(
     }
 
     let h = &*handle;
-    let sentinel_guard = match h.sentinel.lock() {
-        Ok(g) => g,
-        Err(_) => return PhalanxError::InvalidState.code(),
-    };
-    let sentinel_ref = match sentinel_guard.as_ref() {
-        Some(s) => s.clone(),
-        None => return PhalanxError::NotRunning.code(),
-    };
-    drop(sentinel_guard);
 
+    // Parse the recording id. `to_str` (not `to_string_lossy`) so a
+    // non-UTF8 byte sequence surfaces as `InvalidUtf8` rather than
+    // silently U+FFFD-ing into a recording id that won't match anything
+    // on disk. (Fixes audit finding L2.)
     let rec_id = if recording_id.is_null() {
         None
     } else {
         let c_str = CStr::from_ptr(recording_id);
-        Some(phalanx_proto::identity::RecordingId::new(
-            c_str.to_string_lossy().to_string(),
-        ))
+        match c_str.to_str() {
+            Ok(s) => {
+                tracing::info!(
+                    target: "phalanx::ffi",
+                    recording = %s,
+                    "Recording state change requested — dispatching to engine"
+                );
+                Some(phalanx_proto::identity::RecordingId::new(s.to_string()))
+            }
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        }
     };
 
-    h.runtime.block_on(async {
-        let mut sentinel = sentinel_ref.lock().await;
-        match rec_id {
-            Some(id) => {
-                tracing::info!(target: "phalanx::ffi", recording = %id, "Recording started — enabling proximity capture");
-                sentinel.start_recording(id, None);
-            }
-            None => {
-                let witnesses = sentinel.stop_recording();
-                if !witnesses.is_empty() {
-                    tracing::info!(
-                        target: "phalanx::ffi",
-                        count = witnesses.len(),
-                        "Recording stopped — flushed {} proximity witnesses", witnesses.len()
-                    );
-                    // Proximity witnesses are stored locally for later export to Stronghold.
-                    // They'll be included in the C2PA export or sent via grant to the Stronghold.
-                    // For now, they're logged. The Stronghold aggregation path will consume them.
-                }
-            }
-        }
-    });
-
-    0 // Success
+    // Dispatch to the engine via the SentinelCommand mailbox. The engine
+    // services the command inside its own `select!` arm — the FFI never
+    // locks the sentinel, so the deadlock pattern this function had
+    // against `engine.run()`'s long-held lock is structurally
+    // impossible now. (Fixes audit finding H2.)
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if h.sentinel_cmd_tx
+        .blocking_send(SentinelCommand::SetRecordingState {
+            id: rec_id,
+            reply_to: reply_tx,
+        })
+        .is_err()
+    {
+        return PhalanxError::ChannelClosed.code();
+    }
+    match reply_rx.blocking_recv() {
+        Ok(()) => 0,
+        Err(_) => PhalanxError::ChannelClosed.code(),
+    }
 }
 
 /// Manually dissolve a community (panic button).
