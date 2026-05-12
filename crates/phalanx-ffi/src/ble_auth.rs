@@ -14,6 +14,25 @@
 
 use crate::error::PhalanxError;
 use crate::handle::PhalanxHandle;
+use phalanx_proto::prelude::PhalanxIdentity;
+
+/// Produce a BLE auth signature from already-validated inputs.
+///
+/// Past-tense work: the identity is immutable, the challenger DID is borrowed,
+/// the nonce is a fixed-size buffer. No runtime, no lock, no async — Ed25519
+/// signing (RFC 8032) is deterministic and synchronous.
+///
+/// Extracted from `phalanx_sign_ble_challenge` so the signing logic is
+/// unit-testable without bootstrapping a full engine.
+pub(crate) fn sign_ble_challenge_inner(
+    identity: &PhalanxIdentity,
+    challenger_did: &phalanx_proto::identity::Did,
+    nonce: &[u8; 32],
+) -> [u8; 64] {
+    use ed25519_dalek::Signer;
+    let msg = phalanx_forensics::identity::ble_auth_message(&identity.did, challenger_did, nonce);
+    identity.keypair.sign(&msg).to_bytes()
+}
 
 /// Sign a BLE auth challenge from a remote peer.
 ///
@@ -58,31 +77,12 @@ pub unsafe extern "C" fn phalanx_sign_ble_challenge(
     let mut nonce = [0u8; 32];
     std::ptr::copy_nonoverlapping(nonce_ptr, nonce.as_mut_ptr(), 32);
 
-    // Access the node identity for signing
-    let sentinel_guard = match h.sentinel.lock() {
-        Ok(g) => g,
-        Err(_) => return PhalanxError::InvalidState.code(),
-    };
-    let sentinel_ref = match sentinel_guard.as_ref() {
-        Some(s) => s.clone(),
-        None => return PhalanxError::NotRunning.code(),
-    };
-    drop(sentinel_guard);
+    // Sign using the handle's identity (past-tense; immutable Arc clone of
+    // the engine's identity). The engine's run loop holds a tokio Mutex on
+    // the MeshSentinel for its full lifetime; an FFI `sentinel.lock().await`
+    // would deadlock. Read identity from the handle directly instead.
+    let sig_bytes = sign_ble_challenge_inner(&h.identity, &challenger_did, &nonce);
 
-    // Sign: message = our_did || challenger_did || nonce
-    let result = h.runtime.block_on(async {
-        let sentinel = sentinel_ref.lock().await;
-        let msg = phalanx_forensics::identity::ble_auth_message(
-            &sentinel.identity.did,
-            &challenger_did,
-            &nonce,
-        );
-        use ed25519_dalek::Signer;
-        sentinel.identity.keypair.sign(&msg)
-    });
-
-    // Write 64-byte signature to output buffer
-    let sig_bytes = result.to_bytes();
     std::ptr::copy_nonoverlapping(sig_bytes.as_ptr(), out_signature, 64);
 
     0 // Success
@@ -164,5 +164,72 @@ pub unsafe extern "C" fn phalanx_verify_ble_peer(
             );
             PhalanxError::InvalidState.code() // Verification failed
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::undocumented_unsafe_blocks
+)]
+mod tests {
+    use super::*;
+    use phalanx_proto::network::{BleChallenge, BleResponse};
+
+    /// `sign_ble_challenge_inner` must produce a signature that
+    /// `verify_ble_response` accepts when the same keypair signs and the
+    /// same DID is recorded on both sides. This is the round-trip
+    /// invariant the FFI relies on; testing it without bootstrapping a
+    /// full engine is the whole reason we extracted the helper.
+    #[test]
+    fn sign_ble_challenge_inner_roundtrips_with_verify_ble_response() {
+        let responder = PhalanxIdentity::new_ephemeral();
+        let challenger = PhalanxIdentity::new_ephemeral();
+        let nonce = [42u8; 32];
+
+        // The challenge as the challenger sees it (sender_did = challenger).
+        let challenge = BleChallenge {
+            sender_did: challenger.did.clone(),
+            nonce,
+        };
+
+        // The responder signs. Note `ble_auth_message`'s parameter names are
+        // (responder_did, challenger_did, nonce) — the responder's DID first.
+        let sig_bytes = sign_ble_challenge_inner(&responder, &challenger.did, &nonce);
+
+        let response = BleResponse {
+            responder_did: responder.did.clone(),
+            signature: sig_bytes.to_vec(),
+        };
+
+        phalanx_forensics::identity::verify_ble_response(&challenge, &response)
+            .expect("signature produced by sign_ble_challenge_inner must verify");
+    }
+
+    /// Tampered nonce must fail verification.
+    #[test]
+    fn tampered_nonce_fails_verification() {
+        let responder = PhalanxIdentity::new_ephemeral();
+        let challenger = PhalanxIdentity::new_ephemeral();
+        let signed_nonce = [1u8; 32];
+        let claimed_nonce = [2u8; 32];
+
+        let challenge = BleChallenge {
+            sender_did: challenger.did.clone(),
+            nonce: claimed_nonce, // verifier sees a different nonce than was signed
+        };
+        let sig_bytes = sign_ble_challenge_inner(&responder, &challenger.did, &signed_nonce);
+        let response = BleResponse {
+            responder_did: responder.did.clone(),
+            signature: sig_bytes.to_vec(),
+        };
+
+        assert!(
+            phalanx_forensics::identity::verify_ble_response(&challenge, &response).is_err(),
+            "verifier must reject signatures over a different nonce"
+        );
     }
 }

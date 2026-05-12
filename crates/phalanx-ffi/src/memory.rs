@@ -33,9 +33,46 @@ pub unsafe extern "C" fn phalanx_free_string(ptr: *mut c_char) {
 #[no_mangle]
 pub unsafe extern "C" fn phalanx_free_bytes(ptr: *mut u8, len: u32) {
     if !ptr.is_null() {
-        // Reconstruct the Vec so Rust's allocator frees it.
+        // SAFETY: every producer of FFI byte buffers uses `leak_bytes_to_c`,
+        // which feeds the helper a `Box<[u8]>`. `Box<[u8]>` has `capacity == len`
+        // by construction (it's a slice, not a Vec with reserved tail), so
+        // reconstructing as `Vec::from_raw_parts(ptr, len, len)` matches the
+        // allocator's record.
         let _ = Vec::from_raw_parts(ptr, len as usize, len as usize);
     }
+}
+
+/// Internal helper: hand a `Box<[u8]>` to the C side, writing the pointer and
+/// length to caller-provided out-params.
+///
+/// Taking `Box<[u8]>` (not `Vec<u8>`) enforces the capacity-equals-length
+/// invariant that `phalanx_free_bytes` relies on. A `Box<[u8]>` is a slice
+/// header on the heap; its layout records exactly `len` bytes, never more. A
+/// `Vec<u8>` with a larger reserved capacity would leak the tail and corrupt
+/// the heap on free — but the type system here makes that wrong shape
+/// unrepresentable.
+///
+/// Truncation note: `boxed.len()` is `usize`; if it exceeds `u32::MAX` we
+/// saturate. No mobile FFI payload is realistically anywhere near 4 GiB, but
+/// the saturation is loud rather than wrapping silently.
+///
+/// # Safety
+/// * `out_ptr` and `out_len` must be valid, writable pointers.
+/// * The caller is responsible for freeing the returned pointer via
+///   `phalanx_free_bytes(ptr, len)`.
+pub(crate) unsafe fn leak_bytes_to_c(
+    mut boxed: Box<[u8]>,
+    out_ptr: *mut *mut u8,
+    out_len: *mut u32,
+) {
+    let len = u32::try_from(boxed.len()).unwrap_or(u32::MAX);
+    // SAFETY: out_ptr / out_len are valid per the function contract.
+    unsafe {
+        *out_ptr = boxed.as_mut_ptr();
+        *out_len = len;
+    }
+    // The caller now owns the allocation; forget the Box so Drop doesn't free it.
+    std::mem::forget(boxed);
 }
 
 #[cfg(test)]
