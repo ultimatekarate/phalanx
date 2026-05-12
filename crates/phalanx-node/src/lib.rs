@@ -22,6 +22,7 @@ pub mod actors {
 
 pub mod clock;
 pub mod config;
+pub mod engine;
 
 pub mod playback {
     pub mod sink;
@@ -89,10 +90,21 @@ pub mod stability {
 extern crate tracing;
 
 // Re-export the Narrators and Physical Hooks
-pub use actors::meshsentinel::MeshSentinel;
+//
+// `MeshSentinel` is *deliberately not* re-exported at the crate root or in
+// the prelude. The audit-driven structural refactor in `engine.rs` forces
+// all external consumers (especially `phalanx-ffi`) through
+// `UnspawnedEngine` / `EngineHandle` / `EngineLifecycle`, so they cannot
+// construct an `Arc<Mutex<MeshSentinel>>` and re-introduce the H1/H2/H3
+// deadlock class. The type is still reachable inside `phalanx-node`
+// (e.g. `phalanx-sim` driver and the in-crate sentinel binary) via the
+// fully-qualified `actors::meshsentinel::MeshSentinel` path; that's a
+// deliberately-uglier import, since those callers also drive the run
+// loop directly and are signing up for the linear-ownership contract.
 pub use actors::storage::StorageActor;
 pub use clock::TrustedClock;
 pub use config::NodeConfig;
+pub use engine::{EngineHandle, EngineLifecycle, ShutdownError, UnspawnedEngine};
 pub use persistence::journal::FileJournal;
 pub use persistence::vault::Guardian;
 
@@ -101,7 +113,6 @@ pub use actors::playback::{PlaybackCoordinator, PlaybackStats};
 pub use playback::sink::{ArtifactSink, VideoPlayerSink};
 
 pub mod prelude {
-    pub use crate::actors::meshsentinel::MeshSentinel;
     pub use crate::clock::TrustedClock;
     pub use crate::config::NodeConfig;
     pub use crate::persistence::journal::FileJournal;
