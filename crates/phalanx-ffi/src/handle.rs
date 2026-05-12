@@ -113,8 +113,13 @@ pub struct PhalanxHandle {
     pub(crate) audio_tx: Option<mpsc::Sender<AudioShard>>,
     /// Node DID — immutable after creation.
     pub(crate) node_did: String,
-    /// Whether a recording is currently active.
-    pub(crate) recording_active: AtomicBool,
+    /// Whether a recording is currently active. This is an `Arc` clone of
+    /// the *engine's* recording flag — owned by `RecordingSessionState`
+    /// and flipped only by `start_recording` / `stop_recording` running
+    /// inside the engine's `select!` arm. The FFI is a reader; writes go
+    /// through `SentinelCommand::SetRecordingState`, so there is exactly
+    /// one writer and no possibility of FFI/engine desync.
+    pub(crate) recording_active: Arc<AtomicBool>,
     /// Local mesh inbound sender — FFI push functions send NetworkEvents here.
     pub(crate) local_mesh_tx: Option<mpsc::Sender<NetworkEvent>>,
     /// Local mesh outbound receiver — Flutter polls outbound packets from here.
@@ -455,6 +460,9 @@ async fn bootstrap(
     let content_key_tx = unspawned.content_key_tx();
     let video_tx = Some(unspawned.video_tx());
     let audio_tx = Some(unspawned.audio_tx());
+    // Single source of truth for "is a recording active" — owned by the
+    // engine's RecordingSessionState, shared into the handle as an Arc.
+    let recording_active = unspawned.recording_active();
 
     // Create a dummy runtime — will be replaced by the caller. This is the
     // same trick the old bootstrap used; we keep it to avoid restructuring
@@ -479,7 +487,7 @@ async fn bootstrap(
             video_tx,
             audio_tx,
             node_did,
-            recording_active: AtomicBool::new(false),
+            recording_active,
             local_mesh_tx: Some(local_mesh_tx),
             local_mesh_outbound_rx: Mutex::new(Some(local_mesh_outbound_rx)),
             local_mesh_available,

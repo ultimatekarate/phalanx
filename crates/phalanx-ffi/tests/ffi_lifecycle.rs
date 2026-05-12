@@ -151,6 +151,98 @@ fn phalanx_full_lifecycle_completes_quickly() {
     });
 }
 
+/// **N1 regression — unified `recording_active` flag.**
+///
+/// Pre-cleanup, `PhalanxHandle::recording_active` was a standalone
+/// `AtomicBool` that `capture.rs:phalanx_start_recording` wrote
+/// directly, while the engine's `RecordingSessionState` had its own
+/// flag flipped by `start_recording` / `stop_recording`. The two
+/// could drift if any caller wrote one without the other.
+///
+/// Post-cleanup, the handle's field is an `Arc<AtomicBool>` cloned
+/// from the engine at bootstrap; `phalanx_start_recording` dispatches
+/// `SentinelCommand::SetRecordingState` which causes the *engine* to
+/// flip the (shared) atomic. This test confirms the FFI-visible flag
+/// reflects engine-side writes — i.e. that there's actually only one
+/// flag now, not two.
+/// **N1 regression — unified `recording_active` flag.**
+///
+/// Pre-cleanup, `PhalanxHandle::recording_active` was a standalone
+/// `AtomicBool` that `capture.rs:phalanx_start_recording` wrote
+/// directly, while the engine's `RecordingSessionState` had its own
+/// flag flipped by `start_recording` / `stop_recording`. The two
+/// could drift if any caller wrote one without the other.
+///
+/// Post-cleanup, the handle's field is an `Arc<AtomicBool>` cloned
+/// from the engine at bootstrap; `phalanx_start_recording` dispatches
+/// `SentinelCommand::SetRecordingState` which causes the *engine* to
+/// flip the (shared) atomic. This test confirms the FFI-visible flag
+/// reflects engine-side writes — observed via the public
+/// `phalanx_is_recording` query — i.e. that there's actually only
+/// one flag now, not two.
+#[test]
+fn phalanx_start_recording_flips_unified_recording_active_via_engine() {
+    under_timeout(Duration::from_secs(45), || {
+        let env = TestEnv::new();
+        let mut genesis_phrase: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let handle = unsafe {
+            phalanx_create(
+                std::ptr::null(),
+                env.storage_cstr.as_ptr(),
+                env.passphrase_cstr.as_ptr(),
+                &mut genesis_phrase as *mut *mut std::os::raw::c_char,
+            )
+        };
+        assert!(!handle.is_null());
+        let started = unsafe { phalanx_start(handle) };
+        assert_eq!(started, PhalanxError::Ok.code());
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Pre-condition: no recording active. Use the public query —
+        // the test must not poke private fields, so any future change
+        // that breaks the C-ABI signal here is caught.
+        let pre = unsafe { phalanx_ffi::status::phalanx_is_recording(handle) };
+        assert_eq!(pre, 0, "phalanx_is_recording starts at 0");
+
+        // Drive phalanx_start_recording — routes through SentinelCommand.
+        let mut out_id: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let code = unsafe {
+            phalanx_ffi::capture::phalanx_start_recording(
+                handle,
+                &mut out_id as *mut *mut std::os::raw::c_char,
+            )
+        };
+        assert_eq!(code, PhalanxError::Ok.code(), "phalanx_start_recording");
+
+        // The engine processed SetRecordingState and flipped the shared atomic.
+        let post_start = unsafe { phalanx_ffi::status::phalanx_is_recording(handle) };
+        assert_eq!(
+            post_start, 1,
+            "phalanx_is_recording is 1 after phalanx_start_recording (engine is the writer)"
+        );
+
+        // And the inverse via phalanx_stop_recording.
+        let code = unsafe { phalanx_ffi::capture::phalanx_stop_recording(handle) };
+        assert_eq!(code, PhalanxError::Ok.code(), "phalanx_stop_recording");
+
+        let post_stop = unsafe { phalanx_ffi::status::phalanx_is_recording(handle) };
+        assert_eq!(
+            post_stop, 0,
+            "phalanx_is_recording back to 0 after phalanx_stop_recording"
+        );
+
+        unsafe {
+            if !out_id.is_null() {
+                phalanx_ffi::memory::phalanx_free_string(out_id);
+            }
+            phalanx_destroy(handle);
+            if !genesis_phrase.is_null() {
+                phalanx_ffi::memory::phalanx_free_string(genesis_phrase);
+            }
+        }
+    });
+}
+
 #[test]
 fn phalanx_destroy_without_stop_drains_cleanly() {
     // M2 regression: `phalanx_destroy` on a still-Running handle must
