@@ -7,8 +7,12 @@ rust-version.workspace = true
 description = "C-ABI bridge for Flutter/mobile integration. The Larynx of the linguistic model."
 
 [lib]
-# "cdylib" for Android (.so), "staticlib" for iOS (.a)
-crate-type = ["cdylib", "staticlib"]
+# "cdylib" for Android (.so), "staticlib" for iOS (.a).
+# "rlib" is dev-only: it lets `tests/*.rs` integration tests link against
+# the crate so the FFI surface can be exercised through its `extern "C"`
+# functions, not just the in-tree `#[cfg(test)]` modules. The mobile
+# deliverables (cdylib/staticlib) are unaffected.
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 # Workspace crates
@@ -40,6 +44,10 @@ zeroize = "1"
 # Android logcat output for diagnostics
 [target.'cfg(target_os = "android")'.dependencies]
 android_log-sys = "0.3"
+
+# Dev-only: integration tests bootstrap a real engine in a tempdir.
+[dev-dependencies]
+tempfile = "3.26"
 
 [lints]
 workspace = true
