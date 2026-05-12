@@ -21,6 +21,7 @@ use phalanx_forensics::reassembler::{compress_frame, create_audio_shard, create_
 use phalanx_lens::scalar::ScalarLens;
 use phalanx_lens::ForensicLens;
 use phalanx_node::actors::egress::EgressCommand;
+use phalanx_node::actors::meshsentinel::SentinelCommand;
 use phalanx_node::actors::storage::StorageCommand;
 
 use phalanx_node::hardware::camera::target_fps;
@@ -206,9 +207,24 @@ unsafe fn start_recording_inner(
         }
     }
 
-    // Set recording active — recording_id is returned to the caller
-    // and passed back on each push call (no Mutex storage needed).
-    h.recording_active.store(true, Ordering::Relaxed);
+    // Dispatch SetRecordingState through the engine's command mailbox.
+    // The engine's `select!` arm calls `start_recording` inside its own
+    // context, which sets `RecordingSessionState::active_recording_id`
+    // and flips the shared `recording_active` atomic. That's the single
+    // writer; the FFI handle holds an `Arc` clone for reads.
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if h.sentinel_cmd_tx
+        .blocking_send(SentinelCommand::SetRecordingState {
+            id: Some(recording_id.clone()),
+            reply_to: reply_tx,
+        })
+        .is_err()
+    {
+        return PhalanxError::ChannelClosed.code();
+    }
+    if reply_rx.blocking_recv().is_err() {
+        return PhalanxError::ChannelClosed.code();
+    }
 
     // Return recording ID to caller
     match CString::new(id_str) {
@@ -235,10 +251,24 @@ pub unsafe extern "C" fn phalanx_stop_recording(handle: *mut PhalanxHandle) -> i
         return PhalanxError::NotRecording.code();
     }
 
-    h.recording_active.store(false, Ordering::Relaxed);
-
-    // Clear per-recording content key — MediaEgressActor reverts to vault_key (None).
-    let _ = h.content_key_tx.send(None);
+    // Dispatch the stop through the engine's command mailbox. The
+    // engine's `session.stop()` flips `recording_active` and sends
+    // `None` on `content_key_tx` (MediaEgressActor reverts to
+    // vault_key), so the FFI no longer needs to drive either signal
+    // directly.
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if h.sentinel_cmd_tx
+        .blocking_send(SentinelCommand::SetRecordingState {
+            id: None,
+            reply_to: reply_tx,
+        })
+        .is_err()
+    {
+        return PhalanxError::ChannelClosed.code();
+    }
+    if reply_rx.blocking_recv().is_err() {
+        return PhalanxError::ChannelClosed.code();
+    }
 
     PhalanxError::Ok.code()
 }
