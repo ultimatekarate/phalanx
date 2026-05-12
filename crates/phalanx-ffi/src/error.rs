@@ -53,6 +53,12 @@ pub enum PhalanxError {
     /// Both producer (capture) and the playback path are gated so the
     /// single-tenant providers channel can't be reassigned mid-recovery.
     AlreadyRecovering = -17,
+    /// An `extern "C"` body caught a panic from inside Rust code (typically a
+    /// third-party crate like `c2pa` on malformed input). The panic was
+    /// converted to this error code by an `ffi_body!` wrapper to avoid the
+    /// process-abort that would otherwise occur when a panic unwinds across
+    /// an `extern "C"` boundary.
+    Panic = -18,
 }
 
 impl PhalanxError {
@@ -100,6 +106,7 @@ mod tests {
         assert_eq!(PhalanxError::BufferTooSmall.code(), -15);
         assert_eq!(PhalanxError::SerializationFailure.code(), -16);
         assert_eq!(PhalanxError::AlreadyRecovering.code(), -17);
+        assert_eq!(PhalanxError::Panic.code(), -18);
     }
 
     #[test]
@@ -123,6 +130,7 @@ mod tests {
             PhalanxError::BufferTooSmall.code(),
             PhalanxError::SerializationFailure.code(),
             PhalanxError::AlreadyRecovering.code(),
+            PhalanxError::Panic.code(),
         ];
 
         let mut sorted = codes.clone();
@@ -153,6 +161,7 @@ mod tests {
             PhalanxError::BufferTooSmall,
             PhalanxError::SerializationFailure,
             PhalanxError::AlreadyRecovering,
+            PhalanxError::Panic,
         ];
 
         for variant in &error_variants {
