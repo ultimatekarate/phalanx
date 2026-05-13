@@ -39,13 +39,27 @@ use std::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Duration};
 
+/// Returned when `spawn_playback` is invoked while a previous playback
+/// coordinator is still live. The playback singleton is enforced
+/// engine-side via `MeshSentinel::playback_slot`; this error is the
+/// type-level signal that the at-most-one invariant was upheld.
+///
+/// Domain note: playback serves the user's own recordings AND
+/// recordings they hold cryptographic grants for. Recovery is a
+/// separate domain operation over the user's own manifest only — the
+/// two share the `providers_rx` channel but have distinct lifecycles
+/// and slots.
+#[derive(Debug, thiserror::Error)]
+#[error("a playback session is already active")]
+pub struct AlreadyPlaying;
+
 /// Commands the FFI (or any external driver) can dispatch to `MeshSentinel`.
 ///
 /// Each variant covers an operation that requires `&mut MeshSentinel` —
-/// `start_recording`, `stop_recording`, `spawn_recovery`. The run loop's
-/// `tokio::select!` services this mailbox alongside network events, so
-/// commands execute inside the engine's own context without external
-/// callers needing to acquire any lock on the sentinel.
+/// `start_recording`, `stop_recording`, `spawn_recovery`, `spawn_playback`.
+/// The run loop's `tokio::select!` services this mailbox alongside network
+/// events, so commands execute inside the engine's own context without
+/// external callers needing to acquire any lock on the sentinel.
 ///
 /// This is the linguistically-correct entry point for sentinel-mutating
 /// FFI requests: the FFI sends a command (future-tense, enqueued); the
@@ -68,6 +82,19 @@ pub enum SentinelCommand {
         status: Arc<Mutex<phalanx_proto::recovery::RecoveryStatus>>,
         cancel_rx: tokio::sync::oneshot::Receiver<()>,
         reply_to: tokio::sync::oneshot::Sender<JoinHandle<()>>,
+    },
+    /// Spawn a playback coordinator for the given recording. Engine
+    /// enforces at-most-one playback via `playback_slot`; the reply
+    /// carries `Err(AlreadyPlaying)` if a prior coordinator is still
+    /// live. The sentinel owns the resulting `JoinHandle` in its slot —
+    /// the FFI doesn't need it because playback lifecycle is
+    /// implicit-shutdown-via-receiver-drop (drop the session → sinks
+    /// fail on next send → `coordinator.run` exits).
+    SpawnPlayback {
+        recording_id: RecordingId,
+        video_sink: Box<dyn phalanx_proto::playback::PlaybackSink + Send + Sync + 'static>,
+        audio_sink: Box<dyn phalanx_proto::playback::PlaybackSink + Send + Sync + 'static>,
+        reply_to: tokio::sync::oneshot::Sender<Result<(), AlreadyPlaying>>,
     },
 }
 
@@ -164,6 +191,18 @@ pub struct MeshSentinel<I: IngressPort> {
     // DHT: Provider discovery forwarding to the active PlaybackCoordinator.
     // Replaced with a fresh channel on each spawn_playback() call.
     providers_tx: mpsc::Sender<(RecordingId, Vec<MeshAddress>)>,
+
+    /// At-most-one active playback coordinator. `Some` iff a playback
+    /// task is running (or finished but unreaped). `spawn_playback`
+    /// rejects a fresh request when this slot holds an unfinished
+    /// JoinHandle.
+    ///
+    /// This is the structural counterpart to the runtime gates the FFI
+    /// previously needed: the invariant "only one playback at a time"
+    /// is encoded in the field, not in scattered checks across
+    /// callsites. Replaces the prior FFI-side dummy-channel pattern at
+    /// `phalanx-ffi/src/playback.rs`.
+    playback_slot: Option<JoinHandle<()>>,
 
     // Shield Wall: Trust channel for dispatching spectral anomaly offenses.
     pub trust_tx: mpsc::Sender<TrustCommand>,
@@ -631,6 +670,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             local_mesh: deps.local_mesh,
             lifecycle_rx,
             providers_tx,
+            playback_slot: None,
             trust_tx: sentinel_trust_tx,
             video_tx,
             audio_tx,
@@ -721,6 +761,15 @@ impl<I: IngressPort> MeshSentinel<I> {
             } => {
                 let jh = self.spawn_recovery(status, cancel_rx);
                 let _ = reply_to.send(jh);
+            }
+            SentinelCommand::SpawnPlayback {
+                recording_id,
+                video_sink,
+                audio_sink,
+                reply_to,
+            } => {
+                let result = self.spawn_playback(recording_id, video_sink, audio_sink);
+                let _ = reply_to.send(result);
             }
         }
     }
@@ -1303,53 +1352,116 @@ impl<I: IngressPort> MeshSentinel<I> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    pub async fn spawn_playback<V: PlaybackSink + 'static, A: PlaybackSink + 'static>(
+    /// Spawn a `PlaybackCoordinator` for the given recording.
+    ///
+    /// Enforces the at-most-one-playback invariant via `playback_slot`:
+    /// if the prior task is still running, returns `Err(AlreadyPlaying)`
+    /// without touching any state. A finished prior is reaped silently
+    /// (its `JoinHandle` is replaced).
+    ///
+    /// Synchronous because `handle_sentinel_command` (the only external
+    /// driver) is sync — the inline `GetContentKey` query and the
+    /// payload-type debug probe both run inside the spawned task rather
+    /// than blocking the run loop.
+    pub fn spawn_playback(
         &mut self,
         recording_id: RecordingId,
-        video_sink: V,
-        audio_sink: A,
-    ) -> tokio::task::JoinHandle<()> {
+        video_sink: Box<dyn PlaybackSink + Send + Sync + 'static>,
+        audio_sink: Box<dyn PlaybackSink + Send + Sync + 'static>,
+    ) -> Result<(), AlreadyPlaying> {
+        // Reap a finished prior, or reject.
+        if let Some(jh) = self.playback_slot.as_ref() {
+            if !jh.is_finished() {
+                return Err(AlreadyPlaying);
+            }
+        }
+
         // Fresh channel per playback session — only one active at a time.
         // Replacing providers_tx drops the old sender, signaling the previous
         // PlaybackCoordinator's providers_rx that no more data will arrive.
+        // The singleton check above guarantees the previous coordinator has
+        // already exited.
         let (providers_tx, providers_rx) = mpsc::channel(100);
         self.providers_tx = providers_tx;
 
-        // Resolve per-recording content key for decryption.
-        // Falls back to vault_key (network_key) for legacy recordings without content keys.
-        let decryption_key = {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let _ = self
-                .storage_tx
-                .send(StorageCommand::GetContentKey {
-                    recording_id: recording_id.clone(),
-                    reply_to: tx,
-                })
-                .await;
-            match rx.await {
-                Ok(Some(key_bytes)) => {
-                    Some(phalanx_proto::crypto::SymmetricKey::from_bytes(key_bytes))
+        let storage_tx = self.storage_tx.clone();
+        let egress_tx = self.egress_tx.clone();
+        let discovery_tx = self.discovery_tx.clone();
+        let identity = self.identity.clone();
+        let network_key = self.network_key.clone();
+
+        let jh = tokio::spawn(async move {
+            // GetContentKey runs inside the task — failure is now localized to
+            // the playback lifecycle rather than blocking the sentinel's run
+            // loop. Falls back to network_key for legacy recordings.
+            let decryption_key = {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let _ = storage_tx
+                    .send(StorageCommand::GetContentKey {
+                        recording_id: recording_id.clone(),
+                        reply_to: tx,
+                    })
+                    .await;
+                match rx.await {
+                    Ok(Some(key_bytes)) => {
+                        Some(phalanx_proto::crypto::SymmetricKey::from_bytes(key_bytes))
+                    }
+                    _ => Some((*network_key).clone()),
                 }
-                _ => Some((*self.network_key).clone()), // fallback for legacy
+            };
+
+            // Payload-type debug probe on shard 1. Preserves the one
+            // useful signal from the prior FFI-side diagnostic block: lets
+            // device debugging distinguish "shard missing" from "decrypt
+            // failed" without firing up logcat triage tooling. The other
+            // four probes (ListRecordings / DebugRecordingInfo /
+            // DebugVaultListing / a duplicate GetContentKey) have been
+            // deleted as scaffolding from when playback wasn't working.
+            {
+                let (probe_tx, probe_rx) = tokio::sync::oneshot::channel();
+                let _ = storage_tx
+                    .send(StorageCommand::GetShard {
+                        recording_id: recording_id.clone(),
+                        sequence_id: phalanx_proto::evidence::StorageSequence(1),
+                        reply_to: probe_tx,
+                    })
+                    .await;
+                if let Ok(Some(env)) = probe_rx.await {
+                    let kind = match &env.evidence {
+                        phalanx_proto::evidence::Evidence::Video(v) => match &v.payload {
+                            phalanx_proto::evidence::DataPayload::Missing => "Missing",
+                            phalanx_proto::evidence::DataPayload::Clear(_) => "Clear",
+                            phalanx_proto::evidence::DataPayload::Compressed(_) => "Compressed",
+                            phalanx_proto::evidence::DataPayload::Encrypted { .. } => "Encrypted",
+                        },
+                        _ => "non-video",
+                    };
+                    tracing::info!(
+                        target: "phalanx::playback",
+                        recording = %recording_id.as_str(),
+                        payload = kind,
+                        "playback start: shard 1 payload type"
+                    );
+                }
             }
-        };
 
-        let mut coordinator = PlaybackCoordinator::new(
-            self.storage_tx.clone(),
-            self.egress_tx.clone(),
-            decryption_key,
-            video_sink,
-            audio_sink,
-            self.discovery_tx.clone(),
-            providers_rx,
-            self.identity.clone(),
-        );
-
-        tokio::spawn(async move {
+            let mut coordinator = PlaybackCoordinator::new(
+                storage_tx,
+                egress_tx,
+                decryption_key,
+                video_sink,
+                audio_sink,
+                discovery_tx,
+                providers_rx,
+                identity,
+            );
             if let Err(e) = coordinator.run(recording_id).await {
                 tracing::error!("Playback Coordinator terminated with error: {:?}", e);
             }
-        })
+        });
+
+        self.playback_slot = Some(jh);
+        Ok(())
     }
 
     /// Spawn a manifest-walk recovery session. Mirrors `spawn_playback`'s

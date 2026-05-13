@@ -15,8 +15,9 @@ use crate::error::PhalanxError;
 use crate::handle::PhalanxHandle;
 use crate::logcat::phalanx_log;
 
-use phalanx_node::actors::storage::StorageCommand;
-use phalanx_node::{PlaybackCoordinator, VideoPlayerSink};
+use phalanx_node::actors::meshsentinel::SentinelCommand;
+use phalanx_node::VideoPlayerSink;
+use phalanx_proto::playback::PlaybackSink;
 use phalanx_proto::prelude::RecordingId;
 
 use std::ffi::CStr;
@@ -104,204 +105,62 @@ pub unsafe extern "C" fn phalanx_start_playback(
     let (video_tx, video_rx) = mpsc::channel(8);
     let (audio_tx, audio_rx) = mpsc::channel(8);
 
-    // Clone tx handles before moving into sinks — we need them later for capacity diagnostics
-    let video_tx_diag = video_tx.clone();
-    let audio_tx_diag = audio_tx.clone();
+    // Construct the playback sinks here; the PlaybackCoordinator and its
+    // providers/discovery channels live inside the sentinel and are reached
+    // via SentinelCommand::SpawnPlayback. This wires mesh fallback through
+    // the sentinel's real discovery_rx, replacing the prior dummy channels
+    // (which silently disabled mesh discovery). The sentinel's playback_slot
+    // enforces at-most-one-playback by type; we receive Err(AlreadyPlaying)
+    // if a prior session is still live.
+    let video_sink: Box<dyn PlaybackSink + Send + Sync + 'static> =
+        Box::new(VideoPlayerSink::new(video_tx));
+    let audio_sink: Box<dyn PlaybackSink + Send + Sync + 'static> =
+        Box::new(VideoPlayerSink::new(audio_tx));
 
-    let video_sink = VideoPlayerSink::new(video_tx);
-    let audio_sink = VideoPlayerSink::new(audio_tx); // Same type — just a channel wrapper
-
-    // Construct PlaybackCoordinator directly from handle channels.
-    // DO NOT lock the sentinel — engine.run() holds that tokio::sync::Mutex
-    // for its entire lifetime, so sentinel_ref.lock().await would deadlock.
-    let storage_tx = h.storage_tx.clone();
-    let egress_tx = h.egress_tx.clone();
-    let identity = h.identity.clone();
-    let vault_key = h.vault_key.clone();
-
-    // Dummy discovery/providers channels — local playback doesn't need DHT.
-    // When a shard is missing locally the coordinator will try_send to
-    // discovery_tx (silently dropped) and poll providers_rx (always empty).
-    // Remote retrieval requires wiring these through the sentinel, but for
-    // the local-capture demo path this is correct.
-    let (discovery_tx, _discovery_rx) = mpsc::channel(1);
-    let (_providers_tx, providers_rx) = mpsc::channel(1);
-
-    h.runtime.spawn(async move {
-        phalanx_log!("[Phalanx FFI] Starting playback for {}", rec_id.as_str());
-
-        // Resolve per-recording content key for decryption.
-        //
-        // Under the v2 deterministic-DEK regime (PR A), `GetContentKey`
-        // always returns `Some` — the storage actor's `resolve_encryption_key`
-        // chain is `keyring → derive(dek_master, recording_id)` and never
-        // returns `None`. The `Ok(None)` branch is therefore unreachable in
-        // production; it's retained only as a defensive bridge for any
-        // future callers that choose to emit `None` again. The `Err` arm
-        // covers the genuine failure mode: the storage actor died before
-        // replying. In that case the vault_key is the only key still in
-        // scope here — decryption will almost certainly fail downstream
-        // (it's the wrong key for v2 recordings), but logging the storage
-        // failure is the correct first signal.
-        let decryption_key = {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let _ = storage_tx
-                .send(StorageCommand::GetContentKey {
-                    recording_id: rec_id.clone(),
-                    reply_to: tx,
-                })
-                .await;
-            match rx.await {
-                Ok(Some(key_bytes)) => {
-                    phalanx_log!("[Phalanx FFI] Got content key ({} bytes) for {}", key_bytes.len(), rec_id.as_str());
-                    Some(phalanx_proto::crypto::SymmetricKey::from_bytes(key_bytes))
-                }
-                Ok(None) => {
-                    // Defensive: not emitted by the post-PR-A storage actor.
-                    phalanx_log!("[Phalanx FFI] GetContentKey returned None (unexpected under v2); falling back to vault_key");
-                    Some((*vault_key).clone())
-                }
-                Err(e) => {
-                    phalanx_log!("[Phalanx FFI] GetContentKey channel error (storage actor down?): {e:?}; falling back to vault_key");
-                    Some((*vault_key).clone())
-                }
-            }
-        };
-
-        // Diagnostic: probe storage for shard 1 before starting coordinator
-        {
-            let (probe_tx, probe_rx) = tokio::sync::oneshot::channel();
-            let _ = storage_tx
-                .send(StorageCommand::GetShard {
-                    recording_id: rec_id.clone(),
-                    sequence_id: phalanx_proto::evidence::StorageSequence(1),
-                    reply_to: probe_tx,
-                })
-                .await;
-            match probe_rx.await {
-                Ok(Some(env)) => {
-                    let (etype, payload) = match &env.evidence {
-                        phalanx_proto::evidence::Evidence::Video(v) => ("Video", Some(v.payload.clone())),
-                        phalanx_proto::evidence::Evidence::Audio(a) => ("Audio", Some(a.payload.clone())),
-                        _ => ("Other", None),
-                    };
-                    phalanx_log!("[Phalanx FFI] Probe: shard 1 EXISTS ({})", etype);
-
-                    // Try to decode the payload to verify the full pipeline
-                    if let Some(p) = payload {
-                        let payload_desc = match &p {
-                            phalanx_proto::evidence::DataPayload::Missing => "Missing",
-                            phalanx_proto::evidence::DataPayload::Clear(_) => "Clear",
-                            phalanx_proto::evidence::DataPayload::Compressed(_) => "Compressed",
-                            phalanx_proto::evidence::DataPayload::Encrypted { .. } => "Encrypted",
-                        };
-                        phalanx_log!("[Phalanx FFI] Probe: shard 1 payload = {}", payload_desc);
-
-                        match phalanx_forensics::decode_payload(p, decryption_key.as_ref()) {
-                            Ok(decoded) => {
-                                phalanx_log!("[Phalanx FFI] Probe: decode_payload OK, {} bytes", decoded.len());
-                                if etype == "Video" {
-                                    match postcard::from_bytes::<Vec<Vec<u8>>>(&decoded) {
-                                        Ok(frames) => phalanx_log!("[Phalanx FFI] Probe: postcard deser OK, {} JPEG frames", frames.len()),
-                                        Err(e) => phalanx_log!("[Phalanx FFI] Probe: postcard deser FAILED: {e:?}"),
-                                    }
-                                }
-                            }
-                            Err(e) => phalanx_log!("[Phalanx FFI] Probe: decode_payload FAILED: {e:?}"),
-                        }
-                    }
-                }
-                Ok(None) => phalanx_log!("[Phalanx FFI] Probe: shard 1 NOT FOUND"),
-                Err(e) => phalanx_log!("[Phalanx FFI] Probe: GetShard failed: {e:?}"),
-            }
-
-            // Also probe ListRecordings to see how many the storage actor knows about
-            let (list_tx, list_rx) = tokio::sync::oneshot::channel();
-            let _ = storage_tx
-                .send(StorageCommand::ListRecordings { reply_to: list_tx })
-                .await;
-            match list_rx.await {
-                Ok(ids) => {
-                    phalanx_log!("[Phalanx FFI] Probe: {} recordings known to storage", ids.len());
-                    for id in &ids {
-                        phalanx_log!("[Phalanx FFI] Probe:   recording = {}", id.as_str());
-                    }
-                }
-                Err(e) => phalanx_log!("[Phalanx FFI] Probe: ListRecordings failed: {e:?}"),
-            }
-
-            // Query shard count for this specific recording
-            let (info_tx, info_rx) = tokio::sync::oneshot::channel();
-            let _ = storage_tx
-                .send(StorageCommand::DebugRecordingInfo {
-                    recording_id: rec_id.clone(),
-                    reply_to: info_tx,
-                })
-                .await;
-            match info_rx.await {
-                Ok((shard_count, has_key)) => {
-                    phalanx_log!(
-                        "[Phalanx FFI] Probe: recording {} has {} shards, has_key={}",
-                        rec_id.as_str(), shard_count, has_key
-                    );
-                }
-                Err(e) => phalanx_log!("[Phalanx FFI] Probe: DebugRecordingInfo failed: {e:?}"),
-            }
-
-            // List vault directory contents to see if .recording files exist on disk
-            let (vault_tx, vault_rx) = tokio::sync::oneshot::channel();
-            let _ = storage_tx
-                .send(StorageCommand::DebugVaultListing {
-                    reply_to: vault_tx,
-                })
-                .await;
-            match vault_rx.await {
-                Ok((vault_path, entries)) => {
-                    phalanx_log!("[Phalanx FFI] Probe: vault_path = {}", vault_path);
-                    if entries.is_empty() {
-                        phalanx_log!("[Phalanx FFI] Probe: vault directory is EMPTY");
-                    }
-                    for entry in &entries {
-                        phalanx_log!("[Phalanx FFI] Probe:   {}", entry);
-                    }
-                }
-                Err(e) => phalanx_log!("[Phalanx FFI] Probe: DebugVaultListing failed: {e:?}"),
-            }
-        }
-
-        let mut coordinator = PlaybackCoordinator::new(
-            storage_tx,
-            egress_tx,
-            decryption_key,
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if h.runtime
+        .block_on(h.sentinel_cmd_tx.send(SentinelCommand::SpawnPlayback {
+            recording_id: rec_id.clone(),
             video_sink,
             audio_sink,
-            discovery_tx,
-            providers_rx,
-            identity,
+            reply_to: reply_tx,
+        }))
+        .is_err()
+    {
+        phalanx_log!(
+            "[Phalanx FFI] phalanx_start_playback: sentinel command channel closed for {}",
+            rec_id.as_str()
         );
+        return std::ptr::null_mut();
+    }
 
-        phalanx_log!("[Phalanx FFI] PlaybackCoordinator starting run loop");
-        match coordinator.run(rec_id).await {
-            Ok(stats) => {
-                // Channel capacity is bounded at 8, well within u32 range.
-                #[allow(clippy::cast_possible_truncation)]
-                let video_buffered = 8u32.saturating_sub(video_tx_diag.capacity() as u32);
-                #[allow(clippy::cast_possible_truncation)]
-                let audio_buffered = 8u32.saturating_sub(audio_tx_diag.capacity() as u32);
-                phalanx_log!(
-                    "[Phalanx FFI] PlaybackStats: found={}, missing={}, video_sent={}, audio_sent={}, decode_fail={}",
-                    stats.shards_found, stats.shards_missing, stats.video_sent, stats.audio_sent, stats.decode_failures
-                );
-                phalanx_log!(
-                    "[Phalanx FFI] PlaybackCoordinator finished. video_buffered={}, audio_buffered={}",
-                    video_buffered, audio_buffered
-                );
-            }
-            Err(e) => phalanx_log!("[Phalanx FFI] PlaybackCoordinator FAILED: {e:?}"),
+    match h.runtime.block_on(reply_rx) {
+        Ok(Ok(())) => {
+            phalanx_log!(
+                "[Phalanx FFI] phalanx_start_playback: dispatched for {}",
+                rec_id.as_str()
+            );
         }
-    });
+        Ok(Err(_already_playing)) => {
+            phalanx_log!(
+                "[Phalanx FFI] phalanx_start_playback: rejected ({}): a playback session is already active",
+                rec_id.as_str()
+            );
+            return std::ptr::null_mut();
+        }
+        Err(_) => {
+            phalanx_log!(
+                "[Phalanx FFI] phalanx_start_playback: reply channel dropped for {}",
+                rec_id.as_str()
+            );
+            return std::ptr::null_mut();
+        }
+    }
 
-    // Return opaque session pointer — caller owns this
+    // Return opaque session pointer — caller owns this. Dropping the session
+    // closes video_rx/audio_rx, which makes the sentinel-spawned coordinator's
+    // sink writes fail and the run loop exit cleanly. No JoinHandle stored
+    // here — the sentinel owns the task lifecycle via its playback_slot.
     Box::into_raw(Box::new(PlaybackSession {
         video_rx,
         audio_rx,
