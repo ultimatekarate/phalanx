@@ -23,6 +23,9 @@ class PhalanxError {
   static const alreadyRecording = -11;
   static const notRecording = -12;
   static const revocationFailed = -13;
+  static const mnemonicParseError = -19;
+  static const revocationKeyMismatch = -20;
+  static const recordingNotFound = -21;
 }
 
 /// Exception thrown when an FFI call fails.
@@ -45,6 +48,14 @@ typedef _PhalanxCreateC = Pointer<Void> Function(
 );
 typedef _PhalanxCreateDart = Pointer<Void> Function(
   Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Pointer<Utf8>>,
+);
+
+// Restore from BIP-39 mnemonic (no out_genesis_phrase: the caller provided it)
+typedef _PhalanxRestoreC = Pointer<Void> Function(
+  Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>,
+);
+typedef _PhalanxRestoreDart = Pointer<Void> Function(
+  Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>,
 );
 
 typedef _PhalanxI32HandleC = Int32 Function(Pointer<Void>);
@@ -216,6 +227,10 @@ typedef _PhalanxForgetRecordingDart = int Function(
   Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>,
 );
 
+// BIP-39 mnemonic validation (stateless — no handle needed)
+typedef _PhalanxValidateMnemonicC = Int32 Function(Pointer<Utf8>);
+typedef _PhalanxValidateMnemonicDart = int Function(Pointer<Utf8>);
+
 // Memory
 typedef _PhalanxFreeStringC = Void Function(Pointer<Utf8>);
 typedef _PhalanxFreeStringDart = void Function(Pointer<Utf8>);
@@ -237,6 +252,7 @@ class PhalanxBridge {
 
   // Cached function lookups
   late final _PhalanxCreateDart _create;
+  late final _PhalanxRestoreDart _restore;
   late final _PhalanxI32HandleDart _start;
   late final _PhalanxI32HandleDart _stop;
   late final _PhalanxDestroyDart _destroy;
@@ -266,6 +282,7 @@ class PhalanxBridge {
   late final _PhalanxOpenLinkDart _openLink;
   late final _PhalanxExportC2paDart _exportC2pa;
   late final _PhalanxForgetRecordingDart _forgetRecording;
+  late final _PhalanxValidateMnemonicDart _validateMnemonic;
   late final _PhalanxFreeStringDart _freeString;
   late final _PhalanxFreeBytesDart _freeBytes;
 
@@ -277,6 +294,9 @@ class PhalanxBridge {
   void _bindFunctions() {
     _create = _lib.lookupFunction<_PhalanxCreateC, _PhalanxCreateDart>(
       'phalanx_create',
+    );
+    _restore = _lib.lookupFunction<_PhalanxRestoreC, _PhalanxRestoreDart>(
+      'phalanx_restore',
     );
     _start = _lib.lookupFunction<_PhalanxI32HandleC, _PhalanxI32HandleDart>(
       'phalanx_start',
@@ -387,6 +407,10 @@ class PhalanxBridge {
         .lookupFunction<_PhalanxForgetRecordingC, _PhalanxForgetRecordingDart>(
           'phalanx_forget_recording',
         );
+    _validateMnemonic = _lib
+        .lookupFunction<_PhalanxValidateMnemonicC, _PhalanxValidateMnemonicDart>(
+          'phalanx_validate_mnemonic',
+        );
     _freeString =
         _lib.lookupFunction<_PhalanxFreeStringC, _PhalanxFreeStringDart>(
           'phalanx_free_string',
@@ -449,6 +473,52 @@ class PhalanxBridge {
       if (configNative != nullptr) calloc.free(configNative);
       calloc.free(outPhrase);
     }
+  }
+
+  /// Restore an existing identity from a 12-word BIP-39 mnemonic and bootstrap
+  /// the engine on top of it. Symmetric with [create]: same `start()` /
+  /// `stop()` / `destroy()` lifecycle after this returns.
+  ///
+  /// The phrase is passed as a [Uint8List] (UTF-8 bytes) rather than a Dart
+  /// `String` so the buffer can be zeroed after the FFI call. The caller is
+  /// expected to construct the buffer cell-by-cell (see [MnemonicInputGrid])
+  /// and zero it on the way out. This is best-effort hygiene: the Dart
+  /// String fragments produced during typing into TextField widgets cannot
+  /// be reached from here and may linger on the GC heap (audit R5).
+  ///
+  /// Fails (throws [PhalanxException]) if:
+  /// - `storagePath` already contains an `identity.bin`. Caller must confirm
+  ///   with the user and delete the existing identity file before retrying.
+  /// - The mnemonic phrase fails to parse (call [validateMnemonic] before
+  ///   invoking this method to pre-screen).
+  /// - Any post-identity bootstrap step fails (transport, vault, etc.).
+  void restoreFromPhrase(
+    String storagePath,
+    String passphrase,
+    Uint8List mnemonicPhrase, {
+    String? configPath,
+  }) {
+    final storageNative = storagePath.toNativeUtf8();
+    final passphraseNative = passphrase.toNativeUtf8();
+    final configNative = configPath?.toNativeUtf8() ?? nullptr;
+
+    _withZeroedNativeBytes(mnemonicPhrase, (phrasePtr) {
+      try {
+        _handle = _restore(
+          configNative.cast(),
+          storageNative.cast(),
+          passphraseNative.cast(),
+          phrasePtr.cast(),
+        );
+        if (_handle == nullptr) {
+          throw PhalanxException(PhalanxError.bootFailed, 'phalanx_restore');
+        }
+      } finally {
+        calloc.free(storageNative);
+        calloc.free(passphraseNative);
+        if (configNative != nullptr) calloc.free(configNative);
+      }
+    });
   }
 
   /// Start the engine's run loop.
@@ -827,23 +897,81 @@ class PhalanxBridge {
 
   /// Permanently destroy all evidence for a recording across the entire mesh.
   ///
-  /// Requires the user's 12-word BIP39 recovery phrase. The revocation
-  /// signing key is derived from the phrase, used to create a signed
-  /// revocation token, and then the phrase is securely wiped from memory.
+  /// Requires the user's 12-word BIP39 recovery phrase as a UTF-8 byte
+  /// buffer (see [restoreFromPhrase] for the rationale on Uint8List vs.
+  /// String). The revocation signing key is derived from the phrase, used
+  /// to create a signed revocation token, then the Rust-side copy of the
+  /// phrase is zeroized. Caller is responsible for zeroing [mnemonicPhrase]
+  /// after this returns; this method only handles the native-side copy.
   ///
-  /// Throws [PhalanxException] with code -13 (revocationFailed) if the
-  /// mnemonic is invalid or does not match the recording's revocation key.
-  void forgetRecording(String recordingId, String mnemonicPhrase) {
+  /// Throws [PhalanxException] with a code distinguishing the failure mode:
+  /// [PhalanxError.mnemonicParseError] (-19) for an invalid BIP-39 phrase,
+  /// [PhalanxError.revocationKeyMismatch] (-20) when the phrase is valid but
+  /// doesn't authorize this recording, [PhalanxError.recordingNotFound] (-21)
+  /// when the recording isn't on this device or the mesh, or
+  /// [PhalanxError.revocationFailed] (-13) for any other failure.
+  void forgetRecording(String recordingId, Uint8List mnemonicPhrase) {
     final recNative = recordingId.toNativeUtf8();
-    final phraseNative = mnemonicPhrase.toNativeUtf8();
+    _withZeroedNativeBytes(mnemonicPhrase, (phrasePtr) {
+      try {
+        _check(
+          _forgetRecording(_handle, recNative.cast(), phrasePtr.cast()),
+          'phalanx_forget_recording',
+        );
+      } finally {
+        calloc.free(recNative);
+      }
+    });
+  }
+
+  /// Validate a BIP-39 mnemonic phrase via the bip39 crate's auto-detecting
+  /// `Mnemonic::parse`. Returns true if the phrase parses cleanly (wordlist
+  /// hit + checksum valid) in any of the 10 BIP-39 wordlists.
+  ///
+  /// Stateless — does not require the engine to be running. Safe to call
+  /// before `phalanx_create`.
+  bool validateMnemonic(Uint8List phrase) {
+    bool result = false;
+    int? errorCode;
+    _withZeroedNativeBytes(phrase, (ptr) {
+      final code = _validateMnemonic(ptr.cast());
+      if (code == PhalanxError.ok) {
+        result = true;
+      } else if (code == PhalanxError.mnemonicParseError) {
+        result = false;
+      } else {
+        errorCode = code;
+      }
+    });
+    if (errorCode != null) {
+      throw PhalanxException(errorCode!, 'phalanx_validate_mnemonic');
+    }
+    return result;
+  }
+
+  /// Copy [bytes] into a freshly-allocated native buffer (null-terminated),
+  /// invoke [fn] with a pointer to it, then unconditionally zero and free
+  /// the buffer. Best-effort companion to R5: limits the lifetime of the
+  /// native-side copy of a sensitive payload to exactly the duration of
+  /// [fn]. The caller is responsible for zeroing [bytes] itself; this
+  /// helper only handles the native side.
+  void _withZeroedNativeBytes(
+    Uint8List bytes,
+    void Function(Pointer<Uint8> ptr) fn,
+  ) {
+    final native = calloc<Uint8>(bytes.length + 1);
     try {
-      _check(
-        _forgetRecording(_handle, recNative.cast(), phraseNative.cast()),
-        'phalanx_forget_recording',
-      );
+      for (var i = 0; i < bytes.length; i++) {
+        native[i] = bytes[i];
+      }
+      native[bytes.length] = 0;
+      fn(native);
     } finally {
-      calloc.free(recNative);
-      calloc.free(phraseNative);
+      // Zero before free; calloc.free doesn't scrub memory.
+      for (var i = 0; i < bytes.length + 1; i++) {
+        native[i] = 0;
+      }
+      calloc.free(native);
     }
   }
 }

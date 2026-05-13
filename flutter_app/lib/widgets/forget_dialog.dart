@@ -1,13 +1,19 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
 import '../ffi/phalanx_bridge.dart';
+import 'mnemonic_input_grid.dart';
 
 /// Two-step dialog for Cryptographic Forgetting.
 ///
 /// Step 1: Confirmation — warns the user this is irreversible.
-/// Step 2: Mnemonic input — user types their 12-word recovery phrase.
+/// Step 2: Mnemonic input — user types their 12-word recovery phrase
+///         via the shared [MnemonicInputGrid] (obscured cells, per-cell
+///         wordlist validation, single FFI checksum call before submit).
 ///
-/// Returns `true` if the recording was successfully forgotten, `false` otherwise.
+/// Returns `true` if the recording was successfully forgotten, `false`
+/// otherwise.
 Future<bool> showForgetRecordingDialog({
   required BuildContext context,
   required PhalanxBridge bridge,
@@ -50,66 +56,45 @@ Future<bool> showForgetRecordingDialog({
   if (!context.mounted) return false;
 
   // Step 2: Mnemonic input
-  final controller = TextEditingController();
-  try {
-    final result = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => _MnemonicInputDialog(
-        controller: controller,
-        bridge: bridge,
-        recordingId: recordingId,
-      ),
-    );
-    return result ?? false;
-  } finally {
-    controller.dispose();
-  }
+  final result = await showDialog<bool>(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) => _MnemonicInputDialog(
+      bridge: bridge,
+      recordingId: recordingId,
+    ),
+  );
+  return result ?? false;
 }
 
-class _MnemonicInputDialog extends StatefulWidget {
-  final TextEditingController controller;
+class _MnemonicInputDialog extends StatelessWidget {
   final PhalanxBridge bridge;
   final String recordingId;
 
   const _MnemonicInputDialog({
-    required this.controller,
     required this.bridge,
     required this.recordingId,
   });
 
-  @override
-  State<_MnemonicInputDialog> createState() => _MnemonicInputDialogState();
-}
-
-class _MnemonicInputDialogState extends State<_MnemonicInputDialog> {
-  String? _error;
-  bool _processing = false;
-
-  void _submit() {
-    final phrase = widget.controller.text.trim();
-    if (phrase.isEmpty) {
-      setState(() => _error = 'Please enter your recovery phrase');
-      return;
-    }
-
-    setState(() {
-      _error = null;
-      _processing = true;
-    });
-
+  String? _onSubmit(BuildContext ctx, Uint8List phrase) {
     try {
-      widget.bridge.forgetRecording(widget.recordingId, phrase);
-      if (mounted) Navigator.of(context).pop(true);
+      bridge.forgetRecording(recordingId, phrase);
+      Navigator.of(ctx).pop(true);
+      return null;
     } on PhalanxException catch (e) {
-      setState(() {
-        _processing = false;
-        if (e.code == PhalanxError.revocationFailed) {
-          _error = 'Invalid recovery phrase or recording not found';
-        } else {
-          _error = 'Operation failed (error ${e.code})';
-        }
-      });
+      switch (e.code) {
+        case PhalanxError.mnemonicParseError:
+          return "That phrase isn't a valid 12-word BIP-39 recovery phrase.";
+        case PhalanxError.revocationKeyMismatch:
+          return "This phrase doesn't match this recording. "
+              "Check that you're using the phrase from the device that captured it.";
+        case PhalanxError.recordingNotFound:
+          return 'Recording not found on this device or the mesh.';
+        case PhalanxError.revocationFailed:
+          return 'Revocation failed. Try again, or check connectivity.';
+        default:
+          return 'Operation failed (error ${e.code})';
+      }
     }
   }
 
@@ -117,48 +102,21 @@ class _MnemonicInputDialogState extends State<_MnemonicInputDialog> {
   Widget build(BuildContext context) {
     return AlertDialog(
       title: const Text('Enter Recovery Phrase'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Text(
-            'Enter your 12-word recovery phrase to authorize '
-            'the destruction of this recording.',
-            style: TextStyle(fontSize: 13, color: Colors.grey),
-          ),
-          const SizedBox(height: 16),
-          TextField(
-            controller: widget.controller,
-            decoration: InputDecoration(
-              hintText: 'word1 word2 word3 ...',
-              border: const OutlineInputBorder(),
-              errorText: _error,
-            ),
-            maxLines: 2,
-            autocorrect: false,
-            enableSuggestions: false,
-            enabled: !_processing,
-          ),
-        ],
+      content: SingleChildScrollView(
+        child: MnemonicInputGrid(
+          headerText:
+              'Enter your 12-word recovery phrase to authorize the destruction '
+              'of this recording.',
+          submitLabel: 'Forget Forever',
+          submitColor: Colors.red,
+          onChecksumValidate: bridge.validateMnemonic,
+          onSubmit: (phrase) => _onSubmit(context, phrase),
+        ),
       ),
       actions: [
         TextButton(
-          onPressed: _processing ? null : () => Navigator.of(context).pop(false),
+          onPressed: () => Navigator.of(context).pop(false),
           child: const Text('Cancel'),
-        ),
-        ElevatedButton(
-          onPressed: _processing ? null : _submit,
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.red,
-            foregroundColor: Colors.white,
-          ),
-          child: _processing
-              ? const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Text('Forget Forever'),
         ),
       ],
     );

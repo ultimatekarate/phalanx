@@ -113,6 +113,43 @@ enum PhalanxError {
    * single-tenant providers channel can't be reassigned mid-recovery.
    */
   ALREADY_RECOVERING = -17,
+  /**
+   * An `extern "C"` body caught a panic from inside Rust code (typically a
+   * third-party crate like `c2pa` on malformed input). The panic was
+   * converted to this error code by an `ffi_body!` wrapper to avoid the
+   * process-abort that would otherwise occur when a panic unwinds across
+   * an `extern "C"` boundary.
+   */
+  PANIC = -18,
+  /**
+   * BIP-39 mnemonic phrase failed to parse — wordlist or checksum violation.
+   * Split out of `RevocationFailed` so the UI can tell the user "this phrase
+   * isn't a valid BIP-39 phrase" rather than the conflated "phrase invalid
+   * or recording not found."
+   */
+  MNEMONIC_PARSE_ERROR = -19,
+  /**
+   * BIP-39 phrase parsed and produced a revocation key, but that key does
+   * not match the revocation key embedded in the target recording. Usually
+   * means the user typed a different identity's phrase, or a typo that
+   * still passes checksum.
+   */
+  REVOCATION_KEY_MISMATCH = -20,
+  /**
+   * The recording_id is not present in the local vault and no shards were
+   * discoverable. Distinct from `RevocationKeyMismatch` so a recovering
+   * node can tell "I don't have this yet" apart from "wrong phrase."
+   */
+  RECORDING_NOT_FOUND = -21,
+  /**
+   * `phalanx_restore` was called against a `storage_path` that already
+   * contains an `identity.bin`. The caller (UI) must explicitly confirm
+   * destruction of the existing on-device identity before retrying. We
+   * fail closed here rather than silently overwriting — losing the on-disk
+   * identity is destructive even though the mesh-side recordings are
+   * untouched.
+   */
+  IDENTITY_ALREADY_EXISTS = -22,
 };
 typedef int32_t PhalanxError;
 
@@ -731,9 +768,51 @@ struct PhalanxHandle *phalanx_create(const char *config_path,
 ;
 
 /**
+ * Restore an identity from an existing BIP-39 mnemonic phrase and bootstrap
+ * the engine. Symmetric with `phalanx_create` except the identity is derived
+ * from the user-provided phrase rather than freshly generated. Fails with a
+ * non-null handle only on success.
+ *
+ * Returns `null` on any failure. Specific error semantics:
+ * - If `storage_path` already contains an `identity.bin`, fails (no handle
+ *   returned). Caller must surface this to the user, confirm, delete the
+ *   existing identity, and retry. We deliberately do not auto-overwrite —
+ *   silently destroying an on-device identity is a destructive operation
+ *   even when the BIP-39 phrase recovers the same keys.
+ * - If `mnemonic_phrase` fails to parse against any of the 10 BIP-39
+ *   wordlists, fails (no handle returned).
+ * - Any post-identity bootstrap failure (vault, transport, etc.) also
+ *   produces a null handle; partial state on disk is bounded by the
+ *   transactional `save_to_disk_atomic` step.
+ *
+ * Use `phalanx_restore_status()` (TODO if needed) to query the specific
+ * failure cause; for now the FFI surfaces null and the Flutter side calls
+ * `phalanx_validate_mnemonic` first to pre-screen the phrase, leaving the
+ * remaining null causes as "boot failed" from the user's perspective.
+ *
+ * # Safety
+ * * `config_path` may be null (use defaults) or a valid null-terminated C
+ *   string.
+ * * `storage_path`, `passphrase`, and `mnemonic_phrase` must be valid
+ *   null-terminated C strings.
+ */
+
+struct PhalanxHandle *phalanx_restore(const char *config_path,
+                                      const char *storage_path,
+                                      const char *passphrase,
+                                      const char *mnemonic_phrase)
+;
+
+/**
  * Starts the engine's main run loop on a background tokio task.
  *
- * Transitions: `Booting → Running`.
+ * Transitions: `Booting → Running`. Consumes the `UnspawnedEngine` stored
+ * in `HandleState::Booting` by `mem::replace`-ing the variant and calling
+ * `unspawned.spawn(&runtime)`. The returned `EngineLifecycle` is stored
+ * in the new `HandleState::Running` variant; `phalanx_stop` consumes it.
+ * The companion `EngineHandle` is discarded — the FFI's flat channel
+ * fields already carry equivalent clones from bootstrap time.
+ *
  * Returns `PhalanxError::AlreadyRunning` if called twice.
  *
  * # Safety
@@ -742,9 +821,12 @@ struct PhalanxHandle *phalanx_create(const char *config_path,
  int32_t phalanx_start(struct PhalanxHandle *handle) ;
 
 /**
- * Stops the engine gracefully by dropping the shutdown oneshot sender.
+ * Stops the engine gracefully by consuming the `EngineLifecycle` and
+ * awaiting its bounded-deadline shutdown.
  *
- * Transitions: `Running → Stopped`.
+ * Transitions: `Running → Stopped`. The lifecycle's `shutdown(self, …)`
+ * signature enforces single-shot semantics at the type level; the
+ * borrow checker forbids calling it twice.
  *
  * # Safety
  * * `handle` must be a valid pointer from `phalanx_create`.
@@ -754,7 +836,11 @@ struct PhalanxHandle *phalanx_create(const char *config_path,
 /**
  * Destroys the handle and frees all resources.
  *
- * After this call, the pointer is invalid. Double-destroy is UB.
+ * If the engine is still `Running`, first invokes the equivalent of
+ * `phalanx_stop` so the run-loop task drains within its 10-second
+ * deadline. Skipping that drain (the old destroy-without-stop path)
+ * would cancel in-flight shard writes when the runtime drops. Subsumes
+ * audit finding M2 — the safe path is now the default, not opt-in.
  *
  * # Safety
  * * `handle` must be a valid pointer from `phalanx_create`.
@@ -865,6 +951,29 @@ int32_t phalanx_local_mesh_poll_outbound(struct PhalanxHandle *handle,
  * * Passing a null pointer is a safe no-op.
  */
  void phalanx_free_bytes(uint8_t *ptr, uint32_t len) ;
+
+/**
+ * Validate a BIP-39 mnemonic phrase. Checks wordlist membership AND checksum
+ * against the `bip39` crate's auto-detected language (English, Japanese,
+ * Korean, Spanish, Chinese-Simplified, Chinese-Traditional, French, Italian,
+ * Czech, or Portuguese).
+ *
+ * Returns:
+ * * `PhalanxError::Ok` (0) — phrase parses cleanly and the checksum is valid.
+ * * `PhalanxError::NullPointer` (-1) — `phrase` is null.
+ * * `PhalanxError::InvalidUtf8` (-3) — `phrase` is not valid UTF-8.
+ * * `PhalanxError::MnemonicParseError` (-19) — wordlist violation or
+ *   checksum failure. Distinguishing between the two is intentionally
+ *   omitted from the FFI surface: the Flutter caller already knows wordlist
+ *   membership per cell from its local lookup, so a -19 after all cells
+ *   pass the local check is necessarily a checksum failure.
+ *
+ * The phrase is zeroized immediately after parsing.
+ *
+ * # Safety
+ * * `phrase` must be a valid null-terminated C string.
+ */
+ int32_t phalanx_validate_mnemonic(const char *phrase) ;
 
 /**
  * Starts playback of a recording by ID. Returns an opaque PlaybackSession pointer.

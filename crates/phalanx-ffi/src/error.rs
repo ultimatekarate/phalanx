@@ -59,6 +59,27 @@ pub enum PhalanxError {
     /// process-abort that would otherwise occur when a panic unwinds across
     /// an `extern "C"` boundary.
     Panic = -18,
+    /// BIP-39 mnemonic phrase failed to parse — wordlist or checksum violation.
+    /// Split out of `RevocationFailed` so the UI can tell the user "this phrase
+    /// isn't a valid BIP-39 phrase" rather than the conflated "phrase invalid
+    /// or recording not found."
+    MnemonicParseError = -19,
+    /// BIP-39 phrase parsed and produced a revocation key, but that key does
+    /// not match the revocation key embedded in the target recording. Usually
+    /// means the user typed a different identity's phrase, or a typo that
+    /// still passes checksum.
+    RevocationKeyMismatch = -20,
+    /// The recording_id is not present in the local vault and no shards were
+    /// discoverable. Distinct from `RevocationKeyMismatch` so a recovering
+    /// node can tell "I don't have this yet" apart from "wrong phrase."
+    RecordingNotFound = -21,
+    /// `phalanx_restore` was called against a `storage_path` that already
+    /// contains an `identity.bin`. The caller (UI) must explicitly confirm
+    /// destruction of the existing on-device identity before retrying. We
+    /// fail closed here rather than silently overwriting — losing the on-disk
+    /// identity is destructive even though the mesh-side recordings are
+    /// untouched.
+    IdentityAlreadyExists = -22,
 }
 
 impl PhalanxError {
@@ -85,6 +106,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::cognitive_complexity)]
     fn error_codes_are_stable() {
         // These values are part of the C-ABI contract.
         // Changing them breaks all Dart code.
@@ -107,6 +129,10 @@ mod tests {
         assert_eq!(PhalanxError::SerializationFailure.code(), -16);
         assert_eq!(PhalanxError::AlreadyRecovering.code(), -17);
         assert_eq!(PhalanxError::Panic.code(), -18);
+        assert_eq!(PhalanxError::MnemonicParseError.code(), -19);
+        assert_eq!(PhalanxError::RevocationKeyMismatch.code(), -20);
+        assert_eq!(PhalanxError::RecordingNotFound.code(), -21);
+        assert_eq!(PhalanxError::IdentityAlreadyExists.code(), -22);
     }
 
     #[test]
@@ -131,6 +157,10 @@ mod tests {
             PhalanxError::SerializationFailure.code(),
             PhalanxError::AlreadyRecovering.code(),
             PhalanxError::Panic.code(),
+            PhalanxError::MnemonicParseError.code(),
+            PhalanxError::RevocationKeyMismatch.code(),
+            PhalanxError::RecordingNotFound.code(),
+            PhalanxError::IdentityAlreadyExists.code(),
         ];
 
         let mut sorted = codes.clone();
@@ -162,6 +192,10 @@ mod tests {
             PhalanxError::SerializationFailure,
             PhalanxError::AlreadyRecovering,
             PhalanxError::Panic,
+            PhalanxError::MnemonicParseError,
+            PhalanxError::RevocationKeyMismatch,
+            PhalanxError::RecordingNotFound,
+            PhalanxError::IdentityAlreadyExists,
         ];
 
         for variant in &error_variants {

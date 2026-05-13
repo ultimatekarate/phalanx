@@ -267,22 +267,105 @@ pub unsafe extern "C" fn phalanx_create(
     })
 }
 
-/// Internal async bootstrap — mirrors `sentinel.rs` dependency graph.
-/// Returns `(PhalanxHandle, Option<String>)` where the String is the BIP39
-/// mnemonic phrase when a new identity was generated (genesis). `None` when
-/// loading an existing identity from disk.
-async fn bootstrap(
-    mut config: NodeConfig,
-    storage_path: &str,
-    passphrase: &str,
-) -> Result<(PhalanxHandle, Option<String>), PhalanxError> {
-    // Override vault_path to match the mobile storage directory.
-    // The default config points to ./sim_vault which doesn't exist on Android.
-    let vault_dir = Path::new(storage_path).join("vault");
-    config.storage.vault_path = vault_dir.to_string_lossy().into_owned();
-    // Diagnostic: write boot log to a file since stderr doesn't reach logcat
-    let log = |msg: &str| {
-        let log_path = Path::new(storage_path).join("boot.log");
+/// Restore an identity from an existing BIP-39 mnemonic phrase and bootstrap
+/// the engine. Symmetric with `phalanx_create` except the identity is derived
+/// from the user-provided phrase rather than freshly generated. Fails with a
+/// non-null handle only on success.
+///
+/// Returns `null` on any failure. Specific error semantics:
+/// - If `storage_path` already contains an `identity.bin`, fails (no handle
+///   returned). Caller must surface this to the user, confirm, delete the
+///   existing identity, and retry. We deliberately do not auto-overwrite —
+///   silently destroying an on-device identity is a destructive operation
+///   even when the BIP-39 phrase recovers the same keys.
+/// - If `mnemonic_phrase` fails to parse against any of the 10 BIP-39
+///   wordlists, fails (no handle returned).
+/// - Any post-identity bootstrap failure (vault, transport, etc.) also
+///   produces a null handle; partial state on disk is bounded by the
+///   transactional `save_to_disk_atomic` step.
+///
+/// Use `phalanx_restore_status()` (TODO if needed) to query the specific
+/// failure cause; for now the FFI surfaces null and the Flutter side calls
+/// `phalanx_validate_mnemonic` first to pre-screen the phrase, leaving the
+/// remaining null causes as "boot failed" from the user's perspective.
+///
+/// # Safety
+/// * `config_path` may be null (use defaults) or a valid null-terminated C
+///   string.
+/// * `storage_path`, `passphrase`, and `mnemonic_phrase` must be valid
+///   null-terminated C strings.
+#[no_mangle]
+pub unsafe extern "C" fn phalanx_restore(
+    config_path: *const c_char,
+    storage_path: *const c_char,
+    passphrase: *const c_char,
+    mnemonic_phrase: *const c_char,
+) -> *mut PhalanxHandle {
+    crate::panic_safety::ffi_panic_safe(std::ptr::null_mut(), || {
+        // SAFETY: caller upholds the # Safety contract on the parent
+        // `unsafe extern "C" fn`. Wrapped in the panic boundary for the
+        // same reasons as `phalanx_create`.
+        unsafe {
+            if storage_path.is_null() || passphrase.is_null() || mnemonic_phrase.is_null() {
+                return std::ptr::null_mut();
+            }
+
+            let storage_str = match CStr::from_ptr(storage_path).to_str() {
+                Ok(s) => s,
+                Err(_) => return std::ptr::null_mut(),
+            };
+            let passphrase_str = match CStr::from_ptr(passphrase).to_str() {
+                Ok(s) => s,
+                Err(_) => return std::ptr::null_mut(),
+            };
+            let mnemonic_str = match CStr::from_ptr(mnemonic_phrase).to_str() {
+                Ok(s) => s,
+                Err(_) => return std::ptr::null_mut(),
+            };
+
+            let config = if config_path.is_null() {
+                NodeConfig::default()
+            } else {
+                match CStr::from_ptr(config_path).to_str() {
+                    Ok(path) => NodeConfig::load(path).unwrap_or_else(|e| {
+                        tracing::warn!(
+                            target: "phalanx::ffi",
+                            config_path = %path,
+                            error = ?e,
+                            "NodeConfig::load failed; falling back to default config"
+                        );
+                        NodeConfig::default()
+                    }),
+                    Err(_) => return std::ptr::null_mut(),
+                }
+            };
+
+            let runtime = match Runtime::new() {
+                Ok(rt) => rt,
+                Err(_) => return std::ptr::null_mut(),
+            };
+
+            let handle_result = runtime.block_on(async {
+                restore_bootstrap(config, storage_str, passphrase_str, mnemonic_str).await
+            });
+
+            match handle_result {
+                Ok(mut handle) => {
+                    handle.runtime = runtime;
+                    Box::into_raw(Box::new(handle))
+                }
+                Err(_) => std::ptr::null_mut(),
+            }
+        }
+    })
+}
+
+/// Diagnostic: write boot log to a file since stderr doesn't reach logcat
+/// on Android. Caller passes `storage_path`; the closure appends to
+/// `<storage_path>/boot.log`.
+fn make_boot_logger(storage_path: &str) -> impl Fn(&str) {
+    let log_path = Path::new(storage_path).join("boot.log");
+    move |msg: &str| {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
@@ -291,7 +374,19 @@ async fn bootstrap(
         {
             let _ = writeln!(f, "{msg}");
         }
-    };
+    }
+}
+
+/// Internal async bootstrap — mirrors `sentinel.rs` dependency graph.
+/// Returns `(PhalanxHandle, Option<String>)` where the String is the BIP39
+/// mnemonic phrase when a new identity was generated (genesis). `None` when
+/// loading an existing identity from disk.
+async fn bootstrap(
+    config: NodeConfig,
+    storage_path: &str,
+    passphrase: &str,
+) -> Result<(PhalanxHandle, Option<String>), PhalanxError> {
+    let log = make_boot_logger(storage_path);
 
     // Identity
     log(&format!("storage_path={storage_path}"));
@@ -301,6 +396,68 @@ async fn bootstrap(
             log(&format!("identity init failed: {e:?}"));
             PhalanxError::BootFailed
         })?;
+
+    let handle = bootstrap_with_identity(config, storage_path, identity).await?;
+    Ok((handle, genesis_phrase))
+}
+
+/// Restore-from-phrase bootstrap. Derives the identity from `mnemonic_phrase`
+/// (BIP-39, any of 10 supported wordlists), persists it transactionally,
+/// then runs the same post-identity bootstrap as the generate path.
+///
+/// Fails with `PhalanxError::IdentityAlreadyExists` if `identity.bin` is
+/// already present at `storage_path` — the caller (UI) must explicitly
+/// confirm and delete the existing on-disk identity before retrying.
+async fn restore_bootstrap(
+    config: NodeConfig,
+    storage_path: &str,
+    passphrase: &str,
+    mnemonic_phrase: &str,
+) -> Result<PhalanxHandle, PhalanxError> {
+    let log = make_boot_logger(storage_path);
+
+    log(&format!("restore: storage_path={storage_path}"));
+    let identity_path = Path::new(storage_path).join("identity.bin");
+
+    if identity_path.exists() {
+        log("restore: identity.bin already exists; refusing");
+        return Err(PhalanxError::IdentityAlreadyExists);
+    }
+
+    let identity = PhalanxIdentity::restore(mnemonic_phrase).map_err(|e| {
+        log(&format!("restore: derive identity failed: {e:?}"));
+        PhalanxError::MnemonicParseError
+    })?;
+    log(&format!(
+        "restore: derived identity {}",
+        identity.did.as_str()
+    ));
+
+    identity
+        .save_to_disk_atomic(&identity_path, passphrase)
+        .map_err(|e| {
+            log(&format!("restore: atomic save failed: {e:?}"));
+            PhalanxError::BootFailed
+        })?;
+    log("restore: identity persisted atomically");
+
+    bootstrap_with_identity(config, storage_path, identity).await
+}
+
+/// Post-identity portion of the bootstrap sequence. Identical between the
+/// generate path (`phalanx_create`) and the restore path (`phalanx_restore`);
+/// extracted so the two callers don't duplicate ~200 lines of orchestrator
+/// wiring.
+async fn bootstrap_with_identity(
+    mut config: NodeConfig,
+    storage_path: &str,
+    identity: PhalanxIdentity,
+) -> Result<PhalanxHandle, PhalanxError> {
+    // Override vault_path to match the mobile storage directory.
+    // The default config points to ./sim_vault which doesn't exist on Android.
+    let vault_dir = Path::new(storage_path).join("vault");
+    config.storage.vault_path = vault_dir.to_string_lossy().into_owned();
+    let log = make_boot_logger(storage_path);
 
     let node_did = identity.did.as_str().to_string();
     log(&format!("identity OK: {node_did}"));
@@ -471,36 +628,33 @@ async fn bootstrap(
         .build()
         .map_err(|_| PhalanxError::BootFailed)?;
 
-    Ok((
-        PhalanxHandle {
-            runtime: dummy_rt,
-            state: Mutex::new(HandleState::Booting {
-                unspawned: Box::new(unspawned),
-            }),
-            governor,
-            probe,
-            trust_tx,
-            storage_tx,
-            egress_tx,
-            sentinel_cmd_tx,
-            content_key_tx,
-            video_tx,
-            audio_tx,
-            node_did,
-            recording_active,
-            local_mesh_tx: Some(local_mesh_tx),
-            local_mesh_outbound_rx: Mutex::new(Some(local_mesh_outbound_rx)),
-            local_mesh_available,
-            vault_key: handle_vault_key,
-            identity: handle_identity,
-            calibration_metrics: Mutex::new(None),
-            prnu_posterior,
-            recovery_status: Arc::new(Mutex::new(RecoveryStatus::default())),
-            recovery_cancel: Mutex::new(None),
-            recovery_handle: Mutex::new(None),
-        },
-        genesis_phrase,
-    ))
+    Ok(PhalanxHandle {
+        runtime: dummy_rt,
+        state: Mutex::new(HandleState::Booting {
+            unspawned: Box::new(unspawned),
+        }),
+        governor,
+        probe,
+        trust_tx,
+        storage_tx,
+        egress_tx,
+        sentinel_cmd_tx,
+        content_key_tx,
+        video_tx,
+        audio_tx,
+        node_did,
+        recording_active,
+        local_mesh_tx: Some(local_mesh_tx),
+        local_mesh_outbound_rx: Mutex::new(Some(local_mesh_outbound_rx)),
+        local_mesh_available,
+        vault_key: handle_vault_key,
+        identity: handle_identity,
+        calibration_metrics: Mutex::new(None),
+        prnu_posterior,
+        recovery_status: Arc::new(Mutex::new(RecoveryStatus::default())),
+        recovery_cancel: Mutex::new(None),
+        recovery_handle: Mutex::new(None),
+    })
 }
 
 /// Starts the engine's main run loop on a background tokio task.

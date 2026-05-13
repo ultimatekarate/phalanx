@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+
+import '../services/screen_security.dart';
 
 /// Displays the BIP39 recovery phrase during first-time identity creation.
 ///
@@ -24,6 +25,21 @@ class _GenesisPhraseScreenState extends State<GenesisPhraseScreen> {
   bool _acknowledged = false;
 
   List<String> get _words => widget.phrase.split(' ');
+
+  @override
+  void initState() {
+    super.initState();
+    // Block Android screenshots / iOS recents snapshot for the lifetime
+    // of this screen. iOS is a stub until the AppDelegate scaffold lands;
+    // ScreenSecurity degrades silently on platforms without a handler.
+    ScreenSecurity.enableSecure();
+  }
+
+  @override
+  void dispose() {
+    ScreenSecurity.disableSecure();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -54,6 +70,17 @@ class _GenesisPhraseScreenState extends State<GenesisPhraseScreen> {
                 style: TextStyle(fontSize: 14, color: Colors.grey),
                 textAlign: TextAlign.center,
               ),
+              const SizedBox(height: 8),
+              const Text(
+                'Never share your recovery phrase with anyone, ever — '
+                'it grants both recovery and destruction of your evidence.',
+                style: TextStyle(
+                  fontSize: 13,
+                  color: Colors.redAccent,
+                  fontWeight: FontWeight.w500,
+                ),
+                textAlign: TextAlign.center,
+              ),
               const SizedBox(height: 24),
               // Word grid
               Expanded(
@@ -81,21 +108,6 @@ class _GenesisPhraseScreenState extends State<GenesisPhraseScreen> {
                     );
                   }),
                 ),
-              ),
-              const SizedBox(height: 16),
-              // Copy button
-              OutlinedButton.icon(
-                onPressed: () {
-                  Clipboard.setData(ClipboardData(text: widget.phrase));
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Copied to clipboard — paste somewhere safe, then clear clipboard'),
-                      duration: Duration(seconds: 4),
-                    ),
-                  );
-                },
-                icon: const Icon(Icons.copy),
-                label: const Text('Copy to Clipboard'),
               ),
               const SizedBox(height: 16),
               // Acknowledgment checkbox

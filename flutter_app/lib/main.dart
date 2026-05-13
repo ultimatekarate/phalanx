@@ -18,9 +18,12 @@ import 'screens/community/community_join_screen.dart';
 import 'screens/community/community_list_screen.dart';
 import 'screens/community/community_vouch_screen.dart';
 import 'screens/genesis_phrase_screen.dart';
+import 'screens/onboarding_choice_screen.dart';
 import 'screens/peers_screen.dart';
 import 'screens/playback_screen.dart';
+import 'screens/restore_phrase_screen.dart';
 import 'screens/settings_screen.dart';
+import 'screens/verify_phrase_screen.dart';
 import 'services/community_link_service.dart';
 
 void main() {
@@ -49,7 +52,14 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
   final Battery _battery = Battery();
   Timer? _sensorTimer;
   bool _engineReady = false;
+  bool _needsOnboarding = false;
   String? _genesisPhrase;
+
+  // TODO: replace with a hardware-keystore-backed key (Android Keystore /
+  // iOS Keychain via flutter_secure_storage). Dev-only placeholder; the
+  // identity-at-rest encryption is only as strong as this string until
+  // the keystore work lands.
+  static const _devPassphrase = 'phalanx-mobile-dev';
 
   // Deep-link plumbing.
   //
@@ -72,33 +82,92 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
   }
 
   Future<void> _initEngine() async {
-    final bridge = ref.read(phalanxProvider);
-
     try {
-      // Storage path: app documents directory
       final storagePath = _getStoragePath();
-      // Ensure storage directory exists before Rust bootstrap
       final dir = Directory(storagePath);
       if (!dir.existsSync()) {
         dir.createSync(recursive: true);
       }
-      // TODO: In production, prompt user for passphrase on first run,
-      // store in secure keychain. For now, use environment or default.
-      const passphrase = 'phalanx-mobile-dev';
 
-      final genesisPhrase = bridge.create(storagePath, passphrase);
-      bridge.start();
+      // Branch on whether an identity is already on disk. If yes, load and
+      // proceed normally. If no, surface the onboarding choice — the user
+      // either generates a new identity or restores from a recovery phrase.
+      // We deliberately do NOT call `bridge.create()` for the no-identity
+      // case any more, because `create` silently generates a fresh identity
+      // — fine for first-time setup, but it would silently overwrite the
+      // recovery flow if the user intends to restore.
+      final identityExists =
+          File('$storagePath${Platform.pathSeparator}identity.bin').existsSync();
 
-      setState(() {
-        _engineReady = true;
-        _genesisPhrase = genesisPhrase;
-      });
-
-      // Start sensor polling
-      _startSensorPolling();
+      if (identityExists) {
+        await _loadExistingIdentity(storagePath);
+      } else {
+        setState(() {
+          _needsOnboarding = true;
+        });
+      }
     } catch (e) {
       debugPrint('Phalanx engine init failed: $e');
     }
+  }
+
+  Future<void> _loadExistingIdentity(String storagePath) async {
+    final bridge = ref.read(phalanxProvider);
+    bridge.create(storagePath, _devPassphrase); // returns null on load
+    bridge.start();
+    setState(() {
+      _engineReady = true;
+      _needsOnboarding = false;
+    });
+    _startSensorPolling();
+  }
+
+  Future<void> _createNewIdentity() async {
+    final bridge = ref.read(phalanxProvider);
+    try {
+      final storagePath = _getStoragePath();
+      final genesisPhrase = bridge.create(storagePath, _devPassphrase);
+      bridge.start();
+      setState(() {
+        _engineReady = true;
+        _needsOnboarding = false;
+        _genesisPhrase = genesisPhrase;
+      });
+      _startSensorPolling();
+    } catch (e) {
+      debugPrint('Phalanx engine init (create) failed: $e');
+    }
+  }
+
+  void _onRestoredFromPhrase() {
+    final bridge = ref.read(phalanxProvider);
+    try {
+      bridge.start();
+      setState(() {
+        _engineReady = true;
+        _needsOnboarding = false;
+      });
+      _startSensorPolling();
+      // Pop the restore screen back to home (which is now the capture
+      // screen because _engineReady just flipped).
+      _navigatorKey.currentState?.popUntil((route) => route.isFirst);
+    } catch (e) {
+      debugPrint('Phalanx engine start (after restore) failed: $e');
+    }
+  }
+
+  void _pushRestorePhraseScreen() {
+    final bridge = ref.read(phalanxProvider);
+    _navigatorKey.currentState?.push(
+      MaterialPageRoute<void>(
+        builder: (_) => RestorePhraseScreen(
+          bridge: bridge,
+          storagePath: _getStoragePath(),
+          passphrase: _devPassphrase,
+          onRestored: _onRestoredFromPhrase,
+        ),
+      ),
+    );
   }
 
   void _subscribeDeepLinks() {
@@ -228,9 +297,17 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
   Widget build(BuildContext context) {
     final emergencyMode = ref.watch(emergencyModeProvider);
 
-    // Show loading → genesis phrase → capture, in sequence
+    // Show loading → onboarding choice → genesis phrase → capture, in
+    // sequence. The onboarding choice only appears on a fresh install (no
+    // identity.bin on disk). After it lands the user either sees the
+    // genesis phrase (new identity) or the capture screen (restored).
     final Widget home;
-    if (!_engineReady) {
+    if (!_engineReady && _needsOnboarding) {
+      home = OnboardingChoiceScreen(
+        onCreateNew: _createNewIdentity,
+        onRestoreExisting: _pushRestorePhraseScreen,
+      );
+    } else if (!_engineReady) {
       home = const Scaffold(
         backgroundColor: Colors.black,
         body: Center(child: CircularProgressIndicator(color: Colors.white)),
@@ -239,7 +316,23 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
       home = GenesisPhraseScreen(
         phrase: _genesisPhrase!,
         onAcknowledged: () {
-          setState(() => _genesisPhrase = null);
+          // R7: after acknowledgment, push the verification screen instead
+          // of jumping straight to capture. The phrase stays live in
+          // `_genesisPhrase` until verification passes so the back button
+          // can return the user to re-review.
+          final phrase = _genesisPhrase!;
+          _navigatorKey.currentState?.push(
+            MaterialPageRoute<void>(
+              builder: (_) => VerifyPhraseScreen(
+                phrase: phrase,
+                onVerified: () {
+                  setState(() => _genesisPhrase = null);
+                  _navigatorKey.currentState
+                      ?.popUntil((route) => route.isFirst);
+                },
+              ),
+            ),
+          );
         },
       );
     } else {

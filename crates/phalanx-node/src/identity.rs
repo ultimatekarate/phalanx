@@ -25,6 +25,19 @@ pub trait PhalanxNodeIdentityExt: Sized {
     fn generate() -> Result<(Self, String), IdentityError>;
     fn restore(phrase: &str) -> Result<Self, IdentityError>;
     fn save_to_disk<P: AsRef<Path>>(&self, path: P, passphrase: &str) -> Result<(), IdentityError>;
+    /// All-or-nothing persistence. Writes to `path.tmp`, fsyncs, then
+    /// atomically renames to `path`. Used by the restore-from-mnemonic path,
+    /// which cannot leave a half-state on disk: an in-memory-only identity
+    /// would lock the user out on next launch ("no identity found, please
+    /// restore" again — but the previous restore "succeeded"). On Windows,
+    /// `std::fs::rename` is implemented via `MoveFileExW` with
+    /// `MOVEFILE_REPLACE_EXISTING` and is atomic; on Unix, `rename(2)` is
+    /// atomic within a single filesystem.
+    fn save_to_disk_atomic<P: AsRef<Path>>(
+        &self,
+        path: P,
+        passphrase: &str,
+    ) -> Result<(), IdentityError>;
     fn load_from_disk<P: AsRef<Path>>(path: P, passphrase: &str) -> Result<Self, IdentityError>;
     fn verify_retrieval_auth(&self, request: &RecordingRequest) -> Result<(), IdentityError>;
     fn init<P: AsRef<Path>>(
@@ -142,6 +155,58 @@ impl PhalanxNodeIdentityExt for PhalanxIdentity {
         })
     }
 
+    fn save_to_disk_atomic<P: AsRef<Path>>(
+        &self,
+        path: P,
+        passphrase: &str,
+    ) -> Result<(), IdentityError> {
+        let target = path.as_ref();
+        let file_bytes = seal_identity(self, passphrase)
+            .map_err(|e| IdentityError::CryptoError(format!("Seal failed: {}", e)))?;
+
+        // Sibling tmp path. Same parent directory so the final rename is
+        // intra-filesystem (a cross-fs rename would be a copy, not atomic).
+        let mut tmp = target.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp_path = std::path::PathBuf::from(tmp);
+
+        // Write + fsync the tmp file. We use a fresh File handle (not
+        // fs::write) so we can call sync_all() before close.
+        {
+            use std::io::Write;
+            let mut f = fs::File::create(&tmp_path).map_err(|e| {
+                IdentityError::Corruption(format!(
+                    "Failed to create tmp identity at {:?}: {}",
+                    tmp_path, e
+                ))
+            })?;
+            f.write_all(&file_bytes).map_err(|e| {
+                IdentityError::Corruption(format!(
+                    "Failed to write tmp identity at {:?}: {}",
+                    tmp_path, e
+                ))
+            })?;
+            f.sync_all().map_err(|e| {
+                IdentityError::Corruption(format!(
+                    "Failed to fsync tmp identity at {:?}: {}",
+                    tmp_path, e
+                ))
+            })?;
+        }
+
+        // Atomic rename. On Unix, rename(2) is atomic intra-fs. On Windows,
+        // std::fs::rename uses MoveFileExW with MOVEFILE_REPLACE_EXISTING,
+        // which is atomic for files on the same volume.
+        fs::rename(&tmp_path, target).map_err(|e| {
+            // Best-effort cleanup; if rename failed the tmp file is stale.
+            let _ = fs::remove_file(&tmp_path);
+            IdentityError::Corruption(format!(
+                "Failed to atomically rename {:?} to {:?}: {}",
+                tmp_path, target, e
+            ))
+        })
+    }
+
     /// Loads an identity from an encrypted file on disk using a passphrase.
     ///
     /// Delegates to shared `unseal_identity()` for crypto (Laboratory),
@@ -251,5 +316,69 @@ impl PhalanxLocatorExt for PhalanxLocator {
     fn load_from_disk<P: AsRef<Path>>(path: P) -> Result<Self, IdentityError> {
         let bytes = fs::read(path).map_err(|e| IdentityError::Corruption(e.to_string()))?;
         postcard::from_bytes(&bytes).map_err(|e| IdentityError::SerializationError(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// End-to-end restore loop: generate identity at path A, restore from the
+    /// returned phrase at a *fresh* path B, assert the same DID is produced.
+    /// Exercises both `save_to_disk_atomic` (the restore-path persistence) and
+    /// the determinism of `PhalanxIdentity::restore`.
+    #[test]
+    fn restore_loop_yields_same_did() {
+        let dir_a = TempDir::new().expect("tempdir A");
+        let dir_b = TempDir::new().expect("tempdir B");
+        let path_a = dir_a.path().join("identity.bin");
+        let path_b = dir_b.path().join("identity.bin");
+        let passphrase = "test-passphrase";
+
+        let (gen_id, phrase) = PhalanxIdentity::generate().expect("generate");
+        gen_id.save_to_disk(&path_a, passphrase).expect("save A");
+        let did_a = gen_id.did.as_str().to_string();
+
+        // Fresh path B (no identity present), restore from the phrase, atomic save.
+        assert!(!path_b.exists(), "tempdir B should be empty");
+        let restored = PhalanxIdentity::restore(&phrase).expect("restore");
+        restored
+            .save_to_disk_atomic(&path_b, passphrase)
+            .expect("atomic save B");
+        assert!(path_b.exists(), "atomic save produced no file");
+
+        let did_b = restored.did.as_str().to_string();
+        assert_eq!(did_a, did_b, "DID must match after restore");
+
+        // Loading from B yields the same identity (round-trip).
+        let loaded = PhalanxIdentity::load_from_disk(&path_b, passphrase).expect("load B");
+        assert_eq!(
+            loaded.did.as_str(),
+            did_a,
+            "DID must survive atomic-save → load round-trip"
+        );
+    }
+
+    /// Atomic save leaves no `.tmp` sibling behind on success.
+    #[test]
+    fn atomic_save_cleans_up_tmp() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("identity.bin");
+        let tmp_path = dir.path().join("identity.bin.tmp");
+
+        let (identity, _) = PhalanxIdentity::generate().expect("generate");
+        identity
+            .save_to_disk_atomic(&path, "pw")
+            .expect("atomic save");
+
+        assert!(path.exists(), "final file should exist");
+        assert!(!tmp_path.exists(), ".tmp sibling should have been renamed");
     }
 }

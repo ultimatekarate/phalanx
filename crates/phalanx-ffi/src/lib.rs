@@ -43,6 +43,7 @@ pub mod forget;
 pub mod handle;
 pub mod local_mesh;
 pub mod memory;
+pub mod mnemonic;
 mod panic_safety;
 pub mod playback;
 pub mod probe;

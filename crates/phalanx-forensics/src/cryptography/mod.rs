@@ -2,6 +2,7 @@ pub mod bridge;
 pub mod dek;
 pub mod grant;
 pub mod identity;
+pub mod mnemonic;
 
 use chacha20poly1305::{
     aead::{Aead, AeadCore, KeyInit, OsRng},

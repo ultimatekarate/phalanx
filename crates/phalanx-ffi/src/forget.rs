@@ -21,8 +21,28 @@ use phalanx_node::actors::storage::StorageCommand;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_proto::identity::RecordingId;
 use phalanx_proto::prelude::PhalanxIdentity;
+use phalanx_proto::storage::GuardianError;
 use phalanx_proto::time::{SystemClock, TrustedClock};
 use zeroize::Zeroize;
+
+/// Map a `GuardianError` from `handle_revoke` to a typed FFI error code.
+///
+/// `handle_revoke` (storage.rs) returns `VerificationFailed(String)` for two
+/// distinct user-visible cases: key mismatch (wrong phrase for this recording)
+/// and unknown recording. We classify by the message prefix the producer uses.
+/// The prefixes are stable — if they change in storage.rs without updating this
+/// match, the integration test for split error codes will catch it.
+fn classify_revoke_error(e: &GuardianError) -> PhalanxError {
+    if let GuardianError::VerificationFailed(msg) = e {
+        if msg.contains("authorization failed") {
+            return PhalanxError::RevocationKeyMismatch;
+        }
+        if msg.contains("unknown recording") {
+            return PhalanxError::RecordingNotFound;
+        }
+    }
+    PhalanxError::RevocationFailed
+}
 
 /// Cryptographically forget a recording. Destroys all local evidence and
 /// propagates the revocation to the mesh via gossipsub and DHT.
@@ -65,12 +85,16 @@ pub unsafe extern "C" fn phalanx_forget_recording(
     // 3. Copy mnemonic into a mutable String for zeroization after use
     let mut mnemonic_owned = phrase_str.to_string();
 
-    // 4. Derive revocation signing key from mnemonic
+    // 4. Derive revocation signing key from mnemonic. Any failure here means
+    //    the phrase couldn't produce a valid signing key — wordlist or
+    //    checksum violation. Map to the dedicated MnemonicParseError so the
+    //    UI can say "your phrase isn't a valid BIP-39 phrase" rather than the
+    //    conflated "phrase invalid or recording not found".
     let signing_key = match PhalanxIdentity::revocation_signing_key(&mnemonic_owned) {
         Ok(key) => key,
         Err(_) => {
             mnemonic_owned.zeroize();
-            return PhalanxError::RevocationFailed.code();
+            return PhalanxError::MnemonicParseError.code();
         }
     };
 
@@ -107,7 +131,7 @@ pub unsafe extern "C" fn phalanx_forget_recording(
 
         let storage_result = match reply_rx.await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(_)) => Err(PhalanxError::RevocationFailed),
+            Ok(Err(e)) => Err(classify_revoke_error(&e)),
             Err(_) => Err(PhalanxError::ChannelClosed),
         };
 

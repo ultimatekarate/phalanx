@@ -4851,6 +4851,7 @@ dependencies = [
  "argon2",
  "async-trait",
  "base64",
+ "bip39",
  "blake3",
  "bs58",
  "c2pa",
