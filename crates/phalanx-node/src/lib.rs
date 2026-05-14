@@ -101,6 +101,17 @@ extern crate tracing;
 // fully-qualified `actors::meshsentinel::MeshSentinel` path; that's a
 // deliberately-uglier import, since those callers also drive the run
 // loop directly and are signing up for the linear-ownership contract.
+//
+// `PlaybackCoordinator` and `PlaybackStats` are *deliberately not*
+// re-exported at the crate root either. The same audit removed the FFI's
+// direct construction of `PlaybackCoordinator` with dummy
+// `discovery_tx` / `providers_rx` channels — the FFI now dispatches
+// `SentinelCommand::SpawnPlayback`, which lets the sentinel build the
+// coordinator with its real DHT channels. Hiding `PlaybackCoordinator`
+// from the public surface makes the regression structurally impossible:
+// `phalanx-ffi` cannot name the type, so it cannot construct it. The
+// internal path `actors::playback::PlaybackCoordinator` remains
+// available for in-crate tests in `playback_tests.rs`.
 pub use actors::storage::StorageActor;
 pub use clock::TrustedClock;
 pub use config::NodeConfig;
@@ -108,8 +119,8 @@ pub use engine::{EngineHandle, EngineLifecycle, ShutdownError, UnspawnedEngine};
 pub use persistence::journal::FileJournal;
 pub use persistence::vault::Guardian;
 
-// Playback re-exports
-pub use actors::playback::{PlaybackCoordinator, PlaybackStats};
+// Playback sink re-exports (the sinks ARE part of the FFI surface — Flutter
+// constructs them to receive decoded frames). The Coordinator is not.
 pub use playback::sink::{ArtifactSink, VideoPlayerSink};
 
 pub mod prelude {

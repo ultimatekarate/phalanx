@@ -30,6 +30,25 @@
 //! re-exports `MeshSentinel` at the `phalanx_node` crate root — this
 //! doc-test fails and the H1/H2/H3 deadlock class becomes representable
 //! again. Don't restore the re-export.
+//!
+//! # Structural invariant: `PlaybackCoordinator` is unreachable from this crate.
+//!
+//! The same audit removed the FFI's direct construction of
+//! `PlaybackCoordinator` with dummy `discovery_tx` / `providers_rx`
+//! channels — `phalanx_start_playback` now dispatches
+//! `SentinelCommand::SpawnPlayback` and lets the sentinel build the
+//! coordinator with its real DHT channels. The regression "FFI hands
+//! the coordinator dummy channels" was the bug that silently disabled
+//! mesh fallback for all peer-hosted recordings.
+//!
+//! ```compile_fail
+//! use phalanx_node::PlaybackCoordinator;
+//! ```
+//!
+//! If the import above ever starts compiling — i.e. someone restored
+//! the crate-root re-export in `phalanx-node` — this doc-test fails
+//! and the mesh-fallback-disabling regression becomes representable
+//! again. Don't restore the re-export.
 
 pub mod logcat;
 
