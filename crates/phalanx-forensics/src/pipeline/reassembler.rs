@@ -607,12 +607,12 @@ impl FountainChunkifier for Vec<u8> {
             .enumerate()
             .map(|(i, packet)| {
                 let esi = packet.payload_id().encoding_symbol_id();
-                let symbol_data = packet.data().to_vec();
+                let symbol_slice = packet.data();
 
                 // Prefix with OTI (12 bytes) — 1% overhead at 1,200-byte symbols
-                let mut data = Vec::with_capacity(OTI_PREFIX_LEN + symbol_data.len());
+                let mut data = Vec::with_capacity(OTI_PREFIX_LEN + symbol_slice.len());
                 data.extend_from_slice(&oti_bytes);
-                data.extend_from_slice(&symbol_data);
+                data.extend_from_slice(symbol_slice);
 
                 ShardChunk {
                     shard_id,
