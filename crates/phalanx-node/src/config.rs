@@ -1,6 +1,5 @@
 // crates/phalanx-node/src/config.rs
 
-use phalanx_proto::evidence::SensorCalibration;
 use phalanx_proto::prelude::{Did, MeshTopic};
 use phalanx_proto::types::{
     ByteCapacity, ChannelCount, Fps, RepairRatio, SampleRate, SymbolBundleSize, SymbolSize,
@@ -108,13 +107,6 @@ pub struct StorageConfig {
     /// Fixed TTL for stored evidence, independent of dynamic temporal tolerance.
     #[serde(default = "default_evidence_ttl")]
     pub evidence_ttl_secs: u64,
-    /// Path to the PEM certificate for C2PA manifest signing.
-    /// When `None`, ArtifactSink writes unsigned raw bytes.
-    #[serde(default)]
-    pub c2pa_cert_path: Option<String>,
-    /// Path to the PEM private key for C2PA manifest signing.
-    #[serde(default)]
-    pub c2pa_key_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -123,11 +115,6 @@ pub struct HardwareConfig {
     pub camera_fps: Fps,
     pub audio_sample_rate: SampleRate,
     pub audio_channels: ChannelCount,
-    /// Per-device PRNU calibration result from the sensor setup pipeline.
-    /// When `None`, LensGate uses conservative default thresholds.
-    /// When `Some`, the calibrated `prnu_floor` is bound to the physical sensor.
-    #[serde(default)]
-    pub sensor_calibration: Option<SensorCalibration>,
 }
 
 impl HardwareConfig {
@@ -140,7 +127,6 @@ impl HardwareConfig {
             camera_fps: Fps::new(self.camera_fps.get()),
             audio_sample_rate: SampleRate::new(self.audio_sample_rate.get()),
             audio_channels: ChannelCount::new(self.audio_channels.get()),
-            sensor_calibration: self.sensor_calibration,
         }
     }
 }
@@ -213,8 +199,6 @@ impl Default for StorageConfig {
             max_foreign_storage_bytes: default_max_foreign(),
             max_foreign_per_owner_bytes: default_max_foreign_per_owner(),
             evidence_ttl_secs: default_evidence_ttl(),
-            c2pa_cert_path: None,
-            c2pa_key_path: None,
         }
     }
 }
@@ -225,7 +209,6 @@ impl Default for HardwareConfig {
             camera_fps: Fps::new(10),
             audio_sample_rate: SampleRate::new(16_000),
             audio_channels: ChannelCount::new(1),
-            sensor_calibration: None,
         }
     }
 }

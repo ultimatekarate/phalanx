@@ -121,7 +121,7 @@ pub use persistence::vault::Guardian;
 
 // Playback sink re-exports (the sinks ARE part of the FFI surface — Flutter
 // constructs them to receive decoded frames). The Coordinator is not.
-pub use playback::sink::{ArtifactSink, VideoPlayerSink};
+pub use playback::sink::VideoPlayerSink;
 
 pub mod prelude {
     pub use crate::clock::TrustedClock;

@@ -1,7 +1,7 @@
 // crates/phalanx-forensics/src/evidence/witness.rs
 
 use ed25519_dalek::{Signature, Signer};
-use phalanx_proto::evidence::{ChunkType, Evidence, ShardChunk, SignatureHash, WitnessEnvelope};
+use phalanx_proto::evidence::{Evidence, SignatureHash, WitnessEnvelope};
 use phalanx_proto::prelude::ShardError;
 use phalanx_proto::prelude::*;
 
@@ -19,14 +19,6 @@ pub trait WitnessAuthority {
 
     /// The Verb "To Anchor": Generates a unique hash of the signature for timeline chaining.
     fn calculate_anchor(&self) -> SignatureHash;
-
-    /// The Verb "To Chunkify": Slices the envelope for physical transmission.
-    fn into_chunks(
-        self,
-        shard_id: ShardId,
-        mtu: usize,
-        now: PhalanxTimestamp,
-    ) -> Result<Vec<ShardChunk>, ShardError>;
 }
 
 impl WitnessAuthority for WitnessEnvelope {
@@ -87,39 +79,6 @@ impl WitnessAuthority for WitnessEnvelope {
 
     fn calculate_anchor(&self) -> SignatureHash {
         SignatureHash(blake3::hash(&self.witness_signature).into())
-    }
-
-    #[allow(clippy::cast_possible_truncation)] // Chunk index as u32 — bounded by MAX_SYMBOLS_PER_CONTEXT.
-    fn into_chunks(
-        self,
-        shard_id: ShardId,
-        mtu: usize,
-        now: PhalanxTimestamp,
-    ) -> Result<Vec<ShardChunk>, ShardError> {
-        let owner_did = self.did.clone();
-
-        // Serialize the entire signed envelope
-        let full_data = postcard::to_allocvec(&self)?;
-        let timestamp = now;
-
-        // Slice into physical MTU-sized chunks
-        let slices: Vec<&[u8]> = full_data.chunks(mtu).collect();
-        let last_index = slices.len().saturating_sub(1);
-        let chunks = slices
-            .into_iter()
-            .enumerate()
-            .map(|(i, slice)| ShardChunk {
-                shard_id,
-                encoding_symbol_id: phalanx_proto::types::EncodingSymbolId(i as u32),
-                chunk_type: ChunkType::Witnessed,
-                is_terminal: i == last_index,
-                data: slice.to_vec(),
-                owner_did: owner_did.clone(),
-                timestamp,
-            })
-            .collect();
-
-        Ok(chunks)
     }
 }
 
