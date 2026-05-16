@@ -22,10 +22,8 @@ phalanx-lens = { path = "../phalanx-lens" }
 # Runtime & Async
 tokio = { version = "1.0", features = ["full"] }
 async-trait = "0.1"
-futures = "0.3"
 
 # CLI & Configuration (The "Interface" Prepositions)
-clap = { version = "4.0", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.9.8"
 
@@ -36,8 +34,6 @@ tracing-appender = "0.2"
 
 # Cryptography, Time & Identity
 bip39 = "2.0"
-bs58 = "0.5"
-argon2 = "0.5"
 ed25519-dalek = { version = "2.0", features = ["zeroize"] }
 rand = {version = "0.10.0", features = ["std"]}
 rand_core = { version = "0.6", features = ["std"] }
@@ -53,10 +49,8 @@ anyhow = "1.0"
 tempfile = "3.26.0"
 oneshot = "0.2.1"
 ctrlc = "3.5.2"
-lru = "0.16.3"
 blake3 = "1.8"
 zeroize = "1.8.2"
-c2pa = { version = "0.78.0", default-features = false, features = ["rust_native_crypto", "file_io"] }
 
 # Stability analysis (optional)
 nalgebra = { version = "0.33", optional = true }

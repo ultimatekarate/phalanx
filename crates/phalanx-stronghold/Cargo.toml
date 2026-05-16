@@ -26,7 +26,6 @@ phalanx-transport = { path = "../phalanx-transport" }
 # Runtime & Async
 tokio = { version = "1.0", features = ["full"] }
 async-trait = "0.1"
-futures = "0.3"
 
 # CLI & Configuration
 clap = { version = "4.0", features = ["derive"] }
@@ -41,22 +40,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Cryptography & Hashing
 ed25519-dalek = { version = "2.0", features = ["zeroize"] }
-rand = { version = "0.10.0", features = ["std"] }
 rand_core = { version = "0.6", features = ["std"] }
 blake3 = "1.8"
 zeroize = "1.8.2"
-argon2 = "0.5"
-bip39 = "2.0"
 
 # Serialization & Errors
 postcard = { version = "1.1.3", features = ["alloc"] }
 thiserror = "2.0.18"
-anyhow = "1.0"
 oneshot = { version = "0.2.1", features = ["async"] }
 
 # Export
 c2pa = { version = "0.78.0", default-features = false, features = ["rust_native_crypto", "file_io"] }
-serde_json = "1"
 
 # System
 ctrlc = "3.5.2"

@@ -3825,15 +3825,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
-name = "lru"
-version = "0.16.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1dc47f592c06f33f8e3aea9591776ec7c9f9e4124778ff8a3c3b87159f7e593"
-dependencies = [
- "hashbrown 0.16.1",
-]
-
-[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4850,7 +4841,6 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "async-trait",
- "base64",
  "bip39",
  "blake3",
  "bs58",
@@ -4859,7 +4849,6 @@ dependencies = [
  "curve25519-dalek",
  "ed25519-dalek",
  "fdk-aac",
- "flate2",
  "hex",
  "hkdf",
  "lz4_flex",
@@ -4897,17 +4886,11 @@ name = "phalanx-node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "argon2",
  "async-trait",
  "bip39",
  "blake3",
- "bs58",
- "c2pa",
- "clap",
  "ctrlc",
  "ed25519-dalek",
- "futures",
- "lru",
  "nalgebra",
  "oneshot",
  "phalanx-forensics",
@@ -4940,7 +4923,6 @@ dependencies = [
  "base64",
  "blake3",
  "bs58",
- "chrono",
  "ed25519-dalek",
  "phalanx-forensics",
  "postcard",
@@ -4949,7 +4931,6 @@ dependencies = [
  "serde",
  "thiserror 2.0.18",
  "tracing",
- "uuid",
  "zeroize",
 ]
 
@@ -4959,7 +4940,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
- "futures",
  "phalanx-forensics",
  "phalanx-node",
  "phalanx-proto",
@@ -4971,18 +4951,14 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
 name = "phalanx-stronghold"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "argon2",
  "async-trait",
  "base64",
- "bip39",
  "blake3",
  "c2pa",
  "chrono",
@@ -4990,7 +4966,6 @@ dependencies = [
  "ctrlc",
  "ed25519-dalek",
  "eframe",
- "futures",
  "oneshot",
  "phalanx-forensics",
  "phalanx-proto",
@@ -4998,11 +4973,9 @@ dependencies = [
  "phalanx-transport",
  "postcard",
  "qrcode",
- "rand 0.10.0",
  "rand_core 0.6.4",
  "rfd",
  "serde",
- "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -5026,20 +4999,17 @@ name = "phalanx-transport"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "bytes",
  "futures",
  "libp2p",
  "phalanx-proto",
  "postcard",
  "rand 0.8.5",
- "rand_core 0.10.0",
  "rcgen",
  "s2n-quic",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-test",
  "tracing",
  "zeroize",
 ]
@@ -7018,28 +6988,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "tokio-stream"
-version = "0.1.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32da49809aab5c3bc678af03902d4ccddea2a87d028d86392a4b1560c6906c70"
-dependencies = [
- "futures-core",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
-name = "tokio-test"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f6d24790a10a7af737693a3e8f1d03faef7e6ca0cc99aae5066f533766de545"
-dependencies = [
- "futures-core",
- "tokio",
- "tokio-stream",
 ]
 
 [[package]]
