@@ -26,21 +26,16 @@ impl VideoPlayerSink {
 
 #[async_trait]
 impl PlaybackSink for VideoPlayerSink {
-    async fn handle_chunk(
-        &mut self,
-        _sequence_id: StorageSequence,
-        mut data: Vec<u8>,
-    ) -> Result<()> {
-        // Hand off to the UI layer.
-        if let Err(e) = self.ui_tx.send(data.clone()).await {
+    async fn handle_chunk(&mut self, _sequence_id: StorageSequence, data: Vec<u8>) -> Result<()> {
+        // Move (not clone) into the channel. A prior version cloned and then
+        // zeroized the local copy, but the clone reached C-side memory via
+        // leak_bytes_to_c unzeroed — so the producer-side wipe only erased
+        // a shorter-lived sibling buffer. Moving eliminates that extra alloc
+        // + memset without changing the dominant cleartext lifetime, which
+        // is bounded by Flutter's free.
+        if let Err(e) = self.ui_tx.send(data).await {
             return Err(anyhow::anyhow!("UI playback channel closed: {}", e));
         }
-
-        // Ephemerality: wipe the local buffer once the clone is sent.
-        // Cleartext exists in RAM for the shortest time possible.
-        data.iter_mut().for_each(|b| *b = 0);
-        data.clear();
-
         Ok(())
     }
 
