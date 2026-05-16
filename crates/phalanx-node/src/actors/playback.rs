@@ -71,7 +71,7 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
     #[allow(clippy::cognitive_complexity)] // Linear state-machine loop; splitting would obscure flow.
     pub async fn run(&mut self, recording_id: RecordingId) -> Result<PlaybackStats> {
         let mut stats = PlaybackStats::default();
-        loop {
+        'playback: loop {
             // Non-blocking: drain any provider results that arrived since last iteration.
             // Using try_recv() instead of select! to avoid cancelling the oneshot reply_rx
             // future below if a provider event arrives mid-wait.
@@ -221,7 +221,7 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                                     timed.extend_from_slice(frame);
                                     if let Err(e) = self.video_sink.handle_chunk(seq, timed).await {
                                         eprintln!("[Phalanx Playback] video sink error: {e:?}");
-                                        break;
+                                        break 'playback Ok(stats);
                                     }
                                     stats.video_sent += 1;
                                 }
