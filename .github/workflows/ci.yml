@@ -24,6 +24,12 @@ jobs:
       - name: Supply chain check
         run: cargo deny check bans
 
+      - name: Install cargo-machete
+        run: cargo install cargo-machete --locked
+
+      - name: Check unused workspace dependencies
+        run: cargo machete
+
       - name: Clippy (workspace)
         run: cargo clippy --workspace -- -D warnings
 
