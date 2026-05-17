@@ -29,9 +29,8 @@ use std::os::raw::c_char;
 
 use c2pa::{CallbackSigner, SigningAlg};
 use phalanx_forensics::c2pa_ext::{generate_self_signed_cert, C2paOrchestrator};
+use phalanx_forensics::decode_payload;
 use phalanx_forensics::gate::{verify_provenance_from_jpeg, LensThresholds};
-use phalanx_forensics::judge::PayloadCipher;
-use phalanx_forensics::reassembler::decompress_payload;
 use phalanx_forensics::transcode::{transcode_to_mp4, DecodedAudioShard, DecodedVideoShard};
 use phalanx_node::actors::storage::StorageCommand;
 use phalanx_proto::evidence::{Evidence, MediaType};
@@ -207,18 +206,12 @@ async fn build_c2pa_export(
     let mut video_shards: Vec<DecodedVideoShard> = Vec::new();
     let mut audio_shards: Vec<DecodedAudioShard> = Vec::new();
 
-    for envelope in &envelopes {
-        match &envelope.evidence {
+    for envelope in envelopes {
+        match envelope.evidence {
             Evidence::Video(v) => {
-                // Decrypt payload
-                let decrypted = v
-                    .payload
-                    .reveal(vault_key)
+                // Canonical decrypt + decompress Verb (Laboratory).
+                let decompressed = decode_payload(v.payload, Some(vault_key))
                     .map_err(|_| PhalanxError::InvalidState)?;
-
-                // Decompress LZ4
-                let decompressed =
-                    decompress_payload(&decrypted).map_err(|_| PhalanxError::InvalidState)?;
 
                 // Deserialize postcard → Vec<Vec<u8>> (JPEG frames)
                 let jpeg_frames: Vec<Vec<u8>> =
@@ -239,15 +232,9 @@ async fn build_c2pa_export(
                 });
             }
             Evidence::Audio(a) => {
-                // Decrypt payload
-                let decrypted = a
-                    .payload
-                    .reveal(vault_key)
+                // Canonical decrypt + decompress Verb (Laboratory).
+                let pcm_bytes = decode_payload(a.payload, Some(vault_key))
                     .map_err(|_| PhalanxError::InvalidState)?;
-
-                // Decompress LZ4 → raw PCM bytes (no postcard wrapper for audio)
-                let pcm_bytes =
-                    decompress_payload(&decrypted).map_err(|_| PhalanxError::InvalidState)?;
 
                 audio_shards.push(DecodedAudioShard {
                     pcm_bytes,
