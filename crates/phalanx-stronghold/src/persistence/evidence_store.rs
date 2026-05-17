@@ -97,17 +97,14 @@ impl EvidenceStore {
         let shards_dir = self.shards_path(community_id, recording_id);
         tokio::fs::create_dir_all(&shards_dir).await?;
 
-        let filename = format!("{}.bin", seq.0);
-        let final_path = shards_dir.join(&filename);
-        let tmp_path = shards_dir.join(format!("{}.bin.tmp", seq.0));
+        let final_path = shards_dir.join(format!("{}.bin", seq.0));
 
         let bytes = postcard::to_allocvec(envelope).map_err(|e| {
             StrongholdError::Serialization(format!("Failed to serialize envelope: {e}"))
         })?;
 
         // RT-6: atomic write
-        tokio::fs::write(&tmp_path, &bytes).await?;
-        tokio::fs::rename(&tmp_path, &final_path).await?;
+        super::atomic::atomic_write(&final_path, &bytes).await?;
 
         Ok(())
     }

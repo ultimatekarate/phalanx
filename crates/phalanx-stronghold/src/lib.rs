@@ -19,6 +19,7 @@ pub mod ops {
     pub mod export;
 }
 pub mod persistence {
+    mod atomic;
     pub mod evidence_store;
     pub mod proof_store;
 }

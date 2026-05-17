@@ -54,16 +54,13 @@ impl ProofStore {
         let dir = self.community_path(community_id);
         tokio::fs::create_dir_all(&dir).await?;
 
-        let filename = format!("{}.bin", hash_hex(&proof.proof_hash));
-        let final_path = dir.join(&filename);
-        let tmp_path = dir.join(format!("{}.bin.tmp", hash_hex(&proof.proof_hash)));
+        let final_path = dir.join(format!("{}.bin", hash_hex(&proof.proof_hash)));
 
         let bytes = postcard::to_allocvec(proof).map_err(|e| {
             StrongholdError::Serialization(format!("Failed to serialize proof: {e}"))
         })?;
 
-        tokio::fs::write(&tmp_path, &bytes).await?;
-        tokio::fs::rename(&tmp_path, &final_path).await?;
+        super::atomic::atomic_write(&final_path, &bytes).await?;
 
         Ok(())
     }
