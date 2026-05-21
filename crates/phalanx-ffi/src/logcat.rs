@@ -30,3 +30,41 @@ macro_rules! phalanx_log {
 }
 
 pub(crate) use phalanx_log;
+
+/// `io::Write` sink that buffers one formatted log line and flushes it to
+/// Android logcat as a single entry. Backs the `tracing` fmt layer's writer.
+pub struct LogcatWriter {
+    buf: Vec<u8>,
+}
+
+impl std::io::Write for LogcatWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if !self.buf.is_empty() {
+            log_to_logcat(String::from_utf8_lossy(&self.buf).trim_end());
+            self.buf.clear();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for LogcatWriter {
+    fn drop(&mut self) {
+        let _ = std::io::Write::flush(self);
+    }
+}
+
+/// `MakeWriter` routing `tracing` fmt-layer output to Android logcat.
+pub struct LogcatMakeWriter;
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogcatMakeWriter {
+    type Writer = LogcatWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        LogcatWriter { buf: Vec::new() }
+    }
+}
