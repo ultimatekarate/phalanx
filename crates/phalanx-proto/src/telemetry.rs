@@ -86,6 +86,32 @@ pub enum SimEvent {
     },
 }
 
+/// Span-name vocabulary for performance instrumentation.
+///
+/// `tracing` span names are `&'static str` fixed at macro-expansion time, so a
+/// runtime enum cannot name a span — these consts are the typed substitute. They
+/// name the manual `trace_span!` sub-scopes on the crypto hot path, and `BRIDGED`
+/// is the allowlist the Android `AtraceLayer` mirrors to Perfetto track events.
+pub mod spans {
+    /// `sign_envelope` — postcard serialization of the evidence.
+    pub const SIGN_SERIALIZE: &str = "sign.serialize";
+    /// `sign_envelope` — Blake3 hash of the serialized evidence.
+    pub const SIGN_HASH: &str = "sign.hash";
+    /// `sign_envelope` — Ed25519 signature over the serialized evidence.
+    pub const SIGN_ED25519: &str = "sign.ed25519";
+
+    /// Span names bridged to Android systrace/Perfetto by `AtraceLayer`.
+    /// `sign_envelope`/`verify_envelope` are the `#[instrument]` function spans
+    /// (named after the fns); the rest are the sub-step consts above.
+    pub const BRIDGED: &[&str] = &[
+        "sign_envelope",
+        "verify_envelope",
+        SIGN_SERIALIZE,
+        SIGN_HASH,
+        SIGN_ED25519,
+    ];
+}
+
 #[cfg(test)]
 #[allow(
     clippy::indexing_slicing,

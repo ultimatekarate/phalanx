@@ -889,6 +889,7 @@ impl<I: IngressPort> MeshSentinel<I> {
 
     /// Unified event handler for both network ingress and local mesh events.
     /// Returns `true` if the engine should shut down.
+    #[tracing::instrument(level = "debug", skip_all)]
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Counter increments and timestamp arithmetic.
     async fn handle_network_event(&mut self, event: NetworkEvent) -> bool {
         match event {
@@ -958,6 +959,7 @@ impl<I: IngressPort> MeshSentinel<I> {
 
     /// Handles incoming data: oversized message rejection, control message
     /// spectral analysis, and bandwidth-gated ingestion forwarding.
+    #[tracing::instrument(level = "debug", skip_all)]
     #[allow(clippy::arithmetic_side_effects)] // Size comparisons and memory pressure recording.
     async fn handle_data_received(&mut self, origin: MeshAddress, topic: MeshTopic, data: Vec<u8>) {
         // P5 FIX: Reject oversized messages before any processing.

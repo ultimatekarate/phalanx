@@ -180,6 +180,7 @@ impl SystemGovernor {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // IO counter delta arithmetic and bandwidth casting.
     pub fn update_vitals(&self) {
         let t_stress = self.read_thermal();
@@ -438,6 +439,7 @@ impl SystemGovernor {
     ///
     /// `e` (entry/sybil) normalizes by `psi_max` because there is no `e_crit`;
     /// `l` (latency) normalizes by `max_temporal_tolerance` converted to seconds.
+    #[tracing::instrument(level = "debug", skip_all)]
     #[allow(clippy::cast_possible_truncation)] // values are clamped to [0, 1] before cast.
     pub fn integral_summary(&self) -> phalanx_proto::vitals::IntegralSummary {
         let now = self.now_secs();
@@ -464,6 +466,7 @@ impl SystemGovernor {
 
     /// Weighted composite of all integral pressures for power state transitions.
     /// Returns 0.0 (idle) to 1.0+ (saturated).
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn composite_stress(&self) -> f64 {
         let w = &self.config.stress_weights;
         let now = self.now_secs();
