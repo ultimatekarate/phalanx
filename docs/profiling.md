@@ -79,6 +79,8 @@ A lone `sentinel` node is idle — drive load through `phalanx-sim` or the bench
 
 ## On-device profiling — retail phone (non-rooted)
 
+Note: I hate the process of on-device profiling. I did it exactly one time just to make sure that it could be done.
+
 1. Stage the release `libphalanx_ffi.so` into the app's `jniLibs` (the existing
    `cargo-ndk` / `scripts/build_mobile.sh` step).
 2. `cd flutter_app && flutter run --profile` — profile mode produces a
