@@ -8,7 +8,7 @@ The codebase is structured so that each [technical specialty](#files-by-technica
 
 Don't you dare disrespect yourself by submitting anything less than your best. Mistakes are acceptable, that is how we learn. The important thing is that we try. I do have some rules:
 
-1. Read `linguistic-code-model.md` — particularly Sections I (Parts of Speech) and II (Structural Enforcement), I promise it is worth it. Read the friendly manual.
+1. Read `linguistic-code-model.md` — particularly Sections I (Definitions, including the Parts of Speech) and II (Structural Enforcement), I promise it is worth it. Read the friendly manual.
 2. If you added a new type, check the linguistic model to determine which crate it belongs in. Nouns go in the Dictionary. Verbs go in the Laboratory. Prepositions go in the Post Office.
 3. Run `cargo clippy --workspace --all-targets` — zero errors, zero governance lint warnings.
 4. Run `cargo test --workspace` — all tests pass.
@@ -128,6 +128,12 @@ DID resolution, Ed25519 key management, AEAD payload encryption, signature verif
 | `phalanx-proto/src/identity/crypto.rs` | `SymmetricKey` with zeroization on drop, cryptographic error types |
 | `phalanx-proto/src/identity/did.rs` | `Did`, `NetworkId`, `PhalanxIdentity`, `RecordingId`, `ShardId` |
 | `phalanx-forensics/src/identity.rs` | DID resolution — extracting Ed25519 public keys from `did:key` URIs |
+| `phalanx-forensics/src/cryptography/mod.rs` | XChaCha20-Poly1305 AEAD primitives — `generate_session_key`, `encrypt_bytes`, `decrypt_bytes` |
+| `phalanx-forensics/src/cryptography/grant.rs` | `GrantAuthority` — sealing/unlocking `RecordingKey`s to a recipient DID via X25519 ECDH |
+| `phalanx-forensics/src/cryptography/dek.rs` | Deterministic per-recording DEK derivation from a BIP-39 seed via HKDF-SHA256 |
+| `phalanx-forensics/src/cryptography/bridge.rs` | Ed25519 → X25519 key conversion for ECDH |
+| `phalanx-forensics/src/cryptography/identity.rs` | Sealing/unsealing `PhalanxIdentity` for disk persistence with Argon2id |
+| `phalanx-forensics/src/cryptography/mnemonic.rs` | Pure-function BIP-39 mnemonic validation |
 | `phalanx-forensics/src/pipeline/witness.rs` | `WitnessAuthority` — signing, verifying, and chunking evidence envelopes |
 | `phalanx-forensics/src/verification/judge.rs` | Shard and recording amalgam causality validation |
 | `phalanx-node/src/identity.rs` | `PhalanxNodeIdentityExt` — node-level identity and retrieval authorization |
@@ -184,6 +190,7 @@ JPEG/PCM capture, MP4 transcoding, fountain code encoding/reassembly, C2PA conte
 | ------ | ------------- |
 | `phalanx-forensics/src/pipeline/transcode.rs` | JPEG frames + PCM audio → MP4 container |
 | `phalanx-forensics/src/pipeline/reassembler.rs` | Fountain-coded chunk reassembly into complete envelopes |
+| `phalanx-forensics/src/pipeline/crucible.rs` | `Crucible` — accumulates verified envelopes into `Recording`s, governed by a `Mold` strategy |
 | `phalanx-forensics/src/pipeline/c2pa_ext.rs` | C2PA manifest builder embedding Phalanx forensic assertions |
 | `phalanx-proto/src/evidence/envelope.rs` | `WitnessEnvelope`, `ShardChunk`, `VideoShard`, `AudioShard`, `Evidence` |
 | `phalanx-node/src/playback/sink.rs` | Media sink for forensic evidence replay |
@@ -228,7 +235,7 @@ Encrypted vault storage, append-only journals, WAL-backed retry queues, and redb
 
 | File | What it does |
 | ------ | ------------- |
-| `phalanx-node/src/persistence/vault.rs` | `Guardian` vault — encrypted, compressed forensic evidence storage |
+| `phalanx-node/src/persistence/vault/mod.rs` | `Guardian` vault — encrypted, compressed forensic evidence storage |
 | `phalanx-node/src/persistence/journal.rs` | `FileJournal` — append-only encrypted log with vault key management |
 | `phalanx-node/src/persistence/outbound.rs` | `OutboundQueue` — WAL-backed retry queue with exponential backoff |
 | `phalanx-node/src/persistence/kademlia.rs` | redb-backed `RecordStore` for persistent DHT records |

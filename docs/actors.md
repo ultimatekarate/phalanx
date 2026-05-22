@@ -171,7 +171,7 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 
 **File**: `crates/phalanx-node/src/actors/ingestion.rs`
 
-**Role**: Ingress gate. Receives raw network data, applies policy checks, and forwards verified shards to StorageActor. This is where adversarial input is rejected.
+**Role**: Ingress gate. Receives raw network data, applies policy checks, and forwards admitted shards to StorageActor. This is where adversarial input is rejected.
 
 **Single command**: `IngestionCommand::ProcessChunk { peer_id, data, topic }`
 
@@ -180,7 +180,7 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 1. **TrafficGovernor** — power-state-aware per-peer bandwidth limit
 2. **IngressGovernor** — slot allocation (sybil endowment)
 3. **ReputationProjection** — lock-free trust level check
-4. **Deserialization + verification** — `ForensicUnit<ShardChunk, Unverified>` → `Verified`
+4. **Deserialization** — unmarshal the gossipsub bundle into `Vec<ShardChunk>` (a fountain fragment has no signature — nothing to verify until reassembly)
 5. **Stale shard check** — reject if timestamp too old
 
 **On rejection**: Sends `TrustCommand::RecordOffense` to TrustActor with the specific offense type.
@@ -440,7 +440,7 @@ Network event (DataReceived)
     → TrafficGovernor gate
     → IngressGovernor gate
     → ReputationProjection gate
-    → Deserialize + verify → ForensicUnit<ShardChunk, Verified>
+    → Deserialize bundle → ShardChunk
       → StorageActor::Ingest
         → Storage pressure gate
         → Reassembler::ingest_chunk (Crucible<ShardMold>)
