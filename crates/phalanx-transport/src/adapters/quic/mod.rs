@@ -227,8 +227,7 @@ pub(crate) async fn translate_response(
     response: RecordingResponse,
 ) {
     match response {
-        RecordingResponse::Success(sealed_units) => {
-            let envelopes = sealed_units.into_iter().map(|u| u.unpack()).collect();
+        RecordingResponse::Success(envelopes) => {
             let _ = event_tx
                 .send(NetworkEvent::ShardResponseReceived {
                     origin: origin.clone(),

@@ -6,11 +6,12 @@
 //! the signing call requires constructing valid Evidence first, which
 //! is exactly the construction knowledge this crate encapsulates.
 
+use phalanx_forensics::gate::PromotionGate;
+use phalanx_forensics::unit::{ForensicUnit, Verified};
 use phalanx_forensics::witness::WitnessAuthority;
 use phalanx_proto::evidence::{Evidence, SignatureHash, WitnessEnvelope};
 use phalanx_proto::identity::{PhalanxIdentity, RecordingId};
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock, TrustedClock};
-use phalanx_proto::types::{ForensicUnit, Verified};
 
 use crate::shards::video_shard_for_recording;
 
@@ -73,5 +74,7 @@ pub fn verified_unit_for_recording(
     prev_hash: Option<SignatureHash>,
 ) -> ForensicUnit<WitnessEnvelope, Verified> {
     let env = witness_envelope_for_recording(identity, recording_id, seq, prev_hash);
-    ForensicUnit::<WitnessEnvelope, Verified>::new_verified(env)
+    ForensicUnit::new(env)
+        .promote_signed()
+        .expect("fixture envelope is validly signed")
 }

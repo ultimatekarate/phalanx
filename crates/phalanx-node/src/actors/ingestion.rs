@@ -12,7 +12,6 @@ use phalanx_forensics::policy::{IngressGovernor, TrafficGovernor};
 
 use phalanx_proto::prelude::*;
 use phalanx_proto::trust::Offense;
-use phalanx_proto::types::{ForensicUnit, Unverified, Verified};
 use phalanx_transport::identity_ext::Libp2pExt;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -144,8 +143,8 @@ impl IngestionActor {
 
         // Wire format is `Vec<ShardChunk>` (length 1 for single-symbol
         // publishes, length N for bundled publishes). Iterate per chunk so
-        // the existing per-chunk handling — bandwidth tracking, ForensicUnit
-        // construction, signature verification — runs unchanged.
+        // the existing per-chunk handling — bandwidth tracking, trust and
+        // staleness checks, ingress slot allocation — runs unchanged.
         let bundle = match phalanx_forensics::gate::unmarshal::<Vec<ShardChunk>>(data, "ingestion")
         {
             Ok(b) => b,
@@ -169,8 +168,7 @@ impl IngestionActor {
                 continue;
             }
 
-            let unverified = ForensicUnit::<_, Unverified>::new(raw_chunk);
-            let sender_did = unverified.data.owner_did.clone();
+            let sender_did = raw_chunk.owner_did.clone();
 
             if !self.system_governor.is_peer_coupled(&peer_id.to_string())
                 || sender_did.verify_standing(&self.trust_oracle).is_err()
@@ -188,7 +186,7 @@ impl IngestionActor {
                 continue;
             }
 
-            let shard_birth = unverified.data.timestamp;
+            let shard_birth = raw_chunk.timestamp;
             let now_ms = self.clock.now().unwrap_or(shard_birth);
             let age = Duration::from_millis(now_ms.0.saturating_sub(shard_birth.0));
 
@@ -236,7 +234,6 @@ impl IngestionActor {
             let _slot_guard = SlotGuard::new(&mut self.ingress_governor, peer_id.clone());
 
             let (reply_tx, reply_rx) = oneshot::channel();
-            let verified_unit = ForensicUnit::<_, Verified>::new_verified(unverified.unpack());
 
             // T6 FIX: Evidence TTL is fixed from config, not coupled to dynamic tolerance.
             // Dynamic tolerance is only used for staleness checks above.
@@ -245,7 +242,7 @@ impl IngestionActor {
             if self
                 .storage_tx
                 .send(StorageCommand::Ingest {
-                    unit: verified_unit,
+                    chunk: raw_chunk,
                     reply_to: reply_tx,
                     ttl: evidence_ttl,
                 })

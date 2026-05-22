@@ -8,13 +8,14 @@ use crate::trust::{ReputationProjection, TrustOracle};
 use crate::vitals::Homeostasis;
 use crate::vitals::{FinalizationScale, SystemGovernor};
 use phalanx_forensics::crucible::EvidenceExt;
-use phalanx_forensics::gate::IntegrityGate;
+use phalanx_forensics::gate::PromotionGate;
 use phalanx_forensics::policy::EgressGovernor;
+use phalanx_forensics::unit::ForensicUnit;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*;
 use phalanx_proto::trust::Offense;
-use phalanx_proto::types::{ForensicUnit, Sealed, TaskCost, Verified};
+use phalanx_proto::types::TaskCost;
 use phalanx_proto::RecordingRequest;
 use std::sync::Arc;
 
@@ -215,7 +216,7 @@ impl RetrievalActor {
         &self,
         raw_envelopes: Vec<WitnessEnvelope>,
         request: &RecordingRequest,
-    ) -> Vec<ForensicUnit<WitnessEnvelope, Sealed>> {
+    ) -> Vec<WitnessEnvelope> {
         let local_id = &self.identity.witness_id;
         let current_stress = self.system_governor.current_stress();
         let target_trust = self.trust_oracle.check_trust_by_did(&request.target_did);
@@ -223,20 +224,19 @@ impl RetrievalActor {
 
         for env in raw_envelopes {
             let sequence_id = env.evidence.sequence_id();
-            if let Ok(valid_env) = env.check_integrity(
+            if let Ok(unit) = ForensicUnit::new(env).promote(
                 local_id,
                 &*self.clock,
                 std::time::Duration::from_millis(10_000),
                 None,
             ) {
-                let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
                 if let Ok(sealed) = EgressGovernor::authorize(
                     unit,
                     &target_trust,
                     &current_stress,
                     &self.network_key,
                 ) {
-                    sealed_units.push(sealed);
+                    sealed_units.push(sealed.unpack());
                 } else {
                     tracing::warn!(seq = %sequence_id, "Egress denied by policy");
                 }

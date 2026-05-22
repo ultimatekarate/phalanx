@@ -10,8 +10,9 @@ mod common;
 
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 
-use phalanx_forensics::gate::IntegrityGate;
+use phalanx_forensics::gate::PromotionGate;
 use phalanx_forensics::policy::EgressGovernor;
+use phalanx_forensics::unit::ForensicUnit;
 use phalanx_forensics::Reassembler;
 use phalanx_node::actors::shutdown::ShutdownSignal;
 use phalanx_node::actors::storage::{NoOpJournal, StorageActor, StorageCommand};
@@ -27,7 +28,7 @@ use phalanx_proto::storage::GuardianError;
 use phalanx_proto::storage::TransientJournal;
 use phalanx_proto::time::SystemClock;
 use phalanx_proto::trust::TrustLevel;
-use phalanx_proto::types::{ForensicUnit, SystemStress, Verified};
+use phalanx_proto::types::SystemStress;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
@@ -222,9 +223,11 @@ async fn test_sentinel_egress_promotion_logic() {
     // 1. Mock raw data from Vault
     let raw_env = mock_valid_envelope();
 
-    // 2. Sentinel performs Gate 3: Integrity
-    let valid_env = raw_env
-        .check_integrity(
+    // 2. Sentinel performs the integrity gate. `promote` runs check_integrity
+    // internally and yields a Verified unit only on success — there is no way
+    // to mint Verified without passing the gate.
+    let unit = ForensicUnit::new(raw_env)
+        .promote(
             &local_net_id,
             &SystemClock,
             std::time::Duration::from_millis(1000),
@@ -232,9 +235,7 @@ async fn test_sentinel_egress_promotion_logic() {
         )
         .expect("Integrity check failed");
 
-    // 3. Sentinel performs Gate 4: Policy Promotion
-    let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
-
+    // 3. Sentinel performs the policy gate (authorize → Sealed).
     let promotion_result =
         EgressGovernor::authorize(unit, &trust, &stress, &SymmetricKey::from_bytes([0u8; 32]));
 
@@ -242,7 +243,7 @@ async fn test_sentinel_egress_promotion_logic() {
     assert!(promotion_result.is_ok());
     let sealed_unit = promotion_result.unwrap();
 
-    let response = RecordingResponse::Success(vec![sealed_unit]);
+    let response = RecordingResponse::Success(vec![sealed_unit.unpack()]);
 
     if let RecordingResponse::Success(units) = response {
         assert_eq!(units.len(), 1);
@@ -436,15 +437,14 @@ async fn test_sentinel_blocks_untrusted_egress() {
     let stress = SystemStress::Nominal;
 
     let raw_env = mock_valid_envelope();
-    let valid_env = raw_env
-        .check_integrity(
+    let unit = ForensicUnit::new(raw_env)
+        .promote(
             &local_net_id,
             &SystemClock,
             std::time::Duration::from_millis(1000),
             None,
         )
         .unwrap();
-    let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
 
     // ACT: Attempt promotion
     let result =

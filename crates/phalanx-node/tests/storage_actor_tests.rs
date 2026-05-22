@@ -30,7 +30,7 @@ use phalanx_proto::storage::GuardianError;
 use phalanx_proto::storage::PendingEgress;
 use phalanx_proto::storage::TransientJournal;
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};
-use phalanx_proto::types::{ForensicUnit, Fps, Verified};
+use phalanx_proto::types::Fps;
 use tokio::sync::{mpsc, oneshot};
 
 fn build_test_actor<J: TransientJournal + Send + 'static>(
@@ -161,11 +161,9 @@ async fn test_pillar_salvage_under_disk_pressure() {
         build_test_actor(config.clone(), identity.clone(), BrokenJournal, guardian);
 
     // 4. Trigger Salvage with Evidence
-    let unit = ForensicUnit::<_, Verified>::new_verified(envelope).seal();
-
     let salvage_data = vec![PendingEgress {
         channel_id: "ch_broken_pillar".into(),
-        response: RecordingResponse::Success(vec![unit]),
+        response: RecordingResponse::Success(vec![envelope]),
         attempt_count: 0,
         next_attempt: PhalanxTimestamp::from_millis(1_700_000_000_000),
     }];
@@ -253,10 +251,9 @@ async fn test_reputation_gate_signature_mismatch() {
     // catches the poisoned signature. Earlier symbols return Ok(()) (still accumulating).
     for chunk in chunks.iter().take(chunks.len() - 1) {
         let (tx, _) = oneshot::channel(); // Ignore intermediate replies
-        let unit = ForensicUnit::<_, Verified>::new_verified(chunk.clone());
         storage_tx
             .send(StorageCommand::Ingest {
-                unit,
+                chunk: chunk.clone(),
                 reply_to: tx,
                 ttl: Duration::from_secs(1),
             })
@@ -266,10 +263,9 @@ async fn test_reputation_gate_signature_mismatch() {
 
     // Send the final symbol and keep its reply channel
     let (reply_tx, reply_rx) = oneshot::channel();
-    let unit = ForensicUnit::<_, Verified>::new_verified(chunks.last().unwrap().clone());
     storage_tx
         .send(StorageCommand::Ingest {
-            unit,
+            chunk: chunks.last().unwrap().clone(),
             reply_to: reply_tx,
             ttl: Duration::from_secs(1),
         })
@@ -383,10 +379,9 @@ async fn test_salvage_on_node_death() {
         // Send all but the last chunk (not enough for decoder without repair)
         for chunk in chunks.iter().take(total_chunks - 1) {
             let (tx, _) = oneshot::channel();
-            let unit = ForensicUnit::<_, Verified>::new_verified(chunk.clone());
             storage_tx
                 .send(StorageCommand::Ingest {
-                    unit,
+                    chunk: chunk.clone(),
                     reply_to: tx,
                     ttl: Duration::from_secs(1),
                 })
@@ -428,10 +423,9 @@ async fn test_salvage_on_node_death() {
 
         // Send the final chunk (triggers fountain decode completion)
         let (tx, _) = oneshot::channel();
-        let unit = ForensicUnit::<_, Verified>::new_verified(chunks[total_chunks - 1].clone());
         storage_tx2
             .send(StorageCommand::Ingest {
-                unit,
+                chunk: chunks[total_chunks - 1].clone(),
                 reply_to: tx,
                 ttl: Duration::from_secs(1),
             })
@@ -527,10 +521,9 @@ async fn test_stronghold_ingestion_and_persistence() {
     // 4. Inject all fountain symbols via StorageCommand::Ingest
     for chunk in &chunks {
         let (tx, _) = oneshot::channel();
-        let unit = ForensicUnit::<_, Verified>::new_verified(chunk.clone());
         storage_tx
             .send(StorageCommand::Ingest {
-                unit,
+                chunk: chunk.clone(),
                 reply_to: tx,
                 ttl: Duration::from_secs(1),
             })
@@ -672,10 +665,9 @@ async fn test_storage_actor_metric_pipeline() {
 
     // 5. Inject via Ingest Command
     let (tx, _) = oneshot::channel();
-    let unit = ForensicUnit::<_, Verified>::new_verified(chunk);
     command_tx
         .send(StorageCommand::Ingest {
-            unit,
+            chunk,
             reply_to: tx,
             ttl: Duration::from_secs(1),
         })
@@ -771,12 +763,10 @@ async fn test_pure_vault_ingest_contract() {
     };
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    let unit = ForensicUnit::<_, Verified>::new_verified(chunk);
-
     // 3. Send and Await
     cmd_tx
         .send(StorageCommand::Ingest {
-            unit,
+            chunk,
             reply_to: reply_tx,
             ttl: Duration::from_secs(1),
         })
@@ -800,11 +790,10 @@ mod ingress_boundary_tests {
     use phalanx_proto::identity::{PhalanxIdentity, RecordingId, ShardId, WitnessId};
     use phalanx_proto::prelude::ShardChunk;
     use phalanx_proto::time::PhalanxTimestamp;
-    use phalanx_proto::types::{ForensicUnit, Unverified, Verified};
     use tokio::sync::oneshot;
 
     #[tokio::test]
-    async fn test_vault_rejects_unverified_ingress_by_design() {
+    async fn test_vault_accepts_valid_chunk_ingress() {
         let (actor, cmd_rx, cmd_tx, _temp) = setup_mock_storage().await;
 
         tokio::spawn(async move {
@@ -844,33 +833,26 @@ mod ingress_boundary_tests {
             timestamp,
         };
 
-        // 3. SENTINEL BOUNDARY: Wrap as Unverified
-        let unverified_unit = ForensicUnit::<_, Unverified>::new(raw_chunk);
-
-        // --- COMPILER ENFORCEMENT ZONE ---
-        // If you uncomment the following line, the test WILL NOT COMPILE:
-        // let BAD_COMMAND = StorageCommand::Ingest { unit: unverified_unit.clone(), reply_to: ... };
-        // ---------------------------------
-
-        // 4. THE PROMOTION: Simulate passing the Reputation & Quota gates
-        let verified_unit = ForensicUnit::<_, Verified>::new_verified(unverified_unit.unpack());
-
-        // 5. THE VAULT: Now it mathematically accepts the command
+        // 3. Send the raw chunk to the Vault. ShardChunk is a fountain-coded
+        // fragment with no signature of its own — nothing is verifiable until
+        // chunks reassemble into a WitnessEnvelope, so Ingest carries the bare
+        // chunk. Authenticity is enforced downstream: the reassembled envelope
+        // must clear the integrity gate before the Crucible accepts it.
         let (reply_tx, reply_rx) = oneshot::channel();
         cmd_tx
             .send(StorageCommand::Ingest {
-                unit: verified_unit,
+                chunk: raw_chunk,
                 reply_to: reply_tx,
                 ttl: Duration::from_secs(1),
             })
             .await
-            .expect("Failed to send verified chunk to Vault");
+            .expect("Failed to send chunk to Vault");
 
-        // 6. VERIFICATION
-        let result = reply_rx.await.expect("Vault died during secure ingest");
+        // 4. VERIFICATION
+        let result = reply_rx.await.expect("Vault died during ingest");
         assert!(
             result.is_ok(),
-            "Vault rejected a cryptographically valid, typestate-verified chunk"
+            "Vault rejected a cryptographically valid chunk"
         );
     }
 }

@@ -247,13 +247,10 @@ pub fn translate_swarm_event(event: SwarmEvent<PhalanxEvent>) -> Option<NetworkE
                 ..
             },
         )) => match response {
-            RecordingResponse::Success(sealed_units) => {
-                let envelopes = sealed_units.into_iter().map(|u| u.unpack()).collect();
-                Some(NetworkEvent::ShardResponseReceived {
-                    origin: PeerMapper::to_mesh_address(&peer),
-                    envelopes,
-                })
-            }
+            RecordingResponse::Success(envelopes) => Some(NetworkEvent::ShardResponseReceived {
+                origin: PeerMapper::to_mesh_address(&peer),
+                envelopes,
+            }),
             other => {
                 tracing::debug!(
                     target: "phalanx::transport",

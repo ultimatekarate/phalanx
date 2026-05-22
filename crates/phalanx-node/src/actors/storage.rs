@@ -21,8 +21,6 @@ use phalanx_proto::revocation::RevocationToken;
 use phalanx_proto::storage::GuardianError;
 use phalanx_proto::storage::PendingEgress;
 use phalanx_proto::storage::TransientJournal;
-use phalanx_proto::types::ForensicUnit;
-use phalanx_proto::types::Verified;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -64,7 +62,7 @@ pub struct StorageActor<J: TransientJournal> {
 pub enum StorageCommand {
     /// Pure ingestion. No routing logic or network ACKs.
     Ingest {
-        unit: ForensicUnit<ShardChunk, Verified>,
+        chunk: ShardChunk,
         reply_to: oneshot::Sender<Result<(), GuardianError>>,
         ttl: Duration,
     },
@@ -328,12 +326,12 @@ impl<J: TransientJournal> StorageActor<J> {
     async fn handle_command(&mut self, cmd: StorageCommand) {
         match cmd {
             StorageCommand::Ingest {
-                unit,
+                chunk,
                 reply_to,
                 ttl,
             } => {
                 self.current_tolerance = ttl;
-                let result = self.handle_ingest(unit).await;
+                let result = self.handle_ingest(chunk).await;
                 let _ = reply_to.send(result);
             }
             StorageCommand::Retrieval {
@@ -517,10 +515,7 @@ impl<J: TransientJournal> StorageActor<J> {
     }
 
     /// Handles data ingestion purely from a forensic and storage perspective.
-    async fn handle_ingest(
-        &mut self,
-        unit: ForensicUnit<ShardChunk, Verified>,
-    ) -> Result<(), GuardianError> {
+    async fn handle_ingest(&mut self, chunk: ShardChunk) -> Result<(), GuardianError> {
         // Storage pressure gate: reject when WAL/disk is near capacity (soft limit via integral)
         if self.system_governor.storage_scaler().0 < 0.05 {
             return Err(GuardianError::StorageFailure(
@@ -539,8 +534,6 @@ impl<J: TransientJournal> StorageActor<J> {
                 current_storage, max_storage
             )));
         }
-
-        let chunk = unit.unpack();
 
         // Foreign storage enforcement: reject foreign data when over the configured limit.
         let is_foreign = chunk.owner_did != self.guardian.local_did;

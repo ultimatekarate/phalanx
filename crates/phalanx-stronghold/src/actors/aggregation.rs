@@ -12,14 +12,14 @@ use std::time::Duration;
 
 use phalanx_forensics::bloom::RotatingBloomFilter;
 use phalanx_forensics::crucible::{Crucible, RecordingAmalgam};
+use phalanx_forensics::gate::PromotionGate;
 use phalanx_forensics::reassembler::ShardMold;
-use phalanx_forensics::witness::WitnessAuthority;
+use phalanx_forensics::unit::ForensicUnit;
 use phalanx_proto::community::CommunityId;
 use phalanx_proto::corroboration::ProximityWitness;
-use phalanx_proto::evidence::{Evidence, Recording, WitnessEnvelope};
+use phalanx_proto::evidence::{Evidence, Recording};
 use phalanx_proto::identity::{Did, RecordingId};
 use phalanx_proto::prelude::ShardChunk;
-use phalanx_proto::types::{ForensicUnit, Verified};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -298,31 +298,31 @@ impl AggregationActor {
             .sum();
         self.governor.record_memory_pressure(buffer_bytes);
 
-        // 6. Signature verification via WitnessAuthority::verify_envelope().
-        // DID → Ed25519 public key → verify_strict over serialized evidence.
-        // This is the verify-don't-trust principle from the design (Q3).
-        if !envelope.verify_envelope() {
-            warn!(
-                did = %envelope.did,
-                "AggregationActor: envelope signature verification failed, dropping"
-            );
-            return;
-        }
+        // 6. Signature verification, folded into the typestate transition:
+        // promote_signed runs WitnessAuthority::verify_envelope (Ed25519
+        // verify_strict over the serialized evidence) and yields a Verified
+        // unit only on success. Verify-don't-trust (design Q3).
+        let unit = match ForensicUnit::new(envelope).promote_signed() {
+            Ok(u) => u,
+            Err(_) => {
+                warn!("AggregationActor: envelope signature verification failed, dropping");
+                return;
+            }
+        };
 
         // R2-2 FIX: Assert chunk.owner_did matches the verified envelope signer.
         // Prevents an attacker from routing evidence into communities they don't belong to
         // by spoofing owner_did in the ShardChunk while signing as a different DID.
-        if claimed_did != envelope.did {
+        if claimed_did != unit.data().did {
             warn!(
                 claimed = %claimed_did,
-                actual = %envelope.did,
+                actual = %unit.data().did,
                 "AggregationActor: chunk owner_did does not match envelope signer, dropping"
             );
             return;
         }
 
         // 7. Feed into recording_crucible.
-        let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(envelope.clone());
         let recording = match self.recording_crucible.process(unit) {
             Ok(Some(rec)) => rec,
             Ok(None) => return, // Accumulating, not ready yet.
