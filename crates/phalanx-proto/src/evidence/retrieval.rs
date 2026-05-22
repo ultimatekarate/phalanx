@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::SealedLocator;
 use crate::identity::{Did, RecordingId};
-use crate::types::{ForensicUnit, Sealed};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordingRequest {
@@ -56,7 +55,7 @@ impl crate::wire::WireBound for RecordingRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RecordingResponse {
-    Success(Vec<ForensicUnit<WitnessEnvelope, Sealed>>),
+    Success(Vec<WitnessEnvelope>),
     Busy,         // Resource-based shedding
     NotFound,     // Data missing from local Guardian
     Unauthorized, // Cryptographic proof failed
@@ -99,11 +98,10 @@ mod tests {
     use crate::evidence::{Evidence, ForensicGap, StorageSequence};
     use crate::identity::WitnessId;
     use crate::time::PhalanxTimestamp;
-    use crate::types::{ForensicUnit, Verified};
     use crate::wire::WireBound;
 
-    fn dummy_sealed_unit() -> ForensicUnit<WitnessEnvelope, Sealed> {
-        let envelope = WitnessEnvelope {
+    fn dummy_envelope() -> WitnessEnvelope {
+        WitnessEnvelope {
             evidence: Evidence::Gap(ForensicGap {
                 recording_id: RecordingId::new("test_rec"),
                 start_seq: StorageSequence(0),
@@ -116,13 +114,12 @@ mod tests {
             did: Did::new("did:test:dummy"),
             prev_hash: None,
             revocation_key: crate::revocation::RevocationKey::default(),
-        };
-        ForensicUnit::<_, Verified>::new_verified(envelope).seal()
+        }
     }
 
     #[test]
     fn s4_wire_bound_truncates_oversized_response() {
-        let units: Vec<_> = (0..500).map(|_| dummy_sealed_unit()).collect();
+        let units: Vec<_> = (0..500).map(|_| dummy_envelope()).collect();
         let mut response = RecordingResponse::Success(units);
 
         response.enforce_wire_bounds();
@@ -148,7 +145,7 @@ mod tests {
 
     #[test]
     fn s4_wire_bound_noop_within_limit() {
-        let units: Vec<_> = (0..10).map(|_| dummy_sealed_unit()).collect();
+        let units: Vec<_> = (0..10).map(|_| dummy_envelope()).collect();
         let mut response = RecordingResponse::Success(units);
 
         response.enforce_wire_bounds();

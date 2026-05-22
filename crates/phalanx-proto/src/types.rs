@@ -259,66 +259,6 @@ pub enum PowerState {
     Dormant,
 }
 
-pub trait ValidationState {}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Unverified; // Data just off the wire
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Verified; // Data that has passed the Gates
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Sealed; // Authorized for egress
-
-impl ValidationState for Unverified {}
-impl ValidationState for Verified {}
-impl ValidationState for Sealed {}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ForensicUnit<T, S: ValidationState> {
-    pub data: T,
-    pub _state: std::marker::PhantomData<S>,
-}
-
-impl<T> ForensicUnit<T, Unverified> {
-    /// Create a new unit from raw bytes or a packet.
-    pub fn new(data: T) -> Self {
-        Self {
-            data,
-            _state: std::marker::PhantomData,
-        }
-    }
-}
-// Data that has passed policy gates and is authorized for the wire
-
-impl<T> ForensicUnit<T, Verified> {
-    /// Creates a new Verified unit.
-    /// This should ONLY be called after data passes Gate 3 (Cryptographic Integrity).
-    pub fn new_verified(data: T) -> Self {
-        Self {
-            data,
-            _state: std::marker::PhantomData,
-        }
-    }
-
-    /// Internal workspace-only seal. Promotes Verified to Sealed.
-    /// Because this is `pub(crate)`, it forces actors to use the EgressGovernor
-    /// to obtain a Sealed unit for network transport.
-    pub fn seal(self) -> ForensicUnit<T, Sealed> {
-        ForensicUnit {
-            data: self.data,
-            _state: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<T, S: ValidationState> ForensicUnit<T, S> {
-    /// Consumes the wrapper to retrieve the raw data.
-    /// Used by the Vault (to unpack Verified ingress) and the Network (to unpack Sealed egress).
-    pub fn unpack(self) -> T {
-        self.data
-    }
-}
-
 // ─── Four Pillars Newtypes ───────────────────────────────────
 // Every new domain concept gets a newtype. Primitive obsession is forbidden.
 
