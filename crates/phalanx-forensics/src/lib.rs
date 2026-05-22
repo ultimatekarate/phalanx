@@ -12,6 +12,7 @@ pub mod identity;
 pub mod kademlia;
 pub mod policy;
 pub mod test_utils;
+pub mod unit; // The ForensicUnit typestate — in-process verification states
 pub mod storage {
     pub mod handover;
 }
@@ -56,6 +57,7 @@ pub use policy::{
 };
 pub use reassembler::{AudioWeaver, FountainChunkifier, Reassembler, ShardMold, VideoWeaver};
 pub use trust::{PeerEvaluator, ReputationGate};
+pub use unit::{ForensicUnit, Sealed, Unverified, ValidationState, Verified};
 
 /// The Laboratory Prelude: Bringing the Verbs into scope for the Actors.
 pub mod prelude {

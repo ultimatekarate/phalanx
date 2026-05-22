@@ -533,7 +533,7 @@ impl ContinuityGate for WitnessEnvelope {
     }
 }
 
-use phalanx_proto::types::{ForensicUnit, Unverified, Verified};
+use crate::unit::{ForensicUnit, Unverified, Verified};
 
 /// Trait for promoting a ForensicUnit from Unverified to Verified state.
 pub trait PromotionGate {
@@ -544,6 +544,14 @@ pub trait PromotionGate {
         tolerance: std::time::Duration,
         anchor: Option<SignatureHash>,
     ) -> Result<ForensicUnit<WitnessEnvelope, Verified>, ShardError>;
+
+    /// Signature-only promotion: verifies the Ed25519 witness signature and
+    /// nothing else (no temporal-freshness or continuity checks).
+    ///
+    /// For consumers — such as the Stronghold archive — whose evidence may
+    /// legitimately be old and whose replay protection is structural
+    /// (sequence-collision dedup), not wall-clock freshness.
+    fn promote_signed(self) -> Result<ForensicUnit<WitnessEnvelope, Verified>, ShardError>;
 }
 
 impl PromotionGate for ForensicUnit<WitnessEnvelope, Unverified> {
@@ -560,7 +568,7 @@ impl PromotionGate for ForensicUnit<WitnessEnvelope, Unverified> {
     ) -> Result<ForensicUnit<WitnessEnvelope, Verified>, ShardError> {
         // Integrity Gate (Signature + Time + Sticky Trust)
         let mut envelope = self
-            .data
+            .unpack()
             .check_integrity(node_id, clock, tolerance, anchor)?;
 
         // Coasting Gate (Fast hash on anchored path)
@@ -573,10 +581,19 @@ impl PromotionGate for ForensicUnit<WitnessEnvelope, Unverified> {
             envelope = envelope.verify_link(a)?;
         }
 
-        Ok(ForensicUnit {
-            data: envelope,
-            _state: std::marker::PhantomData,
-        })
+        Ok(ForensicUnit::new_verified_unchecked(envelope))
+    }
+
+    fn promote_signed(self) -> Result<ForensicUnit<WitnessEnvelope, Verified>, ShardError> {
+        // Signature-only gate — no temporal or continuity checks.
+        let envelope = self.unpack();
+        if envelope.verify_envelope() {
+            Ok(ForensicUnit::new_verified_unchecked(envelope))
+        } else {
+            Err(ShardError::SigningError(
+                "Signature verification failed".into(),
+            ))
+        }
     }
 }
 

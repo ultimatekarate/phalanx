@@ -1,15 +1,15 @@
+use crate::unit::ForensicUnit;
+use crate::unit::Sealed;
+use crate::unit::Verified;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*;
 use phalanx_proto::trust::MonotonicClock;
 use phalanx_proto::trust::PeerRecord;
-use phalanx_proto::types::ForensicUnit;
 use phalanx_proto::types::PhalanxPhysics;
 use phalanx_proto::types::PowerState;
-use phalanx_proto::types::Sealed;
 use phalanx_proto::types::SystemStress;
 use phalanx_proto::types::UnitInterval;
-use phalanx_proto::types::Verified;
 use phalanx_proto::vitals::HeartbeatInterval;
 
 use std::collections::HashMap;
@@ -190,7 +190,7 @@ impl EgressGovernor {
     /// Evaluates physical and social constraints to determine if a verified unit
     /// is authorized to be promoted for mesh egress.
     pub fn authorize(
-        mut unit: ForensicUnit<WitnessEnvelope, Verified>,
+        unit: ForensicUnit<WitnessEnvelope, Verified>,
         trust: &TrustLevel,
         stress: &SystemStress,
         encryption_key: &SymmetricKey,
@@ -213,17 +213,17 @@ impl EgressGovernor {
             ));
         }
 
-        // Privacy Gate: Encrypt evidence payload before egress
-        unit.data.evidence = unit
-            .data
+        // Privacy Gate: encryption is the mandatory side effect of egress
+        // authorization. Unwrap, encrypt the payload, then re-wrap and seal.
+        let mut envelope = unit.unpack();
+        envelope.evidence = envelope
             .evidence
             .safeguard(encryption_key)
             .map_err(|e| GuardianError::VerificationFailed(e.to_string()))?;
 
-        // Typestate Promotion (The core architectural lock)
-        // This is the ONLY place in the entire codebase where .seal() is called,
-        // physically proving to the compiler that the data passed the policy gates.
-        Ok(unit.seal())
+        // Typestate promotion (Verified -> Sealed): authorizing egress is the
+        // only path to a Sealed unit.
+        Ok(ForensicUnit::new_verified_unchecked(envelope).seal_unchecked())
     }
 }
 

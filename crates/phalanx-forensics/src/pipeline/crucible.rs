@@ -1,4 +1,5 @@
 use crate::errors::ForensicPromotion;
+use crate::unit::{ForensicUnit, Verified};
 use phalanx_proto::evidence::Evidence;
 use phalanx_proto::evidence::ForensicGap;
 use phalanx_proto::evidence::Recording;
@@ -6,7 +7,6 @@ use phalanx_proto::evidence::StorageSequence;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::Ownership;
 use phalanx_proto::prelude::*;
-use phalanx_proto::types::{ForensicUnit, Verified};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::btree_map::Entry as MapEntry;
@@ -363,7 +363,7 @@ impl Mold for RecordingAmalgam {
     type Error = AmalgamError;
 
     fn get_key(item: &Self::Input) -> Self::Key {
-        item.data.evidence.recording_id().clone()
+        item.data().evidence.recording_id().clone()
     }
 
     fn is_authoritative(acc: &Self::Accumulator) -> bool {
@@ -372,37 +372,38 @@ impl Mold for RecordingAmalgam {
 
     fn init_accumulator(item: &Self::Input) -> Self::Accumulator {
         let mut artifacts = BTreeMap::new();
-        let seq = item.data.evidence.sequence_id();
-        artifacts.insert(seq, item.data.clone());
+        let seq = item.data().evidence.sequence_id();
+        artifacts.insert(seq, item.data().clone());
 
         // Check if the very first packet seen is an authority signal
-        let is_auth = match &item.data.evidence {
+        let is_auth = match &item.data().evidence {
             Evidence::Video(s) if s.sequence_id.0 == 0 => true,
             Evidence::Handover(_) => true,
             _ => false,
         };
 
         let ownership = if is_auth {
-            Ownership::Authoritative(item.data.did.clone())
+            Ownership::Authoritative(item.data().did.clone())
         } else {
-            Ownership::Tentative(item.data.did.clone())
+            Ownership::Tentative(item.data().did.clone())
         };
 
         RecordingBuffer {
             artifacts,
-            recording_id: item.data.evidence.recording_id().clone(),
+            recording_id: item.data().evidence.recording_id().clone(),
             ownership,
         }
     }
 
     fn ingest(acc: &mut Self::Accumulator, item: Self::Input) -> Result<(), Self::Error> {
-        let incoming_did = &item.data.did;
-        let seq = item.data.evidence.sequence_id();
+        let envelope = item.unpack();
+        let incoming_did = &envelope.did;
+        let seq = envelope.evidence.sequence_id();
 
         // M4 FIX: Check for sequence collision before any insert.
         // If seq already exists with different content, reject; if identical, skip (dedup).
         if let Some(existing) = acc.artifacts.get(&seq) {
-            if existing.witness_signature == item.data.witness_signature {
+            if existing.witness_signature == envelope.witness_signature {
                 // Identical evidence — deduplicate silently
                 return Ok(());
             } else {
@@ -417,14 +418,14 @@ impl Mold for RecordingAmalgam {
         }
 
         // Determine if the incoming shard is an "Authority Signal"
-        let provides_authority = match &item.data.evidence {
+        let provides_authority = match &envelope.evidence {
             Evidence::Handover(_) => true,
             Evidence::Video(s) if s.sequence_id.0 == 0 => true,
             _ => false,
         };
 
         // Detect Handover target
-        let handover_target = if let Evidence::Handover(ref h) = item.data.evidence {
+        let handover_target = if let Evidence::Handover(ref h) = envelope.evidence {
             Some(h.new_did.clone())
         } else {
             None
@@ -437,7 +438,7 @@ impl Mold for RecordingAmalgam {
                     if let Some(new_owner) = handover_target {
                         acc.ownership = Ownership::Authoritative(new_owner);
                     }
-                    acc.artifacts.insert(seq, item.data);
+                    acc.artifacts.insert(seq, envelope);
                     Ok(())
                 } else {
                     // AUTHORITATIVE MISMATCH: Proven Identity Theft
@@ -451,10 +452,10 @@ impl Mold for RecordingAmalgam {
                     // the one with the proof wins and cements the recording.
                     let new_authority = handover_target.unwrap_or_else(|| incoming_did.clone());
                     acc.ownership = Ownership::Authoritative(new_authority);
-                    acc.artifacts.insert(seq, item.data);
+                    acc.artifacts.insert(seq, envelope);
                     Ok(())
                 } else if incoming_did == tentative_did {
-                    acc.artifacts.insert(seq, item.data);
+                    acc.artifacts.insert(seq, envelope);
                     Ok(())
                 } else {
                     // TENTATIVE MISMATCH: Race condition (Ambiguous)

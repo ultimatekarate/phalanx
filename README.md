@@ -64,7 +64,7 @@ The codebase is governed by a [Linguistic Code Model](linguistic-code-model.md).
 | Crate | Role | Description |
 | --- | --- | --- |
 | `phalanx-proto` | Dictionary (Nouns) | Data types, trait contracts, error types. No IO. |
-| `phalanx-forensics` | Laboratory (Verbs) | Verification, validation, state machines, crypto. No `tokio::fs`. |
+| `phalanx-forensics` | Laboratory (Verbs) | Verification, validation, state machines (incl. the `ForensicUnit` typestate), crypto. No `tokio::fs`. |
 | `phalanx-transport` | Post Office (Prepositions) | Network adapters, routing, peer mapping, wire codecs. |
 | `phalanx-node` | Sentence | Actors, persistence, orchestration. Environment-dependent. |
 | `phalanx-lens` | Optics | Camera and media capture pipeline. |

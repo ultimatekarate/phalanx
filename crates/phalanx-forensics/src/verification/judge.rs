@@ -201,13 +201,14 @@ mod tests {
 
     use super::*;
     use crate::policy::EgressGovernor;
+    use crate::unit::ForensicUnit;
     use phalanx_proto::evidence::{
         DataPayload, Evidence, ForensicMetrics, StorageSequence, VideoShard, WitnessEnvelope,
     };
     use phalanx_proto::identity::{PhalanxIdentity, RecordingId};
     use phalanx_proto::time::{SystemClock, TrustedClock};
     use phalanx_proto::trust::TrustLevel;
-    use phalanx_proto::types::{ForensicUnit, Fps, SystemStress, Verified};
+    use phalanx_proto::types::{Fps, SystemStress};
 
     use tracing::info;
 
@@ -281,7 +282,7 @@ mod tests {
         match tamper_result {
             Ok(valid_env) => {
                 // If we somehow reached here (we shouldn't), the Governor is the second line of defense.
-                let unit = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(valid_env);
+                let unit = ForensicUnit::new_verified_unchecked(valid_env);
                 let sealed_result = EgressGovernor::authorize(
                     unit,
                     &TrustLevel::Ally,

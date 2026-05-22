@@ -23,6 +23,7 @@ use phalanx_forensics::reassembler::{create_video_shard, FountainChunkifier, Rea
 use phalanx_forensics::storage::handover::HandoverAuthority;
 use phalanx_forensics::witness::WitnessAuthority;
 
+use phalanx_forensics::unit::{ForensicUnit, Unverified};
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{
     DataPayload, Evidence, ForensicMetrics, ShardChunk, StorageSequence, VideoShard,
@@ -32,7 +33,7 @@ use phalanx_proto::identity::PhalanxIdentity;
 use phalanx_proto::prelude::{RecordingId, ShardError, ShardId};
 use phalanx_proto::storage::HandoverProof;
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock, TrustedClock};
-use phalanx_proto::types::{ForensicUnit, Fps, RepairRatio, SymbolSize, Unverified, Verified};
+use phalanx_proto::types::{Fps, RepairRatio, SymbolSize};
 
 use phalanx_test_fixtures::envelope::{
     verified_unit_for_recording, video_evidence_for_recording, witness_envelope_for_recording,
@@ -57,7 +58,7 @@ fn amalgam_seals_at_threshold() {
     let mut sealed = false;
     for seq in 0..100u32 {
         let unit = verified_unit_for_recording(&identity, &rid, seq, prev_hash);
-        prev_hash = Some(unit.data.signature_hash());
+        prev_hash = Some(unit.data().signature_hash());
         match crucible.process(unit) {
             Ok(Some(_recording)) => {
                 sealed = true;
@@ -83,7 +84,7 @@ fn amalgam_flush_all_returns_partial() {
     let mut prev_hash = None;
     for seq in 0..5u32 {
         let unit = verified_unit_for_recording(&identity, &rid, seq, prev_hash);
-        prev_hash = Some(unit.data.signature_hash());
+        prev_hash = Some(unit.data().signature_hash());
         let result = crucible.process(unit);
         assert!(
             result.unwrap().is_none(),
@@ -105,12 +106,12 @@ fn amalgam_rejects_sequence_conflict() {
 
     // First envelope at seq 0 to establish the recording
     let unit_0 = verified_unit_for_recording(&identity, &rid, 0, None);
-    let hash_0 = unit_0.data.signature_hash();
+    let hash_0 = unit_0.data().signature_hash();
     crucible.process(unit_0).unwrap();
 
     // First envelope at seq 5
     let unit_a = verified_unit_for_recording(&identity, &rid, 5, Some(hash_0));
-    let hash_a = unit_a.data.signature_hash();
+    let hash_a = unit_a.data().signature_hash();
     crucible.process(unit_a).unwrap();
 
     // Different envelope at seq 5 (different content → different signature)
@@ -129,7 +130,9 @@ fn amalgam_rejects_sequence_conflict() {
         Some(hash_a),
     )
     .expect("sign should not fail");
-    let unit_b = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(env_b);
+    let unit_b = ForensicUnit::new(env_b)
+        .promote_signed()
+        .expect("env_b is validly signed");
 
     let result = crucible.process(unit_b);
     assert!(
@@ -150,7 +153,7 @@ fn amalgam_handover_transfers_ownership() {
     let mut prev_hash = None;
     for seq in 0..3u32 {
         let unit = verified_unit_for_recording(&identity_a, &rid, seq, prev_hash);
-        prev_hash = Some(unit.data.signature_hash());
+        prev_hash = Some(unit.data().signature_hash());
         crucible.process(unit).unwrap();
     }
 
@@ -172,13 +175,15 @@ fn amalgam_handover_transfers_ownership() {
     )
     .expect("sign handover should not fail");
     prev_hash = Some(env_handover.signature_hash());
-    let unit_handover = ForensicUnit::<WitnessEnvelope, Verified>::new_verified(env_handover);
+    let unit_handover = ForensicUnit::new(env_handover)
+        .promote_signed()
+        .expect("env_handover is validly signed");
     crucible.process(unit_handover).unwrap();
 
     // DID-B frames: seq 4, 5, 6
     for seq in 4..7u32 {
         let unit = verified_unit_for_recording(&identity_b, &rid, seq, prev_hash);
-        prev_hash = Some(unit.data.signature_hash());
+        prev_hash = Some(unit.data().signature_hash());
         let result = crucible.process(unit);
         assert!(
             result.is_ok(),
@@ -201,7 +206,7 @@ fn amalgam_freeze_thaw_continues_ingestion() {
     let mut prev_hash = None;
     for seq in 0..3u32 {
         let unit = verified_unit_for_recording(&identity, &rid, seq, prev_hash);
-        prev_hash = Some(unit.data.signature_hash());
+        prev_hash = Some(unit.data().signature_hash());
         crucible.process(unit).unwrap();
     }
 
@@ -214,7 +219,7 @@ fn amalgam_freeze_thaw_continues_ingestion() {
     // Continue ingestion from seq 3
     for seq in 3..6u32 {
         let unit = verified_unit_for_recording(&identity, &rid, seq, prev_hash);
-        prev_hash = Some(unit.data.signature_hash());
+        prev_hash = Some(unit.data().signature_hash());
         restored.process(unit).unwrap();
     }
 
@@ -307,7 +312,7 @@ fn promotion_gate_full_pipeline() {
     assert!(result.is_ok(), "Valid unit should promote to Verified");
 
     let verified = result.unwrap();
-    assert_eq!(verified.data.did, identity.did);
+    assert_eq!(verified.data().did, identity.did);
 }
 
 // ─── Group C: unmarshal trust boundary ────────────────────────────────────

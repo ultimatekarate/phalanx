@@ -163,7 +163,7 @@ Three traffic governors translate integral pressure into admission decisions:
 
 - **Per-recording keys.** Each recording gets its own XChaCha20-Poly1305 symmetric key. Keys are stored in a keyring that is persisted to disk and loaded on restart.
 
-- **Mandatory encryption on egress.** The Privacy Gate (Gate 4) applies encryption before any evidence leaves the node. The EgressGovernor's `.seal()` method — the only path to a `Sealed` forensic unit — requires encryption to have been applied. This is enforced by the type system: you cannot construct a `ForensicUnit<T, Sealed>` without going through the governor.
+- **Mandatory encryption on egress.** The Privacy Gate (Gate 4) applies encryption before any evidence leaves the node. `EgressGovernor::authorize` — the only path to a `Sealed` forensic unit — applies that encryption as it produces the unit. This is enforced by the type system: you cannot construct a `ForensicUnit<_, Sealed>` without going through the governor.
 
 - **Grant-based selective sharing.** Per-recording keys can be sealed for specific recipients using ECDH over Curve25519 with XChaCha20-Poly1305. Permissions are bound into the authenticated additional data (AAD), so they cannot be modified after sealing.
 
@@ -272,17 +272,21 @@ Every error path returns `Result` or uses saturating arithmetic. There is no act
 
 **Defense:** Typestate Enforcement
 
-The type system makes invalid state transitions a compile error.
+`ForensicUnit<WitnessEnvelope, S>` carries its verification status in the type parameter `S`. The status cannot be forged: every transition into a privileged state runs the corresponding check, and the unchecked shortcuts are not reachable outside the crate that owns the gates.
 
-- **Three states.** `ForensicUnit<T, Unverified>`, `ForensicUnit<T, Verified>`, `ForensicUnit<T, Sealed>` are distinct types. You cannot pass a `Verified` unit to a function expecting `Sealed`, or vice versa.
+- **Three states.** `Unverified`, `Verified`, and `Sealed` are distinct marker types — `ForensicUnit<_, Verified>` and `ForensicUnit<_, Sealed>` cannot be substituted for one another. The marker set is closed: `ValidationState` is a sealed trait (private supertrait), so no crate can introduce a fourth state.
 
-- **Promotion.** `Unverified -> Verified` requires passing through the Promotion Gate (Gate 9), which orchestrates the Integrity Gate, Coasting Gate, and Continuity Gate in sequence.
+- **No forgery surface.** `ForensicUnit`'s fields are private — no `ForensicUnit { .. }` struct literal can be written outside its defining module. It derives only `Debug` and `Clone`; it is deliberately *not* `Serialize`/`Deserialize`, so it cannot be conjured by deserializing attacker-controlled bytes. It is a pure in-process construct with no wire representation.
 
-- **Sealing.** `Verified -> Sealed` requires the EgressGovernor's `authorize()` method — the only code path that calls `.seal()`. The `.seal()` method has `pub(crate)` visibility, so no code outside the forensics crate can construct a Sealed unit.
+- **Promotion (`Unverified -> Verified`).** Reachable only through `PromotionGate::promote` (full mesh admission — Ed25519 signature, temporal freshness, hash-chain continuity) or `promote_signed` (signature only — for archive replay and test fixtures, where freshness does not apply). Both are `pub`, which is safe: calling either *performs* signature verification and yields `Verified` only on success. The unchecked constructor `new_verified_unchecked` is `pub(crate)`.
 
-- **Invariant.** If evidence is on the wire, it is `Sealed`. If it is `Sealed`, it passed the full gate chain. This is not a convention — it is enforced by the Rust compiler.
+- **Sealing (`Verified -> Sealed`).** Reachable only through `EgressGovernor::authorize`, which applies mandatory per-recording encryption as it produces the `Sealed` unit. The unchecked constructor `seal_unchecked` is `pub(crate)`.
 
-**Files:** `phalanx-proto/src/types.rs` (state definitions), `phalanx-forensics/src/verification/gate.rs` (promotion), `phalanx-forensics/src/policy.rs` (sealing)
+- **Why `pub(crate)` is real enforcement.** `ForensicUnit` and the gates that transition it both live in `phalanx-forensics`, so `pub(crate)` confines `new_verified_unchecked`/`seal_unchecked` to the crate that owns the verification verbs. No code in `phalanx-node`, `phalanx-stronghold`, `phalanx-transport`, or any other crate can name them. This is Rust module visibility — not a lint, not a naming convention.
+
+- **Invariant.** A value of type `ForensicUnit<_, Verified>` has had its signature checked. A value of type `ForensicUnit<_, Sealed>` passed the full gate chain and was encrypted for egress. This is enforced by the Rust compiler, without caveat.
+
+**Files:** `phalanx-forensics/src/unit.rs` (state definitions, sealed `ValidationState`, `pub(crate)` constructors), `phalanx-forensics/src/verification/gate.rs` (promotion gates), `phalanx-forensics/src/policy.rs` (sealing)
 
 ---
 
@@ -437,7 +441,7 @@ Outbound evidence passes through the reverse chain:
 Verified evidence
   -> EgressGovernor: Stress gate + trust gate
   -> Privacy Gate:   Mandatory encryption (type-enforced)
-  -> .seal():        Typestate promotion (Verified -> Sealed)
+  -> Sealing:        Typestate promotion (Verified -> Sealed)
   -> Wire
 ```
 

@@ -14,7 +14,7 @@ Every element of Phalanx code maps to a linguistic role. Understanding these par
 
 ### I.a. Parts of Speech
 - **Noun** — A data type, trait contract, or error type. Things that exist. `WitnessEnvelope`, `WitnessId`, `MeshAddress`, `TransientJournal`, `GuardianError`. Nouns live in the Dictionary (`phalanx-proto`).
-- **Adjective** — A qualifier that narrows a noun's meaning. Type-state markers (`Verified`, `Sealed`, `Ephemeral`), configuration types, and constructor suffixes (`new_verified()`, `new_ephemeral()`). Adjectives attach to nouns — they describe *what kind* of noun you have.
+- **Adjective** — A qualifier that narrows a noun's meaning. Type-state markers (`Verified`, `Sealed`, `Ephemeral`), configuration types, and constructor suffixes (`new_verified()`, `new_ephemeral()`). Adjectives attach to nouns — they describe *what kind* of noun you have. An adjective normally lives wherever its noun lives; the exception is a type-state marker whose states are produced and consumed solely by Laboratory verbs and which has no wire representation — that marker co-locates with the verbs that transition it. `ForensicUnit` and its `Unverified`/`Verified`/`Sealed` markers therefore live in the Laboratory (`phalanx-forensics`), not the Dictionary.
 - **Verb** — Pure logic that acts on nouns. Validation, verification, transformation, encoding. `check_integrity()`, `fountain_chunkify()`, `authorize()`. Verbs live in the Laboratory (`phalanx-forensics`). A verb never touches the filesystem or network.
 - **Preposition** — The directional relationships that define how nouns move through the system. Routing, codecs, adapter boundary mappings, serialization. The `PeerId` → `MeshAddress` translation at the libp2p boundary. Postcard encoding of envelopes into wire bytes. The routing switchboard that delivers events to the correct actor. `from_<source>()` constructors. Prepositions live in the Post Office (`phalanx-transport`) and at the edges of the Sentence (`phalanx-node`).
 - **Conjunction** — Monadic gates that chain verbs together and short-circuit the pipeline on failure. `LensGate`, `IntegrityGate`, `TopologyGate`. A conjunction says "and" between verbs — verify integrity *and* check provenance *and* gate bandwidth. If any conjunction fails, the sentence stops. Conjunctions live in the Laboratory.
@@ -174,7 +174,7 @@ The following sections are a module-level inventory of each crate. The file list
 
 **Supporting Types:**
 
-- **types.rs:** `ForensicUnit<T, State>` type-state wrapper, `PhalanxPhysics`, unit interval types, `TaskCost`.
+- **types.rs:** `PhalanxPhysics`, unit interval types, `TaskCost`.
 - **error.rs:** `ShardError`, `TimeError` — domain error types.
 - **constants.rs:** Global protocol constants and DHT error types.
 
@@ -182,6 +182,10 @@ The following sections are a module-level inventory of each crate. The file list
 
 **Role:** The Verbs, Conjunctions, and The Law. Pure Logic.
 **Constraint:** 100% Testable. No tokio::fs. No libp2p.
+
+**The Verification Typestate:**
+
+- **unit.rs:** `ForensicUnit<WitnessEnvelope, State>` and its `Unverified`/`Verified`/`Sealed` markers — the type-state wrapper, relocated here from the Dictionary. It has no wire form (deliberately not `Serialize`/`Deserialize`) and its unchecked constructors are `pub(crate)`, so a `Verified` or `Sealed` unit can only be minted by this crate's gates. The marker adjectives co-locate with the verbs that transition them.
 
 **Core Forensic Verbs:**
 
