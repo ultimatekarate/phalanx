@@ -92,7 +92,7 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 
 ### MeshSentinel
 
-**File**: `crates/phalanx-node/src/actors/meshsentinel.rs` (1143 lines)
+**File**: `crates/phalanx-node/src/actors/meshsentinel.rs`
 
 **Role**: Orchestrator. Spawns every other actor during `new()`, then enters a `select!` loop routing network events to the appropriate handler. Not a pure actor — it's the singleton coordinator.
 
@@ -131,7 +131,7 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 
 ### StorageActor
 
-**File**: `crates/phalanx-node/src/actors/storage.rs` (558 lines)
+**File**: `crates/phalanx-node/src/actors/storage.rs`
 
 **Role**: Pure vault. Handles only disk I/O, WAL recovery, fountain reassembly, and cryptographic operations. No network logic, no routing.
 
@@ -169,7 +169,7 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 
 ### IngestionActor
 
-**File**: `crates/phalanx-node/src/actors/ingestion.rs` (275 lines)
+**File**: `crates/phalanx-node/src/actors/ingestion.rs`
 
 **Role**: Ingress gate. Receives raw network data, applies policy checks, and forwards verified shards to StorageActor. This is where adversarial input is rejected.
 
@@ -193,7 +193,7 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 
 ### EgressActor
 
-**File**: `crates/phalanx-node/src/actors/egress.rs` (304 lines)
+**File**: `crates/phalanx-node/src/actors/egress.rs`
 
 **Role**: Network output. All outbound messages flow through EgressActor — mesh publishes, DHT announces, peer disconnects, retrieval responses.
 
@@ -226,7 +226,7 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 
 ### RetrievalActor
 
-**File**: `crates/phalanx-node/src/actors/retrieval.rs` (237 lines)
+**File**: `crates/phalanx-node/src/actors/retrieval.rs`
 
 **Role**: Retrieval gate. When a remote peer requests recordings, RetrievalActor decides whether to serve them based on trust, system load, and authorization.
 
@@ -250,7 +250,7 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 
 ### MediaEgressActor
 
-**File**: `crates/phalanx-node/src/actors/media_egress.rs` (354 lines)
+**File**: `crates/phalanx-node/src/actors/media_egress.rs`
 
 **Role**: Capture pipeline. Receives raw video/audio frames from the FFI camera callback, encrypts, signs, fountain-encodes, and publishes to the mesh.
 
@@ -278,7 +278,7 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 
 ### TrustActor
 
-**File**: `crates/phalanx-node/src/actors/trust_actor.rs` (218 lines)
+**File**: `crates/phalanx-node/src/actors/trust_actor.rs`
 
 **Role**: Reputation engine. Maintains per-peer trust scores, handles community imports, and periodically accumulates reputation via the Volterra trust integral.
 
@@ -308,7 +308,7 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 
 ### PlaybackCoordinator
 
-**File**: `crates/phalanx-node/src/actors/playback.rs` (216 lines)
+**File**: `crates/phalanx-node/src/actors/playback.rs`
 
 **Role**: Ephemeral playback session. Spawned by FFI when the user requests recording playback. Not a persistent actor — created on demand, dropped when playback ends.
 
@@ -331,7 +331,7 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 
 ### StrongholdSentinel
 
-**File**: `crates/phalanx-stronghold/src/sentinel.rs` (~200 lines)
+**File**: `crates/phalanx-stronghold/src/sentinel.rs`
 
 **Role**: Server-side event router. Analog to MeshSentinel but simpler — a Stronghold doesn't capture media, doesn't have a UI, and doesn't manage mobile lifecycle.
 
@@ -345,7 +345,7 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 
 ### AggregationActor
 
-**File**: `crates/phalanx-stronghold/src/actors/aggregation.rs` (378 lines)
+**File**: `crates/phalanx-stronghold/src/actors/aggregation.rs`
 
 **Role**: Dual Crucible pipeline. Receives ShardChunks from the mesh, reassembles into recordings, stores encrypted. **Never decrypts** — grant-based decryption happens at corroboration/export time.
 
@@ -375,7 +375,7 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 
 ### CommunityActor
 
-**File**: `crates/phalanx-stronghold/src/actors/community.rs` (229 lines)
+**File**: `crates/phalanx-stronghold/src/actors/community.rs`
 
 **Role**: Community roster lifecycle. Manages import (with vouch signature verification), expiration sweep, dissolution (with zeroize), and DID-to-community routing.
 
@@ -406,25 +406,25 @@ These modules hold state that is updated by multiple actors but don't have their
 
 ### SystemGovernor
 
-**File**: `crates/phalanx-node/src/vitals/governor.rs` (1543 lines)
+**File**: `crates/phalanx-node/src/vitals/governor.rs`
 
 Shared via `Arc` across all actors. Implements the Volterra second-kind integral system for resource management. Each actor calls `record_*_pressure()` to feed signals (memory, bandwidth, storage, I/O, connection, thermal). Gate checks call `is_*_ok()` to read composite stress. A dedicated vitals polling task (spawned in MeshSentinel, 1s tick) calls `update_vitals()` to step the integrals and poll hardware sensors.
 
 ### CanaryMonitor
 
-**File**: `crates/phalanx-node/src/vitals/canary.rs` (302 lines)
+**File**: `crates/phalanx-node/src/vitals/canary.rs`
 
 Embedded in MeshSentinel. Tracks community-scoped peer liveness. When enough peers go silent (stale or disconnected), emits `CanaryState` escalation signals that trigger evidence distribution priority increases and Stronghold flush.
 
 ### SpectralObserver
 
-**File**: `crates/phalanx-node/src/vitals/spectral.rs` (360 lines)
+**File**: `crates/phalanx-node/src/vitals/spectral.rs` 
 
 Embedded in HealthTracker. Records per-peer heartbeat timing and data volume. Evaluates behavioral consistency — detects Byzantine peers by checking whether their claimed state matches their observed behavior (the Shield Wall).
 
 ### HealthTracker
 
-**File**: `crates/phalanx-node/src/vitals/health.rs` (129 lines)
+**File**: `crates/phalanx-node/src/vitals/health.rs`
 
 Embedded in MeshSentinel. Tracks peer heartbeats, capacities, and contracts. Contains SpectralObserver as a field. Updated passively as heartbeats arrive from the network.
 
