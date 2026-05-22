@@ -177,11 +177,11 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 
 **Gate sequence** (each can reject):
 
-1. **TrafficGovernor** — power-state-aware per-peer bandwidth limit
-2. **IngressGovernor** — slot allocation (sybil endowment)
+1. **Deserialization** — unmarshal the gossipsub bundle into `Vec<ShardChunk>` (a fountain fragment has no signature — nothing to verify until reassembly)
+2. **TrafficGovernor** — power-state-aware per-peer bandwidth limit
 3. **ReputationProjection** — lock-free trust level check
-4. **Deserialization** — unmarshal the gossipsub bundle into `Vec<ShardChunk>` (a fountain fragment has no signature — nothing to verify until reassembly)
-5. **Stale shard check** — reject if timestamp too old
+4. **Stale shard check** — reject if timestamp too old
+5. **IngressGovernor** — slot allocation (sybil endowment)
 
 **On rejection**: Sends `TrustCommand::RecordOffense` to TrustActor with the specific offense type.
 
@@ -437,10 +437,10 @@ Embedded in MeshSentinel. Tracks peer heartbeats, capacities, and contracts. Con
 ```
 Network event (DataReceived)
   → MeshSentinel routes to IngestionActor
-    → TrafficGovernor gate
-    → IngressGovernor gate
-    → ReputationProjection gate
     → Deserialize bundle → ShardChunk
+    → TrafficGovernor gate
+    → ReputationProjection gate
+    → IngressGovernor gate
       → StorageActor::Ingest
         → Storage pressure gate
         → Reassembler::ingest_chunk (Crucible<ShardMold>)
