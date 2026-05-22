@@ -453,6 +453,9 @@ async fn bootstrap_with_identity(
     storage_path: &str,
     identity: PhalanxIdentity,
 ) -> Result<PhalanxHandle, PhalanxError> {
+    // Install the Android tracing subscriber before any bootstrap work runs.
+    crate::observability::init_android_observability();
+
     // Override vault_path to match the mobile storage directory.
     // The default config points to ./sim_vault which doesn't exist on Android.
     let vault_dir = Path::new(storage_path).join("vault");

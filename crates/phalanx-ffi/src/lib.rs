@@ -50,7 +50,9 @@
 //! and the mesh-fallback-disabling regression becomes representable
 //! again. Don't restore the re-export.
 
+pub mod atrace;
 pub mod logcat;
+mod observability;
 
 pub mod ble_auth;
 pub mod calibrate;

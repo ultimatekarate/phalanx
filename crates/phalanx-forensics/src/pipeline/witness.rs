@@ -4,6 +4,7 @@ use ed25519_dalek::{Signature, Signer};
 use phalanx_proto::evidence::{Evidence, SignatureHash, WitnessEnvelope};
 use phalanx_proto::prelude::ShardError;
 use phalanx_proto::prelude::*;
+use phalanx_proto::telemetry::spans;
 
 pub trait WitnessAuthority {
     /// The Verb "To Sign": Anchors evidence into a signed envelope.
@@ -22,19 +23,27 @@ pub trait WitnessAuthority {
 }
 
 impl WitnessAuthority for WitnessEnvelope {
+    #[tracing::instrument(level = "trace", skip_all)]
     fn sign_envelope(
         evidence: Evidence,
         identity: &PhalanxIdentity,
         peer_id: WitnessId,
         prev_hash: Option<SignatureHash>,
     ) -> Result<Self, ShardError> {
-        let data_to_sign = postcard::to_allocvec(&evidence)?;
+        let data_to_sign = {
+            let _span = tracing::trace_span!(spans::SIGN_SERIALIZE).entered();
+            postcard::to_allocvec(&evidence)?
+        };
 
-        // Compute the fast hash
-        let evidence_hash: [u8; 32] = blake3::hash(&data_to_sign).into();
+        let evidence_hash: [u8; 32] = {
+            let _span = tracing::trace_span!(spans::SIGN_HASH).entered();
+            blake3::hash(&data_to_sign).into()
+        };
 
-        // Sign the hash (or data_to_sign)
-        let signature = identity.keypair.sign(&data_to_sign);
+        let signature = {
+            let _span = tracing::trace_span!(spans::SIGN_ED25519).entered();
+            identity.keypair.sign(&data_to_sign)
+        };
 
         Ok(Self {
             evidence,
@@ -47,6 +56,7 @@ impl WitnessAuthority for WitnessEnvelope {
         })
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn verify_envelope(&self) -> bool {
         // Resolve Public Key from DID Noun
         // (Assuming bridge::resolve_did_pk handles the multibase decoding)

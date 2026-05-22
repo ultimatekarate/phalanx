@@ -58,6 +58,20 @@ pub struct TelemetryHub {
     pub tx: broadcast::Sender<SimEvent>,
 }
 
+/// The shared per-target telemetry filter — used by the desktop subscriber here
+/// and by the Android subscriber in `phalanx-ffi`, so both keep identical levels.
+///
+/// `phalanx_transport` is admitted at DEBUG so the `Libp2pAdapter::publish` span
+/// is captured; the prior filter omitted it, leaving it at the INFO default.
+pub fn telemetry_filter() -> Targets {
+    Targets::new()
+        .with_target("phalanx_node", Level::DEBUG)
+        .with_target("phalanx_forensics", Level::DEBUG)
+        .with_target("phalanx_transport", Level::DEBUG)
+        .with_target("phalanx::forensics::collision", Level::TRACE)
+        .with_default(Level::INFO)
+}
+
 pub fn init_observability() {
     INIT.call_once(|| {
         let file_appender = tracing_appender::rolling::daily("logs", "guardian.log");
@@ -65,15 +79,14 @@ pub fn init_observability() {
 
         let _ = TELEMETRY_GUARD.set(file_guard);
 
-        let filter = Targets::new()
-            .with_target("phalanx_node", Level::DEBUG)
-            .with_target("phalanx_forensics", Level::DEBUG)
-            .with_target("phalanx::forensics::collision", Level::TRACE)
-            .with_default(Level::INFO);
-
         let registry = tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt::layer().with_target(true).with_thread_ids(true))
+            .with(telemetry_filter())
+            .with(
+                fmt::layer()
+                    .with_target(true)
+                    .with_thread_ids(true)
+                    .with_span_events(fmt::format::FmtSpan::CLOSE),
+            )
             .with(fmt::layer().with_writer(non_blocking_file).json());
 
         let _ = registry.try_init();

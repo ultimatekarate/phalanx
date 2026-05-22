@@ -111,3 +111,47 @@ jobs:
           path: |
             target/aarch64-apple-ios/release/libphalanx_ffi.a
             phalanx-ffi/phalanx.h
+
+  # Manual performance-comparison job. Benchmarks the dispatched branch against
+  # `main` and prints a critcmp table to the run summary. Informational only —
+  # GitHub-hosted runners are too noisy for a hard regression gate.
+  bench:
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y nasm
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+
+      - name: Install critcmp
+        run: cargo install critcmp --locked
+
+      - name: Benchmark the current branch
+        run: cargo bench -p phalanx-forensics -- --save-baseline current
+
+      - name: Benchmark the main baseline
+        run: |
+          git fetch origin main
+          git checkout origin/main
+          cargo bench -p phalanx-forensics -- --save-baseline main
+
+      - name: Compare against main (informational — not a gate)
+        run: |
+          {
+            echo '### Benchmark comparison — main vs current'
+            echo
+            echo '```'
+            critcmp main current 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

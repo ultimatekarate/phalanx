@@ -855,6 +855,7 @@ impl Libp2pAdapter {
 }
 
 impl Libp2pAdapter {
+    #[tracing::instrument(level = "debug", skip_all, fields(topic = topic.as_str(), len = data.len()))]
     pub async fn publish(&self, topic: MeshTopic, data: Vec<u8>) -> Result<(), TransportError> {
         self.outbound_queue_depth.fetch_add(1, Ordering::Relaxed);
         self.command_tx

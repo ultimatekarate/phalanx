@@ -25,6 +25,7 @@ phalanx-lens = { workspace = true }
 # Runtime
 tokio = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = "0.3"
 
 # FFI
 serde = { workspace = true }
@@ -44,6 +45,8 @@ zeroize = "1"
 # Android logcat output for diagnostics
 [target.'cfg(target_os = "android")'.dependencies]
 android_log-sys = "0.3"
+# Runtime resolution of the ATrace symbols (API 23+) for the Perfetto bridge.
+libloading = "0.8"
 
 # Dev-only: integration tests bootstrap a real engine in a tempdir.
 [dev-dependencies]

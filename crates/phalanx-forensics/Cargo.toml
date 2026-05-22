@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "The Phalanx Laboratory: Verbs, Integrity Judges, and the Evidence Weaver."
 
+[lib]
+# No lib-level benchmarks: disabling the lib as a bench target keeps `cargo
+# bench` from invoking the libtest harness, which rejects criterion CLI flags
+# such as `--save-baseline`.
+bench = false
+
 [dependencies]
 # The Linguistic Foundation
 phalanx-proto = { path = "../phalanx-proto" }
@@ -50,6 +56,11 @@ mp4 = "0.14"
 # For testing the Weaver without a network
 tokio = { version = "1.0", features = ["macros", "rt"] }
 phalanx-test-fixtures = { workspace = true }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "witness"
+harness = false
 
 [lints]
 workspace = true

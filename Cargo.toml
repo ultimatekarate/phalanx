@@ -65,7 +65,7 @@ cognitive_complexity = "warn"
 undocumented_unsafe_blocks = "deny"
 todo = "warn"
 
-# E5 DIAGNOSTIC (docs/bottleneck-attribution-arc.md): debug symbols in
+# E5 DIAGNOSTIC (docs/profiling.md): debug symbols in
 # release builds enable function-level attribution from sampling profilers
 # (samply, perf, cargo-flamegraph). No code-gen impact, only larger binaries.
 # Remove if release artifact size becomes a concern.
