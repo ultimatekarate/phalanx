@@ -135,3 +135,25 @@ pub unsafe extern "C" fn phalanx_update_lifecycle(
     h.probe.set_lifecycle(is_foreground);
     PhalanxError::Ok.code()
 }
+
+/// Updates total device RAM in bytes.
+///
+/// Called once by Flutter shortly after `phalanx_create`/`phalanx_restore`,
+/// using the platform's physical-memory API. RAM sizes the homeostatic
+/// memory-pressure integrals; passing 0 leaves the reference-device fallback
+/// in place. Additive setter — avoids an ABI change to `phalanx_create`.
+///
+/// # Safety
+/// * `handle` must be a valid pointer from `phalanx_create`.
+#[no_mangle]
+pub unsafe extern "C" fn phalanx_update_device_ram(
+    handle: *mut PhalanxHandle,
+    total_ram_bytes: u64,
+) -> i32 {
+    let Some(h) = handle.as_ref() else {
+        return PhalanxError::NullPointer.code();
+    };
+
+    h.probe.set_device_ram(total_ram_bytes);
+    PhalanxError::Ok.code()
+}

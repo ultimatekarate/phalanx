@@ -284,10 +284,12 @@ pub unsafe extern "C" fn phalanx_create(
 ///   produces a null handle; partial state on disk is bounded by the
 ///   transactional `save_to_disk_atomic` step.
 ///
-/// Use `phalanx_restore_status()` (TODO if needed) to query the specific
-/// failure cause; for now the FFI surfaces null and the Flutter side calls
-/// `phalanx_validate_mnemonic` first to pre-screen the phrase, leaving the
-/// remaining null causes as "boot failed" from the user's perspective.
+/// By design, the FFI surfaces only a null handle on failure rather than a
+/// richer status code: the Flutter side calls `phalanx_validate_mnemonic`
+/// first to pre-screen the phrase, leaving the remaining null causes as
+/// "boot failed" from the user's perspective. This is intentional — a
+/// per-cause restore-status API would be added here only if product needs
+/// justify distinguishing the residual failure modes.
 ///
 /// # Safety
 /// * `config_path` may be null (use defaults) or a valid null-terminated C
@@ -516,9 +518,9 @@ async fn bootstrap_with_identity(
     let reputation_projection = trust_registry.projection_handle();
     log("trust OK");
 
-    // Mobile hardware probe (atomics-based).
-    // RAM=0: falls back to reference device default (4GB).
-    // TODO: Pass actual device RAM from Flutter via phalanx_create parameter.
+    // Mobile hardware probe (atomics-based). Constructed with RAM=0 (reference
+    // device fallback); Flutter sets the real value once after create via
+    // `phalanx_update_device_ram`, avoiding an ABI change to the create call.
     let probe = Arc::new(MobileProbe::new(ThermalThresholds::default(), 0));
 
     // Network

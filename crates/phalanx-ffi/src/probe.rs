@@ -90,6 +90,13 @@ impl MobileProbe {
             }
         }
     }
+
+    /// Set total device RAM in bytes. Called once from Flutter during init
+    /// (after `phalanx_create`/`phalanx_restore`) via `phalanx_update_device_ram`.
+    /// 0 means unavailable — the probe falls back to the reference-device default.
+    pub fn set_device_ram(&self, bytes: u64) {
+        self.total_ram_bytes.store(bytes, Ordering::Relaxed);
+    }
 }
 
 impl HardwareProbe for MobileProbe {
