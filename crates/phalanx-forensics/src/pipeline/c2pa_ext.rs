@@ -45,6 +45,15 @@ impl C2paOrchestrator {
         builder.add_assertion("phalanx.lens.v_energy", &metrics.v_energy)?;
         builder.add_assertion("phalanx.lens.prnu_var", &metrics.prnu_var)?;
 
+        // C2PA requires a c2pa.actions assertion whose first action is a
+        // creation/open action; without it validators report
+        // `assertion.action.malformed`. Phalanx originates the media from
+        // device sensors, so the creation action is `c2pa.created`.
+        builder.add_assertion(
+            "c2pa.actions",
+            &serde_json::json!({ "actions": [ { "action": "c2pa.created" } ] }),
+        )?;
+
         Ok(builder)
     }
 

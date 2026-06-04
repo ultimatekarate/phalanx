@@ -72,9 +72,15 @@ pub fn telemetry_filter() -> Targets {
         .with_default(Level::INFO)
 }
 
-pub fn init_observability() {
-    INIT.call_once(|| {
-        let file_appender = tracing_appender::rolling::daily("logs", "guardian.log");
+/// Initialise telemetry, writing the rolling `guardian.log` under `log_dir`.
+///
+/// The shipped sentinel passes an OS-correct data directory (see
+/// `crate::paths::NodePaths`); tests and the zero-arg [`init_observability`]
+/// wrapper use the legacy `logs/` directory relative to the CWD.
+pub fn init_observability_in(log_dir: impl AsRef<std::path::Path>) {
+    let log_dir = log_dir.as_ref().to_path_buf();
+    INIT.call_once(move || {
+        let file_appender = tracing_appender::rolling::daily(&log_dir, "guardian.log");
         let (non_blocking_file, file_guard) = tracing_appender::non_blocking(file_appender);
 
         let _ = TELEMETRY_GUARD.set(file_guard);
@@ -91,6 +97,13 @@ pub fn init_observability() {
 
         let _ = registry.try_init();
     });
+}
+
+/// Back-compat wrapper: initialise telemetry with the default `logs/` directory
+/// (relative to the CWD). Used by tests; the shipped sentinel calls
+/// [`init_observability_in`] with a platform data directory instead.
+pub fn init_observability() {
+    init_observability_in("logs");
 }
 
 /// Per-peer health and spectral observer state. Designed for `Arc<HealthTracker>`
