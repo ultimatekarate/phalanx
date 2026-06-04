@@ -130,7 +130,8 @@ pub enum StorageCommand {
         recording_id: RecordingId,
         reply_to: oneshot::Sender<Result<(), GuardianError>>,
     },
-    /// Debug: return (shard_count, has_content_key) for a recording.
+    /// Hidden diagnostic (intentional, retained): return
+    /// (shard_count, has_content_key) for a recording.
     DebugRecordingInfo {
         recording_id: RecordingId,
         reply_to: oneshot::Sender<(usize, bool)>,

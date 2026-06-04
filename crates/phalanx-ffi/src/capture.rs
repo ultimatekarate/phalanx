@@ -807,7 +807,10 @@ pub unsafe extern "C" fn phalanx_debug_delete_recording(
     }
 }
 
-/// Debug: returns "shards=N,key=true/false" as a C string for a recording.
+/// Hidden diagnostic (intentional — retained for field debugging, not part of
+/// the production UI flow). Returns the per-recording shard count as a C string
+/// in the form `"shards=N,key=true/false"`. Namespaced `phalanx_debug_*` so it
+/// reads as deliberate diagnostic surface, not accidental production API.
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.

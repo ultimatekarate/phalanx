@@ -203,7 +203,8 @@ impl Guardian {
         ids
     }
 
-    /// Debug: return shard count + has_key for a recording.
+    /// Hidden diagnostic (intentional, retained): return shard count + has_key
+    /// for a recording.
     pub fn debug_recording_info(&self, recording_id: &RecordingId) -> (usize, bool) {
         let shard_count = self
             .recording_logs
