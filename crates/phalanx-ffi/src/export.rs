@@ -520,7 +520,8 @@ mod tests {
         assert!(!mp4.is_empty(), "exported mp4 is non-empty");
 
         // First use of c2pa::Reader in-repo: read the signed manifest back.
-        let reader = Reader::from_stream("video/mp4", &mut Cursor::new(mp4.as_slice()))
+        let reader = Reader::from_context(c2pa::Context::default())
+            .with_stream("video/mp4", Cursor::new(mp4.as_slice()))
             .expect("c2pa reads back the signed mp4");
         let manifest_json = reader.json();
 
@@ -539,15 +540,18 @@ mod tests {
             "the MP4 asset hash binding validates: {manifest_json}"
         );
 
-        // KNOWN PRE-SHIP FINDING (tracked separately — see the run summary):
-        // c2pa `validation_state` is currently "Invalid" due to two statuses —
-        //   * signingCredential.untrusted : EXPECTED — self-signed, no CA.
-        //   * claimSignature.mismatch     : the Ed25519 COSE signature does not
-        //     verify against the self-signed cert's public key.
-        // The asset and assertion bindings above ARE valid, which isolates the
-        // problem to the signer/cert, not the pipeline. This test deliberately
-        // does NOT assert full signature validity yet; it pins the parts that
-        // are correct so they cannot silently regress.
+        // The Ed25519 COSE claim signature must verify. `signingCredential.untrusted`
+        // is EXPECTED and acceptable (self-signed, no CA), but `claimSignature.mismatch`
+        // would mean the signature itself is broken. The latter was a c2pa
+        // rust_native_crypto defect in 0.78.x; resolved by the 0.85 upgrade.
+        let statuses = reader.validation_status().unwrap_or_default();
+        let sig_mismatch = statuses
+            .iter()
+            .any(|s| s.code() == "claimSignature.mismatch");
+        assert!(
+            !sig_mismatch,
+            "C2PA claim signature failed to verify (claimSignature.mismatch): {manifest_json}"
+        );
 
         let _ = std::fs::remove_file(&out_path);
     }

@@ -33,7 +33,7 @@ serde_json = "1.0"
 postcard = { workspace = true }
 
 # C2PA export (rust_native_crypto avoids OpenSSL dependency)
-c2pa = { version = "0.78", default-features = false, features = ["rust_native_crypto", "file_io"] }
+c2pa = { version = "0.85.0", default-features = false, features = ["rust_native_crypto", "file_io"] }
 
 # Ed25519 signing (for C2PA signer)
 ed25519-dalek = { version = "2.1", features = ["serde", "zeroize"] }

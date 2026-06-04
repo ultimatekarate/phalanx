@@ -9,7 +9,7 @@ impl C2paOrchestrator {
     /// This is PURE logic — no signing, no disk IO.
     /// The caller is responsible for signing via `builder.sign(...)`.
     pub fn build_manifest(node_id: &str, format: MediaType) -> Result<Builder, c2pa::Error> {
-        let mut builder = Builder::new();
+        let mut builder = Builder::default();
         builder.set_format(format.as_str());
 
         // Tag every manifest with the originating Phalanx node identity
@@ -34,7 +34,7 @@ impl C2paOrchestrator {
         format: MediaType,
         metrics: &ForensicMetrics,
     ) -> Result<Builder, c2pa::Error> {
-        let mut builder = Builder::new();
+        let mut builder = Builder::default();
         builder.set_format(format.as_str());
 
         // Node identity assertion
@@ -69,7 +69,7 @@ impl C2paOrchestrator {
         producer_did: &str,
         proof: &CorroborationProof,
     ) -> Result<Builder, c2pa::Error> {
-        let mut builder = Builder::new();
+        let mut builder = Builder::default();
         builder.set_format("image/jpeg");
 
         // Producer identity
@@ -172,7 +172,10 @@ impl C2paOrchestrator {
 /// Pure crypto — no IO. Caller wraps in `CallbackSigner` (Hands).
 /// Used by both phalanx-ffi (mobile export) and phalanx-stronghold (proof export).
 pub fn generate_self_signed_cert(signing_key: &ed25519_dalek::SigningKey) -> Vec<u8> {
-    use rcgen::{CertificateParams, ExtendedKeyUsagePurpose, KeyUsagePurpose, PKCS_ED25519};
+    use rcgen::{
+        CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, KeyUsagePurpose,
+        PKCS_ED25519,
+    };
 
     let Ok(mut params) = CertificateParams::new(vec!["phalanx-stronghold.local".to_string()])
     else {
@@ -185,6 +188,16 @@ pub fn generate_self_signed_cert(signing_key: &ed25519_dalek::SigningKey) -> Vec
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::EmailProtection];
     params.use_authority_key_identifier_extension = true;
+
+    // C2PA COSE verification requires the signing certificate's subject to
+    // carry an Organization (O) attribute — `c2pa`'s verifier reads it via
+    // `subject().iter_organization()` and treats its absence as a missing
+    // certificate chain, surfaced as `claimSignature.mismatch`. rcgen's default
+    // DN has no Organization, so set one explicitly.
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::OrganizationName, "Phalanx");
+    dn.push(DnType::CommonName, "Phalanx Self-Signed Signer");
+    params.distinguished_name = dn;
 
     // Wrap the identity's Ed25519 secret key in PKCS8 DER so rcgen can use it.
     // Ed25519 PKCS8 format: fixed ASN.1 prefix (16 bytes) + 34-byte octet string

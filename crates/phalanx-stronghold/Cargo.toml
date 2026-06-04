@@ -50,7 +50,7 @@ thiserror = "2.0.18"
 oneshot = { version = "0.2.1", features = ["async"] }
 
 # Export
-c2pa = { version = "0.78.0", default-features = false, features = ["rust_native_crypto", "file_io"] }
+c2pa = { version = "0.85.0", default-features = false, features = ["rust_native_crypto", "file_io"] }
 
 # System
 ctrlc = "3.5.2"
