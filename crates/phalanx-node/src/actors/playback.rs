@@ -104,19 +104,6 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                     self.consecutive_gaps = 0;
                     stats.shards_found += 1;
 
-                    let evidence_type = match &envelope.evidence {
-                        Evidence::Video(_) => "Video",
-                        Evidence::Audio(_) => "Audio",
-                        Evidence::Gap(_) => "Gap",
-                        Evidence::Handover(_) => "Handover",
-                        Evidence::Proximity(_) => "Proximity",
-                        Evidence::ManifestEntry(_) => "ManifestEntry",
-                    };
-                    eprintln!(
-                        "[Phalanx Playback] seq {}: got {} shard",
-                        self.current_sequence.0, evidence_type
-                    );
-
                     // Demux: extract payload + timestamp + fps + audio metadata by value.
                     // Video arm sets sample_rate/channels to 0 (unused); audio arm sets
                     // timestamp/interval to 0 (unused). No Option, no unwrap.
@@ -151,17 +138,6 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                     let seq = self.current_sequence;
                     self.current_sequence.0 += 1;
 
-                    let payload_desc = match &payload {
-                        DataPayload::Missing => "Missing",
-                        DataPayload::Clear(_) => "Clear",
-                        DataPayload::Compressed(_) => "Compressed",
-                        DataPayload::Encrypted { .. } => "Encrypted",
-                    };
-                    eprintln!(
-                        "[Phalanx Playback] seq {seq}: payload is {payload_desc}, has_key={}",
-                        self.decryption_key.is_some()
-                    );
-
                     let frame_data = match payload {
                         DataPayload::Missing => continue,
                         other => {
@@ -171,7 +147,6 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                             ) {
                                 Ok(data) => data,
                                 Err(e) => {
-                                    eprintln!("[Phalanx Playback] decode_payload FAILED at seq {seq}: {e:?}");
                                     tracing::warn!(seq = seq.0, error = ?e, "Skipping frame: decode_payload failed");
                                     stats.decode_failures += 1;
                                     continue;
@@ -196,8 +171,7 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                         prefixed.push(channels);
                         prefixed.push(0u8);
                         prefixed.extend_from_slice(&frame_data);
-                        if let Err(e) = self.audio_sink.handle_chunk(seq, prefixed).await {
-                            eprintln!("[Phalanx Playback] audio sink error at seq {seq}: {e:?}");
+                        if self.audio_sink.handle_chunk(seq, prefixed).await.is_err() {
                             break Ok(stats);
                         }
                         stats.audio_sent += 1;
@@ -207,10 +181,6 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                         // Falls back to raw bytes if deserialization fails (legacy format).
                         match postcard::from_bytes::<Vec<Vec<u8>>>(&frame_data) {
                             Ok(jpeg_frames) => {
-                                eprintln!(
-                                    "[Phalanx Playback] seq {seq}: decoded {} JPEG frames",
-                                    jpeg_frames.len()
-                                );
                                 for (i, frame) in jpeg_frames.iter().enumerate() {
                                     // Prepend 8-byte LE timestamp for playback pacing.
                                     // Offset each frame within the shard by its index × per-frame interval.
@@ -219,20 +189,17 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                                     let mut timed = Vec::with_capacity(8 + frame.len());
                                     timed.extend_from_slice(&frame_ts.to_le_bytes());
                                     timed.extend_from_slice(frame);
-                                    if let Err(e) = self.video_sink.handle_chunk(seq, timed).await {
-                                        eprintln!("[Phalanx Playback] video sink error: {e:?}");
+                                    if self.video_sink.handle_chunk(seq, timed).await.is_err() {
                                         break 'playback Ok(stats);
                                     }
                                     stats.video_sent += 1;
                                 }
                             }
-                            Err(e) => {
-                                eprintln!("[Phalanx Playback] seq {seq}: postcard deser failed ({e:?}), sending {} raw bytes", frame_data.len());
+                            Err(_) => {
                                 let mut timed = Vec::with_capacity(8 + frame_data.len());
                                 timed.extend_from_slice(&timestamp_ms.to_le_bytes());
                                 timed.extend_from_slice(&frame_data);
-                                if let Err(e) = self.video_sink.handle_chunk(seq, timed).await {
-                                    eprintln!("[Phalanx Playback] video sink error: {e:?}");
+                                if self.video_sink.handle_chunk(seq, timed).await.is_err() {
                                     break Ok(stats);
                                 }
                                 stats.video_sent += 1;

@@ -109,11 +109,8 @@ impl AsyncRead for CountingStream {
     ) -> Poll<io::Result<usize>> {
         let result = Pin::new(&mut self.inner).poll_read(cx, buf);
         if let Poll::Ready(Ok(n)) = &result {
-            let prev = self.bytes_received.fetch_add(*n as u64, Ordering::Relaxed);
+            self.bytes_received.fetch_add(*n as u64, Ordering::Relaxed);
             self.io_ops.fetch_add(1, Ordering::Relaxed);
-            if prev == 0 {
-                eprintln!("[CountingStream] first read: {n} bytes");
-            }
             if let Some(ref log) = self.io_log {
                 if let Ok(mut guard) = log.lock() {
                     guard.push(IoLogEntry {
@@ -217,7 +214,6 @@ impl StreamMuxer for CountingMuxer {
         let counter = self.substreams_opened.clone();
         Pin::new(&mut self.inner).poll_inbound(cx).map_ok(|sub| {
             let n = counter.fetch_add(1, Ordering::Relaxed);
-            eprintln!("[CountingMuxer] poll_inbound substream #{n}");
             self.wrap_substream(sub, n)
         })
     }
@@ -229,7 +225,6 @@ impl StreamMuxer for CountingMuxer {
         let counter = self.substreams_opened.clone();
         Pin::new(&mut self.inner).poll_outbound(cx).map_ok(|sub| {
             let n = counter.fetch_add(1, Ordering::Relaxed);
-            eprintln!("[CountingMuxer] poll_outbound substream #{n}");
             self.wrap_substream(sub, n)
         })
     }
