@@ -1,5 +1,4 @@
 use std::error::Error;
-use std::path::Path;
 use std::sync::Arc;
 use tracing::info;
 
@@ -10,17 +9,24 @@ use phalanx_node::actors::meshsentinel::SentinelDependencies;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::network::orchestrator::setup_transport;
+use phalanx_node::paths::NodePaths;
 use phalanx_node::persistence::vault::{derive_vault_key, load_or_create_vault_salt};
 use phalanx_node::psk::load_swarm_key;
 use phalanx_node::trust::TrustRegistry;
-use phalanx_node::vitals::init_observability;
+use phalanx_node::vitals::init_observability_in;
 use phalanx_node::FileJournal;
 use phalanx_proto::prelude::PhalanxIdentity;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // Resolve the single on-disk state root (PHALANX_HOME override, else the
+    // OS-correct local data dir) and create its directories BEFORE telemetry —
+    // the rolling guardian.log lives under it.
+    let paths = NodePaths::resolve()?;
+
     // Telemetry & Initialization
-    init_observability();
+    init_observability_in(paths.log_dir());
+    info!(data_root = %paths.base().display(), "Phalanx state directory resolved");
 
     // Ctrl-C wiring: the handler sends on a oneshot. `engine.run()` is raced
     // against the receiver so SIGINT unwinds back to the `shutdown().await`
@@ -38,17 +44,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
     })?;
 
     // Configuration Loading
-    let config = NodeConfig::load_from_env();
+    let mut config = NodeConfig::load_from_env();
+    // Place the vault under the resolved state root unless the operator set an
+    // explicit (non-dev-default) vault_path via PHALANX_CONFIG. The salt, DHT
+    // store, and PRNU posterior all live under this directory.
+    if config.storage.vault_path == phalanx_node::paths::DEV_DEFAULT_VAULT_PATH {
+        config.storage.vault_path = paths.vault().to_string_lossy().into_owned();
+    }
 
-    // TODO: Hard coded for now, this will come from the UI once it is built.
+    // The identity passphrase is supplied via the environment for this headless
+    // daemon — the correct production mechanism (e.g. a systemd EnvironmentFile
+    // or a secrets manager). The node refuses to start without it.
     let identity_passphrase = std::env::var("PHALANX_IDENTITY_PASSPHRASE")
         .map_err(|_| "Security Violation: PHALANX_IDENTITY_PASSPHRASE not set")?;
 
     // Identity & Security Setup
     let (my_identity, _genesis_phrase) =
-        PhalanxIdentity::init("identity.bin", &identity_passphrase)?;
-    let psk_path = Path::new("swarm.key");
-    let psk = load_swarm_key(psk_path);
+        PhalanxIdentity::init(paths.identity(), &identity_passphrase)?;
+    let psk = load_swarm_key(&paths.swarm_key());
 
     if psk.is_some() {
         info!("Joining Private Swarm (Static PSK Loaded).");
@@ -57,9 +70,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     info!("Initializing Transient WAL");
-    let vault_salt = load_or_create_vault_salt("vault").await?;
+    let vault_salt = load_or_create_vault_salt(&config.storage.vault_path).await?;
     let vault_key = derive_vault_key(&my_identity, &vault_salt);
-    let journal = FileJournal::new("sentinel_transient_wal.bin", vault_key.clone()).await?;
+    let journal = FileJournal::new(paths.wal(), vault_key.clone()).await?;
 
     // --- ZERO-TRUST DEPENDENCY GRAPH ---
     // External registry for swarm's gossipsub validator.

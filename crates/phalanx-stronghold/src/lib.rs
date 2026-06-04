@@ -14,6 +14,7 @@ pub mod actors {
 pub mod config;
 pub mod error;
 pub mod governor;
+pub mod paths;
 pub mod ops {
     pub mod corroborate;
     pub mod export;

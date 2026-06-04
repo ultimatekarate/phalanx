@@ -785,10 +785,12 @@ struct PhalanxHandle *phalanx_create(const char *config_path,
  *   produces a null handle; partial state on disk is bounded by the
  *   transactional `save_to_disk_atomic` step.
  *
- * Use `phalanx_restore_status()` (TODO if needed) to query the specific
- * failure cause; for now the FFI surfaces null and the Flutter side calls
- * `phalanx_validate_mnemonic` first to pre-screen the phrase, leaving the
- * remaining null causes as "boot failed" from the user's perspective.
+ * By design, the FFI surfaces only a null handle on failure rather than a
+ * richer status code: the Flutter side calls `phalanx_validate_mnemonic`
+ * first to pre-screen the phrase, leaving the remaining null causes as
+ * "boot failed" from the user's perspective. This is intentional — a
+ * per-cause restore-status API would be added here only if product needs
+ * justify distinguishing the residual failure modes.
  *
  * # Safety
  * * `config_path` may be null (use defaults) or a valid null-terminated C
@@ -1159,6 +1161,19 @@ int32_t phalanx_recovery_status(const struct PhalanxHandle *handle,
  * * `handle` must be a valid pointer from `phalanx_create`.
  */
  int32_t phalanx_update_lifecycle(struct PhalanxHandle *handle, bool is_foreground) ;
+
+/**
+ * Updates total device RAM in bytes.
+ *
+ * Called once by Flutter shortly after `phalanx_create`/`phalanx_restore`,
+ * using the platform's physical-memory API. RAM sizes the homeostatic
+ * memory-pressure integrals; passing 0 leaves the reference-device fallback
+ * in place. Additive setter — avoids an ABI change to `phalanx_create`.
+ *
+ * # Safety
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ */
+ int32_t phalanx_update_device_ram(struct PhalanxHandle *handle, uint64_t total_ram_bytes) ;
 
 /**
  * Returns the peer list as a JSON array string.

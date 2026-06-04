@@ -32,6 +32,7 @@ pub mod hardware {
     pub mod camera;
 }
 pub mod identity;
+pub mod paths;
 
 pub mod network {
     pub mod orchestrator;

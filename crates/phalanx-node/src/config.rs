@@ -189,6 +189,9 @@ impl Default for NetworkConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
+            // Dev-only default. The shipped sentinel binary overrides this with
+            // an OS-correct data dir via `crate::paths::NodePaths` (and mobile
+            // overrides it with the app sandbox dir); see `paths::DEV_DEFAULT_VAULT_PATH`.
             vault_path: "./sim_vault".to_string(),
             max_video_buffer: 100,
             max_audio_buffer: 100,

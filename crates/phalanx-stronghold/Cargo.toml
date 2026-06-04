@@ -54,6 +54,8 @@ c2pa = { version = "0.78.0", default-features = false, features = ["rust_native_
 
 # System
 ctrlc = "3.5.2"
+# OS-correct data directories for the shipped daemon (vault/identity/proofs).
+directories = "5"
 
 # GUI (optional, feature-gated)
 eframe = { version = "0.30", optional = true, default-features = false, features = ["glow", "default_fonts"] }

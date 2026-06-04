@@ -28,6 +28,12 @@ struct Cli {
     #[arg(short, long, default_value = "stronghold.toml")]
     config: String,
 
+    /// Override the data root (vault, identity, proofs). Highest precedence;
+    /// otherwise PHALANX_STRONGHOLD_HOME, then config `vault_path`, then the
+    /// OS-correct platform data directory.
+    #[arg(long)]
+    data_dir: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -129,7 +135,14 @@ async fn main() {
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config(&cli.config)?;
-    let vault_path = PathBuf::from(&config.storage.vault_path);
+    // Resolve the data root to an OS-correct, machine-local directory for the
+    // shipped daemon (never the dev-relative ./stronghold-data unless the
+    // operator opts in). Fails loudly if no location can be determined.
+    let vault_path = phalanx_stronghold::paths::resolve_data_dir(
+        &config.storage.vault_path,
+        cli.data_dir.as_deref(),
+    )?;
+    std::fs::create_dir_all(&vault_path)?;
 
     match cli.command {
         Commands::Run => {
