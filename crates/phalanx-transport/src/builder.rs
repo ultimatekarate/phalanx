@@ -12,7 +12,7 @@ use std::time::Duration;
 use crate::behaviour::PhalanxBehaviour;
 
 use phalanx_proto::{
-    network::RETRIEVAL_PROTOCOL_ID,
+    network::{ARCHIVE_PROTOCOL_ID, RETRIEVAL_PROTOCOL_ID},
     types::{PhalanxPhysics, VitalityRate},
 };
 
@@ -216,6 +216,16 @@ where
         retrieval_config,
     );
 
+    // Directed archive PUSH protocol — same request/response machinery, its own
+    // codec (initiator carries shards, responder returns a custody receipt).
+    let archive_config =
+        request_response::Config::default().with_request_timeout(Duration::from_secs(20));
+    let archive_protocol = StreamProtocol::try_from_owned(ARCHIVE_PROTOCOL_ID.to_string())?;
+    let archive = request_response::Behaviour::new(
+        [(archive_protocol, request_response::ProtocolSupport::Full)],
+        archive_config,
+    );
+
     // E1/E5 FIX: Connection limits to prevent eclipse attacks.
     // Caps the total number of established connections and per-peer connections.
     // max_established_per_peer prevents a single PeerId from opening many connections.
@@ -239,6 +249,7 @@ where
         dcutr,
         autonat,
         retrieval,
+        archive,
         connection_limits,
     })
 }

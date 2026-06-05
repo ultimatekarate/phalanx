@@ -1,5 +1,5 @@
 use crate::behaviour::kad::store::RecordStore;
-use crate::codec::PhalanxRetrievalProtocol;
+use crate::codec::{PhalanxArchiveProtocol, PhalanxRetrievalProtocol};
 use crate::events::PhalanxEvent;
 use libp2p::kad::RecordKey;
 use libp2p::swarm::NetworkBehaviour;
@@ -36,6 +36,9 @@ pub struct PhalanxBehaviour<S: RecordStore + Send + Sync + 'static> {
     pub dcutr: dcutr::Behaviour,
     pub autonat: autonat::Behaviour,
     pub retrieval: request_response::Behaviour<PhalanxRetrievalProtocol>,
+    /// Directed archive PUSH protocol (`/phalanx/archive/1.0.0`): a publisher
+    /// carries shards to a Stronghold, which replies with a custody receipt.
+    pub archive: request_response::Behaviour<PhalanxArchiveProtocol>,
     /// E1 FIX: Swarm-level connection limits to prevent eclipse attacks.
     /// Enforces hard caps on total connections and per-peer connections.
     pub connection_limits: connection_limits::Behaviour,

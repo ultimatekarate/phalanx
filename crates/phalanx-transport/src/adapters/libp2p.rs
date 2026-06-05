@@ -9,6 +9,7 @@ use libp2p::kad::store::RecordStore;
 use libp2p::swarm::Swarm;
 use libp2p::swarm::SwarmEvent;
 use libp2p::PeerId;
+use phalanx_proto::archive::{ArchiveReceipt, ArchiveRequest};
 use phalanx_proto::identity::MeshAddress;
 use phalanx_proto::network::TransportError;
 use phalanx_proto::network::{EgressPort, IngressPort, NetworkEvent};
@@ -35,6 +36,26 @@ pub enum TransportCommand {
     /// The actor looks up the captured `ResponseChannel` and calls
     /// `swarm.behaviour_mut().retrieval.send_response(...)`.
     SendResponse(String, RecordingResponse),
+    /// Directed archive PUSH to a connected peer (Stronghold). The typed request
+    /// is carried directly (not postcard-encoded like `SendDirect`).
+    SendArchiveRequest(MeshAddress, ArchiveRequest),
+    /// Reply to a previously-received archive `Message::Request` with a custody
+    /// receipt, identified by `channel_id`.
+    SendArchiveResponse(String, ArchiveReceipt),
+}
+
+/// A captured inbound request-response `ResponseChannel`, tagged by protocol so
+/// the swarm task can insert it into the correct typed store. The two protocols
+/// have distinct response types and therefore distinct channel types.
+enum CapturedChannel {
+    Retrieval(
+        String,
+        libp2p::request_response::ResponseChannel<RecordingResponse>,
+    ),
+    Archive(
+        String,
+        libp2p::request_response::ResponseChannel<ArchiveReceipt>,
+    ),
 }
 
 /// Per-protocol wake attribution. Each field is a handle to a shared atomic
@@ -260,6 +281,19 @@ pub fn translate_swarm_event(event: SwarmEvent<PhalanxEvent>) -> Option<NetworkE
                 None
             }
         },
+        // Archive: custody receipt received in reply to a directed push.
+        // (Inbound archive `Message::Request` is captured in the swarm task, like
+        // retrieval, so the `ResponseChannel` can be retained.)
+        SwarmEvent::Behaviour(PhalanxEvent::Archive(
+            libp2p::request_response::Event::Message {
+                peer,
+                message: libp2p::request_response::Message::Response { response, .. },
+                ..
+            },
+        )) => Some(NetworkEvent::ArchiveReceiptReceived {
+            from: PeerMapper::to_mesh_address(&peer),
+            receipt: response,
+        }),
         _ => None, // Safely ignore background noise like DHT pings
     }
 }
@@ -439,6 +473,11 @@ impl Libp2pAdapter {
             let mut response_channels: TimedStore<
                 libp2p::request_response::ResponseChannel<RecordingResponse>,
             > = TimedStore::new(Duration::from_secs(30));
+            // Parallel store for inbound archive-push request channels (distinct
+            // response type, hence a distinct map).
+            let mut archive_response_channels: TimedStore<
+                libp2p::request_response::ResponseChannel<ArchiveReceipt>,
+            > = TimedStore::new(Duration::from_secs(30));
             let mut last_gc = Instant::now();
 
             // Shared closure-like helper: process a single swarm event.
@@ -595,6 +634,58 @@ impl Libp2pAdapter {
                                 }
                             }
                         }
+                        Some(TransportCommand::SendArchiveRequest(target, request)) => {
+                            match PeerMapper::from_mesh_address(&target) {
+                                Ok(peer_id) => {
+                                    if !swarm.is_connected(&peer_id) {
+                                        tracing::warn!(
+                                            target: "phalanx::transport",
+                                            "Rejecting archive push to unconnected peer: {}",
+                                            target.0,
+                                        );
+                                    } else {
+                                        swarm.behaviour_mut().archive.send_request(&peer_id, request);
+                                    }
+                                }
+                                Err(mapping_error) => {
+                                    tracing::error!(
+                                        target: "phalanx::transport",
+                                        "Cannot route archive push; invalid MeshAddress {}: {}",
+                                        target.0,
+                                        mapping_error
+                                    );
+                                }
+                            }
+                        }
+                        Some(TransportCommand::SendArchiveResponse(channel_id, receipt)) => {
+                            archive_response_channels.evict_expired(Instant::now());
+                            match archive_response_channels.take(&channel_id) {
+                                Some(channel) => {
+                                    if swarm
+                                        .behaviour_mut()
+                                        .archive
+                                        .send_response(channel, receipt)
+                                        .is_err()
+                                    {
+                                        response_channels_lost_task
+                                            .fetch_add(1, Ordering::Relaxed);
+                                        tracing::warn!(
+                                            target: "phalanx::transport",
+                                            channel_id = %channel_id,
+                                            "send_archive_response failed: channel closed before reply"
+                                        );
+                                    }
+                                }
+                                None => {
+                                    response_channels_lost_task.fetch_add(1, Ordering::Relaxed);
+                                    tracing::warn!(
+                                        target: "phalanx::transport",
+                                        channel_id = %channel_id,
+                                        "send_archive_response: unknown channel_id (already responded, or expired)"
+                                    );
+                                }
+                            }
+                        }
                         Some(TransportCommand::ReBootstrap(peers)) => {
                             for addr_str in &peers {
                                 if let Ok(addr) = addr_str.parse::<libp2p::Multiaddr>() {
@@ -673,6 +764,9 @@ impl Libp2pAdapter {
                         SwarmEvent::Behaviour(PhalanxEvent::Retrieval(
                             libp2p::request_response::Event::Message { peer, .. }
                         )) => Some(*peer),
+                        SwarmEvent::Behaviour(PhalanxEvent::Archive(
+                            libp2p::request_response::Event::Message { peer, .. }
+                        )) => Some(*peer),
                         _ => None,
                     };
 
@@ -687,7 +781,8 @@ impl Libp2pAdapter {
                     // per 30s (libp2p's request-response timeout is 20s, so any
                     // entry past 30s is guaranteed dead from libp2p's perspective).
                     if now.duration_since(last_gc) >= Duration::from_secs(30) {
-                        let evicted = response_channels.evict_expired(now);
+                        let evicted = response_channels.evict_expired(now)
+                            + archive_response_channels.evict_expired(now);
                         if evicted > 0 {
                             response_channels_lost_task
                                 .fetch_add(evicted as u64, Ordering::Relaxed);
@@ -719,7 +814,33 @@ impl Libp2pAdapter {
                                 request,
                                 channel_id: channel_id.clone(),
                             };
-                            (Some(event), Some((channel_id, channel)))
+                            (
+                                Some(event),
+                                Some(CapturedChannel::Retrieval(channel_id, channel)),
+                            )
+                        }
+                        SwarmEvent::Behaviour(PhalanxEvent::Archive(
+                            libp2p::request_response::Event::Message {
+                                peer,
+                                message:
+                                    libp2p::request_response::Message::Request {
+                                        request_id,
+                                        request,
+                                        channel,
+                                    },
+                                ..
+                            },
+                        )) => {
+                            let channel_id = request_id.to_string();
+                            let event = NetworkEvent::ArchiveRequested {
+                                origin: PeerMapper::to_mesh_address(&peer),
+                                request,
+                                channel_id: channel_id.clone(),
+                            };
+                            (
+                                Some(event),
+                                Some(CapturedChannel::Archive(channel_id, channel)),
+                            )
                         }
                         other => (translate_swarm_event(other), None),
                     };
@@ -728,8 +849,14 @@ impl Libp2pAdapter {
                         if let Some(network_event) = network_event {
                             match _event_tx.try_send(network_event) {
                                 Ok(()) => {
-                                    if let Some((id, channel)) = channel_to_insert {
-                                        response_channels.insert(id, channel, now);
+                                    match channel_to_insert {
+                                        Some(CapturedChannel::Retrieval(id, channel)) => {
+                                            response_channels.insert(id, channel, now);
+                                        }
+                                        Some(CapturedChannel::Archive(id, channel)) => {
+                                            archive_response_channels.insert(id, channel, now);
+                                        }
+                                        None => {}
                                     }
                                 }
                                 Err(_) => {
@@ -960,6 +1087,45 @@ impl Libp2pAdapter {
                 TransportError::Internal("Sentinel connection lost".into())
             })
     }
+
+    /// Directed archive PUSH of a recording to a connected peer (Stronghold).
+    pub async fn send_archive_request(
+        &self,
+        target: &MeshAddress,
+        request: ArchiveRequest,
+    ) -> Result<(), TransportError> {
+        self.outbound_queue_depth.fetch_add(1, Ordering::Relaxed);
+        self.command_tx
+            .send(TransportCommand::SendArchiveRequest(
+                target.clone(),
+                request,
+            ))
+            .await
+            .map_err(|_| {
+                self.outbound_queue_depth.fetch_sub(1, Ordering::Relaxed);
+                TransportError::Internal("Sentinel connection lost".into())
+            })
+    }
+
+    /// Reply to a previously-received `ArchiveRequested` event with a custody
+    /// receipt. Best-effort, same semantics as `send_response`.
+    pub async fn send_archive_response(
+        &self,
+        channel_id: &str,
+        receipt: ArchiveReceipt,
+    ) -> Result<(), TransportError> {
+        self.outbound_queue_depth.fetch_add(1, Ordering::Relaxed);
+        self.command_tx
+            .send(TransportCommand::SendArchiveResponse(
+                channel_id.to_string(),
+                receipt,
+            ))
+            .await
+            .map_err(|_| {
+                self.outbound_queue_depth.fetch_sub(1, Ordering::Relaxed);
+                TransportError::Internal("Sentinel connection lost".into())
+            })
+    }
 }
 
 // --- Port Objects ---
@@ -1126,6 +1292,28 @@ impl EgressPort for Libp2pEgress {
     async fn rebootstrap(&self, peers: &[String]) -> Result<(), String> {
         self.adapter
             .rebootstrap(peers)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn send_archive_request(
+        &self,
+        target: &MeshAddress,
+        request: ArchiveRequest,
+    ) -> Result<(), String> {
+        self.adapter
+            .send_archive_request(target, request)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn send_archive_response(
+        &self,
+        channel_id: &str,
+        receipt: ArchiveReceipt,
+    ) -> Result<(), String> {
+        self.adapter
+            .send_archive_response(channel_id, receipt)
             .await
             .map_err(|e| e.to_string())
     }

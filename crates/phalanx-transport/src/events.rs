@@ -1,4 +1,5 @@
 use libp2p::{autonat, dcutr, gossipsub, identify, kad, mdns, relay, request_response};
+use phalanx_proto::archive::{ArchiveReceipt, ArchiveRequest};
 use phalanx_proto::retrieval::RecordingRequest;
 use phalanx_proto::retrieval::RecordingResponse;
 use std::convert::Infallible;
@@ -15,6 +16,7 @@ pub enum PhalanxEvent {
     Dcutr(dcutr::Event),
     Autonat(autonat::Event),
     Retrieval(request_response::Event<RecordingRequest, RecordingResponse>),
+    Archive(request_response::Event<ArchiveRequest, ArchiveReceipt>),
 }
 
 impl From<gossipsub::Event> for PhalanxEvent {
@@ -61,6 +63,12 @@ impl From<autonat::Event> for PhalanxEvent {
 impl From<request_response::Event<RecordingRequest, RecordingResponse>> for PhalanxEvent {
     fn from(event: request_response::Event<RecordingRequest, RecordingResponse>) -> Self {
         PhalanxEvent::Retrieval(event)
+    }
+}
+
+impl From<request_response::Event<ArchiveRequest, ArchiveReceipt>> for PhalanxEvent {
+    fn from(event: request_response::Event<ArchiveRequest, ArchiveReceipt>) -> Self {
+        PhalanxEvent::Archive(event)
     }
 }
 
