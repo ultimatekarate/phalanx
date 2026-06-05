@@ -21,6 +21,7 @@ pub mod vitals; // The Health Nouns
 // prefer the grouped paths (e.g. `crate::evidence::corroboration::X`).
 
 // evidence/*
+pub use evidence::archive;
 pub use evidence::corroboration;
 pub use evidence::playback;
 pub use evidence::retrieval;

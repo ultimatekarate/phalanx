@@ -1,5 +1,6 @@
 // The What — evidence lifecycle types.
 
+pub mod archive;
 pub mod corroboration;
 mod envelope;
 pub mod playback;

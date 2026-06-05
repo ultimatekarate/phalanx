@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::archive::{ArchiveReceipt, ArchiveRequest};
 use crate::evidence::WitnessEnvelope;
 use crate::identity::{Did, RecordingId};
 use crate::prelude::{MeshAddress, MeshTopic};
@@ -11,6 +12,9 @@ use crate::topology::{SubnetBucket, TransportClass};
 
 pub const RETRIEVAL_PROTOCOL_ID: &str = "/phalanx/retrieval/1.0.0";
 pub const DISCOVERY_TOPIC_ID: &str = "/phalanx/discovery/1.0.0";
+/// Unicast request/response protocol for directed evidence PUSH to an archival
+/// Stronghold (the custody tier). Distinct from the pull-only retrieval protocol.
+pub const ARCHIVE_PROTOCOL_ID: &str = "/phalanx/archive/1.0.0";
 
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {
@@ -34,6 +38,19 @@ pub enum NetworkEvent {
         origin: MeshAddress,
         request: RecordingRequest,
         channel_id: String,
+    },
+    /// An inbound directed PUSH of evidence to be taken into custody.
+    /// The responder (a Stronghold) admits, persists, and replies with an
+    /// `ArchiveReceipt` over `channel_id`.
+    ArchiveRequested {
+        origin: MeshAddress,
+        request: ArchiveRequest,
+        channel_id: String,
+    },
+    /// A custody receipt received in reply to a `send_archive_request`.
+    ArchiveReceiptReceived {
+        from: MeshAddress,
+        receipt: ArchiveReceipt,
     },
     /// DHT providers discovered for a recording.
     ProvidersDiscovered {
@@ -175,6 +192,26 @@ pub trait EgressPort: Send + Sync + Clone {
     /// Default: no-op (transports that don't maintain provider records ignore this).
     async fn withdraw_provider(&self, _recording_id: &RecordingId) -> Result<(), String> {
         Ok(())
+    }
+
+    /// Directed PUSH of a recording's envelopes to an archival peer (Stronghold).
+    /// Default: unsupported (transports without the archive protocol ignore it).
+    async fn send_archive_request(
+        &self,
+        _target: &MeshAddress,
+        _request: ArchiveRequest,
+    ) -> Result<(), String> {
+        Err("archive protocol not supported by this transport".to_string())
+    }
+
+    /// Reply to an inbound archive push with a custody receipt over `channel_id`.
+    /// Default: unsupported.
+    async fn send_archive_response(
+        &self,
+        _channel_id: &str,
+        _receipt: ArchiveReceipt,
+    ) -> Result<(), String> {
+        Err("archive protocol not supported by this transport".to_string())
     }
 }
 
