@@ -7,6 +7,7 @@ pub mod trust; // Integrity — evaluation, corroboration, eclipse, revocation
 pub mod verification; // The Gates — gate, topology_gate, judge, bloom // Crypto primitives — encrypt, decrypt, grants, bridge
 
 // ─── Cross-cutting ───────────────────────────────────────────────────
+pub mod archive; // Custody Verbs — sign/verify archive push request + receipt
 pub mod errors;
 pub mod identity;
 pub mod kademlia;
