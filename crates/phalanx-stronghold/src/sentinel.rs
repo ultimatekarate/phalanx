@@ -9,15 +9,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use phalanx_forensics::archive::{build_archive_receipt, verify_archive_request};
 use phalanx_forensics::gate;
+use phalanx_proto::archive::{ArchiveReceipt, ArchiveRequest};
 use phalanx_proto::identity::PhalanxIdentity;
-use phalanx_proto::network::IngressPort;
 use phalanx_proto::network::NetworkEvent;
+use phalanx_proto::network::{EgressPort, IngressPort};
 use phalanx_proto::prelude::ShardChunk;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::actors::aggregation::{AggregationActor, AggregationCommand};
+use crate::actors::aggregation::{AggregationActor, AggregationCommand, ArchiveAdmit};
 use crate::actors::community::{CommunityActor, CommunityCommand};
 use crate::config::StrongholdConfig;
 use crate::governor::StrongholdGovernor;
@@ -29,19 +31,23 @@ const ACTOR_CHANNEL_CAPACITY: usize = 512;
 
 // ── Dependencies ─────────────────────────────────────────────────────────
 
-pub struct StrongholdDependencies<I: IngressPort> {
+pub struct StrongholdDependencies<I: IngressPort, E: EgressPort> {
     pub config: StrongholdConfig,
     pub identity: PhalanxIdentity,
     pub ingress: I,
+    pub egress: E,
     pub evidence_store: EvidenceStore,
 }
 
 // ── Sentinel ─────────────────────────────────────────────────────────────
 
-pub struct StrongholdSentinel<I: IngressPort> {
+pub struct StrongholdSentinel<I: IngressPort, E: EgressPort> {
     config: Arc<StrongholdConfig>,
     identity: Arc<PhalanxIdentity>,
     ingress: I,
+    /// Egress for replying to archive pushes (custody receipts) and announcing
+    /// custody on the DHT. The daemon was previously passive (egress discarded).
+    egress: E,
     aggregation_tx: mpsc::Sender<AggregationCommand>,
     community_tx: mpsc::Sender<CommunityCommand>,
     governor: Arc<StrongholdGovernor>,
@@ -50,9 +56,9 @@ pub struct StrongholdSentinel<I: IngressPort> {
     community_handle: tokio::task::JoinHandle<()>,
 }
 
-impl<I: IngressPort> StrongholdSentinel<I> {
+impl<I: IngressPort + 'static, E: EgressPort + 'static> StrongholdSentinel<I, E> {
     /// Construct the sentinel, spawn actors, return ready-to-run sentinel.
-    pub fn new(deps: StrongholdDependencies<I>) -> Self {
+    pub fn new(deps: StrongholdDependencies<I, E>) -> Self {
         let config = Arc::new(deps.config);
         let identity = Arc::new(deps.identity);
         let governor = Arc::new(StrongholdGovernor::new());
@@ -62,8 +68,12 @@ impl<I: IngressPort> StrongholdSentinel<I> {
         let (community_tx, community_rx) = mpsc::channel(ACTOR_CHANNEL_CAPACITY);
 
         // Construct and spawn AggregationActor.
-        let aggregation_actor =
-            AggregationActor::new(deps.evidence_store, governor.clone(), aggregation_rx);
+        let aggregation_actor = AggregationActor::new(
+            deps.evidence_store,
+            governor.clone(),
+            config.clone(),
+            aggregation_rx,
+        );
         let aggregation_handle = tokio::spawn(aggregation_actor.run());
 
         // Construct and spawn CommunityActor.
@@ -74,6 +84,7 @@ impl<I: IngressPort> StrongholdSentinel<I> {
             config,
             identity,
             ingress: deps.ingress,
+            egress: deps.egress,
             aggregation_tx,
             community_tx,
             governor,
@@ -105,6 +116,14 @@ impl<I: IngressPort> StrongholdSentinel<I> {
                 }
                 _ = maintenance.tick() => {
                     self.refresh_routing().await;
+                    // Custody TTL sweep: reclaim expired recordings.
+                    if self
+                        .aggregation_tx
+                        .try_send(AggregationCommand::SweepExpired)
+                        .is_err()
+                    {
+                        warn!("StrongholdSentinel: aggregation channel full, skipping custody sweep");
+                    }
                 }
             }
         }
@@ -148,6 +167,25 @@ impl<I: IngressPort> StrongholdSentinel<I> {
                 false
             }
 
+            // Directed archive PUSH: a publisher staging a recording for custody.
+            NetworkEvent::ArchiveRequested {
+                request,
+                channel_id,
+                ..
+            } => {
+                // Spawn so a slow/large push — or a flood of them — cannot block
+                // the ingress event loop (head-of-line). The persist round-trip,
+                // receipt, and DHT announce all happen off the loop.
+                tokio::spawn(Self::run_archive_request(
+                    self.egress.clone(),
+                    self.identity.clone(),
+                    self.aggregation_tx.clone(),
+                    request,
+                    channel_id,
+                ));
+                false
+            }
+
             NetworkEvent::Shutdown => {
                 info!("StrongholdSentinel: shutdown event received");
                 true
@@ -155,9 +193,89 @@ impl<I: IngressPort> StrongholdSentinel<I> {
 
             // All other event variants are ignored by the Stronghold.
             // PeerDiscovered, RecordingRequested, ProvidersDiscovered,
-            // ShardResponseReceived, PeerDisconnected, BLE auth events
-            // are handled by the phone's MeshSentinel, not the Stronghold.
+            // ShardResponseReceived, ArchiveReceiptReceived, PeerDisconnected,
+            // BLE auth events are handled by the phone's MeshSentinel.
             _ => false,
+        }
+    }
+
+    /// Handle a directed archive PUSH (runs on a spawned task, not the ingress
+    /// loop): verify the pusher, persist under the custody fairness gate (via
+    /// AggregationActor), and reply with a signed custody receipt. On success,
+    /// announce custody on the DHT. Takes owned handles so it is `'static`.
+    async fn run_archive_request(
+        egress: E,
+        identity: Arc<PhalanxIdentity>,
+        aggregation_tx: mpsc::Sender<AggregationCommand>,
+        request: ArchiveRequest,
+        channel_id: String,
+    ) {
+        // 1. Authenticate the pusher's request-level signature.
+        if !verify_archive_request(&request) {
+            warn!("StrongholdSentinel: archive push failed signature verification, rejecting");
+            let _ = egress
+                .send_archive_response(&channel_id, ArchiveReceipt::Rejected)
+                .await;
+            return;
+        }
+
+        let recording_id = request.recording_id.clone();
+        let owner_did = request.sender_did.clone();
+
+        // 2. Persist via the AggregationActor (membership + per-envelope verify
+        //    + fairness gate + persist + ledger + custody deadline).
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if aggregation_tx
+            .send(AggregationCommand::PersistEnvelopes {
+                recording_id: recording_id.clone(),
+                envelopes: request.envelopes,
+                owner_did,
+                reply_to: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            warn!("StrongholdSentinel: aggregation channel closed; cannot persist archive push");
+            return;
+        }
+        let outcome = match reply_rx.await {
+            Ok(o) => o,
+            Err(_) => {
+                warn!("StrongholdSentinel: aggregation did not reply to archive push");
+                return;
+            }
+        };
+
+        // 3. Build the receipt. `Stored` is signed by this Stronghold's identity
+        //    over the bounds the actor's clock fixed.
+        let (receipt, stored) = match outcome {
+            ArchiveAdmit::Stored {
+                envelope_count,
+                stored_at,
+                held_until,
+            } => (
+                build_archive_receipt(
+                    &identity,
+                    recording_id.clone(),
+                    stored_at,
+                    held_until,
+                    envelope_count,
+                ),
+                true,
+            ),
+            ArchiveAdmit::QuotaExceeded => (ArchiveReceipt::QuotaExceeded, false),
+            ArchiveAdmit::Rejected => (ArchiveReceipt::Rejected, false),
+        };
+
+        if let Err(e) = egress.send_archive_response(&channel_id, receipt).await {
+            warn!(error = %e, "StrongholdSentinel: failed to send archive receipt");
+        }
+
+        // 4. Announce custody on the DHT (the live/broad durability signal).
+        if stored {
+            if let Err(e) = egress.announce_recording(&recording_id).await {
+                warn!(error = %e, "StrongholdSentinel: failed to announce custody on DHT");
+            }
         }
     }
 

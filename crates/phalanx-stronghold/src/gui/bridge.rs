@@ -57,7 +57,7 @@ impl DaemonBridge {
         let identity = load_identity(&vault_path, passphrase)?;
 
         // 4. Set up mesh transport (sync — ephemeral DHT, no blocking IO)
-        let (ingress, _egress) = setup_stronghold_swarm(&identity, &config.network)
+        let (ingress, egress) = setup_stronghold_swarm(&identity, &config.network)
             .map_err(|e| format!("Failed to set up swarm: {e}"))?;
 
         // 5. Construct stores and sentinel dependencies
@@ -67,6 +67,7 @@ impl DaemonBridge {
             config: config.clone(),
             identity,
             ingress,
+            egress,
             evidence_store,
         };
 

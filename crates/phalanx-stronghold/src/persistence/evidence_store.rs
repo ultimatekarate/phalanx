@@ -300,6 +300,29 @@ impl EvidenceStore {
         Ok(())
     }
 
+    /// Custody reclamation: remove a SINGLE recording's shards within ONE
+    /// community. Unlike `revoke_recording` (cryptographic forgetting across
+    /// ALL communities), this is scoped to exactly the (community, recording)
+    /// the custody ledger tracked — so an identically-named recording in a
+    /// different community is never touched. Idempotent: a missing directory is
+    /// a no-op.
+    pub async fn reclaim_recording(
+        &self,
+        community_id: &CommunityId,
+        recording_id: &RecordingId,
+    ) -> Result<(), StrongholdError> {
+        let recording_path = self.recording_path(community_id, recording_id);
+        if recording_path.exists() {
+            tokio::fs::remove_dir_all(&recording_path).await?;
+            tracing::info!(
+                recording = %recording_id,
+                community = ?community_id,
+                "Stronghold: custody recording reclaimed"
+            );
+        }
+        Ok(())
+    }
+
     /// Load all stored proximity evidence for a community.
     pub async fn list_proximity(
         &self,

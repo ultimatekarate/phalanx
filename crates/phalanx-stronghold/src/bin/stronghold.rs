@@ -245,7 +245,7 @@ async fn cmd_run(
     eprintln!("  DID: {}", identity.did);
 
     // Set up the mesh transport with ephemeral DHT
-    let (ingress, _egress) = setup_stronghold_swarm(&identity, &config.network)?;
+    let (ingress, egress) = setup_stronghold_swarm(&identity, &config.network)?;
 
     // Construct stores
     let evidence_store = EvidenceStore::new(vault_path.to_path_buf());
@@ -255,6 +255,7 @@ async fn cmd_run(
         config: config.clone(),
         identity,
         ingress,
+        egress,
         evidence_store,
     };
 

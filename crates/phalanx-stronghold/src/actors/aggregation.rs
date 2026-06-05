@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use phalanx_forensics::bloom::RotatingBloomFilter;
 use phalanx_forensics::crucible::{Crucible, RecordingAmalgam};
@@ -17,12 +17,15 @@ use phalanx_forensics::reassembler::ShardMold;
 use phalanx_forensics::unit::ForensicUnit;
 use phalanx_proto::community::CommunityId;
 use phalanx_proto::corroboration::ProximityWitness;
-use phalanx_proto::evidence::{Evidence, Recording};
+use phalanx_proto::evidence::{Evidence, Recording, WitnessEnvelope};
 use phalanx_proto::identity::{Did, RecordingId};
 use phalanx_proto::prelude::ShardChunk;
+use phalanx_proto::time::PhalanxTimestamp;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::config::StrongholdConfig;
+use crate::custody::{CustodyCaps, CustodyLedger};
 use crate::error::StrongholdError;
 use crate::governor::StrongholdGovernor;
 use crate::persistence::evidence_store::EvidenceStore;
@@ -66,6 +69,44 @@ pub enum AggregationCommand {
     Revoke {
         recording_id: RecordingId,
     },
+    /// Directed archive PUSH: persist a set of already-assembled, owner-signed
+    /// envelopes (bypassing the ShardChunk reassembly crucibles), gated by the
+    /// per-owner custody fairness ledger. Replies with the admission outcome so
+    /// the sentinel can sign a custody receipt.
+    PersistEnvelopes {
+        recording_id: RecordingId,
+        envelopes: Vec<WitnessEnvelope>,
+        owner_did: Did,
+        reply_to: oneshot::Sender<ArchiveAdmit>,
+    },
+    /// Custody TTL sweep: reclaim recordings whose `held_until` has passed.
+    SweepExpired,
+}
+
+/// Outcome of an archive-push admission + persist, returned to the sentinel so
+/// it can build the appropriate (signed) `ArchiveReceipt`.
+#[derive(Debug, Clone)]
+pub enum ArchiveAdmit {
+    /// Admitted and persisted; the actor's clock fixed these custody bounds.
+    Stored {
+        envelope_count: u32,
+        stored_at: PhalanxTimestamp,
+        held_until: PhalanxTimestamp,
+    },
+    /// A per-owner / per-community / global storage cap would be exceeded.
+    QuotaExceeded,
+    /// Structurally/cryptographically refused (non-member, bad signature).
+    Rejected,
+}
+
+/// In-memory custody bookkeeping for the TTL sweep. Transient by design — lost
+/// on restart, at which point the publisher re-pushes (custody is not permanent
+/// storage). Carries everything needed to release ledger bytes on reclamation.
+struct CustodyEntry {
+    held_until: PhalanxTimestamp,
+    owner: Did,
+    communities: Vec<CommunityId>,
+    bytes: u64,
 }
 
 // ── Actor ────────────────────────────────────────────────────────────────
@@ -78,6 +119,12 @@ pub struct AggregationActor {
     governor: Arc<StrongholdGovernor>,
     replay_filter: RotatingBloomFilter,
     proximity_log: Vec<ProximityWitness>,
+    config: Arc<StrongholdConfig>,
+    /// Per-owner storage fairness — the balancing ratio. Owned by the actor
+    /// (single-threaded over its mailbox), so no lock is needed.
+    custody_ledger: CustodyLedger,
+    /// Per-recording custody deadlines for the TTL sweep.
+    custody_deadlines: HashMap<RecordingId, CustodyEntry>,
     rx: mpsc::Receiver<AggregationCommand>,
 }
 
@@ -85,8 +132,15 @@ impl AggregationActor {
     pub fn new(
         evidence_store: EvidenceStore,
         governor: Arc<StrongholdGovernor>,
+        config: Arc<StrongholdConfig>,
         rx: mpsc::Receiver<AggregationCommand>,
     ) -> Self {
+        let caps = CustodyCaps {
+            max_storage_bytes: config.storage.max_storage_bytes,
+            max_per_community_bytes: config.storage.max_per_community_bytes,
+            max_bytes_per_owner: config.storage.max_bytes_per_owner,
+            owner_fair_share_ratio: config.storage.owner_fair_share_ratio,
+        };
         Self {
             shard_crucible: Crucible::new(
                 ShardMold,
@@ -103,8 +157,24 @@ impl AggregationActor {
             governor,
             replay_filter: RotatingBloomFilter::new(RotatingBloomFilter::DEFAULT_CAPACITY),
             proximity_log: Vec::new(),
+            config,
+            custody_ledger: CustodyLedger::new(caps),
+            custody_deadlines: HashMap::new(),
             rx,
         }
+    }
+
+    /// Wall-clock milliseconds since the UNIX epoch. The actor's governor uses a
+    /// monotonic `Instant` epoch for the integral domain; custody deadlines need
+    /// wall-clock time, hence `SystemTime` here.
+    fn now_millis() -> u64 {
+        u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+        )
+        .unwrap_or(u64::MAX)
     }
 
     /// Run the actor loop. Returns when the channel is closed.
@@ -170,6 +240,101 @@ impl AggregationActor {
                     info!(recording = %recording_id, "Recording revoked from Stronghold");
                 }
             }
+            AggregationCommand::PersistEnvelopes {
+                recording_id,
+                envelopes,
+                owner_did,
+                reply_to,
+            } => {
+                let outcome = self
+                    .handle_persist_envelopes(recording_id, envelopes, owner_did)
+                    .await;
+                let _ = reply_to.send(outcome);
+            }
+            AggregationCommand::SweepExpired => {
+                self.handle_sweep_expired().await;
+            }
+        }
+    }
+
+    // ── Archive PUSH: persist pre-assembled envelopes ────────────────────
+
+    /// Persist a directed archive push. Membership + per-envelope signature are
+    /// verified here (verify-don't-trust), then the shared fairness gate +
+    /// persist path runs. Returns the admission outcome for the receipt.
+    async fn handle_persist_envelopes(
+        &mut self,
+        recording_id: RecordingId,
+        envelopes: Vec<WitnessEnvelope>,
+        owner_did: Did,
+    ) -> ArchiveAdmit {
+        // Membership: the owner must route to a community this Stronghold serves.
+        let communities = match self.community_routing.get(&owner_did) {
+            Some(c) if !c.is_empty() => c.clone(),
+            _ => {
+                debug!(did = %owner_did, "archive push from unknown DID, rejecting");
+                return ArchiveAdmit::Rejected;
+            }
+        };
+
+        // Verify-don't-trust: every envelope must carry a valid owner signature
+        // and name the claimed owner. Reject the whole push otherwise.
+        for env in &envelopes {
+            if ForensicUnit::new(env.clone()).promote_signed().is_err() {
+                warn!(recording = %recording_id, "archive push envelope failed signature verification, rejecting");
+                return ArchiveAdmit::Rejected;
+            }
+            if env.did != owner_did {
+                warn!(recording = %recording_id, "archive push envelope signer != sender_did, rejecting");
+                return ArchiveAdmit::Rejected;
+            }
+        }
+
+        self.persist_and_account(&recording_id, &owner_did, &envelopes, &communities, true)
+            .await
+    }
+
+    /// Custody TTL sweep: delete recordings whose custody window has closed and
+    /// release their bytes from the fairness ledger. Eviction ≠ revocation — the
+    /// recording still exists at the owner / other replicas and may be re-pushed.
+    async fn handle_sweep_expired(&mut self) {
+        let now = Self::now_millis();
+        let expired: Vec<RecordingId> = self
+            .custody_deadlines
+            .iter()
+            .filter(|(_, e)| e.held_until.as_u64() <= now)
+            .map(|(rid, _)| rid.clone())
+            .collect();
+        for rid in expired {
+            let Some(entry) = self.custody_deadlines.remove(&rid) else {
+                continue;
+            };
+            // Delete only the (community, recording) copies this entry tracked —
+            // scoped, so an identically-named recording in a DIFFERENT community
+            // is never collaterally deleted (unlike the global revoke_recording).
+            for community_id in &entry.communities {
+                if let Err(e) = self
+                    .evidence_store
+                    .reclaim_recording(community_id, &rid)
+                    .await
+                {
+                    warn!(
+                        recording = %rid,
+                        community = ?community_id,
+                        error = %e,
+                        "custody sweep: failed to delete expired recording copy"
+                    );
+                }
+            }
+            // Always release the ledger: the custody window has closed, so the
+            // bytes are reclaimed regardless of any disk-delete error (logged
+            // above). This avoids an infinite re-insert/retry that would leak the
+            // owner's quota if a delete failure were permanent.
+            for community_id in &entry.communities {
+                self.custody_ledger
+                    .release(community_id, &entry.owner, entry.bytes);
+            }
+            info!(recording = %rid, "custody sweep: expired recording reclaimed");
         }
     }
 
@@ -227,46 +392,166 @@ impl AggregationActor {
         Some(communities)
     }
 
-    /// Store an assembled recording and collect proximity evidence.
-    #[allow(clippy::cast_possible_truncation)] // estimated_bytes arithmetic
+    /// Store a gossipsub-assembled recording through the shared persist path.
+    /// `custody = false`: the per-owner fairness gate applies (anti-flood), but
+    /// the recording is retained indefinitely (not TTL-swept), preserving the
+    /// prior passive-collection semantics. Over-quota recordings are dropped
+    /// (the gossipsub path has no receipt to return).
     async fn store_recording(&mut self, recording: &Recording, communities: &[CommunityId]) {
-        // Store via evidence_store for each community the DID belongs to.
+        match self
+            .persist_and_account(
+                &recording.id,
+                &recording.owner_did,
+                &recording.artifacts,
+                communities,
+                false,
+            )
+            .await
+        {
+            ArchiveAdmit::Stored { .. } => {
+                info!(
+                    recording = %recording.id,
+                    artifacts = recording.artifacts.len(),
+                    communities = communities.len(),
+                    "AggregationActor: recording stored"
+                );
+            }
+            ArchiveAdmit::QuotaExceeded => {
+                info!(
+                    recording = %recording.id,
+                    owner = %recording.owner_did,
+                    "AggregationActor: recording dropped — custody fairness cap exceeded"
+                );
+            }
+            ArchiveAdmit::Rejected => {}
+        }
+    }
+
+    /// Shared custody persist path used by BOTH the gossipsub ingest and the
+    /// directed archive push: run the hard per-owner fairness gate, persist each
+    /// envelope to every community the owner belongs to, record the bytes in the
+    /// fairness ledger, set a custody deadline, and collect proximity evidence.
+    ///
+    /// Admission order (fail-closed): per-owner share → per-community → global,
+    /// checked against EVERY community before any write (all-or-nothing).
+    async fn persist_and_account(
+        &mut self,
+        recording_id: &RecordingId,
+        owner: &Did,
+        artifacts: &[WitnessEnvelope],
+        communities: &[CommunityId],
+        custody: bool,
+    ) -> ArchiveAdmit {
+        // Serialized byte size of this recording (per copy).
+        let bytes: u64 = artifacts
+            .iter()
+            .map(|e| {
+                postcard::to_allocvec(e)
+                    .map(|v| u64::try_from(v.len()).unwrap_or(u64::MAX))
+                    .unwrap_or(0)
+            })
+            .sum();
+
+        // Idempotency: if this recording was already persisted (a re-push or a
+        // re-assembly), release its prior ledger contribution first — the new
+        // copy overwrites the same shard files on disk, so without this the
+        // ledger would double-count and never fully release (a permanent leak).
+        // Restored below if the fresh admission is refused.
+        let prior = self.custody_deadlines.remove(recording_id);
+        if let Some(ref p) = prior {
+            for community_id in &p.communities {
+                self.custody_ledger.release(community_id, &p.owner, p.bytes);
+            }
+        }
+
+        // Fairness admission against every target community (all-or-nothing).
+        let mut admitted = true;
         for community_id in communities {
-            for artifact in &recording.artifacts {
+            if !self
+                .custody_ledger
+                .check_admit(community_id, owner, bytes)
+                .is_admitted()
+            {
+                admitted = false;
+                break;
+            }
+        }
+        if !admitted {
+            // Restore the prior contribution we tentatively released.
+            if let Some(p) = prior {
+                for community_id in &p.communities {
+                    self.custody_ledger.record(community_id, &p.owner, p.bytes);
+                }
+                self.custody_deadlines.insert(recording_id.clone(), p);
+            }
+            warn!(
+                recording = %recording_id,
+                owner = %owner,
+                "custody admission refused (per-owner/community/global cap)"
+            );
+            return ArchiveAdmit::QuotaExceeded;
+        }
+
+        // Persist + record. Each community holds an independent copy.
+        for community_id in communities {
+            for artifact in artifacts {
                 if let Err(e) = self
                     .evidence_store
-                    .append_envelope(community_id, &recording.id, artifact)
+                    .append_envelope(community_id, recording_id, artifact)
                     .await
                 {
                     warn!(
                         community = ?community_id,
-                        recording = %recording.id,
+                        recording = %recording_id,
                         error = %e,
                         "AggregationActor: failed to store envelope"
                     );
                 }
             }
+            self.custody_ledger.record(community_id, owner, bytes);
         }
 
-        // Record storage pressure after writes.
-        // Use a rough estimate based on artifact count * average size.
-        #[allow(clippy::arithmetic_side_effects)] // Artifact count × 4096 won't overflow u64.
-        let estimated_bytes = recording.artifacts.len() as u64 * 4096;
-        self.governor
-            .record_storage_pressure(estimated_bytes, 100 * 1024 * 1024 * 1024);
-
-        info!(
-            recording = %recording.id,
-            artifacts = recording.artifacts.len(),
-            communities = communities.len(),
-            "AggregationActor: recording stored"
+        // Deadline. Archive pushes are transient export-staging (now + TTL).
+        // Gossipsub passive collection is retained indefinitely (held_until =
+        // never), preserving the prior cumulative-archive semantics — only the
+        // per-owner fairness cap is newly applied to that path, not eviction.
+        let now = Self::now_millis();
+        let stored_at = PhalanxTimestamp::from_millis(now);
+        let held_until = if custody {
+            let ttl_ms = self.config.storage.custody_ttl_secs.saturating_mul(1000);
+            PhalanxTimestamp::from_millis(now.saturating_add(ttl_ms))
+        } else {
+            PhalanxTimestamp::from_millis(u64::MAX) // never swept
+        };
+        self.custody_deadlines.insert(
+            recording_id.clone(),
+            CustodyEntry {
+                held_until,
+                owner: owner.clone(),
+                communities: communities.to_vec(),
+                bytes,
+            },
         );
 
-        // If any artifact is Proximity evidence, push to proximity_log.
-        for artifact in &recording.artifacts {
+        // Storage pressure: the disk actually written THIS call (one copy per
+        // community) against the config cap — NOT the cumulative ledger total,
+        // which sums per-community fair-share bytes and would over-report.
+        let disk_written = bytes.saturating_mul(u64::try_from(communities.len()).unwrap_or(1));
+        self.governor
+            .record_storage_pressure(disk_written, self.config.storage.max_storage_bytes);
+
+        // Proximity evidence collection.
+        for artifact in artifacts {
             if let Evidence::Proximity(pw) = &artifact.evidence {
                 self.proximity_log.push(pw.clone());
             }
+        }
+
+        let envelope_count = u32::try_from(artifacts.len()).unwrap_or(u32::MAX);
+        ArchiveAdmit::Stored {
+            envelope_count,
+            stored_at,
+            held_until,
         }
     }
 
