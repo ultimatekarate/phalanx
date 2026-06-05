@@ -14,10 +14,35 @@ pub struct StrongholdConfig {
 pub struct StorageConfig {
     /// Root directory for all Stronghold data.
     pub vault_path: String,
-    /// Maximum total storage bytes for evidence.
+    /// Maximum total storage bytes for evidence (hard cap).
     pub max_storage_bytes: u64,
-    /// Per-community storage quota.
+    /// Per-community storage quota (hard cap).
     pub max_per_community_bytes: u64,
+    /// Per-owner (per-DID) custody quota within a community — the balancing
+    /// ratio's absolute ceiling. Prevents one member flooding the buffer.
+    #[serde(default = "default_max_bytes_per_owner")]
+    pub max_bytes_per_owner: u64,
+    /// Fraction of `max_per_community_bytes` any single owner may occupy under
+    /// contention. The effective per-owner share is
+    /// `min(max_bytes_per_owner, max_per_community_bytes * owner_fair_share_ratio)`.
+    #[serde(default = "default_owner_fair_share_ratio")]
+    pub owner_fair_share_ratio: f64,
+    /// Custody window: how long the Stronghold commits to hold a pushed
+    /// recording before it may be reclaimed (transient-by-design). Seconds.
+    #[serde(default = "default_custody_ttl_secs")]
+    pub custody_ttl_secs: u64,
+}
+
+fn default_max_bytes_per_owner() -> u64 {
+    2 * 1024 * 1024 * 1024 // 2 GB
+}
+
+fn default_owner_fair_share_ratio() -> f64 {
+    0.25
+}
+
+fn default_custody_ttl_secs() -> u64 {
+    7 * 24 * 60 * 60 // 7 days
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -49,6 +74,9 @@ impl Default for StrongholdConfig {
                 vault_path: "./stronghold-data".to_string(),
                 max_storage_bytes: 100 * 1024 * 1024 * 1024, // 100 GB
                 max_per_community_bytes: 20 * 1024 * 1024 * 1024, // 20 GB
+                max_bytes_per_owner: default_max_bytes_per_owner(),
+                owner_fair_share_ratio: default_owner_fair_share_ratio(),
+                custody_ttl_secs: default_custody_ttl_secs(),
             },
             network: NetworkConfig {
                 listen_addresses: vec!["/ip4/0.0.0.0/tcp/0".to_string()],

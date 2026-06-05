@@ -12,6 +12,7 @@ pub mod actors {
     pub mod community;
 }
 pub mod config;
+pub mod custody; // Per-owner storage fairness (the balancing ratio)
 pub mod error;
 pub mod governor;
 pub mod paths;
