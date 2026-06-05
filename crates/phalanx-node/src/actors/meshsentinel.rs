@@ -19,8 +19,10 @@ use crate::vitals::{HealthTracker, Homeostasis, LifecycleEvent, SystemGovernor};
 use crate::Guardian;
 use crate::{trust::TrustRegistry, StorageActor};
 
+use phalanx_forensics::archive::{build_archive_request, verify_archive_receipt};
 use phalanx_forensics::policy::{IngressGovernor, TrafficGovernor};
 use phalanx_forensics::prelude::*;
+use phalanx_proto::archive::ArchiveReceipt;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::network::{EgressPort, IngressPort, LocalMeshPort};
 use phalanx_proto::prelude::*;
@@ -28,9 +30,10 @@ use phalanx_proto::storage::TransientJournal;
 use phalanx_proto::telemetry::DiscoverySource;
 use phalanx_proto::topology::{SubnetBucket, TransportClass};
 use phalanx_transport::identity_ext::Libp2pExt;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use phalanx_proto::crypto::{DekMaster, SymmetricKey};
 use phalanx_proto::evidence::{AudioShard, PrnuPosterior, StorageSequence, VideoShard};
@@ -174,6 +177,13 @@ pub struct MeshSentinel<I: IngressPort> {
     // DHT: Receives notifications when StorageActor persists a shard.
     // Triggers `EgressCommand::AnnounceRecording` to announce the recording on the DHT.
     commit_notify_rx: mpsc::Receiver<RecordingId>,
+
+    // Archive custody: recordings already pushed to Stronghold custody peers this
+    // session (dedup, mirrors the DHT announce dedup — prevents per-shard storms).
+    archived_to_strongholds: HashSet<RecordingId>,
+    // Archive custody marker: per-recording Stronghold replicas and the deadline
+    // each committed to hold until. Point-in-time / last-known, refreshable.
+    custody: HashMap<RecordingId, HashMap<Did, PhalanxTimestamp>>,
 
     // DHT: Receives (recording_id, sequence_id) from PlaybackCoordinator when it
     // discovers missing shards. Triggers `EgressCommand::FindProviders`.
@@ -666,6 +676,8 @@ impl<I: IngressPort> MeshSentinel<I> {
             egress_tx,
             discovery_tx,
             commit_notify_rx,
+            archived_to_strongholds: HashSet::new(),
+            custody: HashMap::new(),
             discovery_rx,
             local_mesh: deps.local_mesh,
             lifecycle_rx,
@@ -840,8 +852,10 @@ impl<I: IngressPort> MeshSentinel<I> {
         self.session.content_key_tx_clone()
     }
 
-    /// DHT: StorageActor persisted a shard — announce as provider.
+    /// DHT: StorageActor persisted a shard — announce as provider, and stage the
+    /// recording at any configured Stronghold custody peers (export-staging).
     async fn handle_commit_notification(&mut self, recording_id: RecordingId) -> bool {
+        self.push_recording_to_archives(recording_id.clone()).await;
         if let Err(e) = self
             .egress_tx
             .send(EgressCommand::AnnounceRecording(recording_id))
@@ -850,6 +864,76 @@ impl<I: IngressPort> MeshSentinel<I> {
             tracing::warn!("Failed to announce recording on DHT — egress channel closed: {e}");
         }
         false
+    }
+
+    /// Directed archive PUSH: stage a recording at the configured Stronghold
+    /// custody peers so it survives device seizure long enough to be exported.
+    /// Deduped per recording per session; idempotent on the Stronghold side.
+    async fn push_recording_to_archives(&mut self, recording_id: RecordingId) {
+        if self.config.network.archival_peers.is_empty() {
+            return;
+        }
+        if !self.archived_to_strongholds.insert(recording_id.clone()) {
+            return; // already staged this session
+        }
+        // Fetch this recording's own envelopes (same query the retrieval
+        // responder uses; owner == self so the ownership guard passes).
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .storage_tx
+            .send(StorageCommand::Retrieval {
+                recording_id: recording_id.clone(),
+                owner_did: Some(self.identity.did.clone()),
+                reply_to: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let Ok(envelopes) = reply_rx.await else {
+            return;
+        };
+        if envelopes.is_empty() {
+            return;
+        }
+        let request = build_archive_request(&self.identity, recording_id, envelopes);
+        for peer in &self.config.network.archival_peers {
+            let target = MeshAddress::new(peer.clone());
+            let _ = self
+                .egress_tx
+                .send(EgressCommand::PushArchive {
+                    target,
+                    request: request.clone(),
+                })
+                .await;
+        }
+    }
+
+    /// A custody receipt arrived from a Stronghold. Verify its self-signature and
+    /// record the replica + its `held_until` deadline against the recording.
+    fn handle_archive_receipt(&mut self, receipt: ArchiveReceipt) {
+        if !verify_archive_receipt(&receipt) {
+            tracing::warn!("Archive: ignoring unverifiable custody receipt");
+            return;
+        }
+        let ArchiveReceipt::Stored {
+            recording_id,
+            replica_did,
+            held_until,
+            ..
+        } = receipt
+        else {
+            return; // unreachable: only Stored verifies
+        };
+        let entry = self.custody.entry(recording_id.clone()).or_default();
+        entry.insert(replica_did, held_until);
+        tracing::info!(
+            recording = %recording_id,
+            replicas = entry.len(),
+            target = self.config.network.target_replica_count,
+            "Archive: custody confirmed at a Stronghold"
+        );
     }
 
     /// DHT: PlaybackCoordinator needs a missing shard — find providers.
@@ -931,6 +1015,19 @@ impl<I: IngressPort> MeshSentinel<I> {
                 providers,
             } => {
                 self.handle_providers_discovered(recording_id, providers);
+                false
+            }
+            NetworkEvent::ArchiveRequested { channel_id, .. } => {
+                // A publishing node is not a custody target — only Strongholds
+                // accept pushes. Drop; the pusher's request will time out.
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    "Archive: push received by a non-custody node; ignoring"
+                );
+                false
+            }
+            NetworkEvent::ArchiveReceiptReceived { from: _, receipt } => {
+                self.handle_archive_receipt(receipt);
                 false
             }
             NetworkEvent::ShardResponseReceived { origin, envelopes } => {

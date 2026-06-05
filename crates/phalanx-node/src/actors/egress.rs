@@ -1,6 +1,7 @@
 use crate::actors::shutdown::ShutdownSignal;
 use crate::clock::TrustedClock;
 use crate::vitals::{Homeostasis, SystemGovernor};
+use phalanx_proto::archive::ArchiveRequest;
 use phalanx_proto::identity::{MeshAddress, RecordingId};
 use phalanx_proto::kademlia::DhtPayload;
 use phalanx_proto::network::EgressPort;
@@ -27,6 +28,11 @@ pub enum EgressCommand {
     RequestShards {
         target: MeshAddress,
         request: RecordingRequest,
+    },
+    /// Directed archive PUSH of a recording to a Stronghold custody peer.
+    PushArchive {
+        target: MeshAddress,
+        request: ArchiveRequest,
     },
     /// Eclipse remediation: actively disconnect a peer rejected or evicted by TopologyGate.
     DisconnectPeer(MeshAddress),
@@ -150,6 +156,15 @@ impl<E: EgressPort> EgressActor<E> {
             }
             EgressCommand::RequestShards { target, request } => {
                 self.handle_request_shards(target, request).await;
+            }
+            EgressCommand::PushArchive { target, request } => {
+                if let Err(e) = self.port.send_archive_request(&target, request).await {
+                    tracing::warn!(
+                        peer = %target,
+                        error = %e,
+                        "Archive: failed to push recording to custody peer"
+                    );
+                }
             }
             EgressCommand::DisconnectPeer(peer) => {
                 self.port.disconnect_peer(&peer).await;

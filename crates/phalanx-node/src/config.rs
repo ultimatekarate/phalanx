@@ -67,6 +67,19 @@ pub struct NetworkConfig {
     /// Topic for revocation token propagation (Cryptographic Forgetting).
     #[serde(default = "default_revocation_topic")]
     pub revocation_topic: MeshTopic,
+    /// Archival custody peers (Strongholds) to push recordings to directly, for
+    /// export-staging durability. `MeshAddress`/peer-id strings. Empty = the
+    /// directed-push feature is inert (mesh broadcast still applies).
+    #[serde(default)]
+    pub archival_peers: Vec<String>,
+    /// Target number of distinct Stronghold custody replicas (K) before a
+    /// recording is considered safely in custody. Policy threshold.
+    #[serde(default = "default_target_replica_count")]
+    pub target_replica_count: usize,
+}
+
+fn default_target_replica_count() -> usize {
+    2
 }
 
 #[derive(Debug)]
@@ -182,6 +195,8 @@ impl Default for NetworkConfig {
             symbol_bundle_size: SymbolBundleSize::default(),
             listen_addresses: default_listen_addresses(),
             revocation_topic: default_revocation_topic(),
+            archival_peers: vec![],
+            target_replica_count: default_target_replica_count(),
         }
     }
 }
