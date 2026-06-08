@@ -10,6 +10,7 @@
 // expiry); Phalanx is export-staging, not long-term storage.
 
 use crate::evidence::WitnessEnvelope;
+use crate::identity::crypto::SealedLocator;
 use crate::identity::{Did, RecordingId};
 use crate::time::PhalanxTimestamp;
 use crate::wire::WireBound;
@@ -26,6 +27,13 @@ pub struct ArchiveRequest {
     pub recording_id: RecordingId,
     pub envelopes: Vec<WitnessEnvelope>,
     pub sender_did: Did,
+    /// Optional **export grant**: a `SealedLocator` sealed to the archival
+    /// peer's DID, authorizing it to decrypt this recording and export it to
+    /// durable storage (escrow-for-export). `None` = custody-only — the peer
+    /// holds ciphertext it cannot export, and the recording ages out at
+    /// `held_until`. Bound into [`ArchiveRequest::signing_bytes`], so a MITM
+    /// can neither strip nor substitute it without breaking `signature`.
+    pub grant: Option<SealedLocator>,
     /// Ed25519 signature by `sender_did` over [`ArchiveRequest::signing_bytes`].
     pub signature: Vec<u8>,
 }
@@ -35,9 +43,18 @@ impl ArchiveRequest {
     pub const MAX_ENVELOPES: usize = 256;
     /// Maximum byte length for the Ed25519 signature field.
     const MAX_SIGNATURE_LEN: usize = 64;
+    /// Wire cap for a grant's sealed key (a sealed 32-byte DEK + AEAD tag is
+    /// ~48 bytes; 256 is generous headroom without enabling amplification).
+    const MAX_GRANT_KEY_LEN: usize = 256;
+    /// Wire cap for a grant's nonce (XChaCha20 uses 24 bytes).
+    const MAX_GRANT_NONCE_LEN: usize = 64;
 
     /// Canonical bytes the sender signs: `recording_id || sender_did ||
-    /// evidence_hash*`. Pure byte concatenation (Dictionary-layer; no crypto).
+    /// evidence_hash* || grant`. Pure byte concatenation (Dictionary-layer; no
+    /// crypto). The trailing grant region is a presence tag (`0` = none, `1` =
+    /// some) followed, when present, by the locator's fields — so stripping the
+    /// grant (some→none) or substituting a different locator changes the bytes
+    /// and invalidates the signature.
     #[must_use]
     pub fn signing_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -45,6 +62,19 @@ impl ArchiveRequest {
         buf.extend_from_slice(self.sender_did.0.as_bytes());
         for env in &self.envelopes {
             buf.extend_from_slice(&env.evidence_hash);
+        }
+        match &self.grant {
+            None => buf.push(0u8),
+            Some(g) => {
+                buf.push(1u8);
+                buf.extend_from_slice(g.target.0.as_bytes());
+                buf.extend_from_slice(g.recipient.0.as_bytes());
+                buf.extend_from_slice(g.sender.0.as_bytes());
+                buf.extend_from_slice(&g.sealed_key);
+                buf.extend_from_slice(&g.nonce);
+                buf.push(u8::from(g.permissions.playback));
+                buf.push(u8::from(g.permissions.export));
+            }
         }
         buf
     }
@@ -65,6 +95,26 @@ impl WireBound for ArchiveRequest {
         }
         if self.signature.len() > Self::MAX_SIGNATURE_LEN {
             self.signature.truncate(Self::MAX_SIGNATURE_LEN);
+        }
+        // Bound the optional grant so an oversized "grant" can't amplify memory.
+        // Truncating a real sealed locator only makes it fail to unlock later
+        // (the honest failure mode for a malformed/oversized grant).
+        if let Some(g) = &mut self.grant {
+            if g.target.0.len() > RecordingId::MAX_WIRE_LEN {
+                g.target.0.truncate(RecordingId::MAX_WIRE_LEN);
+            }
+            if g.recipient.0.len() > Did::MAX_WIRE_LEN {
+                g.recipient.0.truncate(Did::MAX_WIRE_LEN);
+            }
+            if g.sender.0.len() > Did::MAX_WIRE_LEN {
+                g.sender.0.truncate(Did::MAX_WIRE_LEN);
+            }
+            if g.sealed_key.len() > Self::MAX_GRANT_KEY_LEN {
+                g.sealed_key.truncate(Self::MAX_GRANT_KEY_LEN);
+            }
+            if g.nonce.len() > Self::MAX_GRANT_NONCE_LEN {
+                g.nonce.truncate(Self::MAX_GRANT_NONCE_LEN);
+            }
         }
     }
 }
@@ -142,6 +192,61 @@ impl WireBound for ArchiveReceipt {
     }
 }
 
+/// A signed attestation that a Stronghold exported `recording_id` to durable
+/// storage. Self-verifiable against `exported_by` (like `RevocationToken`): its
+/// existence is the durability proof. A *failed* export produces no receipt —
+/// absence is the alarm, never a forged "Failed" variant — so this is a plain
+/// struct, not an enum.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportReceipt {
+    pub recording_id: RecordingId,
+    /// blake3 of the exported artifact bytes (the C2PA MP4) — binds the receipt
+    /// to exactly what landed in the sink.
+    pub artifact_hash: [u8; 32],
+    pub exported_at: PhalanxTimestamp,
+    /// DID of the Stronghold that performed and signed the export.
+    pub exported_by: Did,
+    /// Ed25519 signature by `exported_by` over [`ExportReceipt::signing_bytes`].
+    pub signature: Vec<u8>,
+}
+
+impl ExportReceipt {
+    /// Maximum byte length for the Ed25519 signature field.
+    const MAX_SIGNATURE_LEN: usize = 64;
+
+    /// Canonical bytes the exporter signs:
+    /// `recording_id || artifact_hash || exported_at || exported_by`.
+    /// Pure byte concatenation (Dictionary-layer; no crypto).
+    #[must_use]
+    pub fn signing_bytes(
+        recording_id: &RecordingId,
+        artifact_hash: &[u8; 32],
+        exported_at: PhalanxTimestamp,
+        exported_by: &Did,
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(recording_id.0.as_bytes());
+        buf.extend_from_slice(artifact_hash);
+        buf.extend_from_slice(&exported_at.as_u64().to_le_bytes());
+        buf.extend_from_slice(exported_by.0.as_bytes());
+        buf
+    }
+}
+
+impl WireBound for ExportReceipt {
+    fn enforce_wire_bounds(&mut self) {
+        if self.recording_id.0.len() > RecordingId::MAX_WIRE_LEN {
+            self.recording_id.0.truncate(RecordingId::MAX_WIRE_LEN);
+        }
+        if self.exported_by.0.len() > Did::MAX_WIRE_LEN {
+            self.exported_by.0.truncate(Did::MAX_WIRE_LEN);
+        }
+        if self.signature.len() > Self::MAX_SIGNATURE_LEN {
+            self.signature.truncate(Self::MAX_SIGNATURE_LEN);
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -182,6 +287,7 @@ mod tests {
                 .map(envelope)
                 .collect(),
             sender_did: Did::new("did:test:owner"),
+            grant: None,
             signature: vec![0u8; 200],
         };
         req.enforce_wire_bounds();
@@ -195,6 +301,7 @@ mod tests {
             recording_id: RecordingId::new("rec"),
             envelopes: vec![envelope(1), envelope(2)],
             sender_did: Did::new("did:test:owner"),
+            grant: None,
             signature: vec![],
         };
         let a = req.signing_bytes();
@@ -205,6 +312,93 @@ mod tests {
         let mut req2 = req.clone();
         req2.envelopes = vec![envelope(1), envelope(9)];
         assert_ne!(req.signing_bytes(), req2.signing_bytes());
+    }
+
+    fn dummy_grant(export: bool) -> SealedLocator {
+        SealedLocator {
+            target: RecordingId::new("rec"),
+            recipient: Did::new("did:test:stronghold"),
+            sender: Did::new("did:test:owner"),
+            sealed_key: vec![1u8; 48],
+            nonce: vec![2u8; 24],
+            permissions: crate::identity::crypto::GrantPermissions {
+                playback: false,
+                export,
+            },
+        }
+    }
+
+    #[test]
+    fn signing_bytes_bind_the_grant() {
+        let base = ArchiveRequest {
+            recording_id: RecordingId::new("rec"),
+            envelopes: vec![envelope(1)],
+            sender_did: Did::new("did:test:owner"),
+            grant: None,
+            signature: vec![],
+        };
+        // Presence flips the bytes (a stripped grant cannot pass the old sig).
+        let mut with_grant = base.clone();
+        with_grant.grant = Some(dummy_grant(true));
+        assert_ne!(base.signing_bytes(), with_grant.signing_bytes());
+
+        // Substituting a *different* grant changes the bytes too.
+        let mut other_grant = base.clone();
+        other_grant.grant = Some(dummy_grant(false)); // permissions differ
+        assert_ne!(with_grant.signing_bytes(), other_grant.signing_bytes());
+    }
+
+    #[test]
+    fn request_wire_bound_caps_oversized_grant_fields() {
+        let mut req = ArchiveRequest {
+            recording_id: RecordingId::new("rec"),
+            envelopes: vec![],
+            sender_did: Did::new("did:test:owner"),
+            grant: Some(SealedLocator {
+                target: RecordingId::new("rec"),
+                recipient: Did::new("did:test:stronghold"),
+                sender: Did::new("did:test:owner"),
+                sealed_key: vec![0u8; 4096],
+                nonce: vec![0u8; 4096],
+                permissions: crate::identity::crypto::GrantPermissions::default(),
+            }),
+            signature: vec![],
+        };
+        req.enforce_wire_bounds();
+        let g = req.grant.expect("grant present");
+        assert!(g.sealed_key.len() <= ArchiveRequest::MAX_GRANT_KEY_LEN);
+        assert!(g.nonce.len() <= ArchiveRequest::MAX_GRANT_NONCE_LEN);
+    }
+
+    #[test]
+    fn export_receipt_signing_bytes_bind_all_fields() {
+        let base = ExportReceipt::signing_bytes(
+            &RecordingId::new("rec"),
+            &[3u8; 32],
+            PhalanxTimestamp::from_millis(100),
+            &Did::new("did:test:stronghold"),
+        );
+        // A different artifact hash must change the signed bytes.
+        let other = ExportReceipt::signing_bytes(
+            &RecordingId::new("rec"),
+            &[4u8; 32],
+            PhalanxTimestamp::from_millis(100),
+            &Did::new("did:test:stronghold"),
+        );
+        assert_ne!(base, other);
+    }
+
+    #[test]
+    fn export_receipt_wire_bound_caps_signature() {
+        let mut r = ExportReceipt {
+            recording_id: RecordingId::new("rec"),
+            artifact_hash: [0u8; 32],
+            exported_at: PhalanxTimestamp::from_millis(1),
+            exported_by: Did::new("did:test:stronghold"),
+            signature: vec![9u8; 200],
+        };
+        r.enforce_wire_bounds();
+        assert_eq!(r.signature.len(), 64);
     }
 
     #[test]

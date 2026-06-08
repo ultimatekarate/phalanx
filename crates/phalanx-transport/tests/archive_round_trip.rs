@@ -47,6 +47,7 @@ fn make_push() -> ArchiveRequest {
         recording_id: RecordingId::new("archive-recording"),
         envelopes: vec![],
         sender_did: Did::new("did:test:pusher"),
+        grant: None,
         signature: vec![],
     }
 }
