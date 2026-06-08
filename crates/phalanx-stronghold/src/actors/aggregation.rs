@@ -6,9 +6,11 @@
 //
 // Hands layer. Owns Crucible<ShardMold> and Crucible<RecordingAmalgam>.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
 
 use phalanx_forensics::bloom::RotatingBloomFilter;
 use phalanx_forensics::crucible::{Crucible, RecordingAmalgam};
@@ -99,10 +101,13 @@ pub enum ArchiveAdmit {
     Rejected,
 }
 
-/// In-memory custody bookkeeping for the TTL sweep. Transient by design — lost
-/// on restart, at which point the publisher re-pushes (custody is not permanent
-/// storage). Carries everything needed to release ledger bytes on reclamation.
+/// Custody bookkeeping for the TTL sweep. Persisted to a per-recording sidecar
+/// (carries its own `recording_id`) so the sweep + fairness ledger survive a
+/// Stronghold restart — without it, a restart orphans held recordings and they
+/// are never reclaimed. Carries everything needed to release ledger bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CustodyEntry {
+    recording_id: RecordingId,
     held_until: PhalanxTimestamp,
     owner: Did,
     communities: Vec<CommunityId>,
@@ -125,6 +130,9 @@ pub struct AggregationActor {
     custody_ledger: CustodyLedger,
     /// Per-recording custody deadlines for the TTL sweep.
     custody_deadlines: HashMap<RecordingId, CustodyEntry>,
+    /// Cryptographically-forgotten recordings. Refuses re-admission (push or
+    /// gossipsub) and is persisted so the forgetting survives a restart.
+    revoked: HashSet<RecordingId>,
     rx: mpsc::Receiver<AggregationCommand>,
 }
 
@@ -160,6 +168,7 @@ impl AggregationActor {
             config,
             custody_ledger: CustodyLedger::new(caps),
             custody_deadlines: HashMap::new(),
+            revoked: HashSet::new(),
             rx,
         }
     }
@@ -180,6 +189,11 @@ impl AggregationActor {
     /// Run the actor loop. Returns when the channel is closed.
     pub async fn run(mut self) {
         info!("AggregationActor: entering run loop");
+
+        // Rebuild custody deadlines + fairness ledger + revoked set from disk
+        // before serving, so a restart neither orphans held recordings nor
+        // resurrects forgotten ones.
+        self.reconcile_custody().await;
 
         let mut maintenance = tokio::time::interval(MAINTENANCE_INTERVAL);
 
@@ -231,13 +245,29 @@ impl AggregationActor {
                 );
             }
             AggregationCommand::Revoke { recording_id } => {
-                // Remove from in-memory recording crucible
+                // Record + PERSIST the forgetting BEFORE deleting shards. Order
+                // matters for crash-consistency: if a crash struck after the
+                // shards were deleted but before the revocation was persisted, a
+                // restart would find an orphan custody sidecar and could
+                // resurrect (and re-admit) the forgotten recording. Persisting
+                // first closes that window.
+                if self.revoked.insert(recording_id.clone()) {
+                    self.persist_revoked().await;
+                }
+                // Remove from in-memory recording crucible + delete shards.
                 self.recording_crucible.contexts.remove(&recording_id);
-                // Remove from evidence store (disk)
                 if let Err(e) = self.evidence_store.revoke_recording(&recording_id).await {
                     warn!(recording = %recording_id, error = %e, "Failed to revoke from evidence store");
                 } else {
                     info!(recording = %recording_id, "Recording revoked from Stronghold");
+                }
+                // Release any in-flight custody bytes so a revoked recording
+                // never leaks the owner's fairness quota; drop its sidecar too.
+                if let Some(entry) = self.clear_custody(&recording_id).await {
+                    for community_id in &entry.communities {
+                        self.custody_ledger
+                            .release(community_id, &entry.owner, entry.bytes);
+                    }
                 }
             }
             AggregationCommand::PersistEnvelopes {
@@ -268,6 +298,12 @@ impl AggregationActor {
         envelopes: Vec<WitnessEnvelope>,
         owner_did: Did,
     ) -> ArchiveAdmit {
+        // An empty push cannot be attributed to any custody/quota — refuse it.
+        if envelopes.is_empty() {
+            debug!(recording = %recording_id, "archive push with no envelopes, rejecting");
+            return ArchiveAdmit::Rejected;
+        }
+
         // Membership: the owner must route to a community this Stronghold serves.
         let communities = match self.community_routing.get(&owner_did) {
             Some(c) if !c.is_empty() => c.clone(),
@@ -294,6 +330,168 @@ impl AggregationActor {
             .await
     }
 
+    // ── Custody persistence helpers (memory + disk kept in sync) ─────────
+
+    /// Insert/replace a custody deadline in memory AND persist its sidecar, so
+    /// the TTL sweep + fairness ledger can be rebuilt after a restart.
+    async fn set_custody(&mut self, entry: CustodyEntry) {
+        let recording_id = entry.recording_id.clone();
+        match postcard::to_allocvec(&entry) {
+            Ok(bytes) => {
+                if let Err(e) = self
+                    .evidence_store
+                    .write_custody_sidecar(&recording_id, &bytes)
+                    .await
+                {
+                    warn!(recording = %recording_id, error = %e, "failed to persist custody sidecar");
+                }
+            }
+            Err(e) => {
+                warn!(recording = %recording_id, error = %e, "failed to serialize custody sidecar");
+            }
+        }
+        self.custody_deadlines.insert(recording_id, entry);
+    }
+
+    /// Remove a custody deadline from memory AND disk, returning the prior entry.
+    /// Does NOT touch the ledger — the caller decides whether to release bytes
+    /// (sweep/revoke release; the idempotency path may re-record).
+    async fn clear_custody(&mut self, recording_id: &RecordingId) -> Option<CustodyEntry> {
+        let entry = self.custody_deadlines.remove(recording_id);
+        if entry.is_some() {
+            if let Err(e) = self
+                .evidence_store
+                .delete_custody_sidecar(recording_id)
+                .await
+            {
+                warn!(recording = %recording_id, error = %e, "failed to delete custody sidecar");
+            }
+        }
+        entry
+    }
+
+    /// Delete a recording's custody sidecar, logging (never swallowing) any
+    /// failure. `reason` gives the log context (e.g. "revoked", "orphan").
+    async fn delete_sidecar_logged(&self, recording_id: &RecordingId, reason: &str) {
+        if let Err(e) = self
+            .evidence_store
+            .delete_custody_sidecar(recording_id)
+            .await
+        {
+            warn!(
+                recording = %recording_id,
+                reason,
+                error = %e,
+                "reconcile: failed to delete custody sidecar"
+            );
+        }
+    }
+
+    /// Persist the full revoked set (small, whole-set rewrite).
+    async fn persist_revoked(&self) {
+        match postcard::to_allocvec(&self.revoked) {
+            Ok(bytes) => {
+                if let Err(e) = self.evidence_store.write_revoked(&bytes).await {
+                    warn!(error = %e, "failed to persist revoked set");
+                }
+            }
+            Err(e) => warn!(error = %e, "failed to serialize revoked set"),
+        }
+    }
+
+    /// Startup reconciliation: rebuild the revoked set, then custody deadlines +
+    /// fairness ledger, from disk; finally sweep anything already past its
+    /// deadline so a long downtime does not retain expired recordings.
+    async fn reconcile_custody(&mut self) {
+        // Revoked set first, so a reconciled custody entry for an
+        // already-forgotten recording is never resurrected below.
+        match self.evidence_store.load_revoked().await {
+            Ok(bytes) if !bytes.is_empty() => {
+                match postcard::from_bytes::<HashSet<RecordingId>>(&bytes) {
+                    Ok(ids) => self.revoked = ids,
+                    Err(e) => warn!(error = %e, "failed to deserialize revoked set"),
+                }
+            }
+            Ok(_) => {}
+            Err(e) => warn!(error = %e, "failed to load revoked set"),
+        }
+
+        match self.evidence_store.load_custody_sidecars().await {
+            Ok(sidecars) => {
+                let mut restored = 0usize;
+                for bytes in sidecars {
+                    if self.reconcile_one_sidecar(&bytes).await {
+                        restored = restored.saturating_add(1);
+                    }
+                }
+                if restored > 0 {
+                    info!(restored, "custody reconcile: restored deadlines from disk");
+                }
+            }
+            Err(e) => warn!(error = %e, "failed to load custody sidecars"),
+        }
+
+        // Reclaim anything whose window already closed during downtime.
+        self.handle_sweep_expired().await;
+    }
+
+    /// Reconcile one custody sidecar: drop it if the recording was revoked or its
+    /// shards are gone (orphan), otherwise restore the deadline + fairness ledger
+    /// for the communities whose shards still exist. Returns true if a deadline
+    /// was restored.
+    async fn reconcile_one_sidecar(&mut self, bytes: &[u8]) -> bool {
+        let entry: CustodyEntry = match postcard::from_bytes(bytes) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(error = %e, "skipping unreadable custody sidecar");
+                return false;
+            }
+        };
+        // Drop a stale sidecar for a recording that was revoked.
+        if self.revoked.contains(&entry.recording_id) {
+            self.delete_sidecar_logged(&entry.recording_id, "revoked")
+                .await;
+            return false;
+        }
+        // Self-heal: keep only communities whose shards still exist on disk. A
+        // crash between the sidecar write and the shard write (or a partial
+        // reclaim) can leave a sidecar whose shards are gone — recording its
+        // bytes would inflate the fairness ledger forever. If none remain, the
+        // sidecar is an orphan and is dropped.
+        let mut live = Vec::with_capacity(entry.communities.len());
+        for community_id in &entry.communities {
+            if self
+                .evidence_store
+                .recording_exists(community_id, &entry.recording_id)
+                .await
+            {
+                live.push(*community_id);
+            }
+        }
+        if live.is_empty() {
+            self.delete_sidecar_logged(&entry.recording_id, "orphan")
+                .await;
+            return false;
+        }
+        let pruned = live.len() != entry.communities.len();
+        for community_id in &live {
+            self.custody_ledger
+                .record(community_id, &entry.owner, entry.bytes);
+        }
+        let healed = CustodyEntry {
+            communities: live,
+            ..entry
+        };
+        if pruned {
+            // Rewrite the sidecar so its community list matches disk.
+            self.set_custody(healed).await;
+        } else {
+            self.custody_deadlines
+                .insert(healed.recording_id.clone(), healed);
+        }
+        true
+    }
+
     /// Custody TTL sweep: delete recordings whose custody window has closed and
     /// release their bytes from the fairness ledger. Eviction ≠ revocation — the
     /// recording still exists at the owner / other replicas and may be re-pushed.
@@ -306,7 +504,7 @@ impl AggregationActor {
             .map(|(rid, _)| rid.clone())
             .collect();
         for rid in expired {
-            let Some(entry) = self.custody_deadlines.remove(&rid) else {
+            let Some(entry) = self.clear_custody(&rid).await else {
                 continue;
             };
             // Delete only the (community, recording) copies this entry tracked —
@@ -434,6 +632,27 @@ impl AggregationActor {
     ///
     /// Admission order (fail-closed): per-owner share → per-community → global,
     /// checked against EVERY community before any write (all-or-nothing).
+    /// Serialized byte size of a recording's envelopes (one copy).
+    fn recording_bytes(artifacts: &[WitnessEnvelope]) -> u64 {
+        artifacts
+            .iter()
+            .map(|e| {
+                postcard::to_allocvec(e)
+                    .map(|v| u64::try_from(v.len()).unwrap_or(u64::MAX))
+                    .unwrap_or(0)
+            })
+            .sum()
+    }
+
+    /// Collect any proximity witnesses carried by a recording's envelopes.
+    fn collect_proximity(&mut self, artifacts: &[WitnessEnvelope]) {
+        for artifact in artifacts {
+            if let Evidence::Proximity(pw) = &artifact.evidence {
+                self.proximity_log.push(pw.clone());
+            }
+        }
+    }
+
     async fn persist_and_account(
         &mut self,
         recording_id: &RecordingId,
@@ -442,21 +661,24 @@ impl AggregationActor {
         communities: &[CommunityId],
         custody: bool,
     ) -> ArchiveAdmit {
-        // Serialized byte size of this recording (per copy).
-        let bytes: u64 = artifacts
-            .iter()
-            .map(|e| {
-                postcard::to_allocvec(e)
-                    .map(|v| u64::try_from(v.len()).unwrap_or(u64::MAX))
-                    .unwrap_or(0)
-            })
-            .sum();
+        // Revocation strictly precedes persistence: never re-admit a
+        // cryptographically-forgotten recording. This single chokepoint covers
+        // both the directed push and gossipsub ingest (both funnel through here).
+        if self.revoked.contains(recording_id) {
+            warn!(recording = %recording_id, "persist refused: recording is revoked");
+            return ArchiveAdmit::Rejected;
+        }
 
-        // Idempotency: if this recording was already persisted (a re-push or a
-        // re-assembly), release its prior ledger contribution first — the new
-        // copy overwrites the same shard files on disk, so without this the
-        // ledger would double-count and never fully release (a permanent leak).
-        // Restored below if the fresh admission is refused.
+        // Serialized byte size of this recording (per copy).
+        let bytes: u64 = Self::recording_bytes(artifacts);
+
+        // Idempotency: a re-push / re-assembly overwrites the same shard files,
+        // so release the prior ledger contribution before re-admitting (else the
+        // ledger double-counts and never fully releases). This is IN-MEMORY only:
+        // on success the on-disk sidecar is rewritten (same key) by set_custody;
+        // on refusal the prior sidecar is left untouched and still matches the
+        // restored entry — so memory and disk never desync, and a rejected
+        // re-push does no disk IO at all.
         let prior = self.custody_deadlines.remove(recording_id);
         if let Some(ref p) = prior {
             for community_id in &p.communities {
@@ -477,7 +699,9 @@ impl AggregationActor {
             }
         }
         if !admitted {
-            // Restore the prior contribution we tentatively released.
+            // Restore the prior contribution we tentatively released — purely in
+            // memory; the prior sidecar on disk was never touched, so memory and
+            // disk are consistent again without any new write.
             if let Some(p) = prior {
                 for community_id in &p.communities {
                     self.custody_ledger.record(community_id, &p.owner, p.bytes);
@@ -492,7 +716,38 @@ impl AggregationActor {
             return ArchiveAdmit::QuotaExceeded;
         }
 
-        // Persist + record. Each community holds an independent copy.
+        // Deadline. Archive pushes are transient export-staging (now + TTL).
+        // Gossipsub passive collection is retained indefinitely (held_until =
+        // never), preserving the prior cumulative-archive semantics — only the
+        // per-owner fairness cap is newly applied to that path, not eviction.
+        let now = Self::now_millis();
+        let stored_at = PhalanxTimestamp::from_millis(now);
+        let held_until = if custody {
+            let ttl_ms = self.config.storage.custody_ttl_secs.saturating_mul(1000);
+            PhalanxTimestamp::from_millis(now.saturating_add(ttl_ms))
+        } else {
+            // Never swept. NOTE: such gossipsub recordings keep a custody sidecar
+            // for the lifetime of the recording (needed so the fairness ledger
+            // survives restart). On a long-running, gossipsub-heavy Stronghold
+            // these accumulate; a periodic sidecar GC for never-expiring entries
+            // is a deliberate follow-up, not done here.
+            PhalanxTimestamp::from_millis(u64::MAX)
+        };
+
+        // Persist the custody sidecar BEFORE the shards. Ordering matters for
+        // crash-consistency: a crash can then only ever leave a
+        // sidecar-without-shards (which reconcile self-heals by dropping) —
+        // never orphan shards with no deadline and no ledger entry.
+        self.set_custody(CustodyEntry {
+            recording_id: recording_id.clone(),
+            held_until,
+            owner: owner.clone(),
+            communities: communities.to_vec(),
+            bytes,
+        })
+        .await;
+
+        // Persist shards + record the ledger. Each community holds one copy.
         for community_id in communities {
             for artifact in artifacts {
                 if let Err(e) = self
@@ -511,28 +766,6 @@ impl AggregationActor {
             self.custody_ledger.record(community_id, owner, bytes);
         }
 
-        // Deadline. Archive pushes are transient export-staging (now + TTL).
-        // Gossipsub passive collection is retained indefinitely (held_until =
-        // never), preserving the prior cumulative-archive semantics — only the
-        // per-owner fairness cap is newly applied to that path, not eviction.
-        let now = Self::now_millis();
-        let stored_at = PhalanxTimestamp::from_millis(now);
-        let held_until = if custody {
-            let ttl_ms = self.config.storage.custody_ttl_secs.saturating_mul(1000);
-            PhalanxTimestamp::from_millis(now.saturating_add(ttl_ms))
-        } else {
-            PhalanxTimestamp::from_millis(u64::MAX) // never swept
-        };
-        self.custody_deadlines.insert(
-            recording_id.clone(),
-            CustodyEntry {
-                held_until,
-                owner: owner.clone(),
-                communities: communities.to_vec(),
-                bytes,
-            },
-        );
-
         // Storage pressure: the disk actually written THIS call (one copy per
         // community) against the config cap — NOT the cumulative ledger total,
         // which sums per-community fair-share bytes and would over-report.
@@ -541,11 +774,7 @@ impl AggregationActor {
             .record_storage_pressure(disk_written, self.config.storage.max_storage_bytes);
 
         // Proximity evidence collection.
-        for artifact in artifacts {
-            if let Evidence::Proximity(pw) = &artifact.evidence {
-                self.proximity_log.push(pw.clone());
-            }
-        }
+        self.collect_proximity(artifacts);
 
         let envelope_count = u32::try_from(artifacts.len()).unwrap_or(u32::MAX);
         ArchiveAdmit::Stored {

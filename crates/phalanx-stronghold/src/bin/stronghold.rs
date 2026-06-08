@@ -633,8 +633,13 @@ fn load_config(path: &str) -> Result<StrongholdConfig, Box<dyn std::error::Error
     }
 
     let text = std::fs::read_to_string(path)?;
-    let config: StrongholdConfig =
+    let mut config: StrongholdConfig =
         toml::from_str(&text).map_err(|e| format!("Failed to parse config {path}: {e}"))?;
+    // Clamp hand-edited values up to safe floors (e.g. a custody TTL of 0 that
+    // would expire recordings before they can be exported).
+    for field in config.storage.clamp_floors() {
+        eprintln!("Config: {field} below its minimum — clamped to the safe floor.");
+    }
     Ok(config)
 }
 

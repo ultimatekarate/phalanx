@@ -45,6 +45,26 @@ fn default_custody_ttl_secs() -> u64 {
     7 * 24 * 60 * 60 // 7 days
 }
 
+/// Minimum enforced custody window. A hand-edited `custody_ttl_secs` of 0 (or a
+/// tiny value) would expire pushed recordings before the publisher can act on
+/// them — the floor rejects that footgun at config-load time. Programmatic
+/// construction (tests) bypasses the floor; only [`StorageConfig::clamp_floors`]
+/// applies it.
+pub const MIN_CUSTODY_TTL_SECS: u64 = 60;
+
+impl StorageConfig {
+    /// Clamp loaded config values up to safe floors. Returns the names of any
+    /// fields that were clamped, so the caller can warn the operator.
+    pub fn clamp_floors(&mut self) -> Vec<&'static str> {
+        let mut clamped = Vec::new();
+        if self.custody_ttl_secs < MIN_CUSTODY_TTL_SECS {
+            self.custody_ttl_secs = MIN_CUSTODY_TTL_SECS;
+            clamped.push("custody_ttl_secs");
+        }
+        clamped
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct NetworkConfig {
     pub listen_addresses: Vec<String>,

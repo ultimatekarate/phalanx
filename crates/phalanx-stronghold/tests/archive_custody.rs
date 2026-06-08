@@ -282,3 +282,217 @@ async fn archive_push_with_forged_owner_did_is_rejected() {
     drop(tx);
     let _ = handle.await;
 }
+
+#[tokio::test]
+async fn revoked_recording_is_refused_and_releases_quota() {
+    let dir = tempdir().unwrap();
+    let config = Arc::new(base_config(dir.path()));
+    let (tx, handle, reader) = spawn_actor(config, dir.path().to_path_buf());
+
+    let owner = PhalanxIdentity::new_ephemeral();
+    let community = CommunityId([4u8; 32]);
+    let mut routing = HashMap::new();
+    routing.insert(owner.did.clone(), vec![community]);
+    tx.send(AggregationCommand::RefreshRouting { routing })
+        .await
+        .unwrap();
+
+    let rid = RecordingId::new("rec-revoke");
+    let env = witness_envelope_for_recording(&owner, &rid, 0, None);
+    let stored = push(&tx, rid.clone(), vec![env.clone()], owner.did.clone()).await;
+    assert!(matches!(stored, ArchiveAdmit::Stored { .. }), "{stored:?}");
+
+    // Cryptographic forgetting.
+    tx.send(AggregationCommand::Revoke {
+        recording_id: rid.clone(),
+    })
+    .await
+    .unwrap();
+    flush(&tx, community).await;
+
+    // The persisted copy is gone.
+    let recs = reader.list_recordings(&community).await.unwrap_or_default();
+    assert!(!recs.contains(&rid), "revoked recording should be deleted");
+
+    // And a re-push of the same recording_id is refused — never resurrected.
+    let again = push(&tx, rid.clone(), vec![env], owner.did.clone()).await;
+    assert!(
+        matches!(again, ArchiveAdmit::Rejected),
+        "revoked recording must not be re-admitted: {again:?}"
+    );
+
+    drop(tx);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn restart_reconciles_custody_ledger_from_disk() {
+    // Restart durability: the fairness ledger and custody deadlines are rebuilt
+    // from on-disk sidecars on startup. We size the per-owner cap to exactly ONE
+    // copy: push A (fills the cap), restart the actor over the SAME vault, then a
+    // DISTINCT recording B from the same owner must be refused — proving A's
+    // bytes were re-occupied on reconcile (without it, the ledger resets to empty
+    // and B would be admitted, silently doubling the owner's footprint).
+    let dir = tempdir().unwrap();
+    let owner = PhalanxIdentity::new_ephemeral();
+    let rid_a = RecordingId::new("rec-a");
+    let env_a = witness_envelope_for_recording(&owner, &rid_a, 0, None);
+    let one_copy = postcard::to_allocvec(&env_a).unwrap().len() as u64;
+
+    let mut config = base_config(dir.path());
+    config.storage.max_bytes_per_owner = one_copy;
+    config.storage.max_per_community_bytes = one_copy;
+    config.storage.owner_fair_share_ratio = 1.0;
+    config.storage.custody_ttl_secs = 3600; // not expired during the test
+    let config = Arc::new(config);
+
+    let community = CommunityId([6u8; 32]);
+    let mut routing = HashMap::new();
+    routing.insert(owner.did.clone(), vec![community]);
+
+    // First lifetime: push A (fills the cap), then shut the actor down cleanly.
+    {
+        let (tx, handle, _reader) = spawn_actor(config.clone(), dir.path().to_path_buf());
+        tx.send(AggregationCommand::RefreshRouting {
+            routing: routing.clone(),
+        })
+        .await
+        .unwrap();
+        let a = push(&tx, rid_a.clone(), vec![env_a.clone()], owner.did.clone()).await;
+        assert!(matches!(a, ArchiveAdmit::Stored { .. }), "{a:?}");
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    // Second lifetime over the SAME vault: reconcile must restore the ledger.
+    {
+        let (tx, handle, _reader) = spawn_actor(config.clone(), dir.path().to_path_buf());
+        tx.send(AggregationCommand::RefreshRouting { routing })
+            .await
+            .unwrap();
+        let rid_b = RecordingId::new("rec-b");
+        let env_b = witness_envelope_for_recording(&owner, &rid_b, 0, None);
+        let b = push(&tx, rid_b, vec![env_b], owner.did.clone()).await;
+        assert!(
+            matches!(b, ArchiveAdmit::QuotaExceeded),
+            "after restart the ledger must be restored so the owner is still at cap: {b:?}"
+        );
+        drop(tx);
+        handle.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn restart_self_heals_orphan_custody_sidecar() {
+    // A custody sidecar whose shards were lost (crash between sidecar write and
+    // shard write, or a partial reclaim) must NOT inflate the fairness ledger on
+    // restart. Size the cap to one copy: push A, delete A's shards (leaving the
+    // sidecar), restart, then a DISTINCT B from the same owner must still fit —
+    // proving reconcile dropped the orphan sidecar instead of re-counting it.
+    let dir = tempdir().unwrap();
+    let owner = PhalanxIdentity::new_ephemeral();
+    let rid_a = RecordingId::new("rec-a");
+    let env_a = witness_envelope_for_recording(&owner, &rid_a, 0, None);
+    let one_copy = postcard::to_allocvec(&env_a).unwrap().len() as u64;
+
+    let mut config = base_config(dir.path());
+    config.storage.max_bytes_per_owner = one_copy;
+    config.storage.max_per_community_bytes = one_copy;
+    config.storage.owner_fair_share_ratio = 1.0;
+    config.storage.custody_ttl_secs = 3600;
+    let config = Arc::new(config);
+
+    let community = CommunityId([8u8; 32]);
+    let mut routing = HashMap::new();
+    routing.insert(owner.did.clone(), vec![community]);
+
+    {
+        let (tx, handle, reader) = spawn_actor(config.clone(), dir.path().to_path_buf());
+        tx.send(AggregationCommand::RefreshRouting {
+            routing: routing.clone(),
+        })
+        .await
+        .unwrap();
+        let a = push(&tx, rid_a.clone(), vec![env_a], owner.did.clone()).await;
+        assert!(matches!(a, ArchiveAdmit::Stored { .. }), "{a:?}");
+        // Simulate the shards being lost while the sidecar survives (orphan).
+        reader.reclaim_recording(&community, &rid_a).await.unwrap();
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    {
+        let (tx, handle, _reader) = spawn_actor(config.clone(), dir.path().to_path_buf());
+        tx.send(AggregationCommand::RefreshRouting { routing })
+            .await
+            .unwrap();
+        let rid_b = RecordingId::new("rec-b");
+        let env_b = witness_envelope_for_recording(&owner, &rid_b, 0, None);
+        let b = push(&tx, rid_b, vec![env_b], owner.did.clone()).await;
+        assert!(
+            matches!(b, ArchiveAdmit::Stored { .. }),
+            "orphan sidecar (shards gone) must not occupy the ledger after restart: {b:?}"
+        );
+        drop(tx);
+        handle.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn revocation_survives_restart() {
+    // Cryptographic forgetting must persist: revoke a recording, restart, and a
+    // re-push of the same recording_id is still refused.
+    let dir = tempdir().unwrap();
+    let config = Arc::new(base_config(dir.path()));
+    let owner = PhalanxIdentity::new_ephemeral();
+    let community = CommunityId([2u8; 32]);
+    let mut routing = HashMap::new();
+    routing.insert(owner.did.clone(), vec![community]);
+    let rid = RecordingId::new("rec-forget");
+    let env = witness_envelope_for_recording(&owner, &rid, 0, None);
+
+    {
+        let (tx, handle, _r) = spawn_actor(config.clone(), dir.path().to_path_buf());
+        tx.send(AggregationCommand::RefreshRouting {
+            routing: routing.clone(),
+        })
+        .await
+        .unwrap();
+        let stored = push(&tx, rid.clone(), vec![env.clone()], owner.did.clone()).await;
+        assert!(matches!(stored, ArchiveAdmit::Stored { .. }), "{stored:?}");
+        tx.send(AggregationCommand::Revoke {
+            recording_id: rid.clone(),
+        })
+        .await
+        .unwrap();
+        flush(&tx, community).await;
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    {
+        let (tx, handle, _r) = spawn_actor(config.clone(), dir.path().to_path_buf());
+        tx.send(AggregationCommand::RefreshRouting { routing })
+            .await
+            .unwrap();
+        let again = push(&tx, rid, vec![env], owner.did.clone()).await;
+        assert!(
+            matches!(again, ArchiveAdmit::Rejected),
+            "revocation must survive restart (persisted revoked set): {again:?}"
+        );
+        drop(tx);
+        handle.await.unwrap();
+    }
+}
+
+#[test]
+fn clamp_floors_raises_zero_custody_ttl() {
+    let mut config = StrongholdConfig::default();
+    config.storage.custody_ttl_secs = 0;
+    let clamped = config.storage.clamp_floors();
+    assert_eq!(
+        config.storage.custody_ttl_secs,
+        phalanx_stronghold::config::MIN_CUSTODY_TTL_SECS
+    );
+    assert!(clamped.contains(&"custody_ttl_secs"));
+}

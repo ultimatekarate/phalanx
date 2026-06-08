@@ -300,6 +300,17 @@ impl EvidenceStore {
         Ok(())
     }
 
+    /// Whether any shard directory exists for a (community, recording) pair.
+    /// Used by startup reconciliation to self-heal custody sidecars whose shards
+    /// were deleted (so their bytes are not re-counted into the fairness ledger).
+    pub async fn recording_exists(
+        &self,
+        community_id: &CommunityId,
+        recording_id: &RecordingId,
+    ) -> bool {
+        self.recording_path(community_id, recording_id).exists()
+    }
+
     /// Custody reclamation: remove a SINGLE recording's shards within ONE
     /// community. Unlike `revoke_recording` (cryptographic forgetting across
     /// ALL communities), this is scoped to exactly the (community, recording)
@@ -321,6 +332,88 @@ impl EvidenceStore {
             );
         }
         Ok(())
+    }
+
+    // ── Custody / revocation persistence (restart durability) ────────────
+    //
+    // The actor owns the CustodyEntry / revoked-set types and their
+    // (de)serialization; this layer only does atomic IO on opaque bytes,
+    // keeping the Hands layer free of Dictionary logic.
+
+    /// Directory holding per-recording custody sidecars.
+    fn custody_dir(&self) -> PathBuf {
+        self.root.join("custody")
+    }
+
+    fn custody_sidecar_path(&self, recording_id: &RecordingId) -> PathBuf {
+        self.custody_dir()
+            .join(format!("{}.bin", recording_dir_name(recording_id)))
+    }
+
+    /// Persist a recording's custody sidecar (atomic). `bytes` is the caller's
+    /// serialized custody record (which carries its own recording_id, owner,
+    /// communities, held_until, and byte count), so the TTL sweep + fairness
+    /// ledger can be rebuilt after a restart.
+    pub async fn write_custody_sidecar(
+        &self,
+        recording_id: &RecordingId,
+        bytes: &[u8],
+    ) -> Result<(), StrongholdError> {
+        tokio::fs::create_dir_all(self.custody_dir()).await?;
+        super::atomic::atomic_write(&self.custody_sidecar_path(recording_id), bytes).await?;
+        Ok(())
+    }
+
+    /// Delete a recording's custody sidecar. A missing file is a no-op.
+    pub async fn delete_custody_sidecar(
+        &self,
+        recording_id: &RecordingId,
+    ) -> Result<(), StrongholdError> {
+        match tokio::fs::remove_file(self.custody_sidecar_path(recording_id)).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Load every custody sidecar's raw bytes for startup reconciliation.
+    pub async fn load_custody_sidecars(&self) -> Result<Vec<Vec<u8>>, StrongholdError> {
+        let dir = self.custody_dir();
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        let mut entries = tokio::fs::read_dir(&dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.file_type().await?.is_file() {
+                match tokio::fs::read(entry.path()).await {
+                    Ok(bytes) => out.push(bytes),
+                    Err(e) => warn!(
+                        error = %e,
+                        path = %entry.path().display(),
+                        "custody reconcile: failed to read sidecar"
+                    ),
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Persist the revoked-recording set (atomic, whole-set rewrite). The set is
+    /// small — one entry per cryptographically-forgotten recording — so a full
+    /// rewrite is simpler and safe. Caller serializes the `RecordingId` set.
+    pub async fn write_revoked(&self, bytes: &[u8]) -> Result<(), StrongholdError> {
+        super::atomic::atomic_write(&self.root.join("revoked.bin"), bytes).await?;
+        Ok(())
+    }
+
+    /// Load the persisted revoked-set bytes (empty if none yet).
+    pub async fn load_revoked(&self) -> Result<Vec<u8>, StrongholdError> {
+        match tokio::fs::read(self.root.join("revoked.bin")).await {
+            Ok(b) => Ok(b),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Load all stored proximity evidence for a community.
