@@ -87,7 +87,7 @@ I want to preface this section with the fact that I am not a DevOps expert. If y
 
 Minimum Rust version: **1.93.1**
 
-### Dev Container
+### Dev Container (recommended)
 
 The fastest way to build — especially on Windows. Everything is pre-installed: Rust, nasm, CMake, Android NDK, Flutter, cargo-ndk, cbindgen. I recommend doing this; do not repeat my mistakes.
 
@@ -100,7 +100,7 @@ cargo test --workspace
 
 ### Native Build
 
-Three crates (`turbojpeg`, `openh264`, `fdk-aac`) compile C/C++ from source. This requires a C compiler toolchain, CMake, and NASM.
+If you're not using the dev container, you can build on the host directly. Three crates (`turbojpeg`, `openh264`, `fdk-aac`) compile C/C++ from source, so you need a C/C++ compiler toolchain, CMake, and NASM.
 
 **Windows:**
 
@@ -135,7 +135,7 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-If `turbojpeg-sys` fails, it is almost always CMake not finding the C compiler. Run `cmake --version` and `cl --version` (Windows) or `cc --version` (Linux/macOS) to verify they're reachable. I've been actively trying to get rid of this dependency- I'm out of my depth on this one.
+If a `*-sys` crate fails to build (e.g. `turbojpeg-sys` or `fdk-aac-sys`), it's almost always CMake not finding the C compiler. Run `cmake --version` and `cl --version` (Windows) or `cc --version` (Linux/macOS) to confirm they're on PATH. If host setup keeps fighting you, use the dev container above — it has the full toolchain preinstalled.
 
 The Stronghold server binary:
 
