@@ -20,7 +20,10 @@ required-features = ["gui"]
 [dependencies]
 # The Linguistic Foundation
 phalanx-proto = { path = "../phalanx-proto" }
-phalanx-forensics = { path = "../phalanx-forensics" }
+# The Stronghold is a wall-power server: it always uses the software H.264/AAC
+# transcode backend for autonomous export (no platform encoder, no FOSS-mobile
+# constraint here).
+phalanx-forensics = { path = "../phalanx-forensics", features = ["software-transcode"] }
 phalanx-transport = { path = "../phalanx-transport" }
 
 # Runtime & Async

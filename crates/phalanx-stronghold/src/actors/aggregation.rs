@@ -1162,7 +1162,16 @@ async fn run_export_inner(
     let id_for_blocking = identity.clone();
     let artifacts = recording.artifacts;
     let exported = match tokio::task::spawn_blocking(move || {
-        export_recording_to_signed_mp4(artifacts, &dek, &id_for_blocking, Fps::default())
+        // ZST backend, constructed at the use site (not stored). The Stronghold
+        // always has the software codecs compiled in (Cargo feature).
+        let transcoder = phalanx_forensics::SoftwareTranscoder;
+        export_recording_to_signed_mp4(
+            artifacts,
+            &dek,
+            &id_for_blocking,
+            Fps::default(),
+            &transcoder,
+        )
     })
     .await
     {
