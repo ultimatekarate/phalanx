@@ -42,6 +42,15 @@ rand = "0.8"
 # Secure memory wiping for mnemonic strings in FFI
 zeroize = "1"
 
+[features]
+# Forwards to the forensics software H.264/AAC backend. Default OFF — the FOSS
+# mobile artifact ships WITHOUT the non-free/patent codecs and uses a native
+# platform encoder instead. Desktop/dev/CI (and the export E2E test) opt in.
+# CI must build `-p phalanx-ffi` (feature off) and assert openh264/fdk-aac are
+# absent, AND run `--features software-transcode` to exercise the export E2E;
+# `cargo test --workspace` does neither.
+software-transcode = ["phalanx-forensics/software-transcode"]
+
 # Android logcat output for diagnostics
 [target.'cfg(target_os = "android")'.dependencies]
 android_log-sys = "0.3"

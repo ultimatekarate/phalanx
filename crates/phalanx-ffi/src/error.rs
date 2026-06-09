@@ -80,6 +80,13 @@ pub enum PhalanxError {
     /// identity is destructive even though the mesh-side recordings are
     /// untouched.
     IdentityAlreadyExists = -22,
+    /// No media encoder is available in this build. The FOSS/mobile artifact
+    /// compiles without the software H.264/AAC codecs and delegates on-device
+    /// export to a registered native platform encoder; until that backend is
+    /// registered (or a `software-transcode` build is used), export is
+    /// unsupported. Distinct code so the UI can say "export not available on
+    /// this build" rather than a generic failure.
+    NoEncoder = -23,
 }
 
 impl PhalanxError {
@@ -133,6 +140,7 @@ mod tests {
         assert_eq!(PhalanxError::RevocationKeyMismatch.code(), -20);
         assert_eq!(PhalanxError::RecordingNotFound.code(), -21);
         assert_eq!(PhalanxError::IdentityAlreadyExists.code(), -22);
+        assert_eq!(PhalanxError::NoEncoder.code(), -23);
     }
 
     #[test]
@@ -161,6 +169,7 @@ mod tests {
             PhalanxError::RevocationKeyMismatch.code(),
             PhalanxError::RecordingNotFound.code(),
             PhalanxError::IdentityAlreadyExists.code(),
+            PhalanxError::NoEncoder.code(),
         ];
 
         let mut sorted = codes.clone();
@@ -196,6 +205,7 @@ mod tests {
             PhalanxError::RevocationKeyMismatch,
             PhalanxError::RecordingNotFound,
             PhalanxError::IdentityAlreadyExists,
+            PhalanxError::NoEncoder,
         ];
 
         for variant in &error_variants {

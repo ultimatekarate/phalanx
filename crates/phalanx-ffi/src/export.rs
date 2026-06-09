@@ -26,10 +26,14 @@ use crate::handle::PhalanxHandle;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
+// Used only by the software-transcode export path (gated below); excluded from
+// the FOSS/feature-off build to avoid unused-import errors under `-D warnings`.
+#[cfg(feature = "software-transcode")]
 use phalanx_forensics::export_recording_to_signed_mp4;
 use phalanx_node::actors::storage::StorageCommand;
 use phalanx_proto::identity::{Did, RecordingId};
 use phalanx_proto::prelude::PhalanxIdentity;
+#[cfg(feature = "software-transcode")]
 use phalanx_proto::types::Fps;
 
 use tokio::sync::oneshot;
@@ -195,18 +199,42 @@ async fn build_c2pa_export(
         return Err(PhalanxError::InvalidState);
     }
 
-    // Decrypt → verify provenance → transcode → C2PA-sign via the shared
-    // Laboratory export verb — the exact same path the Stronghold escrow export
-    // uses, so mobile and Stronghold artifacts are byte-identical and validate
-    // identically. The verb names the `phalanx.node_id` assertion from
-    // `identity.did` (own-evidence export: identity DID == node_did above).
-    let artifact = export_recording_to_signed_mp4(envelopes, vault_key, identity, Fps::default())
+    // ── Select the encode backend (carve-out) ────────────────────────
+    // The software H.264/AAC/MP4 codecs are compiled in only under
+    // `software-transcode` (desktop/dev/Play-Store). The FOSS mobile build
+    // excludes them; on-device export there will delegate to a registered
+    // native platform encoder (MediaCodec/VideoToolbox) — a separate follow-up.
+    // Until that backend exists, the FOSS build reports `NoEncoder`.
+    //
+    // The software path uses the shared Laboratory export verb — the exact same
+    // path the Stronghold escrow export uses — so mobile and Stronghold
+    // artifacts are byte-identical and validate identically. The verb names the
+    // `phalanx.node_id` assertion from `identity.did` (own-evidence export:
+    // identity DID == node_did above).
+    #[cfg(feature = "software-transcode")]
+    {
+        let transcoder = phalanx_forensics::SoftwareTranscoder;
+        let artifact = export_recording_to_signed_mp4(
+            envelopes,
+            vault_key,
+            identity,
+            Fps::default(),
+            &transcoder,
+        )
         .map_err(|_| PhalanxError::InvalidState)?;
 
-    // Write the signed MP4 to disk (Hands).
-    std::fs::write(out_path, artifact.mp4_bytes).map_err(|_| PhalanxError::InvalidState)?;
+        // Write the signed MP4 to disk (Hands).
+        std::fs::write(out_path, artifact.mp4_bytes).map_err(|_| PhalanxError::InvalidState)?;
 
-    Ok(())
+        Ok(())
+    }
+
+    #[cfg(not(feature = "software-transcode"))]
+    {
+        // FOSS/mobile build: no software codecs and no native encoder registered yet.
+        let _ = (envelopes, vault_key, identity, out_path);
+        Err(PhalanxError::NoEncoder)
+    }
 }
 
 #[cfg(test)]
@@ -225,18 +253,35 @@ async fn build_c2pa_export(
 mod tests {
     use super::*;
 
-    use std::io::Cursor;
+    // `SigningAlg` is used by the (codec-free) `identity_signer` test below.
+    use c2pa::SigningAlg;
 
-    use c2pa::{Reader, SigningAlg};
+    // The real-encode E2E and its helpers only compile under `software-transcode`
+    // (they exercise the software backend); their imports are co-gated so the
+    // FOSS/feature-off build has no unused imports under `-D warnings`.
+    #[cfg(feature = "software-transcode")]
+    use c2pa::Reader;
+    #[cfg(feature = "software-transcode")]
     use phalanx_forensics::gate::{verify_provenance_from_jpeg, LensThresholds};
+    #[cfg(feature = "software-transcode")]
     use phalanx_forensics::reassembler::{compress_frame, create_audio_shard, create_video_shard};
+    #[cfg(feature = "software-transcode")]
     use phalanx_forensics::witness::WitnessAuthority;
+    #[cfg(feature = "software-transcode")]
     use phalanx_forensics::PayloadCipher;
+    #[cfg(feature = "software-transcode")]
     use phalanx_proto::crypto::SymmetricKey;
+    #[cfg(feature = "software-transcode")]
     use phalanx_proto::evidence::{Evidence, ForensicMetrics, StorageSequence, WitnessEnvelope};
+    #[cfg(feature = "software-transcode")]
     use phalanx_proto::identity::WitnessId;
+    #[cfg(feature = "software-transcode")]
     use phalanx_proto::time::PhalanxTimestamp;
+    #[cfg(feature = "software-transcode")]
     use phalanx_proto::types::{ChannelCount, SampleRate};
+    #[cfg(feature = "software-transcode")]
+    use std::io::Cursor;
+    #[cfg(feature = "software-transcode")]
     use tokio::sync::mpsc;
 
     #[test]
@@ -305,6 +350,7 @@ mod tests {
     /// "screen recapture", so a synthetic frame cannot honestly exercise the
     /// gate's *normal-luminance* PRNU/Moiré path — that belongs in lens tests
     /// with real sensor captures, not here.
+    #[cfg(feature = "software-transcode")]
     fn faint_frame_jpeg(width: u32, height: u32, shift_seed: u32) -> Vec<u8> {
         let w = width as usize;
         let h = height as usize;
@@ -324,6 +370,7 @@ mod tests {
         compress_frame(&y, &uv, width, height, false).expect("compress faint frame")
     }
 
+    #[cfg(feature = "software-transcode")]
     fn encrypted_video_envelope(
         seq: u32,
         rec: &RecordingId,
@@ -349,6 +396,7 @@ mod tests {
             .expect("sign video envelope")
     }
 
+    #[cfg(feature = "software-transcode")]
     fn encrypted_audio_envelope(
         seq: u32,
         rec: &RecordingId,
@@ -379,6 +427,7 @@ mod tests {
             .expect("sign audio envelope")
     }
 
+    #[cfg(feature = "software-transcode")]
     #[tokio::test]
     async fn export_pipeline_binds_phalanx_c2pa_assertions() {
         let identity = PhalanxIdentity::new_ephemeral();
