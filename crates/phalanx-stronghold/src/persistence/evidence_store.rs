@@ -5,7 +5,7 @@
 //
 // Hands layer — owns IO. Imports Dictionary nouns unchanged.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use phalanx_proto::community::CommunityId;
@@ -32,6 +32,7 @@ fn community_dir_name(community_id: &CommunityId) -> String {
 
 // ── EvidenceStore ───────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct EvidenceStore {
     root: PathBuf,
 }
@@ -39,6 +40,14 @@ pub struct EvidenceStore {
 impl EvidenceStore {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
+    }
+
+    /// Default durable export sink: `{vault}/exports`. The autonomous export
+    /// task writes the signed C2PA MP4 + `ExportReceipt` here unless the config
+    /// overrides the path. A sibling of `evidence/`, never under it, so a
+    /// custody reclaim of `evidence/` never deletes a delivered artifact.
+    pub fn export_dir(&self) -> PathBuf {
+        self.root.join("exports")
     }
 
     /// Base path for a community's evidence.
@@ -298,6 +307,29 @@ impl EvidenceStore {
         }
 
         Ok(())
+    }
+
+    /// Write an autonomously-exported artifact (the signed C2PA MP4) and its
+    /// signed `ExportReceipt` to the durable sink (atomic temp+rename for both).
+    /// `dir` overrides [`EvidenceStore::export_dir`] when the config names an
+    /// external sink. Filenames derive from a blake3 hash of the recording id,
+    /// so an owner-controlled id can never escape the sink directory. Returns
+    /// the artifact path.
+    pub async fn write_export(
+        &self,
+        dir: Option<&Path>,
+        recording_id: &RecordingId,
+        mp4: &[u8],
+        receipt_bytes: &[u8],
+    ) -> Result<PathBuf, StrongholdError> {
+        let base = dir.map_or_else(|| self.export_dir(), Path::to_path_buf);
+        tokio::fs::create_dir_all(&base).await?;
+        let stem = recording_dir_name(recording_id);
+        let mp4_path = base.join(format!("{stem}.mp4"));
+        let receipt_path = base.join(format!("{stem}.receipt.bin"));
+        super::atomic::atomic_write(&mp4_path, mp4).await?;
+        super::atomic::atomic_write(&receipt_path, receipt_bytes).await?;
+        Ok(mp4_path)
     }
 
     /// Whether any shard directory exists for a (community, recording) pair.

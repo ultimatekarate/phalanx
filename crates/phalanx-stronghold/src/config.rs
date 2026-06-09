@@ -31,6 +31,23 @@ pub struct StorageConfig {
     /// recording before it may be reclaimed (transient-by-design). Seconds.
     #[serde(default = "default_custody_ttl_secs")]
     pub custody_ttl_secs: u64,
+    /// Quiescence window for autonomous export: a held, grant-bearing recording
+    /// is auto-exported once no new push for it has arrived for this many
+    /// seconds (so the Stronghold exports a settled recording, not a mid-flight
+    /// one). `0` disables autonomous export entirely.
+    #[serde(default = "default_export_quiescence_secs")]
+    pub export_quiescence_secs: u64,
+    /// Optional durable sink directory for exported C2PA MP4s + signed
+    /// `ExportReceipt`s. `None` ⇒ `{vault}/exports`. Set to an external,
+    /// operator-managed path (e.g. a cloud-synced or archival mount) in prod.
+    #[serde(default)]
+    pub export_path: Option<String>,
+    /// After a successful autonomous export, reclaim the custody copy early
+    /// (free its shards + fairness bytes) rather than holding to `custody_ttl`.
+    /// The exported artifact is the deliverable, so the encrypted custody copy
+    /// is redundant once it lands. Default off (hold to TTL for redundancy).
+    #[serde(default)]
+    pub release_custody_after_export: bool,
 }
 
 fn default_max_bytes_per_owner() -> u64 {
@@ -43,6 +60,10 @@ fn default_owner_fair_share_ratio() -> f64 {
 
 fn default_custody_ttl_secs() -> u64 {
     7 * 24 * 60 * 60 // 7 days
+}
+
+fn default_export_quiescence_secs() -> u64 {
+    120 // 2 minutes of no new shards ⇒ the recording has settled
 }
 
 /// Minimum enforced custody window. A hand-edited `custody_ttl_secs` of 0 (or a
@@ -97,6 +118,9 @@ impl Default for StrongholdConfig {
                 max_bytes_per_owner: default_max_bytes_per_owner(),
                 owner_fair_share_ratio: default_owner_fair_share_ratio(),
                 custody_ttl_secs: default_custody_ttl_secs(),
+                export_quiescence_secs: default_export_quiescence_secs(),
+                export_path: None,
+                release_custody_after_export: false,
             },
             network: NetworkConfig {
                 listen_addresses: vec!["/ip4/0.0.0.0/tcp/0".to_string()],

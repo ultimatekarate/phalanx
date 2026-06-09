@@ -67,11 +67,16 @@ impl<I: IngressPort + 'static, E: EgressPort + 'static> StrongholdSentinel<I, E>
         let (aggregation_tx, aggregation_rx) = mpsc::channel(ACTOR_CHANNEL_CAPACITY);
         let (community_tx, community_rx) = mpsc::channel(ACTOR_CHANNEL_CAPACITY);
 
-        // Construct and spawn AggregationActor.
+        // Construct and spawn AggregationActor. It gets the identity (to unlock
+        // export grants + sign ExportReceipts) and a WEAK handle to its own
+        // mailbox (so spawned export tasks can post ExportCompleted back without
+        // keeping the channel alive past shutdown).
         let aggregation_actor = AggregationActor::new(
             deps.evidence_store,
             governor.clone(),
             config.clone(),
+            identity.clone(),
+            aggregation_tx.downgrade(),
             aggregation_rx,
         );
         let aggregation_handle = tokio::spawn(aggregation_actor.run());
@@ -123,6 +128,15 @@ impl<I: IngressPort + 'static, E: EgressPort + 'static> StrongholdSentinel<I, E>
                         .is_err()
                     {
                         warn!("StrongholdSentinel: aggregation channel full, skipping custody sweep");
+                    }
+                    // Autonomous export: scan for settled, grant-bearing
+                    // recordings and export them to durable storage.
+                    if self
+                        .aggregation_tx
+                        .try_send(AggregationCommand::ScanExports)
+                        .is_err()
+                    {
+                        warn!("StrongholdSentinel: aggregation channel full, skipping export scan");
                     }
                 }
             }
@@ -223,13 +237,18 @@ impl<I: IngressPort + 'static, E: EgressPort + 'static> StrongholdSentinel<I, E>
         let owner_did = request.sender_did.clone();
 
         // 2. Persist via the AggregationActor (membership + per-envelope verify
-        //    + fairness gate + persist + ledger + custody deadline).
+        //    + fairness gate + persist + ledger + custody deadline). The export
+        //    grant (if any) rides along so the actor can autonomously export
+        //    this recording once it settles. It is already bound into the
+        //    request signature verified in step 1, so it cannot have been
+        //    stripped or substituted in flight.
         let (reply_tx, reply_rx) = oneshot::channel();
         if aggregation_tx
             .send(AggregationCommand::PersistEnvelopes {
                 recording_id: recording_id.clone(),
                 envelopes: request.envelopes,
                 owner_did,
+                grant: request.grant,
                 reply_to: reply_tx,
             })
             .await

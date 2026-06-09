@@ -37,7 +37,8 @@ fn spawn_actor(
     let reader = EvidenceStore::new(vault);
     let governor = Arc::new(StrongholdGovernor::new());
     let (tx, rx) = mpsc::channel(64);
-    let actor = AggregationActor::new(store, governor, config, rx);
+    let identity = Arc::new(PhalanxIdentity::new_ephemeral());
+    let actor = AggregationActor::new(store, governor, config, identity, tx.downgrade(), rx);
     let handle = tokio::spawn(actor.run());
     (tx, handle, reader)
 }
@@ -54,6 +55,7 @@ async fn push(
         recording_id,
         envelopes,
         owner_did,
+        grant: None,
         reply_to: rtx,
     })
     .await

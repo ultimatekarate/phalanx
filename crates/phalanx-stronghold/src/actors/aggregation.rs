@@ -7,22 +7,28 @@
 // Hands layer. Owns Crucible<ShardMold> and Crucible<RecordingAmalgam>.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use phalanx_forensics::archive::build_export_receipt;
 use phalanx_forensics::bloom::RotatingBloomFilter;
 use phalanx_forensics::crucible::{Crucible, RecordingAmalgam};
+use phalanx_forensics::cryptography::grant::GrantAuthority;
+use phalanx_forensics::export_recording_to_signed_mp4;
 use phalanx_forensics::gate::PromotionGate;
 use phalanx_forensics::reassembler::ShardMold;
 use phalanx_forensics::unit::ForensicUnit;
 use phalanx_proto::community::CommunityId;
 use phalanx_proto::corroboration::ProximityWitness;
+use phalanx_proto::crypto::{SealedLocator, SymmetricKey};
 use phalanx_proto::evidence::{Evidence, Recording, WitnessEnvelope};
-use phalanx_proto::identity::{Did, RecordingId};
+use phalanx_proto::identity::{Did, PhalanxIdentity, RecordingId};
 use phalanx_proto::prelude::ShardChunk;
 use phalanx_proto::time::PhalanxTimestamp;
+use phalanx_proto::types::Fps;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -74,15 +80,29 @@ pub enum AggregationCommand {
     /// Directed archive PUSH: persist a set of already-assembled, owner-signed
     /// envelopes (bypassing the ShardChunk reassembly crucibles), gated by the
     /// per-owner custody fairness ledger. Replies with the admission outcome so
-    /// the sentinel can sign a custody receipt.
+    /// the sentinel can sign a custody receipt. An optional export `grant`
+    /// (sealed to this Stronghold) authorizes later autonomous export.
     PersistEnvelopes {
         recording_id: RecordingId,
         envelopes: Vec<WitnessEnvelope>,
         owner_did: Did,
+        grant: Option<SealedLocator>,
         reply_to: oneshot::Sender<ArchiveAdmit>,
     },
     /// Custody TTL sweep: reclaim recordings whose `held_until` has passed.
     SweepExpired,
+    /// Autonomous-export quiescence scan: spawn export tasks for settled,
+    /// grant-bearing recordings. Driven by the sentinel's maintenance tick
+    /// (alongside `SweepExpired`); also the test trigger.
+    ScanExports,
+    /// An autonomous export task finished (sent by the task back to the actor).
+    /// `success` marks the recording exported (so it is not re-exported) and, if
+    /// configured, releases its custody copy early; a failure just clears the
+    /// in-flight guard so the next quiescence tick can retry.
+    ExportCompleted {
+        recording_id: RecordingId,
+        success: bool,
+    },
 }
 
 /// Outcome of an archive-push admission + persist, returned to the sentinel so
@@ -105,6 +125,11 @@ pub enum ArchiveAdmit {
 /// (carries its own `recording_id`) so the sweep + fairness ledger survive a
 /// Stronghold restart — without it, a restart orphans held recordings and they
 /// are never reclaimed. Carries everything needed to release ledger bytes.
+///
+/// NOTE: the sidecar is postcard (non-self-describing); the M2.3 fields below
+/// extend the layout, so sidecars written by an earlier build are unreadable
+/// and dropped by `reconcile_one_sidecar` (their shards survive). Acceptable
+/// pre-release; a real format version belongs with the first shipped release.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CustodyEntry {
     recording_id: RecordingId,
@@ -112,6 +137,17 @@ struct CustodyEntry {
     owner: Did,
     communities: Vec<CommunityId>,
     bytes: u64,
+    /// Export grant sealed to THIS Stronghold's DID (escrow-for-export). Sealed
+    /// ciphertext — safe to persist; unlockable only with the Stronghold's
+    /// in-memory private key. `None` ⇒ custody-only, never auto-exported.
+    grant: Option<SealedLocator>,
+    /// Wall-clock of the most recent (re-)push for this recording. The export
+    /// trigger fires only once `now - last_activity ≥ export_quiescence`, so a
+    /// still-arriving recording is never exported mid-flight.
+    last_activity: PhalanxTimestamp,
+    /// Set once the recording has been autonomously exported, so the trigger
+    /// does not re-export it. Reset to false on any new push (new content).
+    exported: bool,
 }
 
 // ── Actor ────────────────────────────────────────────────────────────────
@@ -133,6 +169,16 @@ pub struct AggregationActor {
     /// Cryptographically-forgotten recordings. Refuses re-admission (push or
     /// gossipsub) and is persisted so the forgetting survives a restart.
     revoked: HashSet<RecordingId>,
+    /// This Stronghold's identity — unlocks export grants (ECDH) and signs the
+    /// `ExportReceipt`. Shared (Arc) so spawned export tasks can hold it.
+    identity: Arc<PhalanxIdentity>,
+    /// Weak handle to the actor's own mailbox, for spawned export tasks to post
+    /// `ExportCompleted` back. WEAK on purpose: it must not keep the channel
+    /// alive, or the actor would never observe shutdown (rx never closes).
+    self_tx: mpsc::WeakSender<AggregationCommand>,
+    /// Recordings with an export task currently in flight — prevents the
+    /// quiescence trigger from spawning a duplicate export each tick.
+    exporting: HashSet<RecordingId>,
     rx: mpsc::Receiver<AggregationCommand>,
 }
 
@@ -141,6 +187,8 @@ impl AggregationActor {
         evidence_store: EvidenceStore,
         governor: Arc<StrongholdGovernor>,
         config: Arc<StrongholdConfig>,
+        identity: Arc<PhalanxIdentity>,
+        self_tx: mpsc::WeakSender<AggregationCommand>,
         rx: mpsc::Receiver<AggregationCommand>,
     ) -> Self {
         let caps = CustodyCaps {
@@ -169,6 +217,9 @@ impl AggregationActor {
             custody_ledger: CustodyLedger::new(caps),
             custody_deadlines: HashMap::new(),
             revoked: HashSet::new(),
+            identity,
+            self_tx,
+            exporting: HashSet::new(),
             rx,
         }
     }
@@ -274,15 +325,25 @@ impl AggregationActor {
                 recording_id,
                 envelopes,
                 owner_did,
+                grant,
                 reply_to,
             } => {
                 let outcome = self
-                    .handle_persist_envelopes(recording_id, envelopes, owner_did)
+                    .handle_persist_envelopes(recording_id, envelopes, owner_did, grant)
                     .await;
                 let _ = reply_to.send(outcome);
             }
             AggregationCommand::SweepExpired => {
                 self.handle_sweep_expired().await;
+            }
+            AggregationCommand::ScanExports => {
+                self.spawn_due_exports();
+            }
+            AggregationCommand::ExportCompleted {
+                recording_id,
+                success,
+            } => {
+                self.handle_export_completed(&recording_id, success).await;
             }
         }
     }
@@ -297,6 +358,7 @@ impl AggregationActor {
         recording_id: RecordingId,
         envelopes: Vec<WitnessEnvelope>,
         owner_did: Did,
+        grant: Option<SealedLocator>,
     ) -> ArchiveAdmit {
         // An empty push cannot be attributed to any custody/quota — refuse it.
         if envelopes.is_empty() {
@@ -326,8 +388,15 @@ impl AggregationActor {
             }
         }
 
-        self.persist_and_account(&recording_id, &owner_did, &envelopes, &communities, true)
-            .await
+        self.persist_and_account(
+            &recording_id,
+            &owner_did,
+            &envelopes,
+            &communities,
+            true,
+            grant,
+        )
+        .await
     }
 
     // ── Custody persistence helpers (memory + disk kept in sync) ─────────
@@ -603,6 +672,7 @@ impl AggregationActor {
                 &recording.artifacts,
                 communities,
                 false,
+                None,
             )
             .await
         {
@@ -660,6 +730,7 @@ impl AggregationActor {
         artifacts: &[WitnessEnvelope],
         communities: &[CommunityId],
         custody: bool,
+        grant: Option<SealedLocator>,
     ) -> ArchiveAdmit {
         // Revocation strictly precedes persistence: never re-admit a
         // cryptographically-forgotten recording. This single chokepoint covers
@@ -716,34 +787,49 @@ impl AggregationActor {
             return ArchiveAdmit::QuotaExceeded;
         }
 
+        // Carry forward an existing export grant when this push supplies none,
+        // so a gossipsub re-delivery (grant=None) of an archive-pushed recording
+        // never strips its escrow-for-export authority.
+        let grant = grant.or_else(|| prior.as_ref().and_then(|p| p.grant.clone()));
+
         // Deadline. Archive pushes are transient export-staging (now + TTL).
         // Gossipsub passive collection is retained indefinitely (held_until =
         // never), preserving the prior cumulative-archive semantics — only the
         // per-owner fairness cap is newly applied to that path, not eviction.
+        // A gossipsub re-delivery must NOT shorten an existing finite custody
+        // window (it would let passive traffic cancel an archive push's TTL).
         let now = Self::now_millis();
         let stored_at = PhalanxTimestamp::from_millis(now);
         let held_until = if custody {
             let ttl_ms = self.config.storage.custody_ttl_secs.saturating_mul(1000);
             PhalanxTimestamp::from_millis(now.saturating_add(ttl_ms))
         } else {
-            // Never swept. NOTE: such gossipsub recordings keep a custody sidecar
-            // for the lifetime of the recording (needed so the fairness ledger
-            // survives restart). On a long-running, gossipsub-heavy Stronghold
-            // these accumulate; a periodic sidecar GC for never-expiring entries
-            // is a deliberate follow-up, not done here.
-            PhalanxTimestamp::from_millis(u64::MAX)
+            // Never swept (or inherit an existing finite custody window). NOTE:
+            // never-expiring gossipsub recordings keep a custody sidecar for the
+            // lifetime of the recording (needed so the fairness ledger survives
+            // restart). On a long-running, gossipsub-heavy Stronghold these
+            // accumulate; a periodic sidecar GC for never-expiring entries is a
+            // deliberate follow-up, not done here.
+            match prior.as_ref() {
+                Some(p) if p.held_until.as_u64() != u64::MAX => p.held_until,
+                _ => PhalanxTimestamp::from_millis(u64::MAX),
+            }
         };
 
         // Persist the custody sidecar BEFORE the shards. Ordering matters for
         // crash-consistency: a crash can then only ever leave a
         // sidecar-without-shards (which reconcile self-heals by dropping) —
-        // never orphan shards with no deadline and no ledger entry.
+        // never orphan shards with no deadline and no ledger entry. `exported`
+        // resets to false on every push: new content must be re-exported.
         self.set_custody(CustodyEntry {
             recording_id: recording_id.clone(),
             held_until,
             owner: owner.clone(),
             communities: communities.to_vec(),
             bytes,
+            grant,
+            last_activity: stored_at,
+            exported: false,
         })
         .await;
 
@@ -903,5 +989,232 @@ impl AggregationActor {
 
         // Rotate the bloom filter.
         self.replay_filter.rotate();
+    }
+
+    // ── Autonomous export ────────────────────────────────────────────────
+
+    /// Quiescence scan (runs on the maintenance tick): for every held recording
+    /// that carries an export grant with `export` permission, has not been
+    /// exported, has no export already in flight, and has been settled (no new
+    /// push) for at least `export_quiescence_secs`, spawn an off-loop export
+    /// task. A `export_quiescence_secs` of `0` disables the feature entirely.
+    fn spawn_due_exports(&mut self) {
+        let window_secs = self.config.storage.export_quiescence_secs;
+        if window_secs == 0 {
+            return;
+        }
+        let now = Self::now_millis();
+        let window_ms = window_secs.saturating_mul(1000);
+
+        // Collect candidates first (shared borrow of custody state), then spawn
+        // (which mutates `exporting`).
+        let mut due: Vec<(RecordingId, CommunityId, SealedLocator)> = Vec::new();
+        for e in self.custody_deadlines.values() {
+            if e.exported || self.exporting.contains(&e.recording_id) {
+                continue;
+            }
+            let Some(grant) = e.grant.as_ref() else {
+                continue;
+            };
+            if !grant.permissions.export {
+                continue;
+            }
+            // Settled: no (re-)push for at least the quiescence window.
+            if now.saturating_sub(e.last_activity.as_u64()) < window_ms {
+                continue;
+            }
+            // Every community holds the same copy; read from the first.
+            let Some(community) = e.communities.first().copied() else {
+                continue;
+            };
+            due.push((e.recording_id.clone(), community, grant.clone()));
+        }
+
+        for (recording_id, community, grant) in due {
+            self.exporting.insert(recording_id.clone());
+            let override_dir = self.config.storage.export_path.as_ref().map(PathBuf::from);
+            tokio::spawn(run_export(
+                self.evidence_store.clone(),
+                self.identity.clone(),
+                override_dir,
+                grant,
+                recording_id,
+                community,
+                self.self_tx.clone(),
+            ));
+        }
+    }
+
+    /// React to a finished export task. On success: mark the recording exported
+    /// (persisted, so a restart does not re-export) and — if configured —
+    /// reclaim its custody copy early (the signed artifact is the deliverable).
+    /// On failure: just clear the in-flight guard so a later tick can retry.
+    async fn handle_export_completed(&mut self, recording_id: &RecordingId, success: bool) {
+        self.exporting.remove(recording_id);
+        if !success {
+            return;
+        }
+        // Mark exported + persist. If the entry is gone (swept/revoked) or
+        // already marked, there is nothing to do.
+        let entry = match self.custody_deadlines.get(recording_id) {
+            Some(e) if !e.exported => CustodyEntry {
+                exported: true,
+                ..e.clone()
+            },
+            _ => return,
+        };
+        self.set_custody(entry).await;
+        info!(recording = %recording_id, "autonomous export: recording marked exported");
+
+        if self.config.storage.release_custody_after_export {
+            if let Some(entry) = self.clear_custody(recording_id).await {
+                for community_id in &entry.communities {
+                    if let Err(e) = self
+                        .evidence_store
+                        .reclaim_recording(community_id, recording_id)
+                        .await
+                    {
+                        warn!(
+                            recording = %recording_id,
+                            community = ?community_id,
+                            error = %e,
+                            "autonomous export: early-release reclaim failed"
+                        );
+                    }
+                }
+                for community_id in &entry.communities {
+                    self.custody_ledger
+                        .release(community_id, &entry.owner, entry.bytes);
+                }
+                info!(recording = %recording_id, "autonomous export: custody released early");
+            }
+        }
+    }
+}
+
+/// Off-loop export task: unlock the grant → decode/transcode/C2PA-sign the
+/// recording → write the signed MP4 + a signed `ExportReceipt` to the durable
+/// sink → post `ExportCompleted` back to the actor. Spawned per recording so a
+/// slow encode never blocks the actor mailbox.
+async fn run_export(
+    evidence_store: EvidenceStore,
+    identity: Arc<PhalanxIdentity>,
+    override_dir: Option<PathBuf>,
+    grant: SealedLocator,
+    recording_id: RecordingId,
+    community: CommunityId,
+    self_tx: mpsc::WeakSender<AggregationCommand>,
+) {
+    let success = run_export_inner(
+        &evidence_store,
+        &identity,
+        override_dir.as_deref(),
+        &grant,
+        &recording_id,
+        &community,
+    )
+    .await;
+
+    // Report back so the actor marks it exported (or clears the in-flight guard
+    // to retry). WEAK upgrade: if the actor is gone (shutdown), drop silently.
+    if let Some(tx) = self_tx.upgrade() {
+        let _ = tx
+            .send(AggregationCommand::ExportCompleted {
+                recording_id,
+                success,
+            })
+            .await;
+    }
+}
+
+/// The fallible body of [`run_export`]. Returns `true` iff a signed artifact +
+/// receipt were written to the sink.
+async fn run_export_inner(
+    evidence_store: &EvidenceStore,
+    identity: &Arc<PhalanxIdentity>,
+    override_dir: Option<&std::path::Path>,
+    grant: &SealedLocator,
+    recording_id: &RecordingId,
+    community: &CommunityId,
+) -> bool {
+    // 1. Unlock the grant → per-recording DEK. `unlock` enforces the grant was
+    //    sealed to THIS Stronghold (recipient == our DID) and authenticates the
+    //    permissions via AAD, so a tampered or misdirected grant fails here.
+    let dek = match grant.unlock(identity) {
+        Ok(k) => SymmetricKey::from_bytes(k),
+        Err(e) => {
+            warn!(recording = %recording_id, error = ?e, "autonomous export: grant unlock failed");
+            return false;
+        }
+    };
+
+    // 2. Load the recording's envelopes from custody.
+    let recording = match evidence_store.read_recording(community, recording_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(recording = %recording_id, error = %e, "autonomous export: read failed");
+            return false;
+        }
+    };
+
+    // 3. Decrypt → re-verify provenance → transcode → C2PA-sign. CPU-bound, so
+    //    run it on a blocking thread to keep the async runtime responsive.
+    let id_for_blocking = identity.clone();
+    let artifacts = recording.artifacts;
+    let exported = match tokio::task::spawn_blocking(move || {
+        export_recording_to_signed_mp4(artifacts, &dek, &id_for_blocking, Fps::default())
+    })
+    .await
+    {
+        Ok(Ok(a)) => a,
+        Ok(Err(e)) => {
+            warn!(recording = %recording_id, error = %e, "autonomous export: transcode/sign failed");
+            return false;
+        }
+        Err(e) => {
+            warn!(recording = %recording_id, error = %e, "autonomous export: blocking join failed");
+            return false;
+        }
+    };
+
+    // 4. Sign an ExportReceipt bound to exactly the bytes that landed.
+    let artifact_hash = *blake3::hash(&exported.mp4_bytes).as_bytes();
+    let receipt = build_export_receipt(
+        identity,
+        recording_id.clone(),
+        artifact_hash,
+        PhalanxTimestamp::from_millis(AggregationActor::now_millis()),
+    );
+    let receipt_bytes = match postcard::to_allocvec(&receipt) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(recording = %recording_id, error = %e, "autonomous export: receipt serialize failed");
+            return false;
+        }
+    };
+
+    // 5. Write artifact + receipt to the durable sink (atomic temp+rename).
+    match evidence_store
+        .write_export(
+            override_dir,
+            recording_id,
+            &exported.mp4_bytes,
+            &receipt_bytes,
+        )
+        .await
+    {
+        Ok(path) => {
+            info!(
+                recording = %recording_id,
+                path = %path.display(),
+                frames = exported.frame_count,
+                "autonomous export: wrote signed C2PA artifact"
+            );
+            true
+        }
+        Err(e) => {
+            warn!(recording = %recording_id, error = %e, "autonomous export: write failed");
+            false
+        }
     }
 }
