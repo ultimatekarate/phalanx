@@ -82,23 +82,60 @@ fn default_target_replica_count() -> usize {
     2
 }
 
-/// A configured archival custody peer (a Stronghold).
+/// A configured archival custody peer (a Stronghold). One block makes the
+/// single-Stronghold flow turnkey — the node DIALS it (so directed push has a
+/// live connection; the transport rejects pushes to unconnected peers), TARGETS
+/// it (the peer id extracted from the multiaddr), and SEALS export grants to it:
 ///
-/// `address` is the libp2p `MeshAddress`/peer-id used to *send* the push (the
-/// peer must already be a connected mesh peer). `stronghold_did`, when set, is
-/// the Stronghold's `did:key` used to *seal* an export grant: the publisher
-/// re-derives the recording's DEK and seals it to this DID with `export`
-/// permission, authorizing autonomous export. The DID and the address are
-/// independent identifiers of the same Stronghold (different keypairs), so both
-/// are configured explicitly — sealing is offline (the public key falls out of
-/// `did:key`), no contact required. Absent DID ⇒ custody-only push (the
-/// Stronghold holds ciphertext it cannot export).
+/// ```toml
+/// [[network.archival_peers]]
+/// address = "/ip4/10.0.0.5/udp/4001/quic-v1/p2p/12D3KooW...the-stronghold"
+/// stronghold_did = "did:key:z...the-stronghold"
+/// ```
+///
+/// `address` is a **dialable multiaddr** whose `/p2p/<peer-id>` tail is also the
+/// push target. `stronghold_did`, when set, is the Stronghold's `did:key` used
+/// to *seal* an export grant (the publisher re-derives the recording's DEK and
+/// seals it with `export` permission, authorizing autonomous export). The DID
+/// and the address identify the same Stronghold via different keypairs, so both
+/// are given explicitly — sealing is offline (the public key falls out of
+/// `did:key`). Absent DID ⇒ custody-only push (the Stronghold holds ciphertext
+/// it cannot export).
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ArchivalPeer {
     pub address: String,
     #[serde(default)]
     pub stronghold_did: Option<Did>,
+}
+
+impl ArchivalPeer {
+    /// The push target: the libp2p peer id from the `/p2p/<peer-id>` tail of the
+    /// dial multiaddr. `None` if the address carries no peer id (not dialable to
+    /// a specific peer, so it cannot be a directed-push target).
+    #[must_use]
+    pub fn peer_id(&self) -> Option<String> {
+        let (_, after) = self.address.rsplit_once("/p2p/")?;
+        let id = after.split('/').next().unwrap_or(after);
+        (!id.is_empty()).then(|| id.to_string())
+    }
+}
+
+impl NetworkConfig {
+    /// Peers the node dials at startup: the bootstrap set plus every archival
+    /// Stronghold's dial address, so directed push has a live connection (custody
+    /// peers are otherwise never dialed, and the transport rejects pushes to
+    /// unconnected peers). Deduplicated; bootstrap order preserved.
+    #[must_use]
+    pub fn dial_peers(&self) -> Vec<String> {
+        let mut peers = self.bootstrap_peers.clone();
+        for p in &self.archival_peers {
+            if !peers.contains(&p.address) {
+                peers.push(p.address.clone());
+            }
+        }
+        peers
+    }
 }
 
 #[derive(Debug)]
@@ -319,6 +356,61 @@ impl Default for NodeConfig {
 )]
 mod validation_tests {
     use super::*;
+
+    // ── Turnkey archival-peer targeting (M2.5) ──────────────────────────
+
+    #[test]
+    fn archival_peer_extracts_peer_id_from_multiaddr() {
+        let p = ArchivalPeer {
+            address: "/ip4/10.0.0.5/udp/4001/quic-v1/p2p/12D3KooWStronghold".to_string(),
+            stronghold_did: None,
+        };
+        assert_eq!(p.peer_id().as_deref(), Some("12D3KooWStronghold"));
+    }
+
+    #[test]
+    fn archival_peer_peer_id_is_none_without_p2p_component() {
+        // A bare transport multiaddr names no specific peer — not a push target.
+        let p = ArchivalPeer {
+            address: "/ip4/10.0.0.5/udp/4001/quic-v1".to_string(),
+            stronghold_did: None,
+        };
+        assert!(p.peer_id().is_none());
+    }
+
+    #[test]
+    fn archival_peer_peer_id_ignores_trailing_protocols() {
+        // A relay-circuit suffix after /p2p/<id> must not corrupt the peer id.
+        let p = ArchivalPeer {
+            address: "/ip4/1.2.3.4/tcp/4001/p2p/12D3KooWRelay/p2p-circuit".to_string(),
+            stronghold_did: None,
+        };
+        assert_eq!(p.peer_id().as_deref(), Some("12D3KooWRelay"));
+    }
+
+    #[test]
+    fn dial_peers_merges_bootstrap_and_archival_deduped() {
+        let mut net = NetworkConfig::default();
+        net.bootstrap_peers = vec!["/ip4/1.1.1.1/tcp/1".to_string()];
+        net.archival_peers = vec![
+            ArchivalPeer {
+                address: "/ip4/2.2.2.2/tcp/2/p2p/12D3KooWA".to_string(),
+                stronghold_did: None,
+            },
+            // Duplicate of a bootstrap entry — must not be dialed twice.
+            ArchivalPeer {
+                address: "/ip4/1.1.1.1/tcp/1".to_string(),
+                stronghold_did: None,
+            },
+        ];
+        assert_eq!(
+            net.dial_peers(),
+            vec![
+                "/ip4/1.1.1.1/tcp/1".to_string(),
+                "/ip4/2.2.2.2/tcp/2/p2p/12D3KooWA".to_string(),
+            ]
+        );
+    }
 
     // The purpose of `HardwareConfig::validated()` is to repair values that
     // slipped through `#[serde(transparent)]` deserialization (which bypasses

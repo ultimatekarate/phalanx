@@ -27,7 +27,11 @@ pub fn setup_transport(
 
     let transport_config = MeshTransportConfig {
         listen_addresses: config.network.listen_addresses.clone(),
-        bootstrap_peers: config.network.bootstrap_peers.clone(),
+        // Dial bootstrap peers AND the configured archival Strongholds, so a
+        // directed archive push has a live connection to its custody target
+        // (the transport rejects pushes to unconnected peers). This is what
+        // makes the single-Stronghold deployment turnkey from one config block.
+        bootstrap_peers: config.network.dial_peers(),
         subscribe_topics: vec![
             config.network.video_topic.to_string(),
             config.network.audio_topic.to_string(),

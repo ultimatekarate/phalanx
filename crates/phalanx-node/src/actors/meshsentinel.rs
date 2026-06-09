@@ -902,6 +902,17 @@ impl<I: IngressPort> MeshSentinel<I> {
         // custody-only push (grant = None). The grant is bound into the request
         // signature, so each peer's request is built and signed individually.
         for peer in &self.config.network.archival_peers {
+            // The push target is the peer id from the dial multiaddr's
+            // `/p2p/<id>` tail (the node already dials the full address at
+            // startup, so it is a connected peer). No peer id ⇒ not a directed
+            // target; skip it.
+            let Some(peer_id) = peer.peer_id() else {
+                tracing::warn!(
+                    address = %peer.address,
+                    "Archive: archival peer address has no /p2p/<peer-id>; skipping push"
+                );
+                continue;
+            };
             let grant = peer.stronghold_did.as_ref().and_then(|did| {
                 crate::actors::archive_grant::mint_export_grant(&self.identity, &recording_id, did)
             });
@@ -911,7 +922,7 @@ impl<I: IngressPort> MeshSentinel<I> {
                 envelopes.clone(),
                 grant,
             );
-            let target = MeshAddress::new(peer.address.clone());
+            let target = MeshAddress::new(peer_id);
             let _ = self
                 .egress_tx
                 .send(EgressCommand::PushArchive { target, request })
