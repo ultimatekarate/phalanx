@@ -3,6 +3,7 @@
 pub mod c2pa_ext;
 pub mod calibrate;
 pub mod crucible;
+pub mod export;
 pub mod reassembler;
 pub mod transcode;
 pub mod witness;

@@ -33,6 +33,7 @@ pub use verification::topology_gate;
 pub use pipeline::c2pa_ext;
 pub use pipeline::calibrate;
 pub use pipeline::crucible;
+pub use pipeline::export;
 pub use pipeline::reassembler;
 pub use pipeline::transcode;
 pub use pipeline::witness;
@@ -49,6 +50,7 @@ pub use cryptography::dek::{
     derive_dek_master, derive_manifest_recording_id, derive_recording_dek,
 };
 pub use cryptography::{decrypt_bytes, encrypt_bytes, generate_session_key};
+pub use export::{export_recording_to_signed_mp4, identity_signer, ExportError, ExportedArtifact};
 pub use judge::{decode_payload, HandoverJudge, PayloadCipher};
 pub use policy::TrafficGovernor;
 pub use policy::{

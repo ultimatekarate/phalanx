@@ -24,16 +24,10 @@ use crate::error::PhalanxError;
 use crate::handle::PhalanxHandle;
 
 use std::ffi::{CStr, CString};
-use std::io::Cursor;
 use std::os::raw::c_char;
 
-use c2pa::{CallbackSigner, SigningAlg};
-use phalanx_forensics::c2pa_ext::{generate_self_signed_cert, C2paOrchestrator};
-use phalanx_forensics::decode_payload;
-use phalanx_forensics::gate::{verify_provenance_from_jpeg, LensThresholds};
-use phalanx_forensics::transcode::{transcode_to_mp4, DecodedAudioShard, DecodedVideoShard};
+use phalanx_forensics::export_recording_to_signed_mp4;
 use phalanx_node::actors::storage::StorageCommand;
-use phalanx_proto::evidence::{Evidence, MediaType};
 use phalanx_proto::identity::{Did, RecordingId};
 use phalanx_proto::prelude::PhalanxIdentity;
 use phalanx_proto::types::Fps;
@@ -185,123 +179,34 @@ async fn build_c2pa_export(
     let envelopes = reply_rx.await.map_err(|_| PhalanxError::ChannelClosed)?;
 
     // `StorageCommand::Retrieval` returns RAW envelopes without re-running
-    // `verify_envelope` — see `storage.rs::handle_retrieval`. This caller
-    // does NOT re-verify the ed25519 signature directly. Trust transfers
-    // across three downstream boundaries instead:
-    //   1. `payload.reveal(vault_key)` — requires the local vault key, so
+    // `verify_envelope` — see `storage.rs::handle_retrieval`. This caller does
+    // NOT re-verify the ed25519 signature directly. Trust transfers across three
+    // downstream boundaries instead, ALL performed inside
+    // `export_recording_to_signed_mp4`:
+    //   1. `decode_payload(.., vault_key)` — requires the local vault key, so
     //      payloads forged without it fail to decrypt.
-    //   2. `verify_provenance_from_jpeg` (below) — re-computes PRNU / Moiré
-    //      metrics from the actual pixels, catching spoofed lens_metrics.
-    //   3. C2PA re-signing with the node's identity (step 5 below) — the
-    //      exported MP4 is attested by the node, not by the envelope's
-    //      original signer.
-    // If this pipeline is ever changed to emit envelope-derived fields
-    // directly to an external consumer WITHOUT these gates, add an explicit
-    // `verify_envelope()` check here.
+    //   2. `verify_provenance_from_jpeg` — re-computes PRNU / Moiré metrics from
+    //      the actual pixels, catching spoofed lens_metrics.
+    //   3. C2PA re-signing with the node's identity — the exported MP4 is
+    //      attested by the node, not by the envelope's original signer.
+    // If envelope-derived fields are ever surfaced to an external consumer
+    // WITHOUT going through that verb, add an explicit `verify_envelope()` here.
     if envelopes.is_empty() {
         return Err(PhalanxError::InvalidState);
     }
 
-    // ── 2. Decrypt + decompress + deserialize by evidence type ───────
-    let mut video_shards: Vec<DecodedVideoShard> = Vec::new();
-    let mut audio_shards: Vec<DecodedAudioShard> = Vec::new();
-
-    for envelope in envelopes {
-        match envelope.evidence {
-            Evidence::Video(v) => {
-                // Canonical decrypt + decompress Verb (Laboratory).
-                let decompressed = decode_payload(v.payload, Some(vault_key))
-                    .map_err(|_| PhalanxError::InvalidState)?;
-
-                // Deserialize postcard → Vec<Vec<u8>> (JPEG frames)
-                let jpeg_frames: Vec<Vec<u8>> =
-                    postcard::from_bytes(&decompressed).map_err(|_| PhalanxError::InvalidState)?;
-
-                // Re-verify provenance from the actual pixels.
-                // Honest evidence: re-computed metrics pass automatically.
-                // Spoofed metrics: caught when the real pixels are analyzed.
-                let thresholds = LensThresholds::default();
-                for frame in &jpeg_frames {
-                    verify_provenance_from_jpeg(frame, &thresholds)
-                        .map_err(|_| PhalanxError::InvalidState)?;
-                }
-
-                video_shards.push(DecodedVideoShard {
-                    jpeg_frames,
-                    metrics: v.lens_metrics,
-                });
-            }
-            Evidence::Audio(a) => {
-                // Canonical decrypt + decompress Verb (Laboratory).
-                let pcm_bytes = decode_payload(a.payload, Some(vault_key))
-                    .map_err(|_| PhalanxError::InvalidState)?;
-
-                audio_shards.push(DecodedAudioShard {
-                    pcm_bytes,
-                    sample_rate: a.sample_rate,
-                    channels: a.channels,
-                });
-            }
-            // Gap, Handover, Proximity — no media payload to transcode.
-            _ => {}
-        }
-    }
-
-    // ── 3. Transcode to MP4 ──────────────────────────────────────────
-    let fps = Fps::default(); // 30fps — reasonable for MP4 timing
-    let transcoded = transcode_to_mp4(video_shards, audio_shards, fps)
+    // Decrypt → verify provenance → transcode → C2PA-sign via the shared
+    // Laboratory export verb — the exact same path the Stronghold escrow export
+    // uses, so mobile and Stronghold artifacts are byte-identical and validate
+    // identically. The verb names the `phalanx.node_id` assertion from
+    // `identity.did` (own-evidence export: identity DID == node_did above).
+    let artifact = export_recording_to_signed_mp4(envelopes, vault_key, identity, Fps::default())
         .map_err(|_| PhalanxError::InvalidState)?;
 
-    // ── 4. Build C2PA manifest with aggregate forensic metrics ───────
-    //
-    // Use the aggregate metrics from the transcode output — they represent
-    // the mean/min/max PRNU, Moiré energy across all shards.
-    let aggregate = &transcoded.aggregate_metrics;
-    let summary_metrics = phalanx_proto::evidence::ForensicMetrics {
-        h_energy: aggregate.mean_h_energy,
-        v_energy: aggregate.mean_v_energy,
-        prnu_var: aggregate.mean_prnu_var,
-        mean_luminance: 0.0, // Not aggregated across shards
-    };
-
-    let mut builder =
-        C2paOrchestrator::build_manifest_with_lens(node_did, MediaType::VideoMp4, &summary_metrics)
-            .map_err(|_| PhalanxError::InvalidState)?;
-
-    // ── 5. Sign with the node's real identity ────────────────────────
-    let signer = create_identity_signer(identity);
-
-    let mut source = Cursor::new(&transcoded.mp4_bytes);
-    let mut dest = Cursor::new(Vec::new());
-
-    builder
-        .sign(&signer, "video/mp4", &mut source, &mut dest)
-        .map_err(|_| PhalanxError::InvalidState)?;
-
-    // ── 6. Write signed MP4 to disk ──────────────────────────────────
-    std::fs::write(out_path, dest.into_inner()).map_err(|_| PhalanxError::InvalidState)?;
+    // Write the signed MP4 to disk (Hands).
+    std::fs::write(out_path, artifact.mp4_bytes).map_err(|_| PhalanxError::InvalidState)?;
 
     Ok(())
-}
-
-/// Creates a C2PA callback signer backed by the node's actual PhalanxIdentity.
-///
-/// Uses the real Ed25519 keypair — NOT an ephemeral key. Red team review
-/// correctly identified that ephemeral signers break provenance chains.
-/// The self-signed cert wraps the node's verifying key so C2PA validators
-/// can verify the signature even without a trusted CA.
-fn create_identity_signer(identity: &PhalanxIdentity) -> CallbackSigner {
-    use ed25519_dalek::Signer;
-
-    let signing_key = identity.keypair.clone();
-    let cert_pem = generate_self_signed_cert(&signing_key);
-
-    let callback = move |_context: *const (), data: &[u8]| -> c2pa::Result<Vec<u8>> {
-        let signature = signing_key.sign(data);
-        Ok(signature.to_bytes().to_vec())
-    };
-
-    CallbackSigner::new(callback, SigningAlg::Ed25519, cert_pem)
 }
 
 #[cfg(test)]
@@ -320,12 +225,15 @@ fn create_identity_signer(identity: &PhalanxIdentity) -> CallbackSigner {
 mod tests {
     use super::*;
 
-    use c2pa::Reader;
+    use std::io::Cursor;
+
+    use c2pa::{Reader, SigningAlg};
+    use phalanx_forensics::gate::{verify_provenance_from_jpeg, LensThresholds};
     use phalanx_forensics::reassembler::{compress_frame, create_audio_shard, create_video_shard};
     use phalanx_forensics::witness::WitnessAuthority;
     use phalanx_forensics::PayloadCipher;
     use phalanx_proto::crypto::SymmetricKey;
-    use phalanx_proto::evidence::{ForensicMetrics, StorageSequence, WitnessEnvelope};
+    use phalanx_proto::evidence::{Evidence, ForensicMetrics, StorageSequence, WitnessEnvelope};
     use phalanx_proto::identity::WitnessId;
     use phalanx_proto::time::PhalanxTimestamp;
     use phalanx_proto::types::{ChannelCount, SampleRate};
@@ -370,7 +278,7 @@ mod tests {
     #[test]
     fn identity_signer_uses_correct_algorithm() {
         let identity = PhalanxIdentity::new_ephemeral();
-        let signer = create_identity_signer(&identity);
+        let signer = phalanx_forensics::identity_signer(&identity);
         assert_eq!(signer.alg, SigningAlg::Ed25519);
     }
 
