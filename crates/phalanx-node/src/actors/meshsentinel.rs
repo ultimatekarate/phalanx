@@ -19,7 +19,7 @@ use crate::vitals::{HealthTracker, Homeostasis, LifecycleEvent, SystemGovernor};
 use crate::Guardian;
 use crate::{trust::TrustRegistry, StorageActor};
 
-use phalanx_forensics::archive::{build_archive_request, verify_archive_receipt};
+use phalanx_forensics::archive::{build_archive_request_with_grant, verify_archive_receipt};
 use phalanx_forensics::policy::{IngressGovernor, TrafficGovernor};
 use phalanx_forensics::prelude::*;
 use phalanx_proto::archive::ArchiveReceipt;
@@ -897,15 +897,24 @@ impl<I: IngressPort> MeshSentinel<I> {
         if envelopes.is_empty() {
             return;
         }
-        let request = build_archive_request(&self.identity, recording_id, envelopes);
+        // One request per peer: a peer configured with a Stronghold DID gets an
+        // export grant sealed to it (escrow-for-export); a DID-less peer gets a
+        // custody-only push (grant = None). The grant is bound into the request
+        // signature, so each peer's request is built and signed individually.
         for peer in &self.config.network.archival_peers {
-            let target = MeshAddress::new(peer.clone());
+            let grant = peer.stronghold_did.as_ref().and_then(|did| {
+                crate::actors::archive_grant::mint_export_grant(&self.identity, &recording_id, did)
+            });
+            let request = build_archive_request_with_grant(
+                &self.identity,
+                recording_id.clone(),
+                envelopes.clone(),
+                grant,
+            );
+            let target = MeshAddress::new(peer.address.clone());
             let _ = self
                 .egress_tx
-                .send(EgressCommand::PushArchive {
-                    target,
-                    request: request.clone(),
-                })
+                .send(EgressCommand::PushArchive { target, request })
                 .await;
         }
     }

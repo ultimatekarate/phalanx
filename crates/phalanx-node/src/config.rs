@@ -68,10 +68,10 @@ pub struct NetworkConfig {
     #[serde(default = "default_revocation_topic")]
     pub revocation_topic: MeshTopic,
     /// Archival custody peers (Strongholds) to push recordings to directly, for
-    /// export-staging durability. `MeshAddress`/peer-id strings. Empty = the
-    /// directed-push feature is inert (mesh broadcast still applies).
+    /// export-staging durability. Empty = the directed-push feature is inert
+    /// (mesh broadcast still applies).
     #[serde(default)]
-    pub archival_peers: Vec<String>,
+    pub archival_peers: Vec<ArchivalPeer>,
     /// Target number of distinct Stronghold custody replicas (K) before a
     /// recording is considered safely in custody. Policy threshold.
     #[serde(default = "default_target_replica_count")]
@@ -80,6 +80,25 @@ pub struct NetworkConfig {
 
 fn default_target_replica_count() -> usize {
     2
+}
+
+/// A configured archival custody peer (a Stronghold).
+///
+/// `address` is the libp2p `MeshAddress`/peer-id used to *send* the push (the
+/// peer must already be a connected mesh peer). `stronghold_did`, when set, is
+/// the Stronghold's `did:key` used to *seal* an export grant: the publisher
+/// re-derives the recording's DEK and seals it to this DID with `export`
+/// permission, authorizing autonomous export. The DID and the address are
+/// independent identifiers of the same Stronghold (different keypairs), so both
+/// are configured explicitly — sealing is offline (the public key falls out of
+/// `did:key`), no contact required. Absent DID ⇒ custody-only push (the
+/// Stronghold holds ciphertext it cannot export).
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct ArchivalPeer {
+    pub address: String,
+    #[serde(default)]
+    pub stronghold_did: Option<Did>,
 }
 
 #[derive(Debug)]

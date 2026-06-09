@@ -1,6 +1,7 @@
 // crates/phalanx-node/src/lib.rs
 
 pub mod actors {
+    pub mod archive_grant;
     pub mod canary_supervisor;
     pub mod eclipse_router;
     pub mod egress;
