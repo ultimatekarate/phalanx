@@ -53,6 +53,40 @@ pub struct AggregateForensicMetrics {
     pub max_prnu_var: f32,
 }
 
+// ── Encoder Strategy (the slot) ─────────────────────────────────────────
+
+/// The output of a [`MediaTranscoder`] backend: the finished MP4 container and
+/// the number of video frames it actually encoded.
+///
+/// `duration_ms` is deliberately NOT here — it is a pure function of
+/// `frame_count` + `fps`, derived once by [`transcode_recording`], so it has a
+/// single owner and no backend can disagree with it.
+pub struct EncodedMedia {
+    /// Complete MP4 file bytes (codec + container chosen by the backend).
+    pub mp4_bytes: Vec<u8>,
+    /// Number of video frames the backend encoded into the container.
+    pub frame_count: u32,
+}
+
+/// A pluggable media-encode backend — the codec/container strategy.
+///
+/// Mirrors the codebase's injected-strategy idiom (`PeerEvaluator`,
+/// `TrustedClock`): one method, object-safe, selected at runtime via `&dyn`.
+/// The software backend ([`SoftwareTranscoder`], openh264/fdk-aac/mp4) lives
+/// behind the `software-transcode` feature; a native platform-encoder backend
+/// (Android MediaCodec / iOS VideoToolbox) implements the same trait in
+/// phalanx-ffi. Frame-cap enforcement and forensic aggregation are NOT here —
+/// they are codec-independent and owned by [`transcode_recording`].
+pub trait MediaTranscoder: Send + Sync {
+    /// Encode decoded JPEG video frames + PCM audio into an MP4 container.
+    fn transcode(
+        &self,
+        video: Vec<DecodedVideoShard>,
+        audio: Vec<DecodedAudioShard>,
+        fps: Fps,
+    ) -> Result<EncodedMedia, TranscodeError>;
+}
+
 // ── Errors ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
@@ -85,27 +119,23 @@ pub enum TranscodeError {
 /// Prevents OOM from unbounded accumulation.
 const MAX_EXPORT_FRAMES: u32 = 10_000;
 
-// ── Transcode Pipeline ──────────────────────────────────────────────────
+// ── Transcode Orchestration ─────────────────────────────────────────────
 
-/// Transcode decoded video/audio shards into an MP4 container.
+/// Transcode decoded video/audio shards into an MP4 container via the injected
+/// [`MediaTranscoder`] backend.
 ///
-/// Pure computation — no IO. The caller is responsible for writing
-/// the output bytes to disk.
-///
-/// # Pipeline
-/// 1. Count total frames, reject if > MAX_EXPORT_FRAMES
-/// 2. Decode JPEG frames to YUV420 via turbojpeg
-/// 3. Encode YUV420 frames to H.264 via openh264
-/// 4. Encode PCM audio to AAC via fdk-aac
-/// 5. Mux H.264 + AAC into MP4 container
-/// 6. Aggregate ForensicMetrics (min/max/mean)
-#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Transcode arithmetic — frame counts and byte offsets bounded by input validation.
-pub fn transcode_to_mp4(
+/// Codec-independent: enforces the frame cap and aggregates forensic metrics
+/// (both *before* the shards are moved into the backend), delegates the actual
+/// encode + mux to `transcoder`, then derives `duration_ms` from the encoded
+/// frame count (its single owner). Pure computation — no IO.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Frame-count/duration arithmetic bounded by the cap below.
+pub fn transcode_recording(
+    transcoder: &dyn MediaTranscoder,
     video_shards: Vec<DecodedVideoShard>,
     audio_shards: Vec<DecodedAudioShard>,
     fps: Fps,
 ) -> Result<TranscodedMedia, TranscodeError> {
-    // Count total frames and enforce cap
+    // Count total input frames and enforce the cap before doing any work.
     let total_frames: u32 = video_shards
         .iter()
         .map(|s| s.jpeg_frames.len() as u32)
@@ -122,70 +152,107 @@ pub fn transcode_to_mp4(
         ));
     }
 
-    // Aggregate forensic metrics
+    // Forensic aggregation is codec-independent — compute it before the shards
+    // are moved into the backend.
     let aggregate_metrics = aggregate_forensic_metrics(&video_shards);
 
-    // Decode all JPEG frames to YUV420
-    let mut yuv_frames: Vec<Vec<u8>> = Vec::with_capacity(total_frames as usize);
-    let mut frame_width: Option<u32> = None;
-    let mut frame_height: Option<u32> = None;
-    let mut global_frame_idx = 0usize;
+    // Delegate the actual encode + mux to the injected strategy.
+    let encoded = transcoder.transcode(video_shards, audio_shards, fps)?;
 
-    for shard in &video_shards {
-        for jpeg_bytes in &shard.jpeg_frames {
-            let (yuv, w, h) = decode_jpeg_to_yuv420(jpeg_bytes, global_frame_idx)?;
-
-            // Enforce consistent dimensions across all frames
-            match (frame_width, frame_height) {
-                (Some(ew), Some(eh)) if ew != w || eh != h => {
-                    return Err(TranscodeError::InconsistentDimensions(ew, eh, w, h));
-                }
-                _ => {
-                    frame_width = Some(w);
-                    frame_height = Some(h);
-                }
-            }
-
-            yuv_frames.push(yuv);
-            global_frame_idx += 1;
-        }
-    }
-
-    let width = frame_width.unwrap_or(256);
-    let height = frame_height.unwrap_or(256);
-
-    // Encode H.264
-    let h264_nals = encode_h264(&yuv_frames, width, height, fps)?;
-
-    // Encode AAC (if audio present) and bundle with metadata for muxing
-    let aac_bundle = if let Some(first) = audio_shards.first() {
-        let sr = first.sample_rate;
-        let ch = first.channels;
-        let (frames, frame_len) = encode_aac(&audio_shards)?;
-        Some((frames, frame_len, sr, ch))
-    } else {
-        None
-    };
-
-    // Mux into MP4
-    let mp4_bytes = mux_mp4(
-        &h264_nals,
-        aac_bundle
-            .as_ref()
-            .map(|(f, fl, sr, ch)| (f.as_slice(), *fl, *sr, *ch)),
-        width,
-        height,
-        fps,
-    )?;
-
-    let duration_ms = (total_frames as u64 * 1000) / fps.get() as u64;
+    // `duration_ms` has a single owner: derived here from the frames the backend
+    // reports it encoded and the frame rate.
+    let duration_ms = (encoded.frame_count as u64 * 1000) / fps.get() as u64;
 
     Ok(TranscodedMedia {
-        mp4_bytes,
+        mp4_bytes: encoded.mp4_bytes,
         duration_ms,
-        frame_count: total_frames,
+        frame_count: encoded.frame_count,
         aggregate_metrics,
     })
+}
+
+// ── Software Backend (H.264 / AAC / MP4) ────────────────────────────────
+//
+// The default `MediaTranscoder`: turbojpeg decode → openh264 H.264 → fdk-aac
+// AAC → `mp4` mux. Pure CPU computation, no IO. Gated behind
+// `software-transcode` and EXCLUDED from FOSS/mobile builds — `fdk-aac` is
+// non-free (no patent grant) and a self-built `openh264` is patent-exposed. On
+// those builds a native platform encoder (MediaCodec/VideoToolbox) implements
+// `MediaTranscoder` instead.
+
+/// Software H.264/AAC/MP4 transcode backend. Zero-sized — constructed at the
+/// use site, never stored.
+#[cfg(feature = "software-transcode")]
+pub struct SoftwareTranscoder;
+
+#[cfg(feature = "software-transcode")]
+impl MediaTranscoder for SoftwareTranscoder {
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // Frame/index arithmetic bounded by the caller's frame cap.
+    fn transcode(
+        &self,
+        video_shards: Vec<DecodedVideoShard>,
+        audio_shards: Vec<DecodedAudioShard>,
+        fps: Fps,
+    ) -> Result<EncodedMedia, TranscodeError> {
+        // Decode all JPEG frames to YUV420, enforcing consistent dimensions.
+        let total_frames: usize = video_shards.iter().map(|s| s.jpeg_frames.len()).sum();
+        let mut yuv_frames: Vec<Vec<u8>> = Vec::with_capacity(total_frames);
+        let mut frame_width: Option<u32> = None;
+        let mut frame_height: Option<u32> = None;
+        let mut global_frame_idx = 0usize;
+
+        for shard in &video_shards {
+            for jpeg_bytes in &shard.jpeg_frames {
+                let (yuv, w, h) = decode_jpeg_to_yuv420(jpeg_bytes, global_frame_idx)?;
+
+                // Enforce consistent dimensions across all frames.
+                match (frame_width, frame_height) {
+                    (Some(ew), Some(eh)) if ew != w || eh != h => {
+                        return Err(TranscodeError::InconsistentDimensions(ew, eh, w, h));
+                    }
+                    _ => {
+                        frame_width = Some(w);
+                        frame_height = Some(h);
+                    }
+                }
+
+                yuv_frames.push(yuv);
+                global_frame_idx += 1;
+            }
+        }
+
+        let width = frame_width.unwrap_or(256);
+        let height = frame_height.unwrap_or(256);
+
+        // Encode H.264.
+        let h264_nals = encode_h264(&yuv_frames, width, height, fps)?;
+
+        // Encode AAC (if audio present) and bundle with metadata for muxing.
+        let aac_bundle = if let Some(first) = audio_shards.first() {
+            let sr = first.sample_rate;
+            let ch = first.channels;
+            let (frames, frame_len) = encode_aac(&audio_shards)?;
+            Some((frames, frame_len, sr, ch))
+        } else {
+            None
+        };
+
+        // Mux into MP4.
+        let mp4_bytes = mux_mp4(
+            &h264_nals,
+            aac_bundle
+                .as_ref()
+                .map(|(f, fl, sr, ch)| (f.as_slice(), *fl, *sr, *ch)),
+            width,
+            height,
+            fps,
+        )?;
+
+        Ok(EncodedMedia {
+            frame_count: h264_nals.len() as u32,
+            mp4_bytes,
+        })
+    }
 }
 
 // ── JPEG Decoding ───────────────────────────────────────────────────────
@@ -229,6 +296,7 @@ pub(crate) fn decode_jpeg_to_yuv420(
 // ── H.264 Encoding ──────────────────────────────────────────────────────
 
 // Indices governed by computed plane dimensions from width/height.
+#[cfg(feature = "software-transcode")]
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn encode_h264(
     yuv_frames: &[Vec<u8>],
@@ -290,6 +358,7 @@ fn encode_h264(
 // ── AAC Encoding ────────────────────────────────────────────────────────
 
 // Indices governed by chunks_exact(2) iterator and non-empty input guard.
+#[cfg(feature = "software-transcode")]
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn encode_aac(audio_shards: &[DecodedAudioShard]) -> Result<(Vec<Vec<u8>>, u32), TranscodeError> {
     use fdk_aac::enc::{Encoder, EncoderParams};
@@ -361,6 +430,7 @@ fn encode_aac(audio_shards: &[DecodedAudioShard]) -> Result<(Vec<Vec<u8>>, u32),
 
 // ── AAC ↔ MP4 Type Mapping ─────────────────────────────────────────────
 
+#[cfg(feature = "software-transcode")]
 fn sample_rate_to_freq_index(rate: SampleRate) -> Result<mp4::SampleFreqIndex, TranscodeError> {
     match rate.get() {
         96_000 => Ok(mp4::SampleFreqIndex::Freq96000),
@@ -382,6 +452,7 @@ fn sample_rate_to_freq_index(rate: SampleRate) -> Result<mp4::SampleFreqIndex, T
     }
 }
 
+#[cfg(feature = "software-transcode")]
 fn channel_count_to_config(ch: ChannelCount) -> Result<mp4::ChannelConfig, TranscodeError> {
     match ch.get() {
         1 => Ok(mp4::ChannelConfig::Mono),
@@ -399,6 +470,7 @@ fn channel_count_to_config(ch: ChannelCount) -> Result<mp4::ChannelConfig, Trans
 
 // ── MP4 Muxing ──────────────────────────────────────────────────────────
 
+#[cfg(feature = "software-transcode")]
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)] // MP4 container byte offset arithmetic and dimension casts.
 fn mux_mp4(
     h264_nals: &[Vec<u8>],
@@ -516,6 +588,7 @@ fn mux_mp4(
 
 /// Extract SPS NAL unit from the H.264 bitstream (NAL type 7).
 // Indices governed by windows(4) iterator: window always has exactly 4 elements.
+#[cfg(feature = "software-transcode")]
 #[allow(clippy::indexing_slicing)]
 fn extract_sps(nals: &[Vec<u8>]) -> Option<Vec<u8>> {
     for nal_data in nals {
@@ -542,6 +615,7 @@ fn extract_sps(nals: &[Vec<u8>]) -> Option<Vec<u8>> {
 
 /// Extract PPS NAL unit from the H.264 bitstream (NAL type 8).
 // Indices governed by windows(4) iterator: window always has exactly 4 elements.
+#[cfg(feature = "software-transcode")]
 #[allow(clippy::indexing_slicing)]
 fn extract_pps(nals: &[Vec<u8>]) -> Option<Vec<u8>> {
     for nal_data in nals {
@@ -601,8 +675,32 @@ fn aggregate_forensic_metrics(shards: &[DecodedVideoShard]) -> AggregateForensic
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
+
+    /// A no-op backend so the codec-independent orchestration (frame cap, empty
+    /// check) is testable WITHOUT the `software-transcode` feature — these
+    /// paths reject before the transcoder is ever invoked.
+    struct StubTranscoder;
+    impl MediaTranscoder for StubTranscoder {
+        fn transcode(
+            &self,
+            _video: Vec<DecodedVideoShard>,
+            _audio: Vec<DecodedAudioShard>,
+            _fps: Fps,
+        ) -> Result<EncodedMedia, TranscodeError> {
+            Ok(EncodedMedia {
+                mp4_bytes: vec![0u8; 4],
+                frame_count: 0,
+            })
+        }
+    }
 
     #[test]
     fn aggregate_metrics_single_shard() {
@@ -667,7 +765,7 @@ mod tests {
             metrics: ForensicMetrics::default(),
         };
 
-        let result = transcode_to_mp4(vec![big_shard], vec![], Fps::new(30));
+        let result = transcode_recording(&StubTranscoder, vec![big_shard], vec![], Fps::new(30));
         assert!(matches!(
             result,
             Err(TranscodeError::RecordingTooLong(_, _))
@@ -676,7 +774,37 @@ mod tests {
 
     #[test]
     fn no_video_frames_rejected() {
-        let result = transcode_to_mp4(vec![], vec![], Fps::new(30));
+        let result = transcode_recording(&StubTranscoder, vec![], vec![], Fps::new(30));
         assert!(matches!(result, Err(TranscodeError::NoVideoFrames)));
+    }
+
+    /// Real software encode through the strategy: decode → H.264 → mux. Gated on
+    /// the feature so it only runs where the codecs are compiled in.
+    #[cfg(feature = "software-transcode")]
+    #[test]
+    fn software_transcoder_round_trips_real_frames() {
+        use crate::reassembler::compress_frame;
+
+        let (w, h) = (64u32, 64u32);
+        let make = |seed: u8| {
+            let y = vec![seed; (w * h) as usize];
+            let uv = vec![128u8; ((w / 2) * (h / 2) * 2) as usize];
+            compress_frame(&y, &uv, w, h, false).expect("compress frame")
+        };
+        let video = vec![DecodedVideoShard {
+            jpeg_frames: vec![make(16), make(32)],
+            metrics: ForensicMetrics::default(),
+        }];
+
+        let out = transcode_recording(&SoftwareTranscoder, video, vec![], Fps::new(30))
+            .expect("software transcode succeeds");
+
+        assert!(!out.mp4_bytes.is_empty(), "produces a non-empty MP4");
+        assert_eq!(out.frame_count, 2, "encodes both frames");
+        assert_eq!(
+            out.duration_ms,
+            2 * 1000 / 30,
+            "duration derived from frame count + fps"
+        );
     }
 }

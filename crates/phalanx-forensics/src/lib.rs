@@ -59,6 +59,9 @@ pub use policy::{
     SybilEndowment,
 };
 pub use reassembler::{AudioWeaver, FountainChunkifier, Reassembler, ShardMold, VideoWeaver};
+#[cfg(feature = "software-transcode")]
+pub use transcode::SoftwareTranscoder;
+pub use transcode::{transcode_recording, EncodedMedia, MediaTranscoder};
 pub use trust::{PeerEvaluator, ReputationGate};
 pub use unit::{ForensicUnit, Sealed, Unverified, ValidationState, Verified};
 

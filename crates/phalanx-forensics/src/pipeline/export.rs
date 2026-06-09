@@ -25,7 +25,9 @@ use phalanx_proto::types::Fps;
 use crate::c2pa_ext::{generate_self_signed_cert, C2paOrchestrator};
 use crate::gate::{verify_provenance_from_jpeg, LensThresholds};
 use crate::judge::decode_payload;
-use crate::transcode::{transcode_to_mp4, DecodedAudioShard, DecodedVideoShard};
+use crate::transcode::{
+    transcode_recording, DecodedAudioShard, DecodedVideoShard, MediaTranscoder,
+};
 
 /// Failure modes of the export verb. Deliberately coarse — callers map these to
 /// their own surface (FFI status code, Stronghold log line) without leaking
@@ -69,12 +71,17 @@ pub struct ExportedArtifact {
 /// exported artifact is attested by *whoever exported it*, independently of the
 /// envelopes' original witness signatures.
 ///
+/// `transcoder` is the injected encode backend (software H.264/AAC on the
+/// Stronghold and desktop; a native platform encoder on mobile) — the codec
+/// choice does not affect the surrounding decrypt/provenance/sign pipeline.
+///
 /// Pure: no disk, no network. Retrieval and the final write are the caller's.
 pub fn export_recording_to_signed_mp4(
     envelopes: Vec<WitnessEnvelope>,
     key: &SymmetricKey,
     signing_identity: &PhalanxIdentity,
     fps: Fps,
+    transcoder: &dyn MediaTranscoder,
 ) -> Result<ExportedArtifact, ExportError> {
     if envelopes.is_empty() {
         return Err(ExportError::EmptyRecording);
@@ -120,9 +127,9 @@ pub fn export_recording_to_signed_mp4(
         }
     }
 
-    // ── Transcode to MP4 (H.264 + AAC) ───────────────────────────────
-    let transcoded =
-        transcode_to_mp4(video_shards, audio_shards, fps).map_err(|_| ExportError::Transcode)?;
+    // ── Transcode to MP4 via the injected backend ────────────────────
+    let transcoded = transcode_recording(transcoder, video_shards, audio_shards, fps)
+        .map_err(|_| ExportError::Transcode)?;
 
     // ── Build the Phalanx C2PA manifest with aggregate forensic metrics ──
     let aggregate = &transcoded.aggregate_metrics;
