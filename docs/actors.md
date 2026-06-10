@@ -9,44 +9,33 @@ This document covers what each actor does, what messages it handles, how it conn
 ## Topology
 
 ```
-                          ┌─────────────────────────────────────────┐
-                          │            MeshSentinel                 │
-                          │  (orchestrator — spawns all actors)     │
-                          │                                        │
-  Network ───IngressPort──│  select! on:                           │
-                          │    ingress (network events)            │
-                          │    local_mesh (BLE/WiFi Direct)        │
-                          │    commit_notify_rx (DHT announce)     │
-                          │    discovery_rx (playback gaps)        │
-                          │    lifecycle_rx (foreground/background) │
-                          └──┬────┬────┬────┬────┬────┬────────────┘
-                             │    │    │    │    │    │
-              ┌──────────────┘    │    │    │    │    └──────────────┐
-              ▼                   ▼    │    ▼    ▼                   ▼
-    ┌──────────────┐  ┌────────────┐  │  ┌────────────┐  ┌──────────────────┐
-    │IngestionActor│  │EgressActor │  │  │TrustActor  │  │MediaEgressActor  │
-    │ (ingress     │  │ (network   │  │  │ (reputation│  │ (capture →       │
-    │  gate)       │  │  output)   │  │  │  engine)   │  │  encrypt → mesh) │
-    └──────┬───────┘  └────────────┘  │  └────────────┘  └──────────────────┘
-           │               ▲          │        ▲              │
-           │               │          │        │              │
-           ▼               │          ▼        │              │
-    ┌──────────────────────┴──────────────────┐│              │
-    │           StorageActor                   ││  ◄───────────┘
-    │  (pure vault — disk I/O, reassembly,     ││    (local shard write)
-    │   WAL recovery, revocation)              ││
-    └──────────────┬───────────────────────────┘│
-                   │                             │
-                   ▼                             │
-    ┌──────────────────────┐                     │
-    │ PlaybackCoordinator  │─────────────────────┘
-    │  (ephemeral, per     │     (requests remote shards
-    │   UI playback)       │      via EgressActor)
-    └──────────────────────┘
+                    ┌────────────────────────────────────────────────┐
+                    │                  MeshSentinel                  │
+                    │   (orchestrator — spawns every actor, routes   │
+                    │    events; holds no business logic or state)   │
+  Network ─Ingress──│  select!: ingress · local_mesh ·               │
+                    │           commit_notify_rx · discovery_rx ·    │
+                    │           lifecycle_rx · sentinel_cmd_rx (FFI) │
+                    └──┬──────────────────┬───────────────────┬──────┘
+       forwards to     │  spawns/owns     │  spawns/owns       │  spawns/owns
+   ┌────────────────────┴──┐   ┌──────────┴─────────┐   ┌──────┴────────────┐
+   │  Pipeline / Storage   │   │     Shield Wall     │   │  Capture/Playback │
+   │  IngestionActor       │   │  EclipseRouter      │   │  MediaEgressActor │
+   │  EgressActor          │   │  CanarySupervisor   │   │  PlaybackCoord.   │
+   │  RetrievalActor       │   │  VitalsActor        │   └───────────────────┘
+   │  TrustActor           │   │  ArchiveCoordinator │
+   │  StorageActor (disk)  │   │  RevocationActor    │
+   └───────────────────────┘   └─────────────────────┘
+              ▲                            │
+              └── Arc<HealthTracker>, Arc<SystemGovernor> shared (no channel) ──┘
 
-    ─── Arrows show command flow (mpsc channels) ───
-    ─── oneshot channels used for request/reply ───
+    ─── Inbound events are forwarded to actors over bounded mpsc channels ───
+    ─── oneshot reply channels used for request/reply (e.g. TryAdmit) ───
+    ─── the Shield Wall group is spawned together by `actors::fleet` ───
 ```
+
+The data path is unchanged: IngestionActor → StorageActor (disk) → PlaybackCoordinator;
+MediaEgressActor writes local shards directly to StorageActor. See "Tracing a data path".
 
 ### Stronghold (server variant)
 
@@ -80,7 +69,7 @@ All actor channels follow the same pattern:
 
 The heuristic: **if a handler needs to read many things and write one thing, inline it in the router. If it needs to read one thing and do expensive work, give it an actor.**
 
-- `PeerDiscovered` reads topology + trust + health + eclipse state and emits a single admit/reject decision → **inline in MeshSentinel**. Extracting a TopologyActor would require either duplicating that state or adding 4-5 channel round-trips per peer connection — unacceptable latency during eclipse attack floods.
+- `PeerDiscovered` reads topology + trust + health + eclipse state and emits a single admit/reject decision. This was once inline, but the topology state (admission gate, eclipse-fingerprint history, reciprocity ledgers, DID cache) is large and stateful, so it lives in **EclipseRouter**. The latency worry is resolved by a single `TryAdmit` → `AdmitOutcome` round-trip (one oneshot reply, not 4-5 queries): the orchestrator passes Eclipse the inputs and gets back the decision plus the follow-on flags (`was_first_seen`) it needs to fan out proximity-witness capture and revocation replay.
 - `Ingest` reads one shard but does gate checks + fountain reassembly + disk I/O → **actor** (IngestionActor + StorageActor). The work is expensive and must not block the event router.
 - `SecureRetrieval` reads one request but does auth verification + disk fetch + response sealing → **actor** (RetrievalActor).
 
@@ -94,7 +83,7 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 
 **File**: `crates/phalanx-node/src/actors/meshsentinel.rs`
 
-**Role**: Orchestrator. Spawns every other actor during `new()`, then enters a `select!` loop routing network events to the appropriate handler. Not a pure actor — it's the singleton coordinator.
+**Role**: Orchestrator. Spawns every other actor during `new()` (delegating the Shield Wall group to `actors::fleet`), then enters a `select!` loop that routes events to a handler or forwards them to an actor over a bounded channel. Holds **no business logic and no business state** — heartbeat crypto, revocation, archive custody, and spectral judgment all live in dedicated actors.
 
 **Event loop arms**:
 
@@ -102,30 +91,35 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 | ----- | -------- | -------- |
 | `ingress.next_event()` | Network (QUIC / libp2p) | Route by `NetworkEvent` variant (see below) |
 | `local_mesh.next_event()` | BLE / WiFi Direct | Same routing as ingress |
-| `commit_notify_rx` | StorageActor | `EgressCommand::AnnounceRecording` — tell DHT we have this shard |
+| `commit_notify_rx` | StorageActor | Forward `ArchiveCommand::StageRecording` → ArchiveCoordinator; `EgressCommand::AnnounceRecording` → EgressActor |
 | `discovery_rx` | PlaybackCoordinator | `EgressCommand::FindProviders` — ask DHT who has missing shards |
 | `lifecycle_rx` | Mobile OS | Recalculate `PowerState` on foreground/background transitions |
-| 5-minute tick | Timer | Topology maintenance: eclipse probe, spectral analysis, mesh fingerprint |
+| `sentinel_cmd_rx` | FFI | start/stop recording, spawn playback, spawn recovery |
+
+> There is no 5-minute tick arm anymore — topology maintenance is EclipseRouter's own `tokio::time::interval`, and the vitals/heartbeat cadence is VitalsActor's pinned timer.
 
 **Network event routing**:
 
 | Event | Dispatched to | Via |
 | ------- | -------------- | ----- |
-| `DataReceived` | IngestionActor | `IngestionCommand::ProcessChunk` |
-| `PeerDiscovered` | (handled inline) | Eclipse probe, topology gate, E6 rate limiting |
+| `DataReceived` (control topic) | VitalsActor | `VitalsCommand::InboundHeartbeat` (try_send) |
+| `DataReceived` (revocation topic) | RevocationActor | `RevocationCommand::InboundToken` (send().await) |
+| `DataReceived` (data topic) | IngestionActor | `IngestionCommand::ProcessChunk` |
+| `PeerDiscovered` | EclipseRouter (+ inline fan-out) | `EclipseCommand::TryAdmit`; on success: proximity-witness capture, `CanaryCommand::OnPeerReconnected`, `ReplayRevocations` |
 | `RecordingRequested` | RetrievalActor | `RetrievalCommand::SecureRetrieval` |
 | `ProvidersDiscovered` | PlaybackCoordinator | `providers_tx` channel |
-| `ShardResponseReceived` | StorageActor | `StorageCommand::WriteShard` |
-| `PeerDisconnected` | (handled inline) | CanaryMonitor, reputation tracking |
+| `ArchiveReceiptReceived` | ArchiveCoordinator | `ArchiveCommand::ReceiptReceived` |
+| `ShardResponseReceived` | StorageActor + CanarySupervisor | `StorageCommand::WriteShard` + `CanaryCommand::RegisterContribution` |
+| `PeerDisconnected` | EclipseRouter + CanarySupervisor | `EclipseCommand::PeerDisconnected` + `CanaryCommand::PeerDisconnected` (+ `HealthTracker::remove_spectral_peer`) |
 
-**Embedded state machines** (not separate actors):
+**Retained inline state** (structural, not business logic):
 
-- **TopologyGate** — peer admission control for eclipse defense
-- **EclipseProbe** — mesh fingerprint consistency checking
-- **CanaryMonitor** — Silent Canary dead man's switch
-- **HealthTracker** — peer heartbeat and spectral observation
+- **playback slot** — the at-most-one-playback `JoinHandle` invariant (`spawn_playback` / `spawn_recovery`)
+- **RecordingSessionState** — active recording id, content-key watch, proximity-witness buffer
+- **edge gates** in `handle_data_received` / `handle_data_chunk` — oversized-message rejection, bandwidth gating
+- writes the shared `Arc<HealthTracker>` (data-volume observation on inbound chunks; spectral-peer cleanup on disconnect)
 
-> **Design rationale**: MeshSentinel is large because routing decisions require access to topology, trust, and health state simultaneously. Splitting it into smaller actors would require passing this state through channels, adding latency to every network event. The tradeoff is a 1143-line file in exchange for zero-copy routing decisions.
+> **Design rationale**: MeshSentinel stays a thin router. The one decision that genuinely needs multi-field state — peer admission — is delegated to EclipseRouter through a single `TryAdmit` → `AdmitOutcome` round-trip, and the stateful/expensive paths (heartbeat crypto, revocation, archive staging) are forwarded to their own actors. The result is a ~1166-line file that is orchestration, not business logic: adding a handler here that reads multi-field state is a regression toward the God Object shape the Shield Wall actors were split out of.
 
 ---
 
@@ -327,6 +321,74 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 
 ---
 
+## The Shield Wall group
+
+EclipseRouter, CanarySupervisor, VitalsActor, ArchiveCoordinator, and RevocationActor are the **Shield Wall** — the security-actor group that MeshSentinel spawns together via [`actors/fleet.rs`](../crates/phalanx-node/src/actors/fleet.rs). `fleet::spawn_shield_wall` takes a `Shared` bundle of the common singletons (config, identity, clock, system_governor, `Arc<HealthTracker>`, reputation, used-bytes gauge, shutdown) and returns a `ShieldWall` of the five command senders plus their `JoinHandle`s — ordered EclipseRouter-first so they drain ahead of the storage/egress recipients they dispatch to. This keeps `MeshSentinel::new` an assembly step. The storage/pipeline actors stay inline in `new()` because they are interleaved with channel and Guardian setup and don't extract cleanly.
+
+### EclipseRouter
+
+**File**: `crates/phalanx-node/src/actors/eclipse_router.rs`
+
+**Role**: Eclipse remediation. Owns topology admission (`TopologyGate`), eclipse-fingerprint history (`EclipseProbe`), the reciprocity floor's per-peer first-seen ledger, and a local DID cache (populated via `DidLearned` from CanarySupervisor). Reads the shared `Arc<HealthTracker>`.
+
+**Commands**: `TryAdmit { … reply_to: AdmitOutcome }`, `PeerDisconnected`, `DidLearned`, `ReplayRevocations`.
+
+**Cadence**: 5-minute topology tick (anchor promotion, eclipse evaluation, reciprocity sweep, integral pruning) + per-command.
+
+> **Design rationale**: admission needs topology + trust + health at once, but that state is large and stateful. Rather than inline it in the router, it's a request/reply actor — the orchestrator sends `TryAdmit` and receives an `AdmitOutcome` (admitted / evicted / `was_first_seen`), keeping Eclipse state encapsulated without per-decision channel chatter.
+
+---
+
+### CanarySupervisor
+
+**File**: `crates/phalanx-node/src/actors/canary_supervisor.rs`
+
+**Role**: Silent Canary. Owns the `CanaryMonitor` (community-peer-liveness dead-man's-switch), the memory-only peer DID cache, and a local mirror of the recording-active flag. Reads the shared `Arc<HealthTracker>`.
+
+**Commands**: `RegisterContribution`, `OnPeerReconnected`, `PeerDisconnected`, `RecordingStarted`, `RecordingStopped`.
+
+**Cadence**: command-driven — staleness is confirmed on `PeerDisconnected` via `HealthTracker::is_peer_stale`. On confirmed darkness it emits `FindProviders` / `EmergencySalvage` and broadcasts an encrypted `CanaryAlert`; it also notifies EclipseRouter via `DidLearned`.
+
+---
+
+### VitalsActor
+
+**File**: `crates/phalanx-node/src/actors/vitals_actor.rs`
+
+**Role**: The node's presence cadence — **publish** (vitals refresh + Tier 2 Shield Wall heartbeat, per-community encrypted, `BroadcastGate`-gated) and **receive** (per-community decrypt, strict-binding origin check, spectral-consistency evaluation). Writes the shared `Arc<HealthTracker>` via `register_activity`.
+
+**Command**: `InboundHeartbeat { origin, data }`.
+
+**Event loop**: `select!` on shutdown + a **single pinned publish timer** (adaptive vitals interval, 5–60s by PowerState, reset only after it fires) + the command channel. Post-loop `try_recv` drain so heartbeats queued before shutdown are processed deterministically.
+
+> **Design rationale**: publish and receive both operate on the same community keyset and the shared HealthTracker, so they're one cohesive actor. The pinned-sleep-reset (vs. recreating the sleep each loop) ensures a busy mesh's inbound heartbeats never reset — and thus never starve — the node's own publish cadence.
+
+---
+
+### ArchiveCoordinator
+
+**File**: `crates/phalanx-node/src/actors/archive_coordinator.rs`
+
+**Role**: Stronghold custody. Owns the per-session staging dedup set and the per-recording replica/deadline ledger. Runs the directed archive PUSH (fetch envelopes from StorageActor → mint per-peer export grants → `PushArchive`) off the run loop, and records inbound custody receipts.
+
+**Commands**: `StageRecording { recording_id }`, `ReceiptReceived { receipt }`.
+
+> **Design rationale**: staging does a storage round-trip plus per-peer grant minting — too heavy for the run-loop arm it used to occupy. MeshSentinel forwards `StageRecording` with `send().await` (not `try_send`) so a single-shard recording's lone staging directive is never dropped; this is deadlock-free because StorageActor emits `commit_notify` via `try_send`.
+
+---
+
+### RevocationActor
+
+**File**: `crates/phalanx-node/src/actors/revocation.rs`
+
+**Role**: Cryptographic forgetting. Stateless. Deserializes and verifies an inbound revocation token, forwards it to StorageActor for authorization/execution, then on success re-publishes to gossipsub and withdraws the local DHT provider records.
+
+**Command**: `InboundToken { origin, data }`.
+
+> **Design rationale**: distinct from `recovery.rs` (manifest-walk recovery) — different domain and trigger. Moving the verify + storage `Revoke` round-trip into an actor keeps it off the sentinel's run loop while preserving no-drop backpressure (`send().await`).
+
+---
+
 ## phalanx-stronghold actors
 
 ### StrongholdSentinel
@@ -400,33 +462,33 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 
 ---
 
-## Vitals (actor-adjacent, not standalone actors)
+## Vitals (shared state, not standalone actors)
 
-These modules hold state that is updated by multiple actors but don't have their own event loops.
+These modules hold state shared across actors via `Arc` but don't own their own event loops.
 
 ### SystemGovernor
 
 **File**: `crates/phalanx-node/src/vitals/governor.rs`
 
-Shared via `Arc` across all actors. Implements the Volterra second-kind integral system for resource management. Each actor calls `record_*_pressure()` to feed signals (memory, bandwidth, storage, I/O, connection, thermal). Gate checks call `is_*_ok()` to read composite stress. A dedicated vitals polling task (spawned in MeshSentinel, 1s tick) calls `update_vitals()` to step the integrals and poll hardware sensors.
-
-### CanaryMonitor
-
-**File**: `crates/phalanx-node/src/vitals/canary.rs`
-
-Embedded in MeshSentinel. Tracks community-scoped peer liveness. When enough peers go silent (stale or disconnected), emits `CanaryState` escalation signals that trigger evidence distribution priority increases and Stronghold flush.
-
-### SpectralObserver
-
-**File**: `crates/phalanx-node/src/vitals/spectral.rs` 
-
-Embedded in HealthTracker. Records per-peer heartbeat timing and data volume. Evaluates behavioral consistency — detects Byzantine peers by checking whether their claimed state matches their observed behavior (the Shield Wall).
+Shared via `Arc` across all actors. Implements the Volterra second-kind integral system for resource management. Each actor calls `record_*_pressure()` to feed signals (memory, bandwidth, storage, I/O, connection, thermal); gate checks call `is_*_ok()` to read composite stress. `update_vitals()` — which steps the integrals and polls hardware sensors — is driven by **VitalsActor** on the adaptive vitals interval (5–60s by PowerState), not by a fixed 1s task.
 
 ### HealthTracker
 
 **File**: `crates/phalanx-node/src/vitals/health.rs`
 
-Embedded in MeshSentinel. Tracks peer heartbeats, capacities, and contracts. Contains SpectralObserver as a field. Updated passively as heartbeats arrive from the network.
+Shared via `Arc` (per-field RwLocks, never held across `.await`). Tracks peer heartbeats, capacities, and contracts; contains SpectralObserver as a field. **Written** by MeshSentinel (data-volume observation on inbound chunks; spectral-peer cleanup on disconnect) and by VitalsActor (`register_activity` per accepted heartbeat). **Read** by EclipseRouter and CanarySupervisor (e.g. `is_peer_stale`).
+
+### SpectralObserver
+
+**File**: `crates/phalanx-node/src/vitals/spectral.rs`
+
+A field of HealthTracker. Records per-peer heartbeat timing and data volume and evaluates behavioral consistency — detecting Byzantine peers whose claimed state contradicts their observed behavior (the Shield Wall). Evaluated by VitalsActor on the heartbeat-receive path (`evaluate_spectral`).
+
+### CanaryMonitor
+
+**File**: `crates/phalanx-node/src/vitals/canary.rs`
+
+Owned by **CanarySupervisor** (no longer embedded in MeshSentinel). The community-peer-liveness dead-man's-switch: when enough peers go silent (stale or disconnected), it emits `CanaryState` escalation that triggers evidence re-distribution and Stronghold flush.
 
 ---
 
