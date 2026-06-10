@@ -318,6 +318,9 @@ async fn test_control_message_origin_mismatch_drops_spoofed_heartbeat() {
     ingress_tx.send(NetworkEvent::Shutdown).await.unwrap();
 
     sentinel.run().await.unwrap();
+    // Heartbeat handling is now async (VitalsActor). Drain it so the forwarded
+    // InboundHeartbeat is processed before we assert on HealthTracker.
+    sentinel.shutdown().await;
 
     // Strict-binding policy: spoofed heartbeat must not register under
     // either the propagation origin OR the forged sender. Both keys
@@ -368,6 +371,8 @@ async fn test_control_message_genuine_origin_registers_heartbeat() {
     ingress_tx.send(NetworkEvent::Shutdown).await.unwrap();
 
     sentinel.run().await.unwrap();
+    // Drain VitalsActor so the forwarded InboundHeartbeat is processed.
+    sentinel.shutdown().await;
 
     assert!(
         sentinel.health_tracker.has_heartbeat(&peer),
@@ -420,6 +425,8 @@ async fn test_no_community_keys_drops_all_heartbeats() {
     ingress_tx.send(NetworkEvent::Shutdown).await.unwrap();
 
     sentinel.run().await.unwrap();
+    // Drain VitalsActor so any forwarded InboundHeartbeat is processed.
+    sentinel.shutdown().await;
 
     assert!(
         !sentinel.health_tracker.has_heartbeat(&peer),

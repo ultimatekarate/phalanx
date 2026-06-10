@@ -1,17 +1,20 @@
 // --- crates/phalanx-node/src/actors/meshsentinel.rs ---
-use crate::actors::canary_supervisor::{CanaryCommand, CanarySupervisor};
-use crate::actors::eclipse_router::{AdmitOutcome, EclipseCommand, EclipseRouter};
+use crate::actors::archive_coordinator::ArchiveCommand;
+use crate::actors::canary_supervisor::CanaryCommand;
+use crate::actors::eclipse_router::{AdmitOutcome, EclipseCommand};
 use crate::actors::egress::{EgressActor, EgressCommand};
+use crate::actors::fleet;
 use crate::actors::ingestion::{IngestionActor, IngestionCommand};
 use crate::actors::media_egress::{MediaEgressActor, MediaEgressConfig};
-use crate::actors::mesh_policy;
 use crate::actors::playback::PlaybackCoordinator;
 use crate::actors::recording_session::RecordingSessionState;
 use crate::actors::recovery::{run_recovery, RecoveryContext, PROVIDERS_CHANNEL_BUFFER};
 use crate::actors::retrieval::{RetrievalActor, RetrievalCommand};
+use crate::actors::revocation::RevocationCommand;
 use crate::actors::shutdown::ShutdownSignal;
 use crate::actors::storage::StorageCommand;
 use crate::actors::trust_actor::{TrustActor, TrustCommand};
+use crate::actors::vitals_actor::VitalsCommand;
 use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
 
@@ -19,10 +22,8 @@ use crate::vitals::{HealthTracker, Homeostasis, LifecycleEvent, SystemGovernor};
 use crate::Guardian;
 use crate::{trust::TrustRegistry, StorageActor};
 
-use phalanx_forensics::archive::{build_archive_request_with_grant, verify_archive_receipt};
 use phalanx_forensics::policy::{IngressGovernor, TrafficGovernor};
 use phalanx_forensics::prelude::*;
-use phalanx_proto::archive::ArchiveReceipt;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::network::{EgressPort, IngressPort, LocalMeshPort};
 use phalanx_proto::prelude::*;
@@ -30,10 +31,9 @@ use phalanx_proto::storage::TransientJournal;
 use phalanx_proto::telemetry::DiscoverySource;
 use phalanx_proto::topology::{SubnetBucket, TransportClass};
 use phalanx_transport::identity_ext::Libp2pExt;
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use phalanx_proto::crypto::{DekMaster, SymmetricKey};
 use phalanx_proto::evidence::{AudioShard, PrnuPosterior, StorageSequence, VideoShard};
@@ -178,13 +178,6 @@ pub struct MeshSentinel<I: IngressPort> {
     // Triggers `EgressCommand::AnnounceRecording` to announce the recording on the DHT.
     commit_notify_rx: mpsc::Receiver<RecordingId>,
 
-    // Archive custody: recordings already pushed to Stronghold custody peers this
-    // session (dedup, mirrors the DHT announce dedup — prevents per-shard storms).
-    archived_to_strongholds: HashSet<RecordingId>,
-    // Archive custody marker: per-recording Stronghold replicas and the deadline
-    // each committed to hold until. Point-in-time / last-known, refreshable.
-    custody: HashMap<RecordingId, HashMap<Did, PhalanxTimestamp>>,
-
     // DHT: Receives (recording_id, sequence_id) from PlaybackCoordinator when it
     // discovers missing shards. Triggers `EgressCommand::FindProviders`.
     discovery_rx: mpsc::Receiver<(RecordingId, StorageSequence)>,
@@ -231,6 +224,18 @@ pub struct MeshSentinel<I: IngressPort> {
     // the canary alert escalation/broadcast paths all live on CanarySupervisor.
     canary_tx: mpsc::Sender<CanaryCommand>,
 
+    // VitalsActor command channel. Inbound heartbeat receive (decrypt +
+    // strict-binding + spectral) and the periodic vitals/heartbeat publish.
+    vitals_tx: mpsc::Sender<VitalsCommand>,
+
+    // ArchiveCoordinator command channel. Stronghold custody staging + the
+    // per-recording replica/deadline ledger.
+    archive_tx: mpsc::Sender<ArchiveCommand>,
+
+    // RevocationActor command channel. Inbound revocation token verify/apply/
+    // propagate (cryptographic forgetting).
+    revocation_tx: mpsc::Sender<RevocationCommand>,
+
     /// Recording-session state container. FFI mutates via `start_recording`
     /// / `stop_recording` methods on `MeshSentinel`, not by reaching in.
     pub session: RecordingSessionState,
@@ -245,11 +250,10 @@ pub struct MeshSentinel<I: IngressPort> {
     pub community_ids_rx: tokio::sync::watch::Receiver<Vec<phalanx_proto::community::CommunityId>>,
     /// Static seeds layered on top of the live registry snapshot. Used by
     /// integration tests that don't stand up a full `TrustRegistry`
-    /// `Community` object. Production callers pass an empty `Vec`. Read
-    /// live on the receive path (`current_community_ids()` reads
-    /// `&self.extra_community_ids`); the vitals task captures its own
-    /// clone at spawn time, so runtime mutations affect receive but not
-    /// publish
+    /// `Community` object. Production callers pass an empty `Vec`. Cloned into
+    /// CanarySupervisor and VitalsActor at spawn time — both the heartbeat
+    /// receive and publish paths now live on VitalsActor. The sentinel retains
+    /// the field as the canonical seed (and for test assertions).
     pub extra_community_ids: Vec<phalanx_proto::community::CommunityId>,
 
     /// Sender for `SentinelCommand`s. Cloned out by `EngineHandle::spawn`
@@ -452,142 +456,6 @@ impl<I: IngressPort> MeshSentinel<I> {
 
         let media_handle = tokio::spawn(media_actor.run());
 
-        // Adaptive vitals polling — interval scales with PowerState.
-        // Normal: 5s, Conserving: 15s, Leaf: 30s, Dormant: 60s.
-        // Uses dynamic sleep instead of fixed interval to adapt each cycle.
-        // select! with biased cancel-first so shutdown wakes the daemon out of
-        // its sleep immediately instead of waiting for the tick.
-        //
-        // The vitals task also publishes Tier 2 Shield Wall heartbeats on the
-        // control topic, encrypted per-community. Heartbeats ride the same
-        // cadence as vitals updates (one timer, two side-effects) and are
-        // gated by `BroadcastGate` so a stable load suppresses sub-30s
-        // republishes. A node not in any community publishes nothing —
-        // heartbeats only serve community-scoped consumers (Tier 2 Shield
-        // Wall, silent canary, eclipse fingerprinting). Note: gossipsub
-        // `MessageAuthenticity::Signed` attaches a sequence number per
-        // publish, so identical-body heartbeats keep distinct message_ids —
-        // receivers' staleness windows refresh correctly. Do NOT switch the
-        // gossipsub `message_id_fn` to a body-hash; that would silently
-        // dedupe consecutive identical heartbeats.
-        let vitals_governor = deps.system_governor.clone();
-        let vitals_shutdown = shutdown.clone();
-        let vitals_egress_tx = egress_tx.clone();
-        let vitals_used_bytes = used_bytes_gauge.clone();
-        let vitals_max_storage = deps.config.storage.max_storage_bytes;
-        // Prefer the explicit local_mesh_address (set by the harness in sim,
-        // by the FFI in production). Both ultimately route to the same
-        // Ed25519 key, but the wire encoding differs between sim and prod.
-        let vitals_local_addr = local_mesh_address.clone();
-        let vitals_control_topic = deps.config.network.control_topic.clone();
-        // Phase 4: subscribe to the live community-key watch (Receiver is
-        // Clone). The vitals task captures its own `extra_community_ids`
-        // clone for the static test seeds — runtime mutation of
-        // `MeshSentinel::extra_community_ids` is reflected on the receive
-        // path but NOT here (asymmetric by design — see plan §Caveats).
-        let vitals_community_ids_rx = community_ids_rx.clone();
-        let vitals_extra = extra_community_ids.clone();
-        let vitals_handle = tokio::spawn(async move {
-            let mut gate = crate::vitals::health::BroadcastGate::new();
-            loop {
-                let interval = vitals_governor.vitals_polling_interval();
-                tokio::select! {
-                    biased;
-                    _ = vitals_shutdown.cancelled() => break,
-                    _ = tokio::time::sleep(interval) => {
-                        vitals_governor.update_vitals();
-                        // CRITICAL: read+clone in a single statement. Watch's
-                        // `borrow()` returns a `Ref<'_, T>` holding an
-                        // internal RwLock guard. Holding it across `.await`
-                        // would deadlock the watch system. The `.clone()` on
-                        // the next token releases the guard immediately.
-                        let mut snapshot: Vec<phalanx_proto::community::CommunityId> =
-                            vitals_community_ids_rx.borrow().clone();
-                        for cid in &vitals_extra {
-                            if !snapshot.contains(cid) {
-                                snapshot.push(*cid);
-                            }
-                        }
-                        if snapshot.is_empty() {
-                            // Open-mesh-only node: no community keys, no heartbeats.
-                            // Tier 2 / silent canary / eclipse all degrade gracefully.
-                            continue;
-                        }
-                        let load = vitals_governor.load_factor();
-                        if gate.should_broadcast(load) {
-                            // Compute storage only when actually publishing —
-                            // saves the atomic load + arithmetic during the
-                            // ~30s no-broadcast intervals.
-                            let used = vitals_used_bytes
-                                .load(std::sync::atomic::Ordering::Relaxed);
-                            let remaining_bytes = vitals_max_storage
-                                .as_u64()
-                                .saturating_sub(used);
-                            // Cap the wire value at u32::MAX MB (~4 PiB)
-                            // even when max_storage_bytes is uncapped.
-                            let storage_remaining_mb = (remaining_bytes / 1_048_576)
-                                .min(u32::MAX as u64);
-                            // `as_millis()` returns u128, but `vitals_polling_interval`
-                            // produces 5–60 second values that fit comfortably in u64.
-                            #[allow(clippy::cast_possible_truncation)]
-                            let heartbeat_ms = phalanx_proto::vitals::HeartbeatInterval(
-                                interval.as_millis() as u64,
-                            )
-                            .as_u64();
-                            let msg = phalanx_proto::vitals::ControlMessage {
-                                sender: vitals_local_addr.clone(),
-                                load_factor: load,
-                                storage_remaining_mb,
-                                heartbeat_ms,
-                                is_leaf: vitals_governor.is_leaf_state(),
-                                integral_summary: Some(
-                                    vitals_governor.integral_summary(),
-                                ),
-                            };
-                            let plaintext = match postcard::to_allocvec(&msg) {
-                                Ok(b) => b,
-                                Err(e) => {
-                                    tracing::warn!(error = %e, "Heartbeat: serialize failed");
-                                    continue;
-                                }
-                            };
-                            // One ciphertext per community — receivers try-decrypt
-                            // with each key they hold. Different domain-separation
-                            // label from canary alerts: same trust circle, different
-                            // purpose, no key reuse.
-                            for cid in &snapshot {
-                                let key = SymmetricKey::from_bytes(blake3::derive_key(
-                                    "phalanx.heartbeat.v1.community",
-                                    &cid.0,
-                                ));
-                                let (nonce, ciphertext) =
-                                    match phalanx_forensics::cryptography::encrypt_bytes(
-                                        &key, &plaintext,
-                                    ) {
-                                        Ok(p) => p,
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                error = %e,
-                                                "Heartbeat: encryption failed"
-                                            );
-                                            continue;
-                                        }
-                                    };
-                                let mut payload = nonce;
-                                payload.extend(ciphertext);
-                                let _ = vitals_egress_tx.try_send(
-                                    EgressCommand::PublishMesh {
-                                        topic: vitals_control_topic.clone(),
-                                        data: payload,
-                                    },
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
         let config_arc = Arc::new(deps.config);
 
         if let Some(ref mesh) = deps.local_mesh {
@@ -615,41 +483,49 @@ impl<I: IngressPort> MeshSentinel<I> {
         // and CanarySupervisor read.
         let health_tracker = Arc::new(HealthTracker::new());
 
-        // EclipseRouter command channel + spawn. Pushed FIRST onto
-        // background_tasks so it shuts down before recipients (egress, trust,
-        // storage), preventing send-to-closed-rx errors during drain.
-        let (eclipse_tx, eclipse_rx) = mpsc::channel::<EclipseCommand>(64);
-        let eclipse_router = EclipseRouter::new(
-            config_arc.clone(),
-            arc_identity.clone(),
-            clock_handle.clone(),
-            deps.system_governor.clone(),
-            health_tracker.clone(),
-            reputation_projection.clone(),
-            egress_tx.clone(),
-            sentinel_trust_tx.clone(),
-            storage_tx.clone(),
-            eclipse_rx,
-            shutdown.clone(),
+        // ── Shield Wall ─────────────────────────────────────────────────────
+        // Spawn the security-actor group as one cohesive unit: EclipseRouter
+        // (topology/admission), CanarySupervisor (silent canary), VitalsActor
+        // (heartbeat publish+receive), ArchiveCoordinator (custody staging),
+        // RevocationActor (cryptographic forgetting). Spawned after the shared
+        // HealthTracker exists; its handles drain ahead of the storage/egress
+        // recipients they send to (eclipse first). See `actors::fleet`.
+        let shared = fleet::Shared {
+            config: config_arc.clone(),
+            identity: arc_identity.clone(),
+            clock: clock_handle.clone(),
+            system_governor: deps.system_governor.clone(),
+            health_tracker: health_tracker.clone(),
+            reputation: reputation_projection.clone(),
+            used_bytes_gauge: used_bytes_gauge.clone(),
+            shutdown: shutdown.clone(),
+        };
+        let fleet::ShieldWall {
+            eclipse_tx,
+            canary_tx,
+            vitals_tx,
+            archive_tx,
+            revocation_tx,
+            handles: shield_wall_handles,
+        } = fleet::spawn_shield_wall(
+            &shared,
+            &storage_tx,
+            &egress_tx,
+            &sentinel_trust_tx,
+            &community_ids_rx,
+            &extra_community_ids,
+            &local_mesh_address,
         );
-        let eclipse_handle = tokio::spawn(eclipse_router.run());
 
-        // CanarySupervisor command channel + spawn. Eclipse already exists,
-        // so we can pass eclipse_tx for `DidLearned` notifies.
-        let (canary_tx, canary_rx) = mpsc::channel::<CanaryCommand>(64);
-        let canary_supervisor = CanarySupervisor::new(
-            clock_handle.clone(),
-            health_tracker.clone(),
-            reputation_projection.clone(),
-            community_ids_rx.clone(),
-            extra_community_ids.clone(),
-            egress_tx.clone(),
-            storage_tx.clone(),
-            eclipse_tx.clone(),
-            canary_rx,
-            shutdown.clone(),
-        );
-        let canary_handle = tokio::spawn(canary_supervisor.run());
+        // Drain order: Shield Wall senders first (eclipse leading), then the
+        // storage/egress/pipeline recipients they dispatch to.
+        let mut background_tasks = shield_wall_handles;
+        background_tasks.push(storage_handle);
+        background_tasks.push(egress_handle);
+        background_tasks.push(trust_handle);
+        background_tasks.push(retrieval_handle);
+        background_tasks.push(ingestion_handle);
+        background_tasks.push(media_handle);
 
         Ok(Self {
             config: config_arc,
@@ -659,25 +535,13 @@ impl<I: IngressPort> MeshSentinel<I> {
             system_governor: deps.system_governor.clone(),
             network_key: network_key.clone(),
             shutdown: shutdown.clone(),
-            background_tasks: vec![
-                eclipse_handle,
-                canary_handle,
-                storage_handle,
-                egress_handle,
-                trust_handle,
-                retrieval_handle,
-                ingestion_handle,
-                media_handle,
-                vitals_handle,
-            ],
+            background_tasks,
             storage_tx,
             ingestion_tx,
             retrieval_tx,
             egress_tx,
             discovery_tx,
             commit_notify_rx,
-            archived_to_strongholds: HashSet::new(),
-            custody: HashMap::new(),
             discovery_rx,
             local_mesh: deps.local_mesh,
             lifecycle_rx,
@@ -688,6 +552,9 @@ impl<I: IngressPort> MeshSentinel<I> {
             audio_tx,
             eclipse_tx,
             canary_tx,
+            vitals_tx,
+            archive_tx,
+            revocation_tx,
             session: RecordingSessionState::new(content_key_tx),
             clock: clock_handle.clone(),
             community_ids_rx,
@@ -852,10 +719,18 @@ impl<I: IngressPort> MeshSentinel<I> {
         self.session.content_key_tx_clone()
     }
 
-    /// DHT: StorageActor persisted a shard — announce as provider, and stage the
-    /// recording at any configured Stronghold custody peers (export-staging).
+    /// DHT: StorageActor persisted a shard — announce as provider, and forward
+    /// to `ArchiveCoordinator` to stage at any configured Stronghold custody
+    /// peers (export-staging). `send().await` (not `try_send`) so a single-shard
+    /// recording's lone staging directive is never dropped — deadlock-free
+    /// because StorageActor emits `commit_notify` via `try_send`.
     async fn handle_commit_notification(&mut self, recording_id: RecordingId) -> bool {
-        self.push_recording_to_archives(recording_id.clone()).await;
+        let _ = self
+            .archive_tx
+            .send(ArchiveCommand::StageRecording {
+                recording_id: recording_id.clone(),
+            })
+            .await;
         if let Err(e) = self
             .egress_tx
             .send(EgressCommand::AnnounceRecording(recording_id))
@@ -864,96 +739,6 @@ impl<I: IngressPort> MeshSentinel<I> {
             tracing::warn!("Failed to announce recording on DHT — egress channel closed: {e}");
         }
         false
-    }
-
-    /// Directed archive PUSH: stage a recording at the configured Stronghold
-    /// custody peers so it survives device seizure long enough to be exported.
-    /// Deduped per recording per session; idempotent on the Stronghold side.
-    async fn push_recording_to_archives(&mut self, recording_id: RecordingId) {
-        if self.config.network.archival_peers.is_empty() {
-            return;
-        }
-        if !self.archived_to_strongholds.insert(recording_id.clone()) {
-            return; // already staged this session
-        }
-        // Fetch this recording's own envelopes (same query the retrieval
-        // responder uses; owner == self so the ownership guard passes).
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if self
-            .storage_tx
-            .send(StorageCommand::Retrieval {
-                recording_id: recording_id.clone(),
-                owner_did: Some(self.identity.did.clone()),
-                reply_to: reply_tx,
-            })
-            .await
-            .is_err()
-        {
-            return;
-        }
-        let Ok(envelopes) = reply_rx.await else {
-            return;
-        };
-        if envelopes.is_empty() {
-            return;
-        }
-        // One request per peer: a peer configured with a Stronghold DID gets an
-        // export grant sealed to it (escrow-for-export); a DID-less peer gets a
-        // custody-only push (grant = None). The grant is bound into the request
-        // signature, so each peer's request is built and signed individually.
-        for peer in &self.config.network.archival_peers {
-            // The push target is the peer id from the dial multiaddr's
-            // `/p2p/<id>` tail (the node already dials the full address at
-            // startup, so it is a connected peer). No peer id ⇒ not a directed
-            // target; skip it.
-            let Some(peer_id) = peer.peer_id() else {
-                tracing::warn!(
-                    address = %peer.address,
-                    "Archive: archival peer address has no /p2p/<peer-id>; skipping push"
-                );
-                continue;
-            };
-            let grant = peer.stronghold_did.as_ref().and_then(|did| {
-                crate::actors::archive_grant::mint_export_grant(&self.identity, &recording_id, did)
-            });
-            let request = build_archive_request_with_grant(
-                &self.identity,
-                recording_id.clone(),
-                envelopes.clone(),
-                grant,
-            );
-            let target = MeshAddress::new(peer_id);
-            let _ = self
-                .egress_tx
-                .send(EgressCommand::PushArchive { target, request })
-                .await;
-        }
-    }
-
-    /// A custody receipt arrived from a Stronghold. Verify its self-signature and
-    /// record the replica + its `held_until` deadline against the recording.
-    fn handle_archive_receipt(&mut self, receipt: ArchiveReceipt) {
-        if !verify_archive_receipt(&receipt) {
-            tracing::warn!("Archive: ignoring unverifiable custody receipt");
-            return;
-        }
-        let ArchiveReceipt::Stored {
-            recording_id,
-            replica_did,
-            held_until,
-            ..
-        } = receipt
-        else {
-            return; // unreachable: only Stored verifies
-        };
-        let entry = self.custody.entry(recording_id.clone()).or_default();
-        entry.insert(replica_did, held_until);
-        tracing::info!(
-            recording = %recording_id,
-            replicas = entry.len(),
-            target = self.config.network.target_replica_count,
-            "Archive: custody confirmed at a Stronghold"
-        );
     }
 
     /// DHT: PlaybackCoordinator needs a missing shard — find providers.
@@ -1047,7 +832,10 @@ impl<I: IngressPort> MeshSentinel<I> {
                 false
             }
             NetworkEvent::ArchiveReceiptReceived { from: _, receipt } => {
-                self.handle_archive_receipt(receipt);
+                let _ = self
+                    .archive_tx
+                    .send(ArchiveCommand::ReceiptReceived { receipt })
+                    .await;
                 false
             }
             NetworkEvent::ShardResponseReceived { origin, envelopes } => {
@@ -1091,103 +879,19 @@ impl<I: IngressPort> MeshSentinel<I> {
         }
 
         if topic.as_str() == self.config.network.control_topic.as_str() {
-            self.handle_control_message(origin, &data);
+            // Inbound heartbeat → VitalsActor (drop-tolerant presence signal).
+            let _ = self
+                .vitals_tx
+                .try_send(VitalsCommand::InboundHeartbeat { origin, data });
         } else if topic.as_str() == self.config.network.revocation_topic.as_str() {
-            self.handle_revocation(origin, &data).await;
+            // Inbound revocation token → RevocationActor (no-drop: send().await).
+            let _ = self
+                .revocation_tx
+                .send(RevocationCommand::InboundToken { origin, data })
+                .await;
         } else {
             self.handle_data_chunk(origin, topic, data);
         }
-    }
-
-    /// Merge the live registry-derived community keyset (from the watch)
-    /// with this sentinel's static `extra_community_ids` (test seeds /
-    /// integration overrides). Delegates to `mesh_policy::current_community_ids`.
-    fn current_community_ids(&self) -> Vec<phalanx_proto::community::CommunityId> {
-        mesh_policy::current_community_ids(&self.community_ids_rx, &self.extra_community_ids)
-    }
-
-    /// Heartbeat receiver: decrypt with each held community key, then
-    /// apply strict-binding origin check.
-    ///
-    /// **Encryption gating**: heartbeats are encrypted per-community with
-    /// `blake3::derive_key("phalanx.heartbeat.v1.community", &community_id)`
-    /// (canary alert pattern). A node not in any community holds no keys
-    /// and silently drops every inbound heartbeat — Tier 2 Shield Wall,
-    /// silent canary, and eclipse fingerprinting all degrade gracefully.
-    ///
-    /// **Strict-binding policy**: a heartbeat is only accepted if the
-    /// decrypted body's claimed sender equals the libp2p propagation
-    /// source. Heartbeats therefore propagate exactly one gossipsub hop.
-    /// Deliberate: heartbeats are local-presence signals, and the
-    /// receive-side consumers (Tier 2 spectral consistency, peer
-    /// staleness, eclipse fingerprinting) all depend on direct-neighbor
-    /// observation that a multi-hop forwarded claim can't substantiate.
-    fn handle_control_message(&mut self, origin: MeshAddress, data: &[u8]) {
-        // Min frame: 24-byte XChaCha20 nonce + 16-byte Poly1305 tag.
-        if data.len() < 40 {
-            return;
-        }
-        let (nonce, ciphertext) = data.split_at(24);
-
-        // Live-snapshot the keyset (registry watch + static extras). Reads
-        // current state per inbound message, so a community dissolved at
-        // runtime stops being decryptable on the next heartbeat.
-        for cid in &self.current_community_ids() {
-            let key = SymmetricKey::from_bytes(blake3::derive_key(
-                "phalanx.heartbeat.v1.community",
-                &cid.0,
-            ));
-            let Ok(plaintext) =
-                phalanx_forensics::cryptography::decrypt_bytes(&key, nonce, ciphertext)
-            else {
-                // Wrong key for this ciphertext — try the next community.
-                // Poly1305 tag mismatch is the fast-fail path; not an attack signal.
-                continue;
-            };
-            let Ok(msg) =
-                phalanx_forensics::gate::unmarshal::<ControlMessage>(&plaintext, "control_message")
-            else {
-                // Decrypted but malformed — log once. A successful decryption
-                // identifies the community, so trying further keys is redundant.
-                tracing::warn!(
-                    target: "phalanx::shield_wall",
-                    "Heartbeat decrypted but failed to deserialize"
-                );
-                return;
-            };
-            if msg.sender != origin {
-                tracing::warn!(
-                    target: "phalanx::shield_wall",
-                    event = "control_message_origin_mismatch",
-                    claimed = %msg.sender,
-                    origin = %origin,
-                    "Heartbeat sender != propagation origin — dropping"
-                );
-                // Do NOT record a Trust offense on `origin` here. Honest
-                // relays forward adversary-authored spoofs; punishing the
-                // relay lets attackers frame any peer in the mesh.
-                return;
-            }
-            let peer_id_for_spectral = origin.clone();
-            self.health_tracker.register_activity(msg);
-
-            // Shield Wall: evaluate spectral consistency.
-            if let Some(residual) = self.health_tracker.evaluate_spectral(&peer_id_for_spectral) {
-                if residual > self.health_tracker.spectral_anomaly_threshold() {
-                    self.system_governor
-                        .record_spectral_anomaly(&peer_id_for_spectral.to_string(), residual);
-                    tracing::warn!(
-                        target: "phalanx::shield_wall",
-                        peer = %peer_id_for_spectral,
-                        residual = %residual,
-                        "SPECTRAL_ANOMALY_DETECTED"
-                    );
-                }
-            }
-            return;
-        }
-        // No held community key decrypts — heartbeat is from a community
-        // we're not in, or unrelated traffic on the topic. Silent drop.
     }
 
     #[allow(clippy::arithmetic_side_effects)] // Memory pressure arithmetic.
@@ -1215,68 +919,6 @@ impl<I: IngressPort> MeshSentinel<I> {
             self.system_governor
                 .record_memory_pressure(self.config.network.max_chunk_size_bytes * 200);
             tracing::warn!("Ingestion channel full, dropping chunk.");
-        }
-    }
-
-    /// Cryptographic Forgetting: process an inbound revocation token from gossipsub.
-    async fn handle_revocation(&mut self, origin: MeshAddress, data: &[u8]) {
-        // 1. Deserialize
-        let token: phalanx_proto::revocation::RevocationToken =
-            match phalanx_forensics::gate::unmarshal_checked(data, "revocation_token") {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::warn!(peer = %origin, error = %e, "Malformed revocation token");
-                    return;
-                }
-            };
-
-        // 2. Verify self-contained signature
-        if let Err(e) = phalanx_forensics::revocation::verify_revocation_token(&token) {
-            tracing::warn!(
-                peer = %origin,
-                recording = %token.recording_id,
-                error = %e,
-                "Invalid revocation token rejected"
-            );
-            return;
-        }
-
-        // 3. Forward to StorageActor for authorization and execution
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        let recording_id = token.recording_id.clone();
-        if self
-            .storage_tx
-            .send(StorageCommand::Revoke {
-                token: token.clone(),
-                reply_to: reply_tx,
-            })
-            .await
-            .is_err()
-        {
-            tracing::error!("Storage channel closed — cannot process revocation");
-            return;
-        }
-
-        match reply_rx.await {
-            Ok(Ok(())) => {
-                tracing::info!(recording = %recording_id, "Revocation applied — propagating");
-                // 4. Epidemic propagation: republish to gossipsub
-                let _ = self
-                    .egress_tx
-                    .send(EgressCommand::PublishRevocation(token))
-                    .await;
-                // 5. Withdraw local DHT provider records
-                let _ = self
-                    .egress_tx
-                    .send(EgressCommand::WithdrawProvider(recording_id))
-                    .await;
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(recording = %recording_id, error = %e, "Revocation rejected");
-            }
-            Err(_) => {
-                tracing::error!("Storage reply channel dropped during revocation");
-            }
         }
     }
 
