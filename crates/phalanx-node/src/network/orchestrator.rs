@@ -6,8 +6,27 @@ use phalanx_proto::network::TransportError;
 use phalanx_proto::prelude::PhalanxIdentity;
 use phalanx_transport::prelude::*;
 
-use crate::config::NodeConfig;
+use crate::config::{NetworkConfig, NodeConfig};
 use crate::persistence::kademlia::RedbStore;
+
+/// Gossipsub topics the node subscribes to at startup — one per message class
+/// the node handles inbound: media → `IngestionActor`, control (heartbeats) →
+/// `VitalsActor`, revocation (Cryptographic Forgetting) → `RevocationActor`.
+///
+/// Deliberately absent: the generic mesh topic (`MeshTopic::mesh()`) that
+/// canary alerts are published on. No inbound alert handler exists yet, and
+/// `MeshSentinel::handle_data_received` routes unrecognized topics into
+/// evidence ingestion — subscribing before the handler exists would misroute
+/// encrypted alerts. Add the topic here together with its handler.
+#[must_use]
+pub fn subscribe_topics(network: &NetworkConfig) -> Vec<String> {
+    vec![
+        network.video_topic.to_string(),
+        network.audio_topic.to_string(),
+        network.control_topic.to_string(),
+        network.revocation_topic.to_string(),
+    ]
+}
 
 /// Build the complete transport stack for a Phalanx node.
 ///
@@ -32,11 +51,7 @@ pub fn setup_transport(
         // (the transport rejects pushes to unconnected peers). This is what
         // makes the single-Stronghold deployment turnkey from one config block.
         bootstrap_peers: config.network.dial_peers(),
-        subscribe_topics: vec![
-            config.network.video_topic.to_string(),
-            config.network.audio_topic.to_string(),
-            config.network.control_topic.to_string(),
-        ],
+        subscribe_topics: subscribe_topics(&config.network),
         protocol_version: config.network.protocol_version.clone(),
         max_chunk_size_bytes: config.network.max_chunk_size_bytes,
         psk,
@@ -46,4 +61,35 @@ pub fn setup_transport(
     };
 
     build_mesh_transport_with_store(identity, persistent_store, &transport_config)
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+    use phalanx_proto::prelude::MeshTopic;
+
+    #[test]
+    fn subscribe_list_covers_every_inbound_message_class() {
+        // Regression: the revocation topic was once published-to but absent
+        // from every default subscribe list, so broadcast revocation tokens
+        // ("deletion propagates across the mesh") went nowhere.
+        let topics = subscribe_topics(&NetworkConfig::default());
+        for class in [
+            MeshTopic::video(),
+            MeshTopic::audio(),
+            MeshTopic::control(),
+            MeshTopic::revocation(),
+        ] {
+            assert!(
+                topics.contains(&class.to_string()),
+                "subscribe list missing {class}"
+            );
+        }
+    }
 }

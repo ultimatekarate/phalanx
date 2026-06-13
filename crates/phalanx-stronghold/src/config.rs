@@ -90,10 +90,25 @@ impl StorageConfig {
 pub struct NetworkConfig {
     pub listen_addresses: Vec<String>,
     pub bootstrap_peers: Vec<String>,
-    #[serde(skip)]
+    /// Gossipsub media topics. Not operator-settable (`serde(skip)`): the mesh
+    /// runs a small fixed set of well-known topics by design, so retargeting
+    /// them per deployment is the wrong knob. The explicit `default = …` is
+    /// load-bearing — serde fills skipped fields from the *field type's*
+    /// default, and `MeshTopic::default()` is "/phalanx/default", so without
+    /// it the mere presence of a config file silently disconnected the
+    /// Stronghold from the media mesh.
+    #[serde(skip, default = "default_video_topic")]
     pub video_topic: MeshTopic,
-    #[serde(skip)]
+    #[serde(skip, default = "default_audio_topic")]
     pub audio_topic: MeshTopic,
+}
+
+fn default_video_topic() -> MeshTopic {
+    MeshTopic::video()
+}
+
+fn default_audio_topic() -> MeshTopic {
+    MeshTopic::audio()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -125,8 +140,8 @@ impl Default for StrongholdConfig {
             network: NetworkConfig {
                 listen_addresses: vec!["/ip4/0.0.0.0/tcp/0".to_string()],
                 bootstrap_peers: vec![],
-                video_topic: MeshTopic::video(),
-                audio_topic: MeshTopic::new("audio/1.0.0"),
+                video_topic: default_video_topic(),
+                audio_topic: default_audio_topic(),
             },
             corroboration: CorroborationConfig {
                 min_overlap_ms: 5000,
@@ -135,5 +150,47 @@ impl Default for StrongholdConfig {
                 c2pa_key_path: None,
             },
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+
+    /// Regression: with bare `#[serde(skip)]`, parsing any config file filled
+    /// the topic fields from `MeshTopic::default()` ("/phalanx/default") —
+    /// the mere presence of a stronghold.toml silently changed what the
+    /// Stronghold subscribed to.
+    #[test]
+    fn config_file_presence_does_not_change_topics() {
+        let parsed: StrongholdConfig = toml::from_str(
+            r#"
+            [storage]
+            vault_path = "./stronghold-data"
+            max_storage_bytes = 1000000
+            max_per_community_bytes = 1000000
+
+            [network]
+            listen_addresses = ["/ip4/0.0.0.0/tcp/4001"]
+            bootstrap_peers = []
+
+            [corroboration]
+            min_overlap_ms = 5000
+            divergence_alpha = 0.05
+            "#,
+        )
+        .expect("TOML parses");
+
+        let compiled = StrongholdConfig::default();
+        assert_eq!(parsed.network.video_topic, compiled.network.video_topic);
+        assert_eq!(parsed.network.audio_topic, compiled.network.audio_topic);
+        assert_eq!(parsed.network.video_topic, MeshTopic::video());
+        assert_eq!(parsed.network.audio_topic, MeshTopic::audio());
     }
 }

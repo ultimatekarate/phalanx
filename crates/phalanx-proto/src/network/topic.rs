@@ -26,6 +26,15 @@ impl MeshTopic {
         Self::new("video/1.0.0")
     }
 
+    pub fn audio() -> Self {
+        Self::new("audio/1.0.0")
+    }
+
+    /// Heartbeat/presence control topic.
+    pub fn control() -> Self {
+        Self::new("control/1.0.0")
+    }
+
     pub fn revocation() -> Self {
         Self::new("revocation/1.0.0")
     }
@@ -132,6 +141,8 @@ mod tests {
         // Regression guard: these strings are wire-visible. Changing them
         // breaks compatibility with every peer on the mesh.
         assert_eq!(MeshTopic::video().as_str(), "/phalanx/video/1.0.0");
+        assert_eq!(MeshTopic::audio().as_str(), "/phalanx/audio/1.0.0");
+        assert_eq!(MeshTopic::control().as_str(), "/phalanx/control/1.0.0");
         assert_eq!(
             MeshTopic::revocation().as_str(),
             "/phalanx/revocation/1.0.0"

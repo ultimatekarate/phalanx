@@ -32,8 +32,16 @@ pub struct NetworkConfig {
     #[serde(default = "default_protocol_version")]
     pub protocol_version: String,
     pub max_chunk_size_bytes: usize,
+    /// Gossipsub media/control topics. Defaults are the canonical well-known
+    /// topics from `MeshTopic`'s constructors — the same values the Stronghold
+    /// compiles in, so a default node and a default Stronghold share a mesh.
+    /// Gossipsub topics are exact-match strings: override these only with the
+    /// same value on every peer.
+    #[serde(default = "default_video_topic")]
     pub video_topic: MeshTopic,
+    #[serde(default = "default_audio_topic")]
     pub audio_topic: MeshTopic,
+    #[serde(default = "default_control_topic")]
     pub control_topic: MeshTopic,
     pub cleanup_interval_secs: u64,
     #[serde(default)]
@@ -232,15 +240,24 @@ fn default_listen_addresses() -> Vec<String> {
 fn default_revocation_topic() -> MeshTopic {
     MeshTopic::revocation()
 }
+fn default_video_topic() -> MeshTopic {
+    MeshTopic::video()
+}
+fn default_audio_topic() -> MeshTopic {
+    MeshTopic::audio()
+}
+fn default_control_topic() -> MeshTopic {
+    MeshTopic::control()
+}
 
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             protocol_version: default_protocol_version(),
             max_chunk_size_bytes: 8192,
-            video_topic: "/phalanx/video".into(),
-            audio_topic: "/phalanx/audio".into(),
-            control_topic: "/phalanx/control".into(),
+            video_topic: default_video_topic(),
+            audio_topic: default_audio_topic(),
+            control_topic: default_control_topic(),
             cleanup_interval_secs: 60,
             bootstrap_peers: vec![],
             guardian_service_key: default_service_key(),
@@ -410,6 +427,34 @@ mod validation_tests {
                 "/ip4/2.2.2.2/tcp/2/p2p/12D3KooWA".to_string(),
             ]
         );
+    }
+
+    // ── Topic-default alignment (gossipsub topics are exact-match strings) ──
+
+    #[test]
+    fn default_topics_are_the_canonical_proto_constructors() {
+        // Regression: these defaults were once raw strings ("/phalanx/video")
+        // that disagreed with the Stronghold's "/phalanx/video/1.0.0", so a
+        // default node and a default Stronghold shared no media topic.
+        let net = NetworkConfig::default();
+        assert_eq!(net.video_topic, MeshTopic::video());
+        assert_eq!(net.audio_topic, MeshTopic::audio());
+        assert_eq!(net.control_topic, MeshTopic::control());
+        assert_eq!(net.revocation_topic, MeshTopic::revocation());
+    }
+
+    #[test]
+    fn topics_omitted_from_config_file_deserialize_to_canonical_defaults() {
+        let net: NetworkConfig = toml::from_str(
+            r#"
+            max_chunk_size_bytes = 8192
+            cleanup_interval_secs = 60
+            "#,
+        )
+        .expect("TOML parses");
+        assert_eq!(net.video_topic, MeshTopic::video());
+        assert_eq!(net.audio_topic, MeshTopic::audio());
+        assert_eq!(net.control_topic, MeshTopic::control());
     }
 
     // The purpose of `HardwareConfig::validated()` is to repair values that
