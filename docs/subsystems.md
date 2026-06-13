@@ -1,5 +1,7 @@
 # Phalanx Subsystem Map
 
+> New to Phalanx? Start with [architecture.md](architecture.md) for orientation — this file is the per-subsystem code index.
+
 Phalanx is built from 34 subsystems. Each one does exactly one thing. The [Linguistic Code Model](../linguistic-code-model.md) prevents them from growing into each other — crate boundaries make entanglement a compiler error, not a code review finding. This document maps every subsystem, what it does, and where it lives.
 
 ---

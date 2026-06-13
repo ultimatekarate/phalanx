@@ -4951,6 +4951,7 @@ dependencies = [
  "eframe",
  "oneshot",
  "phalanx-forensics",
+ "phalanx-node",
  "phalanx-proto",
  "phalanx-test-fixtures",
  "phalanx-transport",

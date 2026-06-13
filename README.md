@@ -2,82 +2,56 @@
 
 [![CI](https://github.com/ultimatekarate/phalanx/actions/workflows/ci.yml/badge.svg)](https://github.com/ultimatekarate/phalanx/actions/workflows/ci.yml)
 
-Phalanx is a mobile app that records video, proves it hasn't been tampered with, and distributes it so it can't be destroyed — without trusting any server, any network, or any other person. That problem touches cryptography, distributed systems, control theory, signal processing, and adversarial security simultaneously. You can't drop any of them and still solve it. Every subsystem exists because the problem required it. Nothing here is for show.
+Phalanx is a mobile app that records video, proves it hasn't been tampered with, and distributes it so that destroying the device doesn't destroy the footage — without trusting any server, any network, or any other person. That problem touches cryptography, distributed systems, control theory, signal processing, and adversarial security simultaneously. You can't drop any of them and still solve it. Every subsystem exists because the problem required it. Nothing here is for show.
+
+> **Status (June 2026):** the Rust engine — capture forensics, encryption, signing, fountain-coding, mesh transport, vault, communities, recovery — is real and tested. A functional Android app builds from source (development build); the Stronghold custody server works, including C2PA export. There is no iOS app, no app-store presence, and no field deployment yet. License: TBD. The candid inventory of what exists is [docs/stewardship.md](docs/stewardship.md); the case for adoption is [PITCH.md](PITCH.md).
+
+## Where to start
+
+| You are | Read |
+| --- | --- |
+| Deciding whether to adopt or fund this | [PITCH.md](PITCH.md), then [docs/stewardship.md](docs/stewardship.md) |
+| Evaluating the technology | [docs/architecture.md](docs/architecture.md) → [docs/network.md](docs/network.md) → [docs/trust.md](docs/trust.md) |
+| Deploying it for an organization | [docs/operations.md](docs/operations.md) |
+| Auditing security | [docs/threat-model.md](docs/threat-model.md) + [docs/trust.md](docs/trust.md) + [docs/network.md](docs/network.md) |
+| Contributing or inheriting the code | [CONTRIBUTING.md](CONTRIBUTING.md), [linguistic-code-model.md](linguistic-code-model.md), [docs/subsystems.md](docs/subsystems.md), [docs/actors.md](docs/actors.md) |
 
 ## How It Works
 
-Phalanx is deliberately designed to look boring. When you open it, it will look like a basic recording application. It functions exactly as you would expect it to, except it is much more robust and secure. The moment you hit record your data is being encrypted, digitally signed, sharded, and stored in a distributed file system. You are the only person who decides who gets to see it. You don't have to worry if your device is seized or destroyed. You will always be able to recover your data — BIP39 mnemonics aren't just for cryptobros anymore. Phalanx also creates a digital chain of custody. It allows you to trust that the video you are seeing is true, not an AI deep fake, without trusting the person who recorded it.
-
-## Background
-
-This started as a way to use AI tools to learn Rust and it rapidly got out of hand. This is also my first mobile application. I cut my teeth learning QBASIC and writing C++ in notepad — not because I'm especially hardcore, but because it was what was available to me at the time. I've spent the past few years writing Python code professionally. I wouldn't describe myself as a 10x engineer. Truth be told, I am jealous of those that can whip through code at lightning speed with VIM keybindings. I wish I could but I've broken, dislocated, or sprained every single one of my fingers — it's the price you pay to be a middle blocker in volleyball. I call my right index finger my "weather finger." My bottleneck has never been ideas. It's always been syntax and keystrokes. Phalanx is 100% my ideas and roughly 10% of my keystrokes.
-
-I'm not an expert in any of the fields you see in this repo (well, I do have a PhD in numerical analysis so there's that) but I don't have to be because I can RTFM. The nerds of yore knew that there would come a time when someone else would need to invoke the deep magic. That's why they wrote it down. There are some genuinely novel ideas in this code base, but for the most part it is an act of synthesis that is heavily influenced by Grace Hopper and Margaret Hamilton.
-
-Grace Hopper believed that the language should be the logic. She dared to believe that the machines should meet the humans where they are — that's why we have compilers. Margaret Hamilton, the woman who coined the phrase "software engineering", believed that software deserved the same level of rigor as the hardware that it ran on. Both were dismissed and they built the thing anyway — and they were right to do it. I'm not Grace Hopper. I'm not Margaret Hamilton. I'm just someone that had an idea that they wanted to try out — and now the world has Phalanx. Use it or don't. Hopefully, at least one person will find it useful.
+Phalanx is deliberately designed to look boring. When you open it, it looks like a basic recording application. The moment you hit record, every frame is checked against the physics of a real camera sensor, encrypted, digitally signed, fountain-coded into redundant fragments, and broadcast to peers — while recording is still in progress. You are the only person who decides who gets to see it. If your device is seized or destroyed, the fragments that already left it survive, and your 12-word recovery phrase regenerates your identity and the keys to every recording you ever made — BIP39 mnemonics aren't just for cryptobros anymore. Phalanx also creates a digital chain of custody: it lets a court trust that a video came from a real camera, without trusting the person who recorded it. The full story, told plainly, is [PITCH.md](PITCH.md); the technical version is [docs/architecture.md](docs/architecture.md).
 
 ## Capabilities
 
-- **Real-time capture-to-mesh pipeline** — The moment you hit record, every frame is analyzed for authenticity, encrypted, split into redundant shards, and distributed across the mesh. The pipeline adapts frame rate to device load so it never drops evidence under pressure
-- **Ad hoc mesh network** — Devices form a self-organizing peer-to-peer network over QUIC, Bluetooth, and WiFi Direct with no infrastructure dependency
+- **Real-time capture-to-mesh pipeline** — The moment you hit record, every frame is analyzed for authenticity, encrypted, split into redundant shards, and distributed across the mesh. The pipeline adapts frame rate to device load, shedding capture rate rather than captured evidence
+- **Ad hoc mesh network** — Devices form a self-organizing peer-to-peer network over QUIC and TCP: zero-config on a shared LAN (mDNS), configured bootstrap peers across the internet. A Bluetooth/WiFi-Direct integration seam exists; the radios themselves are not yet implemented ([docs/network.md §6](docs/network.md#6-local-mesh-ble--wifi-direct))
 - **Trusted communities** — Groups of people who vouch for each other. A quorum of existing members must approve new members. Communities expire automatically and leave no trace when dissolved
 - **Selective sharing** — You control who can view your recordings. Access is granted per-recipient through key exchange — no central server decides who sees what. Data is encrypted separately in transit and at rest
-- **Fountain-coded sharding** — Recordings are split into redundant pieces so that any sufficient subset can reconstruct the original. Pieces can arrive in any order — formally proven in Lean 4
-- **Cryptographic forgetting** — When you delete a recording, it is gone forever. The encryption key is destroyed before the data is removed — if the device dies mid-deletion, the key is already gone and the ciphertext is permanently unreadable. Deletion propagates across the entire mesh
-- **Silent Canary** — A dead man's switch for your community. If members go dark, encrypted alerts notify the group about which peers disappeared and which recordings may be at risk. A seized device cannot reveal the community roster
+- **Fountain-coded sharding** — Recordings are split into redundant pieces so that any sufficient subset can reconstruct the original. That reconstruction is order-independent — formally proven in Lean 4
+- **Cryptographic forgetting** — When you delete a recording, it is gone forever. The encryption key is destroyed before the data is removed — if the device dies mid-deletion, the key is already gone and the ciphertext is permanently unreadable. Deletion is designed to propagate across the mesh (see [docs/network.md §3](docs/network.md#3-topics-who-publishes-who-listens) for a current default-config caveat)
+- **Silent Canary** — A dead man's switch for your community. If members go dark, the node identifies locally which peers disappeared and which recordings may be at risk; the encrypted alert it broadcasts is deliberately content-free. A seized device cannot reveal the community roster
 - **Adaptive resource management** — The system continuously monitors CPU, memory, bandwidth, storage, and battery. When any resource is strained, it gracefully reduces throughput rather than crashing or dropping data
-- **Byzantine peer detection** — Nodes that lie about their state are mathematically detectable. The system's resource signals are coupled in a way that cannot be independently faked — dishonest claims are internally inconsistent
-- **Proven stability** — The adaptive control system is formally proven to remain bounded under adversarial conditions. No combination of malicious input can drive a node into an unstable state
+- **Byzantine peer detection** — Nodes that lie about their state are exposed by behavioral consistency checks: the system's resource signals are coupled, so dishonest claims contradict observed behavior
+- **Certified stability** — The adaptive control system's boundedness is numerically certified by an SDP-derived Lyapunov analysis ([docs/contractivity-proof.md](docs/contractivity-proof.md) — a strong computational artifact, not a machine-checked proof)
 - **Compile-time evidence integrity** — Evidence passes through verified → sealed states enforced by the type system. Code that skips a verification step does not compile
 - **Formal verification** — Lean 4 proof that evidence reconstruction produces identical output regardless of the order pieces arrive
 
 ## Security Posture
 
-Phalanx assumes zero trust at every boundary. No peer, device, or network path is trusted by default.
-
-- **Every envelope is signed and verified** — evidence carries Ed25519 signatures from capture through reassembly. Nothing is accepted on claim alone.
-- **Every payload is encrypted in transit and at rest** — two independent XChaCha20-Poly1305 layers with distinct keys
-- **Every peer earns trust** — reputation scoring tracks invalid signatures, quota violations, and protocol deviations. Misbehaving peers are demoted or blocked.
-- **Byzantine actors are mathematically detectable** — fabricated state is exposed via Jacobian analysis of the coupled integral system
-- **Key material is ephemeral where possible** — ECDH grants use per-session derivation, stack intermediates are zeroized, community keys dissolve on expiration
-- **The compiler enforces the posture** — workspace deny lints eliminate `unwrap`, `panic`, unchecked indexing, arithmetic overflow, and lock-holding-across-await at compile time. These are not conventions — they are build failures.
+Phalanx assumes zero trust at every boundary: every envelope is Ed25519-signed and re-verified by every receiver, every payload is encrypted in transit and at rest, and trust is earned locally per-peer and never gossiped. The full identity-and-trust model is [docs/trust.md](docs/trust.md); the attack-by-attack catalog is [docs/threat-model.md](docs/threat-model.md).
 
 ## Emergent Properties
 
-The adaptive control system produces behaviors that were never explicitly programmed:
-
-- **Self-healing** — There is no recovery logic. When load drops, the system naturally returns to full throughput on its own. Recovery is a side effect of how pressure decays over time. 
-- **Natural load shedding order** — Under stress, untrusted peers are shed first, then bandwidth-heavy work, then memory, then storage, then CPU. Nobody wrote this priority list — it falls out of how the resource signals are coupled to each other.
-- **Sybil resistance with diminishing returns** — Each additional fake peer an attacker adds is less effective than the last. Overwhelming the system requires flooding bandwidth, not just creating identities.
-- **Anticipatory memory pressure** — When storage backs up, memory pressure rises even before anything new is allocated. The system senses that writes are queuing and preemptively constrains upstream work.
-- **Thermal throttling as a natural consequence** — Heat enters the same pressure system that governs everything else. A phone that overheats throttles itself the same way it throttles a network attack.
-- **Load balancing without a balancer** — When a node is under stress, it processes incoming work more slowly. Peers observe the latency, score it lower, and naturally route traffic toward healthier nodes. No node ever announces that it is overloaded — the network reorganizes around the pressure.
-- **Honesty is cheap, dishonesty is expensive** — Sensor fingerprints are verified before encryption on the capture path. A real camera always passes. A forged frame must carry fabricated metrics that survive re-verification from the actual pixels at every downstream node. The cost of forgery compounds with every recipient.
-- **Rejections regulate throughput** — When verification gates reject incoming data, the rejection itself registers as resource pressure. A burst of bad traffic doesn't just get filtered — it raises system stress, which lowers capture rate, which reduces the volume of new work. The gates are simultaneously filters and throttle valves.
-- **Smooth Byzantine ejection** — Dishonest peers are not kicked after a fixed number of violations. Anomaly signals accumulate gradually in a per-peer reputation score that decays over time. A borderline-suspicious peer slowly loses standing; a blatantly dishonest one is isolated quickly. The transition is continuous, not a cliff — and reversible if the peer starts behaving honestly.
-- **Peer loss identifies at-risk data** — When community members go dark, the system automatically knows which recordings those peers contributed to. That set is implicitly the under-replicated data. No separate durability monitor exists — failure detection doubles as a replication priority signal.
+The adaptive control system produces behaviors that were never explicitly programmed — self-healing recovery as pressure decays, load shedding that sacrifices untrusted peers first, Sybil resistance with diminishing returns for each fake identity. The full list, with mechanisms, is [docs/homeostasis.md](docs/homeostasis.md).
 
 ## Architecture
 
-The codebase is governed by a [Linguistic Code Model](linguistic-code-model.md). The system is composed of [35 subsystems](docs/subsystems.md) spanning evidence lifecycle, cryptography, trust, adaptive control, corroboration, and infrastructure.
-
-| Crate | Role | Description |
-| --- | --- | --- |
-| `phalanx-proto` | Dictionary (Nouns) | Data types, trait contracts, error types. No IO. |
-| `phalanx-forensics` | Laboratory (Verbs) | Verification, validation, state machines (incl. the `ForensicUnit` typestate), crypto. No `tokio::fs`. |
-| `phalanx-transport` | Post Office (Prepositions) | Network adapters, routing, peer mapping, wire codecs. |
-| `phalanx-node` | Sentence | Actors, persistence, orchestration. Environment-dependent. |
-| `phalanx-lens` | Optics | Camera and media capture pipeline. |
-| `phalanx-ffi` | FFI Bridge | C ABI surface for iOS and Android. |
-| `phalanx-stronghold` | Binary | Wall powered at-rest encrypted storage for witness envelopes. |
-| `phalanx-sim` | Simulator | Network simulation and adversarial testing. |
-| `phalanx-test-fixtures` | Phrasebook | Synthetic test data satisfying validation preconditions. |
+The codebase is governed by a [Linguistic Code Model](linguistic-code-model.md) and composed of [34 subsystems](docs/subsystems.md) spanning evidence lifecycle, cryptography, trust, adaptive control, corroboration, and infrastructure. The crate-by-crate map, node taxonomy, and the life of a frame from sensor to custody are in [docs/architecture.md](docs/architecture.md).
 
 ## Contributing
 
 Phalanx is conceptually dense. I have gone to great lengths to ensure that you do not need to understand all of it to contribute to any of it. If you are interested, please read [the friendly manual](CONTRIBUTING.md). There you will find the code base broken down by technical specialty with a list of files and a brief summary of what each file does.
 
-I'm not an expert in cryptography, control theory, networking, or any of the other fields represented here. I RTFM, implemented what made sense to me, and tried to get it right. If you are an expert and something I did gives you pause — a non-standard key derivation, an assumption that doesn't hold, an edge case I didn't consider — that is the most valuable contribution you can make. You don't need to fix it. Just telling me what's wrong and why is enough— I love to learn new ideas. Or you could fix it, that's kind of the point of open source, right?
+I'm not an expert in cryptography, control theory, networking, or any of the other fields represented here. I RTFM, implemented what made sense to me, and tried to get it right. If you are an expert and something I did gives you pause — a non-standard key derivation, an assumption that doesn't hold, an edge case I didn't consider — that is the most valuable contribution you can make. You don't need to fix it. Just telling me what's wrong and why is enough — I love to learn new ideas. Or you could fix it, that's kind of the point of open source, right?
 
 ---
 
@@ -191,4 +165,4 @@ The workspace enforces deny-level clippy lints across all crates — `unwrap_use
 
 ## License
 
-License: TBD. Phalanx will always be open source and free.
+License: TBD. Phalanx will always be open source and free. The decision path and constraints are tracked in [docs/stewardship.md](docs/stewardship.md).
