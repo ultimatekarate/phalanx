@@ -55,6 +55,13 @@ pub unsafe extern "C" fn phalanx_sign_ble_challenge(
     nonce_ptr: *const u8,
     out_signature: *mut u8,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. Every raw pointer is null-checked before
+    // use; `handle` is then read as `&*handle`, `challenger_did_ptr`/
+    // `nonce_ptr` are read via `from_raw_parts`/`copy_nonoverlapping` for
+    // the caller-declared lengths, and the 64-byte signature is written
+    // into `out_signature`, which the caller guarantees points to at
+    // least 64 writable bytes.
     unsafe {
         if handle.is_null()
             || challenger_did_ptr.is_null()
@@ -112,6 +119,11 @@ pub unsafe extern "C" fn phalanx_verify_ble_peer(
     our_nonce_ptr: *const u8,
     signature_ptr: *const u8,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. Every raw pointer is null-checked before
+    // use; `handle` is then read as `&*handle`, and `responder_did_ptr`/
+    // `our_nonce_ptr`/`signature_ptr` are read via `from_raw_parts`/
+    // `copy_nonoverlapping` for the caller-declared lengths.
     unsafe {
         if handle.is_null()
             || responder_did_ptr.is_null()

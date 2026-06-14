@@ -33,6 +33,11 @@ pub unsafe extern "C" fn phalanx_get_peers(
     handle: *const PhalanxHandle,
     out_json: *mut *mut c_char,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` is null-checked via `as_ref`;
+    // `out_json` is null-checked before the resulting C string is written
+    // through it, and the caller guarantees it points to writable
+    // `*mut c_char` storage.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -82,6 +87,9 @@ pub unsafe extern "C" fn phalanx_set_trust_level(
     did: *const c_char,
     level: i32,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` is null-checked via `as_ref`; `did`
+    // is read only as a caller-guaranteed NUL-terminated C string.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -134,6 +142,10 @@ pub unsafe extern "C" fn phalanx_assign_pet_name(
     did: *const c_char,
     name: *const c_char,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` is null-checked via `as_ref`;
+    // `did`/`name` are read only as caller-guaranteed NUL-terminated C
+    // strings.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -187,6 +199,9 @@ pub unsafe extern "C" fn phalanx_remove_peer(
     handle: *mut PhalanxHandle,
     did: *const c_char,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` is null-checked via `as_ref`; `did`
+    // is read only as a caller-guaranteed NUL-terminated C string.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();

@@ -37,6 +37,12 @@ pub unsafe extern "C" fn phalanx_compute_community_id(
     dids_len: usize,
     out_id: *mut u8,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `name_ptr`/`dids_ptr`/`out_id` are
+    // null-checked before use; `name_ptr` is read as a NUL-terminated C
+    // string, `dids_ptr` via `from_raw_parts` for the caller-declared
+    // `dids_len`, and the 32-byte id is written into `out_id`, which the
+    // caller guarantees points to a 32-byte writable buffer.
     unsafe {
         if name_ptr.is_null() || dids_ptr.is_null() || out_id.is_null() || dids_len == 0 {
             return PhalanxError::NullPointer.code();
@@ -107,6 +113,12 @@ pub unsafe extern "C" fn phalanx_sign_vouch(
     out_ptr: *mut *mut u8,
     out_len: *mut u32,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. Every raw pointer is null-checked before
+    // use; `handle` is read as `&PhalanxHandle`, `member_did_ptr` as a
+    // NUL-terminated C string, `community_id_ptr` as exactly 32 bytes, and
+    // the leaked buffer pointer/length are written through the
+    // caller-guaranteed writable `out_ptr`/`out_len`.
     unsafe {
         if handle.is_null()
             || member_did_ptr.is_null()
@@ -189,6 +201,12 @@ pub unsafe extern "C" fn phalanx_create_community(
     out_ptr: *mut *mut u8,
     out_len: *mut u32,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. Every raw pointer is null-checked before
+    // use; `name_ptr`/`stronghold_did_ptr` are read as NUL-terminated C
+    // strings, `members_ptr` via `from_raw_parts` for the caller-declared
+    // `members_len`, and the leaked buffer pointer/length are written
+    // through the caller-guaranteed writable `out_ptr`/`out_len`.
     unsafe {
         if name_ptr.is_null() || members_ptr.is_null() || out_ptr.is_null() || out_len.is_null() {
             return PhalanxError::NullPointer.code();
@@ -333,6 +351,14 @@ pub unsafe extern "C" fn phalanx_preview_vouch_request(
     out_buf: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle`/`bytes_ptr`/`out_len` are
+    // null-checked before use; `handle` is read as `&PhalanxHandle`,
+    // `bytes_ptr` via `from_raw_parts` for the caller-declared
+    // `bytes_len`. The two-call sizing protocol writes the required size
+    // through the caller-guaranteed writable `out_len`; `out_buf` is only
+    // written when non-null and the caller guarantees it points to at
+    // least `*out_len` writable bytes.
     unsafe {
         if handle.is_null() || bytes_ptr.is_null() || bytes_len == 0 || out_len.is_null() {
             return PhalanxError::NullPointer.code();
@@ -415,6 +441,14 @@ pub unsafe extern "C" fn phalanx_sign_vouch_request(
     out_buf: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle`/`bytes_ptr`/`out_len` are
+    // null-checked before use; `handle` is read as `&PhalanxHandle`,
+    // `bytes_ptr` via `from_raw_parts` for the caller-declared
+    // `bytes_len`. The two-call sizing protocol writes the required size
+    // through the caller-guaranteed writable `out_len`; `out_buf` is only
+    // written when non-null and the caller guarantees it points to at
+    // least `*out_len` writable bytes.
     unsafe {
         if handle.is_null() || bytes_ptr.is_null() || bytes_len == 0 || out_len.is_null() {
             return PhalanxError::NullPointer.code();
@@ -494,6 +528,11 @@ unsafe fn write_postcard_outcome<T: serde::Serialize>(
     out_buf: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
+    // SAFETY: the (FFI) callers of this internal helper uphold its own
+    // out-param contract: `out_len` is a writable `usize` pointer, and
+    // `out_buf` is either null (sizing call) or points to at least
+    // `*out_len` writable bytes. `out_len` is null-checked before any
+    // write and `out_buf` is written only when non-null.
     unsafe {
         if out_len.is_null() {
             return PhalanxError::NullPointer.code();
@@ -535,6 +574,14 @@ pub unsafe extern "C" fn phalanx_import_community(
     out_buf: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle`/`token_ptr`/`out_len` are
+    // null-checked before use; `handle` is read as `&PhalanxHandle`,
+    // `token_ptr` via `from_raw_parts` for the caller-declared
+    // `token_len`. The two-call sizing protocol writes the required size
+    // through the caller-guaranteed writable `out_len`; `out_buf` is only
+    // written when non-null and the caller guarantees it points to at
+    // least `*out_len` writable bytes.
     unsafe {
         if handle.is_null() || token_ptr.is_null() || token_len == 0 || out_len.is_null() {
             return PhalanxError::NullPointer.code();
@@ -603,6 +650,11 @@ pub unsafe extern "C" fn phalanx_set_recording_state(
     handle: *const PhalanxHandle,
     recording_id: *const c_char,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` is null-checked before being read
+    // as `&PhalanxHandle`; `recording_id` is read only as a
+    // caller-guaranteed NUL-terminated C string (or treated as the
+    // stop sentinel when null).
     unsafe {
         if handle.is_null() {
             return PhalanxError::NullPointer.code();
@@ -672,6 +724,13 @@ pub unsafe extern "C" fn phalanx_dissolve_community(
     out_buf: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle`/`community_id_ptr`/`out_len` are
+    // null-checked before use; `handle` is read as `&PhalanxHandle` and
+    // `community_id_ptr` as exactly 32 bytes. The two-call sizing protocol
+    // writes the required size through the caller-guaranteed writable
+    // `out_len`; `out_buf` is only written when non-null and the caller
+    // guarantees it points to at least `*out_len` writable bytes.
     unsafe {
         if handle.is_null() || community_id_ptr.is_null() || out_len.is_null() {
             return PhalanxError::NullPointer.code();
@@ -724,6 +783,12 @@ pub unsafe extern "C" fn phalanx_list_communities(
     out_buf: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle`/`out_len` are null-checked before
+    // use; `handle` is read as `&PhalanxHandle`. The two-call sizing
+    // protocol writes the required size through the caller-guaranteed
+    // writable `out_len`; `out_buf` is only written when non-null and the
+    // caller guarantees it points to at least `*out_len` writable bytes.
     unsafe {
         if handle.is_null() || out_len.is_null() {
             return PhalanxError::NullPointer.code();
@@ -765,6 +830,13 @@ pub unsafe extern "C" fn phalanx_get_community(
     out_buf: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle`/`community_id_ptr`/`out_len` are
+    // null-checked before use; `handle` is read as `&PhalanxHandle` and
+    // `community_id_ptr` as exactly 32 bytes. The two-call sizing protocol
+    // writes the required size through the caller-guaranteed writable
+    // `out_len`; `out_buf` is only written when non-null and the caller
+    // guarantees it points to at least `*out_len` writable bytes.
     unsafe {
         if handle.is_null() || community_id_ptr.is_null() || out_len.is_null() {
             return PhalanxError::NullPointer.code();
@@ -814,6 +886,13 @@ pub unsafe extern "C" fn phalanx_preview_community(
     out_buf: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `token_ptr`/`out_len` are null-checked
+    // before use; `token_ptr` is read via `from_raw_parts` for the
+    // caller-declared `token_len`. The two-call sizing protocol writes the
+    // required size through the caller-guaranteed writable `out_len`;
+    // `out_buf` is only written when non-null and the caller guarantees it
+    // points to at least `*out_len` writable bytes.
     unsafe {
         if token_ptr.is_null() || token_len == 0 || out_len.is_null() {
             return PhalanxError::NullPointer.code();
@@ -917,7 +996,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
     use phalanx_forensics::identity::{
-        assemble_community, sign_vouch, wrap_payload_version, CommunityAssemblyParams,
+        CommunityAssemblyParams, assemble_community, sign_vouch, wrap_payload_version,
     };
     use phalanx_proto::community::{
         CeremonyMember, Community, CommunityGrants, CommunityId, CommunityRoster,

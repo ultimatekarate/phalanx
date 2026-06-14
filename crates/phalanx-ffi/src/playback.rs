@@ -15,8 +15,8 @@ use crate::error::PhalanxError;
 use crate::handle::PhalanxHandle;
 use crate::logcat::phalanx_log;
 
-use phalanx_node::actors::meshsentinel::SentinelCommand;
 use phalanx_node::VideoPlayerSink;
+use phalanx_node::actors::meshsentinel::SentinelCommand;
 use phalanx_proto::playback::PlaybackSink;
 use phalanx_proto::prelude::RecordingId;
 
@@ -62,6 +62,10 @@ pub unsafe extern "C" fn phalanx_start_playback(
     handle: *mut PhalanxHandle,
     recording_id: *const c_char,
 ) -> *mut PlaybackSession {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` is null-checked via `as_ref`;
+    // `recording_id` is read only as a caller-guaranteed NUL-terminated C
+    // string.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return std::ptr::null_mut();
@@ -144,9 +148,9 @@ pub unsafe extern "C" fn phalanx_start_playback(
             }
             Ok(Err(_already_playing)) => {
                 phalanx_log!(
-                "[Phalanx FFI] phalanx_start_playback: rejected ({}): a playback session is already active",
-                rec_id.as_str()
-            );
+                    "[Phalanx FFI] phalanx_start_playback: rejected ({}): a playback session is already active",
+                    rec_id.as_str()
+                );
                 return std::ptr::null_mut();
             }
             Err(_) => {
@@ -186,6 +190,11 @@ pub unsafe extern "C" fn phalanx_poll_video_frame(
     out_data: *mut *mut u8,
     out_len: *mut u32,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `session.as_mut()` null-checks the pointer
+    // and otherwise yields a `&mut PlaybackSession` the caller guarantees
+    // is valid; the leaked frame pointer and length are written through
+    // the caller-guaranteed writable `out_data`/`out_len`.
     unsafe {
         let Some(s) = session.as_mut() else {
             return PhalanxError::NullPointer.code();
@@ -238,6 +247,11 @@ pub unsafe extern "C" fn phalanx_poll_audio_frame(
     out_data: *mut *mut u8,
     out_len: *mut u32,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `session.as_mut()` null-checks the pointer
+    // and otherwise yields a `&mut PlaybackSession` the caller guarantees
+    // is valid; the leaked frame pointer and length are written through
+    // the caller-guaranteed writable `out_data`/`out_len`.
     unsafe {
         let Some(s) = session.as_mut() else {
             return PhalanxError::NullPointer.code();
@@ -261,6 +275,11 @@ pub unsafe extern "C" fn phalanx_poll_audio_frame(
 /// * Must be called exactly once per session. Null is a safe no-op.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_stop_playback(session: *mut PlaybackSession) {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. Null is a safe no-op; otherwise `session`
+    // was produced by `Box::into_raw` in `phalanx_start_playback` and the
+    // caller guarantees it is reclaimed exactly once, so `Box::from_raw`
+    // takes unique ownership and drops it.
     unsafe {
         if !session.is_null() {
             let _ = Box::from_raw(session);
@@ -278,6 +297,11 @@ unsafe fn poll_channel(
     out_data: *mut *mut u8,
     out_len: *mut u32,
 ) -> i32 {
+    // SAFETY: the FFI callers (`phalanx_poll_video_frame`/
+    // `phalanx_poll_audio_frame`) uphold this helper's out-param contract:
+    // `out_data`/`out_len` are writable pointers of the matching pointee
+    // type, into which `leak_bytes_to_c` writes the leaked frame pointer
+    // and length on a successful receive.
     unsafe {
         match rx.try_recv() {
             Ok(frame) => {

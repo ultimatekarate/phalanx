@@ -13,9 +13,9 @@
 use crate::error::PhalanxError;
 use crate::handle::PhalanxHandle;
 
-use phalanx_forensics::calibrate::{calibrate_prnu, posterior_from_batch, MAX_CALIBRATION_FRAMES};
-use phalanx_lens::scalar::ScalarLens;
+use phalanx_forensics::calibrate::{MAX_CALIBRATION_FRAMES, calibrate_prnu, posterior_from_batch};
 use phalanx_lens::ForensicLens;
+use phalanx_lens::scalar::ScalarLens;
 use phalanx_node::actors::storage::StorageCommand;
 use phalanx_proto::types::BlackLevel;
 
@@ -31,6 +31,10 @@ static LENS: ScalarLens = ScalarLens;
 /// * `handle` must be a valid pointer from `phalanx_create`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_calibration_start(handle: *const PhalanxHandle) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle.as_ref()` returns `None` on null and
+    // otherwise yields a `&PhalanxHandle` whose validity the caller
+    // guarantees; no other raw pointer is dereferenced.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -66,6 +70,10 @@ pub unsafe extern "C" fn phalanx_calibration_push_frame(
     width: u32,
     height: u32,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle.as_ref()` null-checks the handle;
+    // `y_plane` is null-checked before `from_raw_parts` reads exactly
+    // `y_len` bytes, which the caller guarantees are valid Y-plane data.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -116,6 +124,11 @@ pub unsafe extern "C" fn phalanx_calibration_finish(
     handle: *const PhalanxHandle,
     out_prnu_floor: *mut f32,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle.as_ref()` null-checks the handle;
+    // `out_prnu_floor` is null-checked before the `f32` result is written
+    // through it, and the caller guarantees it points to writable `f32`
+    // storage.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();

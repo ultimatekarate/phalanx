@@ -16,6 +16,11 @@ use std::os::raw::c_char;
 /// * Passing a null pointer is a safe no-op.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_free_string(ptr: *mut c_char) {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. Null is a safe no-op; otherwise `ptr` was
+    // produced by a `CString::into_raw` in this crate and the caller
+    // guarantees it is freed exactly once, so `CString::from_raw` reclaims
+    // unique ownership and drops it.
     unsafe {
         if !ptr.is_null() {
             // Reconstruct the CString so Rust's allocator frees it.
@@ -34,6 +39,11 @@ pub unsafe extern "C" fn phalanx_free_string(ptr: *mut c_char) {
 /// * Passing a null pointer is a safe no-op.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_free_bytes(ptr: *mut u8, len: u32) {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. Null is a safe no-op; otherwise `ptr`/`len`
+    // were produced together by `leak_bytes_to_c` and the caller
+    // guarantees they are freed exactly once with the original length (see
+    // the inner block for the capacity-equals-length reconstruction).
     unsafe {
         if !ptr.is_null() {
             // SAFETY: every producer of FFI byte buffers uses `leak_bytes_to_c`,

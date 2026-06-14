@@ -18,8 +18,8 @@ use crate::logcat::phalanx_log;
 
 use phalanx_forensics::calibrate::update_prnu_posterior;
 use phalanx_forensics::reassembler::{compress_frame, create_audio_shard, create_video_shard};
-use phalanx_lens::scalar::ScalarLens;
 use phalanx_lens::ForensicLens;
+use phalanx_lens::scalar::ScalarLens;
 use phalanx_node::actors::egress::EgressCommand;
 use phalanx_node::actors::meshsentinel::SentinelCommand;
 use phalanx_node::actors::storage::StorageCommand;
@@ -243,6 +243,10 @@ unsafe fn start_recording_inner(
 /// * `handle` must be a valid pointer from `phalanx_create`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_stop_recording(handle: *mut PhalanxHandle) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle.as_ref()` null-checks the pointer and
+    // otherwise yields a `&PhalanxHandle` whose validity the caller
+    // guarantees; no other raw pointer is dereferenced.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -304,6 +308,12 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
     recording_id: *const c_char,
     _timestamp_ms: u64,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle`, `y_plane`, `uv_plane` and
+    // `recording_id` are null-checked before use; the handle is read as
+    // `&PhalanxHandle`, the planes are read via `from_raw_parts` for the
+    // caller-declared `y_len`/`uv_len` byte counts, and `recording_id` is
+    // read as a NUL-terminated C string the caller guarantees is valid.
     unsafe {
         // DIAGNOSTIC: log first call to confirm Flutter is pushing frames
         {
@@ -311,9 +321,16 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
                 std::sync::atomic::AtomicBool::new(false);
             if !LOGGED_ENTRY.swap(true, Ordering::Relaxed) {
                 phalanx_log!(
-                "[Phalanx FFI] push_video_frame CALLED: y_len={}, uv_len={}, {}x{}, handle_null={}, y_null={}, uv_null={}, rec_null={}",
-                y_len, uv_len, width, height, handle.is_null(), y_plane.is_null(), uv_plane.is_null(), recording_id.is_null()
-            );
+                    "[Phalanx FFI] push_video_frame CALLED: y_len={}, uv_len={}, {}x{}, handle_null={}, y_null={}, uv_null={}, rec_null={}",
+                    y_len,
+                    uv_len,
+                    width,
+                    height,
+                    handle.is_null(),
+                    y_plane.is_null(),
+                    uv_plane.is_null(),
+                    recording_id.is_null()
+                );
             }
         }
 
@@ -519,6 +536,11 @@ pub unsafe extern "C" fn phalanx_push_audio_frame(
     channels: u8,
     recording_id: *const c_char,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` and `pcm_data`/`recording_id` are
+    // null-checked before use; the handle is read as `&PhalanxHandle`,
+    // `pcm_data` via `from_raw_parts` for the caller-declared `pcm_len`,
+    // and `recording_id` as a caller-guaranteed NUL-terminated C string.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -595,6 +617,10 @@ pub unsafe extern "C" fn phalanx_push_audio_frame(
 /// * `handle` must be a valid pointer from `phalanx_create`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_get_target_fps(handle: *const PhalanxHandle) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle.as_ref()` null-checks the pointer and
+    // otherwise yields a `&PhalanxHandle` whose validity the caller
+    // guarantees; no other raw pointer is dereferenced.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return 0;
@@ -624,6 +650,10 @@ pub unsafe extern "C" fn phalanx_list_recordings(
     handle: *mut PhalanxHandle,
     out_json: *mut *mut c_char,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle.as_ref()` null-checks the handle;
+    // the resulting C string is written through `out_json`, which the
+    // caller guarantees points to writable `*mut c_char` storage.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -687,6 +717,11 @@ pub unsafe extern "C" fn phalanx_get_share_link(
     recipient_did: *const c_char,
     out_link: *mut *mut c_char,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` is null-checked via `as_ref`;
+    // `recording_id`/`recipient_did`/`out_link` are null-checked before
+    // the C strings are read and the result is written through `out_link`,
+    // all of which the caller guarantees are valid for their declared use.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -741,6 +776,10 @@ pub unsafe extern "C" fn phalanx_open_link(
     handle: *mut PhalanxHandle,
     phx_link: *const c_char,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` is null-checked via `as_ref`;
+    // `phx_link` is null-checked before being read as a caller-guaranteed
+    // NUL-terminated C string.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -788,6 +827,10 @@ pub unsafe extern "C" fn phalanx_debug_delete_recording(
     handle: *mut PhalanxHandle,
     recording_id: *const c_char,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` is null-checked via `as_ref` and
+    // `recording_id` is null-checked before being read as a
+    // caller-guaranteed NUL-terminated C string.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -840,6 +883,11 @@ pub unsafe extern "C" fn phalanx_debug_recording_info(
     recording_id: *const c_char,
     out_info: *mut *mut c_char,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` is null-checked via `as_ref`;
+    // `recording_id`/`out_info` are null-checked before `recording_id` is
+    // read as a NUL-terminated C string and the resulting C string is
+    // written through `out_info`, both caller-guaranteed valid.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();

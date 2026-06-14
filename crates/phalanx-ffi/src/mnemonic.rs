@@ -17,7 +17,7 @@ use crate::error::PhalanxError;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
-use phalanx_forensics::cryptography::mnemonic::{validate_mnemonic, MnemonicValidation};
+use phalanx_forensics::cryptography::mnemonic::{MnemonicValidation, validate_mnemonic};
 use zeroize::Zeroize;
 
 /// Validate a BIP-39 mnemonic phrase. Checks wordlist membership AND checksum
@@ -41,6 +41,10 @@ use zeroize::Zeroize;
 /// * `phrase` must be a valid null-terminated C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_validate_mnemonic(phrase: *const c_char) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `phrase` is null-checked before
+    // `CStr::from_ptr` reads it as a caller-guaranteed NUL-terminated C
+    // string that outlives the call.
     unsafe {
         if phrase.is_null() {
             return PhalanxError::NullPointer.code();
@@ -74,8 +78,7 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
-    const VALID_ENGLISH: &str =
-        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const VALID_ENGLISH: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
     #[test]
     fn null_phrase_returns_null_pointer() {

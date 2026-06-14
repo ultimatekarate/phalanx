@@ -685,6 +685,10 @@ async fn bootstrap_with_identity(
 /// * `handle` must be a valid pointer from `phalanx_create`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_start(handle: *mut PhalanxHandle) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle.as_ref()` null-checks the pointer and
+    // otherwise yields a `&PhalanxHandle` whose validity the caller
+    // guarantees; no other raw pointer is dereferenced.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -727,6 +731,10 @@ pub unsafe extern "C" fn phalanx_start(handle: *mut PhalanxHandle) -> i32 {
 /// * `handle` must be a valid pointer from `phalanx_create`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_stop(handle: *mut PhalanxHandle) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle.as_ref()` null-checks the pointer and
+    // otherwise yields a `&PhalanxHandle` whose validity the caller
+    // guarantees; no other raw pointer is dereferenced.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -784,6 +792,11 @@ pub unsafe extern "C" fn phalanx_stop(handle: *mut PhalanxHandle) -> i32 {
 /// * Null is a safe no-op.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_destroy(handle: *mut PhalanxHandle) {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. Null is a safe no-op; otherwise `handle` was
+    // produced by `Box::into_raw` in `phalanx_create`/`phalanx_restore`
+    // and the caller guarantees it is reclaimed exactly once, so
+    // `Box::from_raw` takes unique ownership and drops it.
     unsafe {
         if !handle.is_null() {
             // If the engine is still Running, drive shutdown first. Ignore

@@ -128,6 +128,11 @@ pub unsafe extern "C" fn phalanx_get_c2pa_export_path(
     recording_id: *const c_char,
     out_path: *mut *mut c_char,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` is null-checked via `as_ref`;
+    // `recording_id`/`out_path` are null-checked before `recording_id` is
+    // read as a NUL-terminated C string and the resulting C string is
+    // written through `out_path`, both caller-guaranteed valid.
     unsafe {
         let Some(_h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -264,13 +269,13 @@ mod tests {
     #[cfg(feature = "software-transcode")]
     use c2pa::Reader;
     #[cfg(feature = "software-transcode")]
-    use phalanx_forensics::gate::{verify_provenance_from_jpeg, LensThresholds};
+    use phalanx_forensics::PayloadCipher;
+    #[cfg(feature = "software-transcode")]
+    use phalanx_forensics::gate::{LensThresholds, verify_provenance_from_jpeg};
     #[cfg(feature = "software-transcode")]
     use phalanx_forensics::reassembler::{compress_frame, create_audio_shard, create_video_shard};
     #[cfg(feature = "software-transcode")]
     use phalanx_forensics::witness::WitnessAuthority;
-    #[cfg(feature = "software-transcode")]
-    use phalanx_forensics::PayloadCipher;
     #[cfg(feature = "software-transcode")]
     use phalanx_proto::crypto::SymmetricKey;
     #[cfg(feature = "software-transcode")]

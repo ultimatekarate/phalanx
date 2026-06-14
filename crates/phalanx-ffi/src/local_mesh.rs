@@ -32,6 +32,10 @@ pub unsafe extern "C" fn phalanx_local_mesh_push_peer_discovered(
     handle: *mut PhalanxHandle,
     peer_id: *const c_char,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` is null-checked via `as_ref`;
+    // `peer_id` is read only as a caller-guaranteed NUL-terminated C
+    // string.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -88,6 +92,11 @@ pub unsafe extern "C" fn phalanx_local_mesh_push_data_received(
     data: *const u8,
     data_len: u32,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` is null-checked via `as_ref`;
+    // `peer_id`/`topic`/`data` are null-checked before `peer_id`/`topic`
+    // are read as NUL-terminated C strings and `data` via `from_raw_parts`
+    // for the caller-declared `data_len`.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -142,6 +151,10 @@ pub unsafe extern "C" fn phalanx_local_mesh_push_peer_disconnected(
     handle: *mut PhalanxHandle,
     peer_id: *const c_char,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` is null-checked via `as_ref`;
+    // `peer_id` is null-checked before being read as a caller-guaranteed
+    // NUL-terminated C string.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -194,6 +207,12 @@ pub unsafe extern "C" fn phalanx_local_mesh_poll_outbound(
     out_data: *mut *mut u8,
     out_len: *mut u32,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` is null-checked via `as_ref`;
+    // `out_peer`/`out_data`/`out_len` are null-checked before the leaked
+    // string and byte-buffer pointers and length are written through them,
+    // and the caller guarantees each is a writable pointer of the matching
+    // pointee type.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -278,6 +297,10 @@ pub unsafe extern "C" fn phalanx_local_mesh_set_available(
     handle: *mut PhalanxHandle,
     available: bool,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle.as_ref()` null-checks the pointer and
+    // otherwise yields a `&PhalanxHandle` whose validity the caller
+    // guarantees; no other raw pointer is dereferenced.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();

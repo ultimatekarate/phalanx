@@ -42,6 +42,10 @@ use std::sync::atomic::Ordering;
 /// * `handle` must be a valid pointer from `phalanx_create`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_start_recovery(handle: *const PhalanxHandle) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle.as_ref()` null-checks the pointer and
+    // otherwise yields a `&PhalanxHandle` whose validity the caller
+    // guarantees; no other raw pointer is dereferenced.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -137,6 +141,11 @@ pub unsafe extern "C" fn phalanx_recovery_status(
     out_ptr: *mut *mut u8,
     out_len: *mut u32,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle`/`out_ptr`/`out_len` are null-checked
+    // before use; `handle` is then read as `&*handle`, and the leaked
+    // buffer pointer and length are written through the caller-guaranteed
+    // writable `out_ptr`/`out_len`.
     unsafe {
         if handle.is_null() || out_ptr.is_null() || out_len.is_null() {
             return PhalanxError::NullPointer.code();
@@ -171,6 +180,10 @@ pub unsafe extern "C" fn phalanx_recovery_status(
 /// * `handle` must be a valid pointer from `phalanx_create`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_cancel_recovery(handle: *const PhalanxHandle) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle.as_ref()` null-checks the pointer and
+    // otherwise yields a `&PhalanxHandle` whose validity the caller
+    // guarantees; no other raw pointer is dereferenced.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();

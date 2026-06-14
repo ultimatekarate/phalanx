@@ -19,6 +19,10 @@ use std::os::raw::c_char;
 /// * `handle` must be a valid pointer from `phalanx_create`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_get_power_state(handle: *const PhalanxHandle) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle.as_ref()` null-checks the pointer and
+    // otherwise yields a `&PhalanxHandle` whose validity the caller
+    // guarantees; no other raw pointer is dereferenced.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -36,6 +40,10 @@ pub unsafe extern "C" fn phalanx_get_power_state(handle: *const PhalanxHandle) -
 /// * `handle` must be a valid pointer from `phalanx_create`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_is_recording(handle: *const PhalanxHandle) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle.as_ref()` null-checks the pointer and
+    // otherwise yields a `&PhalanxHandle` whose validity the caller
+    // guarantees; no other raw pointer is dereferenced.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -60,6 +68,11 @@ pub unsafe extern "C" fn phalanx_get_node_did(
     handle: *const PhalanxHandle,
     out: *mut *mut c_char,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` is null-checked via `as_ref`; `out`
+    // is null-checked before the leaked C string is written through it,
+    // and the caller guarantees `out` points to writable `*mut c_char`
+    // storage.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -96,6 +109,10 @@ pub unsafe extern "C" fn phalanx_update_battery(
     level: u8,
     charging: bool,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle.as_ref()` null-checks the pointer and
+    // otherwise yields a `&PhalanxHandle` whose validity the caller
+    // guarantees; no other raw pointer is dereferenced.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -115,6 +132,10 @@ pub unsafe extern "C" fn phalanx_update_battery(
 /// * `handle` must be a valid pointer from `phalanx_create`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_update_thermal(handle: *mut PhalanxHandle, celsius: i32) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle.as_ref()` null-checks the pointer and
+    // otherwise yields a `&PhalanxHandle` whose validity the caller
+    // guarantees; no other raw pointer is dereferenced.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -138,6 +159,10 @@ pub unsafe extern "C" fn phalanx_update_lifecycle(
     handle: *mut PhalanxHandle,
     is_foreground: bool,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle.as_ref()` null-checks the pointer and
+    // otherwise yields a `&PhalanxHandle` whose validity the caller
+    // guarantees; no other raw pointer is dereferenced.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
@@ -162,6 +187,10 @@ pub unsafe extern "C" fn phalanx_update_device_ram(
     handle: *mut PhalanxHandle,
     total_ram_bytes: u64,
 ) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle.as_ref()` null-checks the pointer and
+    // otherwise yields a `&PhalanxHandle` whose validity the caller
+    // guarantees; no other raw pointer is dereferenced.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
