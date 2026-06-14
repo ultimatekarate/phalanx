@@ -14,11 +14,13 @@ use std::os::raw::c_char;
 ///   "caller must free with `phalanx_free_string`".
 /// * `ptr` must not have been freed previously (double-free is UB).
 /// * Passing a null pointer is a safe no-op.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_free_string(ptr: *mut c_char) {
-    if !ptr.is_null() {
-        // Reconstruct the CString so Rust's allocator frees it.
-        drop(CString::from_raw(ptr));
+    unsafe {
+        if !ptr.is_null() {
+            // Reconstruct the CString so Rust's allocator frees it.
+            drop(CString::from_raw(ptr));
+        }
     }
 }
 
@@ -30,15 +32,17 @@ pub unsafe extern "C" fn phalanx_free_string(ptr: *mut c_char) {
 /// * `len` must be the exact length returned alongside the pointer.
 /// * `ptr` must not have been freed previously (double-free is UB).
 /// * Passing a null pointer is a safe no-op.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_free_bytes(ptr: *mut u8, len: u32) {
-    if !ptr.is_null() {
-        // SAFETY: every producer of FFI byte buffers uses `leak_bytes_to_c`,
-        // which feeds the helper a `Box<[u8]>`. `Box<[u8]>` has `capacity == len`
-        // by construction (it's a slice, not a Vec with reserved tail), so
-        // reconstructing as `Vec::from_raw_parts(ptr, len, len)` matches the
-        // allocator's record.
-        let _ = Vec::from_raw_parts(ptr, len as usize, len as usize);
+    unsafe {
+        if !ptr.is_null() {
+            // SAFETY: every producer of FFI byte buffers uses `leak_bytes_to_c`,
+            // which feeds the helper a `Box<[u8]>`. `Box<[u8]>` has `capacity == len`
+            // by construction (it's a slice, not a Vec with reserved tail), so
+            // reconstructing as `Vec::from_raw_parts(ptr, len, len)` matches the
+            // allocator's record.
+            let _ = Vec::from_raw_parts(ptr, len as usize, len as usize);
+        }
     }
 }
 

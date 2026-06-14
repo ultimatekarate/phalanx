@@ -29,7 +29,7 @@ use phalanx_forensics::identity::MAX_CEREMONY_MEMBERS;
 /// * `name_ptr` must be a valid null-terminated C string.
 /// * `dids_ptr` and `dids_len` must describe a valid postcard-serialized `Vec<String>`.
 /// * `out_id` must point to a caller-allocated 32-byte buffer.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_compute_community_id(
     name_ptr: *const c_char,
     quorum: u8,
@@ -37,53 +37,55 @@ pub unsafe extern "C" fn phalanx_compute_community_id(
     dids_len: usize,
     out_id: *mut u8,
 ) -> i32 {
-    if name_ptr.is_null() || dids_ptr.is_null() || out_id.is_null() || dids_len == 0 {
-        return PhalanxError::NullPointer.code();
-    }
+    unsafe {
+        if name_ptr.is_null() || dids_ptr.is_null() || out_id.is_null() || dids_len == 0 {
+            return PhalanxError::NullPointer.code();
+        }
 
-    // Parse name
-    let name_str = match CStr::from_ptr(name_ptr).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
-    let name = match phalanx_proto::trust::PetName::new(name_str) {
-        Ok(n) => n,
-        Err(_) => return PhalanxError::CeremonyFailed.code(),
-    };
-
-    // Parse quorum
-    let quorum = match phalanx_proto::community::Quorum::new(quorum) {
-        Some(q) => q,
-        None => return PhalanxError::CeremonyFailed.code(),
-    };
-
-    // Deserialize DID list via unmarshal gate
-    let dids_bytes = std::slice::from_raw_parts(dids_ptr, dids_len);
-    let did_strings: Vec<String> =
-        match phalanx_forensics::gate::unmarshal(dids_bytes, "ceremony_dids") {
-            Ok(v) => v,
+        // Parse name
+        let name_str = match CStr::from_ptr(name_ptr).to_str() {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
+        let name = match phalanx_proto::trust::PetName::new(name_str) {
+            Ok(n) => n,
             Err(_) => return PhalanxError::CeremonyFailed.code(),
         };
 
-    if did_strings.len() > MAX_CEREMONY_MEMBERS {
-        return PhalanxError::CeremonyFailed.code();
-    }
+        // Parse quorum
+        let quorum = match phalanx_proto::community::Quorum::new(quorum) {
+            Some(q) => q,
+            None => return PhalanxError::CeremonyFailed.code(),
+        };
 
-    // Validate DID format and convert
-    let mut dids = Vec::with_capacity(did_strings.len());
-    for s in &did_strings {
-        let did = phalanx_proto::identity::Did::new(s);
-        if phalanx_forensics::identity::resolve_did_public_key(&did).is_err() {
-            tracing::warn!(target: "phalanx::ffi", did = %s, "Invalid DID format in ceremony");
+        // Deserialize DID list via unmarshal gate
+        let dids_bytes = std::slice::from_raw_parts(dids_ptr, dids_len);
+        let did_strings: Vec<String> =
+            match phalanx_forensics::gate::unmarshal(dids_bytes, "ceremony_dids") {
+                Ok(v) => v,
+                Err(_) => return PhalanxError::CeremonyFailed.code(),
+            };
+
+        if did_strings.len() > MAX_CEREMONY_MEMBERS {
             return PhalanxError::CeremonyFailed.code();
         }
-        dids.push(did);
+
+        // Validate DID format and convert
+        let mut dids = Vec::with_capacity(did_strings.len());
+        for s in &did_strings {
+            let did = phalanx_proto::identity::Did::new(s);
+            if phalanx_forensics::identity::resolve_did_public_key(&did).is_err() {
+                tracing::warn!(target: "phalanx::ffi", did = %s, "Invalid DID format in ceremony");
+                return PhalanxError::CeremonyFailed.code();
+            }
+            dids.push(did);
+        }
+
+        let id = phalanx_proto::community::CommunityId::compute(&name, quorum, &dids);
+        std::ptr::copy_nonoverlapping(id.0.as_ptr(), out_id, 32);
+
+        0
     }
-
-    let id = phalanx_proto::community::CommunityId::compute(&name, quorum, &dids);
-    std::ptr::copy_nonoverlapping(id.0.as_ptr(), out_id, 32);
-
-    0
 }
 
 /// Sign a vouch for a member using this node's identity.
@@ -96,7 +98,7 @@ pub unsafe extern "C" fn phalanx_compute_community_id(
 /// * `member_did_ptr` must be a valid null-terminated C string.
 /// * `community_id_ptr` must point to exactly 32 bytes.
 /// * `out_ptr` and `out_len` must be valid writable pointers.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_sign_vouch(
     handle: *const PhalanxHandle,
     member_did_ptr: *const c_char,
@@ -105,59 +107,61 @@ pub unsafe extern "C" fn phalanx_sign_vouch(
     out_ptr: *mut *mut u8,
     out_len: *mut u32,
 ) -> i32 {
-    if handle.is_null()
-        || member_did_ptr.is_null()
-        || community_id_ptr.is_null()
-        || out_ptr.is_null()
-        || out_len.is_null()
-    {
-        return PhalanxError::NullPointer.code();
+    unsafe {
+        if handle.is_null()
+            || member_did_ptr.is_null()
+            || community_id_ptr.is_null()
+            || out_ptr.is_null()
+            || out_len.is_null()
+        {
+            return PhalanxError::NullPointer.code();
+        }
+
+        if joined_at < 0 {
+            return PhalanxError::CeremonyFailed.code();
+        }
+
+        let h = &*handle;
+
+        let member_did_str = match CStr::from_ptr(member_did_ptr).to_str() {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
+        let member_did = phalanx_proto::identity::Did::new(member_did_str);
+
+        let mut id_bytes = [0u8; 32];
+        std::ptr::copy_nonoverlapping(community_id_ptr, id_bytes.as_mut_ptr(), 32);
+        let community_id = phalanx_proto::community::CommunityId(id_bytes);
+
+        // Sign-loss is guarded: the `joined_at < 0` check above rejects negative
+        // values before this cast runs. FFI boundary receives i64 because Swift/Kotlin
+        // expose milliseconds-since-epoch as a signed integer; PhalanxTimestamp is u64.
+        #[allow(clippy::cast_sign_loss)]
+        let timestamp = phalanx_proto::time::PhalanxTimestamp(joined_at as u64);
+
+        let vouch = phalanx_forensics::identity::sign_vouch(
+            &h.identity.keypair,
+            &h.identity.did,
+            &member_did,
+            &community_id,
+            timestamp,
+        );
+
+        let serialized = match phalanx_forensics::gate::marshal(&vouch, "sign_vouch") {
+            Ok(bytes) => bytes,
+            Err(_) => return PhalanxError::CeremonyFailed.code(),
+        };
+
+        crate::memory::leak_bytes_to_c(serialized.into_boxed_slice(), out_ptr, out_len);
+
+        tracing::info!(
+            target: "phalanx::ffi",
+            member = %member_did_str,
+            "Vouch signed for community member"
+        );
+
+        0
     }
-
-    if joined_at < 0 {
-        return PhalanxError::CeremonyFailed.code();
-    }
-
-    let h = &*handle;
-
-    let member_did_str = match CStr::from_ptr(member_did_ptr).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
-    let member_did = phalanx_proto::identity::Did::new(member_did_str);
-
-    let mut id_bytes = [0u8; 32];
-    std::ptr::copy_nonoverlapping(community_id_ptr, id_bytes.as_mut_ptr(), 32);
-    let community_id = phalanx_proto::community::CommunityId(id_bytes);
-
-    // Sign-loss is guarded: the `joined_at < 0` check above rejects negative
-    // values before this cast runs. FFI boundary receives i64 because Swift/Kotlin
-    // expose milliseconds-since-epoch as a signed integer; PhalanxTimestamp is u64.
-    #[allow(clippy::cast_sign_loss)]
-    let timestamp = phalanx_proto::time::PhalanxTimestamp(joined_at as u64);
-
-    let vouch = phalanx_forensics::identity::sign_vouch(
-        &h.identity.keypair,
-        &h.identity.did,
-        &member_did,
-        &community_id,
-        timestamp,
-    );
-
-    let serialized = match phalanx_forensics::gate::marshal(&vouch, "sign_vouch") {
-        Ok(bytes) => bytes,
-        Err(_) => return PhalanxError::CeremonyFailed.code(),
-    };
-
-    crate::memory::leak_bytes_to_c(serialized.into_boxed_slice(), out_ptr, out_len);
-
-    tracing::info!(
-        target: "phalanx::ffi",
-        member = %member_did_str,
-        "Vouch signed for community member"
-    );
-
-    0
 }
 
 /// Assemble a complete community from ceremony inputs.
@@ -173,7 +177,7 @@ pub unsafe extern "C" fn phalanx_sign_vouch(
 /// * `stronghold_did_ptr` may be null (community without Stronghold).
 /// * `members_ptr`/`members_len` must describe a valid postcard-serialized `Vec<CeremonyMember>`.
 /// * `out_ptr` and `out_len` must be valid writable pointers.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_create_community(
     name_ptr: *const c_char,
     quorum: u8,
@@ -185,102 +189,104 @@ pub unsafe extern "C" fn phalanx_create_community(
     out_ptr: *mut *mut u8,
     out_len: *mut u32,
 ) -> i32 {
-    if name_ptr.is_null() || members_ptr.is_null() || out_ptr.is_null() || out_len.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-
-    // Validate timestamps
-    if joined_at < 0 || expires_at < 0 {
-        return PhalanxError::CeremonyFailed.code();
-    }
-
-    #[allow(clippy::cast_sign_loss)]
-    let joined_ts = phalanx_proto::time::PhalanxTimestamp(joined_at as u64);
-    #[allow(clippy::cast_sign_loss)]
-    let expires_ts = phalanx_proto::time::PhalanxTimestamp(expires_at as u64);
-
-    use phalanx_proto::time::TrustedClock;
-    let now = phalanx_proto::time::SystemClock.now();
-
-    // Parse name
-    let name_str = match CStr::from_ptr(name_ptr).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
-    let name = match phalanx_proto::trust::PetName::new(name_str) {
-        Ok(n) => n,
-        Err(_) => return PhalanxError::CeremonyFailed.code(),
-    };
-
-    // Parse quorum
-    let quorum_val = match phalanx_proto::community::Quorum::new(quorum) {
-        Some(q) => q,
-        None => return PhalanxError::CeremonyFailed.code(),
-    };
-
-    // Parse optional Stronghold DID
-    let stronghold_did = if stronghold_did_ptr.is_null() {
-        None
-    } else {
-        match CStr::from_ptr(stronghold_did_ptr).to_str() {
-            Ok(s) => Some(phalanx_proto::identity::Did::new(s)),
-            Err(_) => return PhalanxError::InvalidUtf8.code(),
+    unsafe {
+        if name_ptr.is_null() || members_ptr.is_null() || out_ptr.is_null() || out_len.is_null() {
+            return PhalanxError::NullPointer.code();
         }
-    };
 
-    // Deserialize ceremony members
-    let members_bytes = std::slice::from_raw_parts(members_ptr, members_len);
-    let ceremony_members: Vec<phalanx_proto::community::CeremonyMember> =
-        match phalanx_forensics::gate::unmarshal(members_bytes, "ceremony_members") {
-            Ok(v) => v,
+        // Validate timestamps
+        if joined_at < 0 || expires_at < 0 {
+            return PhalanxError::CeremonyFailed.code();
+        }
+
+        #[allow(clippy::cast_sign_loss)]
+        let joined_ts = phalanx_proto::time::PhalanxTimestamp(joined_at as u64);
+        #[allow(clippy::cast_sign_loss)]
+        let expires_ts = phalanx_proto::time::PhalanxTimestamp(expires_at as u64);
+
+        use phalanx_proto::time::TrustedClock;
+        let now = phalanx_proto::time::SystemClock.now();
+
+        // Parse name
+        let name_str = match CStr::from_ptr(name_ptr).to_str() {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
+        let name = match phalanx_proto::trust::PetName::new(name_str) {
+            Ok(n) => n,
             Err(_) => return PhalanxError::CeremonyFailed.code(),
         };
 
-    // Delegate every ceremony invariant to the shared forensics verb:
-    // freshness, expiration bounds, member count, vouch count, quorum,
-    // cryptographic vouch verification, and QR payload budget.
-    let params = phalanx_forensics::identity::CommunityAssemblyParams {
-        name: name.clone(),
-        quorum: quorum_val,
-        joined_at: joined_ts,
-        expires_at: expires_ts,
-        stronghold_did,
-        baseline_trust: phalanx_proto::trust::TrustLevel::Verified,
-        grants: phalanx_proto::community::CommunityGrants::default(),
-        members: ceremony_members,
-    };
+        // Parse quorum
+        let quorum_val = match phalanx_proto::community::Quorum::new(quorum) {
+            Some(q) => q,
+            None => return PhalanxError::CeremonyFailed.code(),
+        };
 
-    let community = match phalanx_forensics::identity::assemble_community(params, now) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(
-                target: "phalanx::ffi",
-                error = %e,
-                community = %name_str,
-                "Community assembly rejected"
-            );
-            return PhalanxError::CeremonyFailed.code();
-        }
-    };
+        // Parse optional Stronghold DID
+        let stronghold_did = if stronghold_did_ptr.is_null() {
+            None
+        } else {
+            match CStr::from_ptr(stronghold_did_ptr).to_str() {
+                Ok(s) => Some(phalanx_proto::identity::Did::new(s)),
+                Err(_) => return PhalanxError::InvalidUtf8.code(),
+            }
+        };
 
-    // Serialize with the versioned envelope (R6) so the emitted token
-    // roundtrips through `phalanx_preview_community` / `phalanx_import_community`.
-    let body = match phalanx_forensics::gate::marshal(&community, "create_community") {
-        Ok(bytes) => bytes,
-        Err(_) => return PhalanxError::CeremonyFailed.code(),
-    };
-    let payload = phalanx_forensics::identity::wrap_payload_version(&body);
+        // Deserialize ceremony members
+        let members_bytes = std::slice::from_raw_parts(members_ptr, members_len);
+        let ceremony_members: Vec<phalanx_proto::community::CeremonyMember> =
+            match phalanx_forensics::gate::unmarshal(members_bytes, "ceremony_members") {
+                Ok(v) => v,
+                Err(_) => return PhalanxError::CeremonyFailed.code(),
+            };
 
-    crate::memory::leak_bytes_to_c(payload.into_boxed_slice(), out_ptr, out_len);
+        // Delegate every ceremony invariant to the shared forensics verb:
+        // freshness, expiration bounds, member count, vouch count, quorum,
+        // cryptographic vouch verification, and QR payload budget.
+        let params = phalanx_forensics::identity::CommunityAssemblyParams {
+            name: name.clone(),
+            quorum: quorum_val,
+            joined_at: joined_ts,
+            expires_at: expires_ts,
+            stronghold_did,
+            baseline_trust: phalanx_proto::trust::TrustLevel::Verified,
+            grants: phalanx_proto::community::CommunityGrants::default(),
+            members: ceremony_members,
+        };
 
-    tracing::info!(
-        target: "phalanx::ffi",
-        community = %name_str,
-        member_count = community.members.len(),
-        "Community created and serialized"
-    );
+        let community = match phalanx_forensics::identity::assemble_community(params, now) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    target: "phalanx::ffi",
+                    error = %e,
+                    community = %name_str,
+                    "Community assembly rejected"
+                );
+                return PhalanxError::CeremonyFailed.code();
+            }
+        };
 
-    0
+        // Serialize with the versioned envelope (R6) so the emitted token
+        // roundtrips through `phalanx_preview_community` / `phalanx_import_community`.
+        let body = match phalanx_forensics::gate::marshal(&community, "create_community") {
+            Ok(bytes) => bytes,
+            Err(_) => return PhalanxError::CeremonyFailed.code(),
+        };
+        let payload = phalanx_forensics::identity::wrap_payload_version(&body);
+
+        crate::memory::leak_bytes_to_c(payload.into_boxed_slice(), out_ptr, out_len);
+
+        tracing::info!(
+            target: "phalanx::ffi",
+            community = %name_str,
+            member_count = community.members.len(),
+            "Community created and serialized"
+        );
+
+        0
+    }
 }
 
 // ── Ceremony: Vouch Request / Response (mobile side) ──────────────────
@@ -319,7 +325,7 @@ pub unsafe extern "C" fn phalanx_create_community(
 /// * `out_len` must be a valid writable pointer.
 /// * `out_buf` may be null (sizing call) or point to `*out_len`
 ///   writable bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_preview_vouch_request(
     handle: *const PhalanxHandle,
     bytes_ptr: *const u8,
@@ -327,50 +333,52 @@ pub unsafe extern "C" fn phalanx_preview_vouch_request(
     out_buf: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    if handle.is_null() || bytes_ptr.is_null() || bytes_len == 0 || out_len.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-    let h = &*handle;
-    let wire = std::slice::from_raw_parts(bytes_ptr, bytes_len);
+    unsafe {
+        if handle.is_null() || bytes_ptr.is_null() || bytes_len == 0 || out_len.is_null() {
+            return PhalanxError::NullPointer.code();
+        }
+        let h = &*handle;
+        let wire = std::slice::from_raw_parts(bytes_ptr, bytes_len);
 
-    // 1. Strip the envelope. Version mismatch → domain error.
-    let body = match phalanx_forensics::identity::strip_vouch_request(wire) {
-        Ok(b) => b,
-        Err(e) => {
+        // 1. Strip the envelope. Version mismatch → domain error.
+        let body = match phalanx_forensics::identity::strip_vouch_request(wire) {
+            Ok(b) => b,
+            Err(e) => {
+                let outcome: Result<
+                    phalanx_proto::community::VouchRequestPreview,
+                    phalanx_proto::community::CeremonyError,
+                > = Err(e);
+                return write_postcard_outcome(&outcome, "vouch_request_preview", out_buf, out_len);
+            }
+        };
+
+        // 2. Decode the VouchRequest. Transport-level failure on decode.
+        let request: phalanx_proto::community::VouchRequest =
+            match phalanx_forensics::gate::unmarshal(body, "vouch_request_preview") {
+                Ok(r) => r,
+                Err(_) => return PhalanxError::InvalidState.code(),
+            };
+
+        // 3. Voucher-identity check: does this device hold the expected key?
+        if request.voucher_did != h.identity.did {
             let outcome: Result<
                 phalanx_proto::community::VouchRequestPreview,
                 phalanx_proto::community::CeremonyError,
-            > = Err(e);
+            > = Err(phalanx_proto::community::CeremonyError::VoucherMismatch {
+                expected: request.voucher_did,
+                actual: h.identity.did.clone(),
+            });
             return write_postcard_outcome(&outcome, "vouch_request_preview", out_buf, out_len);
         }
-    };
 
-    // 2. Decode the VouchRequest. Transport-level failure on decode.
-    let request: phalanx_proto::community::VouchRequest =
-        match phalanx_forensics::gate::unmarshal(body, "vouch_request_preview") {
-            Ok(r) => r,
-            Err(_) => return PhalanxError::InvalidState.code(),
-        };
-
-    // 3. Voucher-identity check: does this device hold the expected key?
-    if request.voucher_did != h.identity.did {
+        // 4. Project to the review-safe shape.
+        let preview = phalanx_forensics::identity::preview_vouch_request(&request);
         let outcome: Result<
             phalanx_proto::community::VouchRequestPreview,
             phalanx_proto::community::CeremonyError,
-        > = Err(phalanx_proto::community::CeremonyError::VoucherMismatch {
-            expected: request.voucher_did,
-            actual: h.identity.did.clone(),
-        });
-        return write_postcard_outcome(&outcome, "vouch_request_preview", out_buf, out_len);
+        > = Ok(preview);
+        write_postcard_outcome(&outcome, "vouch_request_preview", out_buf, out_len)
     }
-
-    // 4. Project to the review-safe shape.
-    let preview = phalanx_forensics::identity::preview_vouch_request(&request);
-    let outcome: Result<
-        phalanx_proto::community::VouchRequestPreview,
-        phalanx_proto::community::CeremonyError,
-    > = Ok(preview);
-    write_postcard_outcome(&outcome, "vouch_request_preview", out_buf, out_len)
 }
 
 /// Sign a scanned `VouchRequest` and return the wrapped `VouchResponse`.
@@ -399,7 +407,7 @@ pub unsafe extern "C" fn phalanx_preview_vouch_request(
 /// * `out_len` must be a valid writable pointer.
 /// * `out_buf` may be null (sizing call) or point to `*out_len`
 ///   writable bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_sign_vouch_request(
     handle: *const PhalanxHandle,
     bytes_ptr: *const u8,
@@ -407,61 +415,63 @@ pub unsafe extern "C" fn phalanx_sign_vouch_request(
     out_buf: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    if handle.is_null() || bytes_ptr.is_null() || bytes_len == 0 || out_len.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-    let h = &*handle;
-    let wire = std::slice::from_raw_parts(bytes_ptr, bytes_len);
-
-    // 1. Strip the request envelope.
-    let body = match phalanx_forensics::identity::strip_vouch_request(wire) {
-        Ok(b) => b,
-        Err(e) => {
-            // Produce `Result<Vec<u8>, CeremonyError>::Err`.
-            let outcome: Result<Vec<u8>, phalanx_proto::community::CeremonyError> = Err(e);
-            return write_postcard_outcome(&outcome, "vouch_response_signed", out_buf, out_len);
+    unsafe {
+        if handle.is_null() || bytes_ptr.is_null() || bytes_len == 0 || out_len.is_null() {
+            return PhalanxError::NullPointer.code();
         }
-    };
+        let h = &*handle;
+        let wire = std::slice::from_raw_parts(bytes_ptr, bytes_len);
 
-    // 2. Decode the VouchRequest.
-    let request: phalanx_proto::community::VouchRequest =
-        match phalanx_forensics::gate::unmarshal(body, "vouch_request_sign") {
-            Ok(r) => r,
-            Err(_) => return PhalanxError::InvalidState.code(),
+        // 1. Strip the request envelope.
+        let body = match phalanx_forensics::identity::strip_vouch_request(wire) {
+            Ok(b) => b,
+            Err(e) => {
+                // Produce `Result<Vec<u8>, CeremonyError>::Err`.
+                let outcome: Result<Vec<u8>, phalanx_proto::community::CeremonyError> = Err(e);
+                return write_postcard_outcome(&outcome, "vouch_response_signed", out_buf, out_len);
+            }
         };
 
-    // 3. Sign via the Laboratory verb. Uses SystemClock — the phone's
-    //    local wall clock. Same time source as `phalanx_create_community`.
-    use phalanx_proto::time::TrustedClock;
-    let now = phalanx_proto::time::SystemClock.now();
-    let response = match phalanx_forensics::identity::sign_vouch_response(
-        &h.identity.keypair,
-        &request,
-        now,
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            let outcome: Result<Vec<u8>, phalanx_proto::community::CeremonyError> = Err(e);
-            return write_postcard_outcome(&outcome, "vouch_response_signed", out_buf, out_len);
-        }
-    };
+        // 2. Decode the VouchRequest.
+        let request: phalanx_proto::community::VouchRequest =
+            match phalanx_forensics::gate::unmarshal(body, "vouch_request_sign") {
+                Ok(r) => r,
+                Err(_) => return PhalanxError::InvalidState.code(),
+            };
 
-    // 4. Serialize and wrap with the response envelope — the Dart side
-    //    surfaces these bytes directly to a QR payload.
-    let body = match phalanx_forensics::gate::marshal(&response, "vouch_response_signed") {
-        Ok(bytes) => bytes,
-        Err(_) => return PhalanxError::SerializationFailure.code(),
-    };
-    let wrapped = phalanx_forensics::identity::wrap_vouch_response(&body);
-    let outcome: Result<Vec<u8>, phalanx_proto::community::CeremonyError> = Ok(wrapped);
+        // 3. Sign via the Laboratory verb. Uses SystemClock — the phone's
+        //    local wall clock. Same time source as `phalanx_create_community`.
+        use phalanx_proto::time::TrustedClock;
+        let now = phalanx_proto::time::SystemClock.now();
+        let response = match phalanx_forensics::identity::sign_vouch_response(
+            &h.identity.keypair,
+            &request,
+            now,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                let outcome: Result<Vec<u8>, phalanx_proto::community::CeremonyError> = Err(e);
+                return write_postcard_outcome(&outcome, "vouch_response_signed", out_buf, out_len);
+            }
+        };
 
-    tracing::info!(
-        target: "phalanx::ffi",
-        member = %request.member_did.as_str(),
-        "VouchResponse signed"
-    );
+        // 4. Serialize and wrap with the response envelope — the Dart side
+        //    surfaces these bytes directly to a QR payload.
+        let body = match phalanx_forensics::gate::marshal(&response, "vouch_response_signed") {
+            Ok(bytes) => bytes,
+            Err(_) => return PhalanxError::SerializationFailure.code(),
+        };
+        let wrapped = phalanx_forensics::identity::wrap_vouch_response(&body);
+        let outcome: Result<Vec<u8>, phalanx_proto::community::CeremonyError> = Ok(wrapped);
 
-    write_postcard_outcome(&outcome, "vouch_response_signed", out_buf, out_len)
+        tracing::info!(
+            target: "phalanx::ffi",
+            member = %request.member_did.as_str(),
+            "VouchResponse signed"
+        );
+
+        write_postcard_outcome(&outcome, "vouch_response_signed", out_buf, out_len)
+    }
 }
 
 // ── Import & Lifecycle ────────────────────────────────────────────────
@@ -484,21 +494,23 @@ unsafe fn write_postcard_outcome<T: serde::Serialize>(
     out_buf: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    if out_len.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-    let encoded = match phalanx_forensics::gate::marshal(value, context) {
-        Ok(bytes) => bytes,
-        Err(_) => return PhalanxError::SerializationFailure.code(),
-    };
-    let available = if out_buf.is_null() { 0 } else { *out_len };
-    if available < encoded.len() {
+    unsafe {
+        if out_len.is_null() {
+            return PhalanxError::NullPointer.code();
+        }
+        let encoded = match phalanx_forensics::gate::marshal(value, context) {
+            Ok(bytes) => bytes,
+            Err(_) => return PhalanxError::SerializationFailure.code(),
+        };
+        let available = if out_buf.is_null() { 0 } else { *out_len };
+        if available < encoded.len() {
+            *out_len = encoded.len();
+            return PhalanxError::BufferTooSmall.code();
+        }
+        std::ptr::copy_nonoverlapping(encoded.as_ptr(), out_buf, encoded.len());
         *out_len = encoded.len();
-        return PhalanxError::BufferTooSmall.code();
+        PhalanxError::Ok.code()
     }
-    std::ptr::copy_nonoverlapping(encoded.as_ptr(), out_buf, encoded.len());
-    *out_len = encoded.len();
-    PhalanxError::Ok.code()
 }
 
 /// Import a community membership from a serialized token (deep link payload).
@@ -515,7 +527,7 @@ unsafe fn write_postcard_outcome<T: serde::Serialize>(
 /// * `token_ptr` and `token_len` must describe a valid byte slice.
 /// * `out_len` must be a valid writable pointer.
 /// * `out_buf` may be null (sizing call) or point to `*out_len` writable bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_import_community(
     handle: *const PhalanxHandle,
     token_ptr: *const u8,
@@ -523,56 +535,58 @@ pub unsafe extern "C" fn phalanx_import_community(
     out_buf: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    if handle.is_null() || token_ptr.is_null() || token_len == 0 || out_len.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-
-    let h = &*handle;
-    let token_bytes = std::slice::from_raw_parts(token_ptr, token_len);
-
-    // R6: strip the versioned envelope first. An unknown version is a *domain*
-    // error, so it rides in the `ImportOutcome` payload — not the FFI status.
-    let body = match phalanx_forensics::identity::strip_payload_version(token_bytes) {
-        Ok(b) => b,
-        Err(e) => {
-            let outcome = phalanx_proto::community::ImportOutcome::Err(e);
-            return write_postcard_outcome(&outcome, "import_outcome", out_buf, out_len);
+    unsafe {
+        if handle.is_null() || token_ptr.is_null() || token_len == 0 || out_len.is_null() {
+            return PhalanxError::NullPointer.code();
         }
-    };
 
-    // Deserialize the community via the Laboratory's unmarshal gate.
-    let community: phalanx_proto::community::Community =
-        match phalanx_forensics::gate::unmarshal(body, "community_import") {
-            Ok(c) => c,
-            Err(_) => return PhalanxError::InvalidState.code(),
+        let h = &*handle;
+        let token_bytes = std::slice::from_raw_parts(token_ptr, token_len);
+
+        // R6: strip the versioned envelope first. An unknown version is a *domain*
+        // error, so it rides in the `ImportOutcome` payload — not the FFI status.
+        let body = match phalanx_forensics::identity::strip_payload_version(token_bytes) {
+            Ok(b) => b,
+            Err(e) => {
+                let outcome = phalanx_proto::community::ImportOutcome::Err(e);
+                return write_postcard_outcome(&outcome, "import_outcome", out_buf, out_len);
+            }
         };
 
-    tracing::info!(
-        target: "phalanx::ffi",
-        community = %community.name,
-        members = community.members.len(),
-        "Importing community from deep link"
-    );
+        // Deserialize the community via the Laboratory's unmarshal gate.
+        let community: phalanx_proto::community::Community =
+            match phalanx_forensics::gate::unmarshal(body, "community_import") {
+                Ok(c) => c,
+                Err(_) => return PhalanxError::InvalidState.code(),
+            };
 
-    // Dispatch to TrustActor and await the import outcome.
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    if h.runtime
-        .block_on(h.trust_tx.send(
-            phalanx_node::actors::trust_actor::TrustCommand::ImportCommunity {
-                community,
-                reply_to: reply_tx,
-            },
-        ))
-        .is_err()
-    {
-        return PhalanxError::ChannelClosed.code();
+        tracing::info!(
+            target: "phalanx::ffi",
+            community = %community.name,
+            members = community.members.len(),
+            "Importing community from deep link"
+        );
+
+        // Dispatch to TrustActor and await the import outcome.
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if h.runtime
+            .block_on(h.trust_tx.send(
+                phalanx_node::actors::trust_actor::TrustCommand::ImportCommunity {
+                    community,
+                    reply_to: reply_tx,
+                },
+            ))
+            .is_err()
+        {
+            return PhalanxError::ChannelClosed.code();
+        }
+        let outcome = match h.runtime.block_on(reply_rx) {
+            Ok(o) => o,
+            Err(_) => return PhalanxError::ChannelClosed.code(),
+        };
+
+        write_postcard_outcome(&outcome, "import_outcome", out_buf, out_len)
     }
-    let outcome = match h.runtime.block_on(reply_rx) {
-        Ok(o) => o,
-        Err(_) => return PhalanxError::ChannelClosed.code(),
-    };
-
-    write_postcard_outcome(&outcome, "import_outcome", out_buf, out_len)
 }
 
 /// Set the active recording state on the MeshSentinel.
@@ -584,56 +598,58 @@ pub unsafe extern "C" fn phalanx_import_community(
 /// # Safety
 /// * `handle` must be a valid `PhalanxHandle` pointer.
 /// * `recording_id` must be a valid null-terminated C string, or null to stop.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_set_recording_state(
     handle: *const PhalanxHandle,
     recording_id: *const c_char,
 ) -> i32 {
-    if handle.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-
-    let h = &*handle;
-
-    // Parse the recording id. `to_str` (not `to_string_lossy`) so a
-    // non-UTF8 byte sequence surfaces as `InvalidUtf8` rather than
-    // silently U+FFFD-ing into a recording id that won't match anything
-    // on disk. (Fixes audit finding L2.)
-    let rec_id = if recording_id.is_null() {
-        None
-    } else {
-        let c_str = CStr::from_ptr(recording_id);
-        match c_str.to_str() {
-            Ok(s) => {
-                tracing::info!(
-                    target: "phalanx::ffi",
-                    recording = %s,
-                    "Recording state change requested — dispatching to engine"
-                );
-                Some(phalanx_proto::identity::RecordingId::new(s.to_string()))
-            }
-            Err(_) => return PhalanxError::InvalidUtf8.code(),
+    unsafe {
+        if handle.is_null() {
+            return PhalanxError::NullPointer.code();
         }
-    };
 
-    // Dispatch to the engine via the SentinelCommand mailbox. The engine
-    // services the command inside its own `select!` arm — the FFI never
-    // locks the sentinel, so the deadlock pattern this function had
-    // against `engine.run()`'s long-held lock is structurally
-    // impossible now. (Fixes audit finding H2.)
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    if h.sentinel_cmd_tx
-        .blocking_send(SentinelCommand::SetRecordingState {
-            id: rec_id,
-            reply_to: reply_tx,
-        })
-        .is_err()
-    {
-        return PhalanxError::ChannelClosed.code();
-    }
-    match reply_rx.blocking_recv() {
-        Ok(()) => 0,
-        Err(_) => PhalanxError::ChannelClosed.code(),
+        let h = &*handle;
+
+        // Parse the recording id. `to_str` (not `to_string_lossy`) so a
+        // non-UTF8 byte sequence surfaces as `InvalidUtf8` rather than
+        // silently U+FFFD-ing into a recording id that won't match anything
+        // on disk. (Fixes audit finding L2.)
+        let rec_id = if recording_id.is_null() {
+            None
+        } else {
+            let c_str = CStr::from_ptr(recording_id);
+            match c_str.to_str() {
+                Ok(s) => {
+                    tracing::info!(
+                        target: "phalanx::ffi",
+                        recording = %s,
+                        "Recording state change requested — dispatching to engine"
+                    );
+                    Some(phalanx_proto::identity::RecordingId::new(s.to_string()))
+                }
+                Err(_) => return PhalanxError::InvalidUtf8.code(),
+            }
+        };
+
+        // Dispatch to the engine via the SentinelCommand mailbox. The engine
+        // services the command inside its own `select!` arm — the FFI never
+        // locks the sentinel, so the deadlock pattern this function had
+        // against `engine.run()`'s long-held lock is structurally
+        // impossible now. (Fixes audit finding H2.)
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if h.sentinel_cmd_tx
+            .blocking_send(SentinelCommand::SetRecordingState {
+                id: rec_id,
+                reply_to: reply_tx,
+            })
+            .is_err()
+        {
+            return PhalanxError::ChannelClosed.code();
+        }
+        match reply_rx.blocking_recv() {
+            Ok(()) => 0,
+            Err(_) => PhalanxError::ChannelClosed.code(),
+        }
     }
 }
 
@@ -649,46 +665,48 @@ pub unsafe extern "C" fn phalanx_set_recording_state(
 /// * `community_id_ptr` must point to exactly 32 bytes.
 /// * `out_len` must be a valid writable pointer.
 /// * `out_buf` may be null (sizing call) or point to `*out_len` writable bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_dissolve_community(
     handle: *const PhalanxHandle,
     community_id_ptr: *const u8,
     out_buf: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    if handle.is_null() || community_id_ptr.is_null() || out_len.is_null() {
-        return PhalanxError::NullPointer.code();
+    unsafe {
+        if handle.is_null() || community_id_ptr.is_null() || out_len.is_null() {
+            return PhalanxError::NullPointer.code();
+        }
+
+        let h = &*handle;
+        let mut id_bytes = [0u8; 32];
+        std::ptr::copy_nonoverlapping(community_id_ptr, id_bytes.as_mut_ptr(), 32);
+        let community_id = phalanx_proto::community::CommunityId(id_bytes);
+
+        tracing::info!(
+            target: "phalanx::ffi",
+            "Manual community dissolution requested"
+        );
+
+        // Dispatch to TrustActor and await the dissolve outcome.
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if h.runtime
+            .block_on(h.trust_tx.send(
+                phalanx_node::actors::trust_actor::TrustCommand::DissolveCommunity {
+                    community_id,
+                    reply_to: reply_tx,
+                },
+            ))
+            .is_err()
+        {
+            return PhalanxError::ChannelClosed.code();
+        }
+        let outcome = match h.runtime.block_on(reply_rx) {
+            Ok(o) => o,
+            Err(_) => return PhalanxError::ChannelClosed.code(),
+        };
+
+        write_postcard_outcome(&outcome, "dissolve_outcome", out_buf, out_len)
     }
-
-    let h = &*handle;
-    let mut id_bytes = [0u8; 32];
-    std::ptr::copy_nonoverlapping(community_id_ptr, id_bytes.as_mut_ptr(), 32);
-    let community_id = phalanx_proto::community::CommunityId(id_bytes);
-
-    tracing::info!(
-        target: "phalanx::ffi",
-        "Manual community dissolution requested"
-    );
-
-    // Dispatch to TrustActor and await the dissolve outcome.
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    if h.runtime
-        .block_on(h.trust_tx.send(
-            phalanx_node::actors::trust_actor::TrustCommand::DissolveCommunity {
-                community_id,
-                reply_to: reply_tx,
-            },
-        ))
-        .is_err()
-    {
-        return PhalanxError::ChannelClosed.code();
-    }
-    let outcome = match h.runtime.block_on(reply_rx) {
-        Ok(o) => o,
-        Err(_) => return PhalanxError::ChannelClosed.code(),
-    };
-
-    write_postcard_outcome(&outcome, "dissolve_outcome", out_buf, out_len)
 }
 
 /// List all communities currently in the TrustRegistry.
@@ -700,30 +718,34 @@ pub unsafe extern "C" fn phalanx_dissolve_community(
 /// * `handle` must be a valid `PhalanxHandle` pointer.
 /// * `out_len` must be a valid writable pointer.
 /// * `out_buf` may be null (sizing call) or point to `*out_len` writable bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_list_communities(
     handle: *const PhalanxHandle,
     out_buf: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    if handle.is_null() || out_len.is_null() {
-        return PhalanxError::NullPointer.code();
+    unsafe {
+        if handle.is_null() || out_len.is_null() {
+            return PhalanxError::NullPointer.code();
+        }
+        let h = &*handle;
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if h.runtime
+            .block_on(h.trust_tx.send(
+                phalanx_node::actors::trust_actor::TrustCommand::ListCommunities {
+                    reply_to: reply_tx,
+                },
+            ))
+            .is_err()
+        {
+            return PhalanxError::ChannelClosed.code();
+        }
+        let summaries = match h.runtime.block_on(reply_rx) {
+            Ok(v) => v,
+            Err(_) => return PhalanxError::ChannelClosed.code(),
+        };
+        write_postcard_outcome(&summaries, "community_summaries", out_buf, out_len)
     }
-    let h = &*handle;
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    if h.runtime
-        .block_on(h.trust_tx.send(
-            phalanx_node::actors::trust_actor::TrustCommand::ListCommunities { reply_to: reply_tx },
-        ))
-        .is_err()
-    {
-        return PhalanxError::ChannelClosed.code();
-    }
-    let summaries = match h.runtime.block_on(reply_rx) {
-        Ok(v) => v,
-        Err(_) => return PhalanxError::ChannelClosed.code(),
-    };
-    write_postcard_outcome(&summaries, "community_summaries", out_buf, out_len)
 }
 
 /// Fetch the full roster for a single community.
@@ -736,38 +758,40 @@ pub unsafe extern "C" fn phalanx_list_communities(
 /// * `community_id_ptr` must point to exactly 32 bytes.
 /// * `out_len` must be a valid writable pointer.
 /// * `out_buf` may be null (sizing call) or point to `*out_len` writable bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_get_community(
     handle: *const PhalanxHandle,
     community_id_ptr: *const u8,
     out_buf: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    if handle.is_null() || community_id_ptr.is_null() || out_len.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-    let h = &*handle;
-    let mut id_bytes = [0u8; 32];
-    std::ptr::copy_nonoverlapping(community_id_ptr, id_bytes.as_mut_ptr(), 32);
-    let community_id = phalanx_proto::community::CommunityId(id_bytes);
+    unsafe {
+        if handle.is_null() || community_id_ptr.is_null() || out_len.is_null() {
+            return PhalanxError::NullPointer.code();
+        }
+        let h = &*handle;
+        let mut id_bytes = [0u8; 32];
+        std::ptr::copy_nonoverlapping(community_id_ptr, id_bytes.as_mut_ptr(), 32);
+        let community_id = phalanx_proto::community::CommunityId(id_bytes);
 
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    if h.runtime
-        .block_on(h.trust_tx.send(
-            phalanx_node::actors::trust_actor::TrustCommand::GetCommunity {
-                community_id,
-                reply_to: reply_tx,
-            },
-        ))
-        .is_err()
-    {
-        return PhalanxError::ChannelClosed.code();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if h.runtime
+            .block_on(h.trust_tx.send(
+                phalanx_node::actors::trust_actor::TrustCommand::GetCommunity {
+                    community_id,
+                    reply_to: reply_tx,
+                },
+            ))
+            .is_err()
+        {
+            return PhalanxError::ChannelClosed.code();
+        }
+        let roster = match h.runtime.block_on(reply_rx) {
+            Ok(r) => r,
+            Err(_) => return PhalanxError::ChannelClosed.code(),
+        };
+        write_postcard_outcome(&roster, "community_roster", out_buf, out_len)
     }
-    let roster = match h.runtime.block_on(reply_rx) {
-        Ok(r) => r,
-        Err(_) => return PhalanxError::ChannelClosed.code(),
-    };
-    write_postcard_outcome(&roster, "community_roster", out_buf, out_len)
 }
 
 /// Preview a community token WITHOUT registering it.
@@ -782,7 +806,7 @@ pub unsafe extern "C" fn phalanx_get_community(
 /// * `token_ptr` and `token_len` must describe a valid byte slice.
 /// * `out_len` must be a valid writable pointer.
 /// * `out_buf` may be null (sizing call) or point to `*out_len` writable bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_preview_community(
     token_ptr: *const u8,
     token_len: usize,
@@ -790,40 +814,42 @@ pub unsafe extern "C" fn phalanx_preview_community(
     out_buf: *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    if token_ptr.is_null() || token_len == 0 || out_len.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-    let token_bytes = std::slice::from_raw_parts(token_ptr, token_len);
-
-    // R6: strip the versioned envelope first. An unknown version is a *domain*
-    // error, so it rides in the preview outcome — not the FFI status.
-    let body = match phalanx_forensics::identity::strip_payload_version(token_bytes) {
-        Ok(b) => b,
-        Err(e) => {
-            let outcome: Result<
-                phalanx_proto::community::CommunityRoster,
-                phalanx_proto::community::CommunityVerifyError,
-            > = Err(e);
-            return write_postcard_outcome(&outcome, "preview_outcome", out_buf, out_len);
+    unsafe {
+        if token_ptr.is_null() || token_len == 0 || out_len.is_null() {
+            return PhalanxError::NullPointer.code();
         }
-    };
+        let token_bytes = std::slice::from_raw_parts(token_ptr, token_len);
 
-    let community: phalanx_proto::community::Community =
-        match phalanx_forensics::gate::unmarshal(body, "community_preview") {
-            Ok(c) => c,
-            Err(_) => return PhalanxError::InvalidState.code(),
+        // R6: strip the versioned envelope first. An unknown version is a *domain*
+        // error, so it rides in the preview outcome — not the FFI status.
+        let body = match phalanx_forensics::identity::strip_payload_version(token_bytes) {
+            Ok(b) => b,
+            Err(e) => {
+                let outcome: Result<
+                    phalanx_proto::community::CommunityRoster,
+                    phalanx_proto::community::CommunityVerifyError,
+                > = Err(e);
+                return write_postcard_outcome(&outcome, "preview_outcome", out_buf, out_len);
+            }
         };
 
-    let now = phalanx_proto::time::PhalanxTimestamp(now_millis);
-    let outcome: Result<
-        phalanx_proto::community::CommunityRoster,
-        phalanx_proto::community::CommunityVerifyError,
-    > = match phalanx_forensics::identity::verify_community_vouches(&community, now) {
-        Ok(()) => Ok(project_preview_roster(&community)),
-        Err(e) => Err(e),
-    };
+        let community: phalanx_proto::community::Community =
+            match phalanx_forensics::gate::unmarshal(body, "community_preview") {
+                Ok(c) => c,
+                Err(_) => return PhalanxError::InvalidState.code(),
+            };
 
-    write_postcard_outcome(&outcome, "preview_outcome", out_buf, out_len)
+        let now = phalanx_proto::time::PhalanxTimestamp(now_millis);
+        let outcome: Result<
+            phalanx_proto::community::CommunityRoster,
+            phalanx_proto::community::CommunityVerifyError,
+        > = match phalanx_forensics::identity::verify_community_vouches(&community, now) {
+            Ok(()) => Ok(project_preview_roster(&community)),
+            Err(e) => Err(e),
+        };
+
+        write_postcard_outcome(&outcome, "preview_outcome", out_buf, out_len)
+    }
 }
 
 /// Project a `Community` into a roster for preview (pre-registration).

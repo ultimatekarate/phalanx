@@ -27,44 +27,46 @@ use std::sync::atomic::Ordering;
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
 /// * `peer_id` must be a valid null-terminated C string.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_local_mesh_push_peer_discovered(
     handle: *mut PhalanxHandle,
     peer_id: *const c_char,
 ) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    if peer_id.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-
-    let peer_str = match CStr::from_ptr(peer_id).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
-
-    let tx = match &h.local_mesh_tx {
-        Some(tx) => tx,
-        None => return PhalanxError::ChannelClosed.code(),
-    };
-
-    let event = NetworkEvent::PeerDiscovered {
-        peer: MeshAddress::new(peer_str.to_string()),
-        source: DiscoverySource::LocalMesh,
-        bucket: SubnetBucket::local_mesh(),
-        transport: TransportClass::LocalMesh,
-    };
-
-    match tx.try_send(event) {
-        Ok(()) => PhalanxError::Ok.code(),
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-            // Backpressure: drop silently, same as video frames
-            PhalanxError::Ok.code()
+        if peer_id.is_null() {
+            return PhalanxError::NullPointer.code();
         }
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-            PhalanxError::ChannelClosed.code()
+
+        let peer_str = match CStr::from_ptr(peer_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
+
+        let tx = match &h.local_mesh_tx {
+            Some(tx) => tx,
+            None => return PhalanxError::ChannelClosed.code(),
+        };
+
+        let event = NetworkEvent::PeerDiscovered {
+            peer: MeshAddress::new(peer_str.to_string()),
+            source: DiscoverySource::LocalMesh,
+            bucket: SubnetBucket::local_mesh(),
+            transport: TransportClass::LocalMesh,
+        };
+
+        match tx.try_send(event) {
+            Ok(()) => PhalanxError::Ok.code(),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                // Backpressure: drop silently, same as video frames
+                PhalanxError::Ok.code()
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                PhalanxError::ChannelClosed.code()
+            }
         }
     }
 }
@@ -78,7 +80,7 @@ pub unsafe extern "C" fn phalanx_local_mesh_push_peer_discovered(
 /// * `peer_id` must be a valid null-terminated C string.
 /// * `topic` must be a valid null-terminated C string.
 /// * `data` must point to `data_len` valid bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_local_mesh_push_data_received(
     handle: *mut PhalanxHandle,
     peer_id: *const c_char,
@@ -86,42 +88,44 @@ pub unsafe extern "C" fn phalanx_local_mesh_push_data_received(
     data: *const u8,
     data_len: u32,
 ) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    if peer_id.is_null() || topic.is_null() || data.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
+        if peer_id.is_null() || topic.is_null() || data.is_null() {
+            return PhalanxError::NullPointer.code();
+        }
 
-    let peer_str = match CStr::from_ptr(peer_id).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
+        let peer_str = match CStr::from_ptr(peer_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
 
-    let topic_str = match CStr::from_ptr(topic).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
+        let topic_str = match CStr::from_ptr(topic).to_str() {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
 
-    let payload = std::slice::from_raw_parts(data, data_len as usize).to_vec();
+        let payload = std::slice::from_raw_parts(data, data_len as usize).to_vec();
 
-    let tx = match &h.local_mesh_tx {
-        Some(tx) => tx,
-        None => return PhalanxError::ChannelClosed.code(),
-    };
+        let tx = match &h.local_mesh_tx {
+            Some(tx) => tx,
+            None => return PhalanxError::ChannelClosed.code(),
+        };
 
-    let event = NetworkEvent::DataReceived {
-        origin: MeshAddress::new(peer_str.to_string()),
-        topic: phalanx_proto::prelude::MeshTopic::from(topic_str),
-        data: payload,
-    };
+        let event = NetworkEvent::DataReceived {
+            origin: MeshAddress::new(peer_str.to_string()),
+            topic: phalanx_proto::prelude::MeshTopic::from(topic_str),
+            data: payload,
+        };
 
-    match tx.try_send(event) {
-        Ok(()) => PhalanxError::Ok.code(),
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => PhalanxError::Ok.code(),
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-            PhalanxError::ChannelClosed.code()
+        match tx.try_send(event) {
+            Ok(()) => PhalanxError::Ok.code(),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => PhalanxError::Ok.code(),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                PhalanxError::ChannelClosed.code()
+            }
         }
     }
 }
@@ -133,38 +137,40 @@ pub unsafe extern "C" fn phalanx_local_mesh_push_data_received(
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
 /// * `peer_id` must be a valid null-terminated C string.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_local_mesh_push_peer_disconnected(
     handle: *mut PhalanxHandle,
     peer_id: *const c_char,
 ) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    if peer_id.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
+        if peer_id.is_null() {
+            return PhalanxError::NullPointer.code();
+        }
 
-    let peer_str = match CStr::from_ptr(peer_id).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
+        let peer_str = match CStr::from_ptr(peer_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
 
-    let tx = match &h.local_mesh_tx {
-        Some(tx) => tx,
-        None => return PhalanxError::ChannelClosed.code(),
-    };
+        let tx = match &h.local_mesh_tx {
+            Some(tx) => tx,
+            None => return PhalanxError::ChannelClosed.code(),
+        };
 
-    let event = NetworkEvent::PeerDisconnected {
-        peer: MeshAddress::new(peer_str.to_string()),
-    };
+        let event = NetworkEvent::PeerDisconnected {
+            peer: MeshAddress::new(peer_str.to_string()),
+        };
 
-    match tx.try_send(event) {
-        Ok(()) => PhalanxError::Ok.code(),
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => PhalanxError::Ok.code(),
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-            PhalanxError::ChannelClosed.code()
+        match tx.try_send(event) {
+            Ok(()) => PhalanxError::Ok.code(),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => PhalanxError::Ok.code(),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                PhalanxError::ChannelClosed.code()
+            }
         }
     }
 }
@@ -181,78 +187,80 @@ pub unsafe extern "C" fn phalanx_local_mesh_push_peer_disconnected(
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
 /// * `out_peer`, `out_data`, and `out_len` must be valid pointers.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_local_mesh_poll_outbound(
     handle: *mut PhalanxHandle,
     out_peer: *mut *mut c_char,
     out_data: *mut *mut u8,
     out_len: *mut u32,
 ) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    if out_peer.is_null() || out_data.is_null() || out_len.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-
-    let Ok(mut guard) = h.local_mesh_outbound_rx.lock() else {
-        return PhalanxError::InvalidState.code();
-    };
-
-    let rx = match guard.as_mut() {
-        Some(rx) => rx,
-        None => {
-            *out_data = std::ptr::null_mut();
-            *out_len = 0;
-            *out_peer = std::ptr::null_mut();
-            return PhalanxError::Ok.code();
+        if out_peer.is_null() || out_data.is_null() || out_len.is_null() {
+            return PhalanxError::NullPointer.code();
         }
-    };
 
-    match rx.try_recv() {
-        Ok(packet) => {
-            // Peer ID → C string (caller frees with phalanx_free_string).
-            // libp2p peer IDs are base58 and contain no NULs, so the
-            // CString conversion realistically cannot fail. If it ever
-            // does, the packet is dropped on the floor (already dequeued)
-            // and the caller sees `InvalidUtf8`. Trace the impossible
-            // path so it surfaces if invariants change upstream.
-            match std::ffi::CString::new(packet.target.0.clone()) {
-                Ok(cstr) => {
-                    *out_peer = cstr.into_raw();
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        target: "phalanx::ffi",
-                        peer = %packet.target.0,
-                        bytes = packet.data.len(),
-                        "outbound local-mesh packet dropped: peer ID contained interior NUL (unreachable path)"
-                    );
-                    *out_data = std::ptr::null_mut();
-                    *out_len = 0;
-                    *out_peer = std::ptr::null_mut();
-                    return PhalanxError::InvalidUtf8.code();
-                }
+        let Ok(mut guard) = h.local_mesh_outbound_rx.lock() else {
+            return PhalanxError::InvalidState.code();
+        };
+
+        let rx = match guard.as_mut() {
+            Some(rx) => rx,
+            None => {
+                *out_data = std::ptr::null_mut();
+                *out_len = 0;
+                *out_peer = std::ptr::null_mut();
+                return PhalanxError::Ok.code();
             }
+        };
 
-            // Data → leaked allocation (caller frees with phalanx_free_bytes)
-            crate::memory::leak_bytes_to_c(packet.data.into_boxed_slice(), out_data, out_len);
+        match rx.try_recv() {
+            Ok(packet) => {
+                // Peer ID → C string (caller frees with phalanx_free_string).
+                // libp2p peer IDs are base58 and contain no NULs, so the
+                // CString conversion realistically cannot fail. If it ever
+                // does, the packet is dropped on the floor (already dequeued)
+                // and the caller sees `InvalidUtf8`. Trace the impossible
+                // path so it surfaces if invariants change upstream.
+                match std::ffi::CString::new(packet.target.0.clone()) {
+                    Ok(cstr) => {
+                        *out_peer = cstr.into_raw();
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            target: "phalanx::ffi",
+                            peer = %packet.target.0,
+                            bytes = packet.data.len(),
+                            "outbound local-mesh packet dropped: peer ID contained interior NUL (unreachable path)"
+                        );
+                        *out_data = std::ptr::null_mut();
+                        *out_len = 0;
+                        *out_peer = std::ptr::null_mut();
+                        return PhalanxError::InvalidUtf8.code();
+                    }
+                }
 
-            PhalanxError::Ok.code()
-        }
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-            *out_data = std::ptr::null_mut();
-            *out_len = 0;
-            *out_peer = std::ptr::null_mut();
-            PhalanxError::Ok.code()
-        }
-        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-            *out_data = std::ptr::null_mut();
-            *out_len = 0;
-            *out_peer = std::ptr::null_mut();
-            *guard = None;
-            PhalanxError::ChannelClosed.code()
+                // Data → leaked allocation (caller frees with phalanx_free_bytes)
+                crate::memory::leak_bytes_to_c(packet.data.into_boxed_slice(), out_data, out_len);
+
+                PhalanxError::Ok.code()
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                *out_data = std::ptr::null_mut();
+                *out_len = 0;
+                *out_peer = std::ptr::null_mut();
+                PhalanxError::Ok.code()
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                *out_data = std::ptr::null_mut();
+                *out_len = 0;
+                *out_peer = std::ptr::null_mut();
+                *guard = None;
+                PhalanxError::ChannelClosed.code()
+            }
         }
     }
 }
@@ -265,15 +273,17 @@ pub unsafe extern "C" fn phalanx_local_mesh_poll_outbound(
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_local_mesh_set_available(
     handle: *mut PhalanxHandle,
     available: bool,
 ) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    h.local_mesh_available.store(available, Ordering::Relaxed);
-    PhalanxError::Ok.code()
+        h.local_mesh_available.store(available, Ordering::Relaxed);
+        PhalanxError::Ok.code()
+    }
 }

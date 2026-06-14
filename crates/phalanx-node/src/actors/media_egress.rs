@@ -268,7 +268,7 @@ impl<E: EgressPort> MediaEgressActor<E> {
     fn gate_and_encrypt(&self, evidence: &mut Evidence) -> bool {
         // LensGate: verify sensor provenance BEFORE encryption.
         // Uses Bayesian posterior for luminance-conditioned PRNU floor.
-        if let Evidence::Video(ref v) = evidence {
+        if let &mut Evidence::Video(ref v) = evidence {
             let posterior = self
                 .prnu_posterior
                 .lock()

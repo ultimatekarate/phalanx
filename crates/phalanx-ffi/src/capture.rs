@@ -71,7 +71,7 @@ pub enum PixelFormat {
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
 /// * `out_recording_id` must be a valid pointer to receive the C string.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_start_recording(
     handle: *mut PhalanxHandle,
     out_recording_id: *mut *mut c_char,
@@ -97,7 +97,7 @@ pub unsafe extern "C" fn phalanx_start_recording(
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
 /// * `out_recording_id` must be a valid pointer to receive the C string.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_start_recording_with_options(
     handle: *mut PhalanxHandle,
     publishable: i32,
@@ -241,36 +241,38 @@ unsafe fn start_recording_inner(
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_stop_recording(handle: *mut PhalanxHandle) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    if !h.recording_active.load(Ordering::Relaxed) {
-        return PhalanxError::NotRecording.code();
-    }
+        if !h.recording_active.load(Ordering::Relaxed) {
+            return PhalanxError::NotRecording.code();
+        }
 
-    // Dispatch the stop through the engine's command mailbox. The
-    // engine's `session.stop()` flips `recording_active` and sends
-    // `None` on `content_key_tx` (MediaEgressActor reverts to
-    // vault_key), so the FFI no longer needs to drive either signal
-    // directly.
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    if h.sentinel_cmd_tx
-        .blocking_send(SentinelCommand::SetRecordingState {
-            id: None,
-            reply_to: reply_tx,
-        })
-        .is_err()
-    {
-        return PhalanxError::ChannelClosed.code();
-    }
-    if reply_rx.blocking_recv().is_err() {
-        return PhalanxError::ChannelClosed.code();
-    }
+        // Dispatch the stop through the engine's command mailbox. The
+        // engine's `session.stop()` flips `recording_active` and sends
+        // `None` on `content_key_tx` (MediaEgressActor reverts to
+        // vault_key), so the FFI no longer needs to drive either signal
+        // directly.
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if h.sentinel_cmd_tx
+            .blocking_send(SentinelCommand::SetRecordingState {
+                id: None,
+                reply_to: reply_tx,
+            })
+            .is_err()
+        {
+            return PhalanxError::ChannelClosed.code();
+        }
+        if reply_rx.blocking_recv().is_err() {
+            return PhalanxError::ChannelClosed.code();
+        }
 
-    PhalanxError::Ok.code()
+        PhalanxError::Ok.code()
+    }
 }
 
 /// Pushes a raw YUV video frame through the forensic pipeline.
@@ -289,7 +291,7 @@ pub unsafe extern "C" fn phalanx_stop_recording(handle: *mut PhalanxHandle) -> i
 /// * `y_plane` must point to `y_len` valid bytes of raw luma data (`width * height`).
 /// * `uv_plane` must point to `uv_len` valid bytes of interleaved chroma (`width * height / 2`).
 /// * `recording_id` must be a valid null-terminated C string (returned from `phalanx_start_recording`).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_push_video_frame(
     handle: *mut PhalanxHandle,
     y_plane: *const u8,
@@ -302,192 +304,196 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
     recording_id: *const c_char,
     _timestamp_ms: u64,
 ) -> i32 {
-    // DIAGNOSTIC: log first call to confirm Flutter is pushing frames
-    {
-        static LOGGED_ENTRY: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        if !LOGGED_ENTRY.swap(true, Ordering::Relaxed) {
-            phalanx_log!(
+    unsafe {
+        // DIAGNOSTIC: log first call to confirm Flutter is pushing frames
+        {
+            static LOGGED_ENTRY: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED_ENTRY.swap(true, Ordering::Relaxed) {
+                phalanx_log!(
                 "[Phalanx FFI] push_video_frame CALLED: y_len={}, uv_len={}, {}x{}, handle_null={}, y_null={}, uv_null={}, rec_null={}",
                 y_len, uv_len, width, height, handle.is_null(), y_plane.is_null(), uv_plane.is_null(), recording_id.is_null()
             );
-        }
-    }
-
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
-
-    if y_plane.is_null() || uv_plane.is_null() || recording_id.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-
-    if !h.recording_active.load(Ordering::Relaxed) {
-        // DIAGNOSTIC: log if recording_active is false
-        static LOGGED_INACTIVE: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        if !LOGGED_INACTIVE.swap(true, Ordering::Relaxed) {
-            phalanx_log!("[Phalanx FFI] push_video_frame: recording_active=false, rejecting");
-        }
-        return PhalanxError::NotRecording.code();
-    }
-
-    // Parse recording ID from caller (no Mutex — stateless)
-    let rec_str = match CStr::from_ptr(recording_id).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
-    let rec_id = RecordingId::new(rec_str);
-
-    // Get video sender
-    let video_tx = match &h.video_tx {
-        Some(tx) => tx.clone(),
-        None => return PhalanxError::ChannelClosed.code(),
-    };
-
-    // Validate UV plane size: must be width * height / 2 (NV12/NV21 interleaved).
-    // Some Android camera HALs deliver UV planes off by 1 byte (e.g., 460799 vs
-    // 460800 for 1280×720). Pad to expected size — the missing byte is the last
-    // chroma sample, visually imperceptible.
-    #[allow(clippy::arithmetic_side_effects)]
-    let expected_uv = (width * height) / 2;
-    if uv_len != expected_uv && uv_len.saturating_add(1) != expected_uv {
-        static LOGGED_UV: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !LOGGED_UV.swap(true, Ordering::Relaxed) {
-            phalanx_log!(
-                "[Phalanx FFI] push_video_frame: UV size mismatch: expected={}, got={}",
-                expected_uv,
-                uv_len
-            );
-        }
-        return PhalanxError::InvalidState.code();
-    }
-
-    // Copy raw YUV from Flutter's memory NOW (caller frees after we return).
-    // This is a fast memcpy — the expensive work (JPEG, forensics, shard
-    // creation) happens on tokio's blocking thread pool below.
-    let y_data = std::slice::from_raw_parts(y_plane, y_len as usize).to_vec();
-    let mut uv_data = std::slice::from_raw_parts(uv_plane, uv_len as usize).to_vec();
-    if uv_data.len() < expected_uv as usize {
-        // Pad short UV plane with last byte repeated (nearest-neighbor chroma)
-        let pad = *uv_data.last().unwrap_or(&128);
-        uv_data.resize(expected_uv as usize, pad);
-    }
-    let is_nv12 = matches!(pixel_format, PixelFormat::Nv12);
-
-    // Claim sequence number now (atomic — no contention with the blocking task).
-    let sequence = StorageSequence(SEQUENCE.fetch_add(1, Ordering::Relaxed));
-    let current_fps = target_fps(Fps::new(30), h.governor.current_power_state());
-
-    // Clone shared state for the async closure.
-    let posterior = h.prnu_posterior.clone();
-    let persist_tx = h.storage_tx.clone();
-
-    // Dispatch the heavy pipeline to tokio's blocking thread pool.
-    // The FFI call returns immediately — Flutter's UI thread is never blocked
-    // by JPEG compression, forensic analysis, or shard serialization.
-    h.runtime.spawn(async move {
-        let result = tokio::task::spawn_blocking(move || -> Option<_> {
-            // Step 1: ForensicLens — PRNU, Moiré, Laplacian (Y-plane only)
-            let lens_metrics = LENS.analyze(
-                &y_data,
-                width as usize,
-                height as usize,
-                BlackLevel::default(),
-            );
-
-            // Step 1.5: Online Bayesian PRNU update.
-            // update_prnu_posterior internally filters dark/degenerate frames.
-            // Lock held for nanoseconds (6 f64 additions). No contention —
-            // MediaEgressActor reads a snapshot via lock-copy-unlock.
-            let updated_n = if let Ok(mut post) = posterior.lock() {
-                *post = update_prnu_posterior(&post, &lens_metrics);
-                post.n
-            } else {
-                0
-            };
-
-            // Persist posterior every 100 frames — sends through the actor
-            // channel so FFI never touches Guardian directly.
-            if updated_n > 0 && updated_n % 100 == 0 {
-                if let Ok(snapshot) = posterior.lock().map(|p| *p) {
-                    // Fire-and-forget: try_send avoids blocking if channel is full.
-                    let _ = persist_tx.try_send(StorageCommand::PersistPosterior(snapshot));
-                }
             }
+        }
 
-            // Step 2: JPEG compression (YUV→JPEG via turbojpeg)
-            let compressed = match compress_frame(&y_data, &uv_data, width, height, is_nv12) {
-                Ok(c) => {
-                    // DIAGNOSTIC: log first successful compression
-                    static LOGGED_OK: std::sync::atomic::AtomicBool =
-                        std::sync::atomic::AtomicBool::new(false);
-                    if !LOGGED_OK.swap(true, Ordering::Relaxed) {
-                        phalanx_log!(
-                            "[Phalanx FFI] compress_frame OK: {} bytes JPEG from {}x{}",
-                            c.len(),
-                            width,
-                            height
-                        );
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
+
+        if y_plane.is_null() || uv_plane.is_null() || recording_id.is_null() {
+            return PhalanxError::NullPointer.code();
+        }
+
+        if !h.recording_active.load(Ordering::Relaxed) {
+            // DIAGNOSTIC: log if recording_active is false
+            static LOGGED_INACTIVE: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED_INACTIVE.swap(true, Ordering::Relaxed) {
+                phalanx_log!("[Phalanx FFI] push_video_frame: recording_active=false, rejecting");
+            }
+            return PhalanxError::NotRecording.code();
+        }
+
+        // Parse recording ID from caller (no Mutex — stateless)
+        let rec_str = match CStr::from_ptr(recording_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
+        let rec_id = RecordingId::new(rec_str);
+
+        // Get video sender
+        let video_tx = match &h.video_tx {
+            Some(tx) => tx.clone(),
+            None => return PhalanxError::ChannelClosed.code(),
+        };
+
+        // Validate UV plane size: must be width * height / 2 (NV12/NV21 interleaved).
+        // Some Android camera HALs deliver UV planes off by 1 byte (e.g., 460799 vs
+        // 460800 for 1280×720). Pad to expected size — the missing byte is the last
+        // chroma sample, visually imperceptible.
+        #[allow(clippy::arithmetic_side_effects)]
+        let expected_uv = (width * height) / 2;
+        if uv_len != expected_uv && uv_len.saturating_add(1) != expected_uv {
+            static LOGGED_UV: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED_UV.swap(true, Ordering::Relaxed) {
+                phalanx_log!(
+                    "[Phalanx FFI] push_video_frame: UV size mismatch: expected={}, got={}",
+                    expected_uv,
+                    uv_len
+                );
+            }
+            return PhalanxError::InvalidState.code();
+        }
+
+        // Copy raw YUV from Flutter's memory NOW (caller frees after we return).
+        // This is a fast memcpy — the expensive work (JPEG, forensics, shard
+        // creation) happens on tokio's blocking thread pool below.
+        let y_data = std::slice::from_raw_parts(y_plane, y_len as usize).to_vec();
+        let mut uv_data = std::slice::from_raw_parts(uv_plane, uv_len as usize).to_vec();
+        if uv_data.len() < expected_uv as usize {
+            // Pad short UV plane with last byte repeated (nearest-neighbor chroma)
+            let pad = *uv_data.last().unwrap_or(&128);
+            uv_data.resize(expected_uv as usize, pad);
+        }
+        let is_nv12 = matches!(pixel_format, PixelFormat::Nv12);
+
+        // Claim sequence number now (atomic — no contention with the blocking task).
+        let sequence = StorageSequence(SEQUENCE.fetch_add(1, Ordering::Relaxed));
+        let current_fps = target_fps(Fps::new(30), h.governor.current_power_state());
+
+        // Clone shared state for the async closure.
+        let posterior = h.prnu_posterior.clone();
+        let persist_tx = h.storage_tx.clone();
+
+        // Dispatch the heavy pipeline to tokio's blocking thread pool.
+        // The FFI call returns immediately — Flutter's UI thread is never blocked
+        // by JPEG compression, forensic analysis, or shard serialization.
+        h.runtime.spawn(async move {
+            let result = tokio::task::spawn_blocking(move || -> Option<_> {
+                // Step 1: ForensicLens — PRNU, Moiré, Laplacian (Y-plane only)
+                let lens_metrics = LENS.analyze(
+                    &y_data,
+                    width as usize,
+                    height as usize,
+                    BlackLevel::default(),
+                );
+
+                // Step 1.5: Online Bayesian PRNU update.
+                // update_prnu_posterior internally filters dark/degenerate frames.
+                // Lock held for nanoseconds (6 f64 additions). No contention —
+                // MediaEgressActor reads a snapshot via lock-copy-unlock.
+                let updated_n = match posterior.lock() {
+                    Ok(mut post) => {
+                        *post = update_prnu_posterior(&post, &lens_metrics);
+                        post.n
                     }
-                    c
-                }
-                Err(e) => {
-                    // DIAGNOSTIC: log first compression failure
-                    static LOGGED_ERR: std::sync::atomic::AtomicBool =
-                        std::sync::atomic::AtomicBool::new(false);
-                    if !LOGGED_ERR.swap(true, Ordering::Relaxed) {
-                        phalanx_log!("[Phalanx FFI] compress_frame FAILED: {}", e);
+                    _ => 0,
+                };
+
+                // Persist posterior every 100 frames — sends through the actor
+                // channel so FFI never touches Guardian directly.
+                if updated_n > 0 && updated_n % 100 == 0 {
+                    if let Ok(snapshot) = posterior.lock().map(|p| *p) {
+                        // Fire-and-forget: try_send avoids blocking if channel is full.
+                        let _ = persist_tx.try_send(StorageCommand::PersistPosterior(snapshot));
                     }
-                    return None;
                 }
-            };
 
-            // Step 3: Create video shard with forensic metrics
-            let elapsed = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or(Duration::from_secs(0));
-            let now = PhalanxTimestamp::from_millis(
-                elapsed
-                    .as_secs()
-                    .saturating_mul(1000)
-                    .saturating_add(u64::from(elapsed.subsec_millis())),
-            );
-            match create_video_shard(
-                vec![compressed],
-                sequence,
-                current_fps,
-                rec_id,
-                lens_metrics,
-                now,
-            ) {
-                Ok(shard) => Some(shard),
+                // Step 2: JPEG compression (YUV→JPEG via turbojpeg)
+                let compressed = match compress_frame(&y_data, &uv_data, width, height, is_nv12) {
+                    Ok(c) => {
+                        // DIAGNOSTIC: log first successful compression
+                        static LOGGED_OK: std::sync::atomic::AtomicBool =
+                            std::sync::atomic::AtomicBool::new(false);
+                        if !LOGGED_OK.swap(true, Ordering::Relaxed) {
+                            phalanx_log!(
+                                "[Phalanx FFI] compress_frame OK: {} bytes JPEG from {}x{}",
+                                c.len(),
+                                width,
+                                height
+                            );
+                        }
+                        c
+                    }
+                    Err(e) => {
+                        // DIAGNOSTIC: log first compression failure
+                        static LOGGED_ERR: std::sync::atomic::AtomicBool =
+                            std::sync::atomic::AtomicBool::new(false);
+                        if !LOGGED_ERR.swap(true, Ordering::Relaxed) {
+                            phalanx_log!("[Phalanx FFI] compress_frame FAILED: {}", e);
+                        }
+                        return None;
+                    }
+                };
+
+                // Step 3: Create video shard with forensic metrics
+                let elapsed = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or(Duration::from_secs(0));
+                let now = PhalanxTimestamp::from_millis(
+                    elapsed
+                        .as_secs()
+                        .saturating_mul(1000)
+                        .saturating_add(u64::from(elapsed.subsec_millis())),
+                );
+                match create_video_shard(
+                    vec![compressed],
+                    sequence,
+                    current_fps,
+                    rec_id,
+                    lens_metrics,
+                    now,
+                ) {
+                    Ok(shard) => Some(shard),
+                    Err(e) => {
+                        phalanx_log!("[Phalanx FFI] create_video_shard FAILED: {e:?}");
+                        None
+                    }
+                }
+            })
+            .await;
+
+            // Step 4: Non-blocking send to MediaEgressActor
+            match &result {
+                Ok(Some(shard)) => {
+                    static LOGGED_SEND: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if !LOGGED_SEND.swap(true, Ordering::Relaxed) {
+                        phalanx_log!("[Phalanx FFI] video shard created, sending to egress");
+                    }
+                    let _ = video_tx.try_send(shard.clone());
+                }
+                Ok(None) => {} // spawn_blocking returned None (pipeline failure logged above)
                 Err(e) => {
-                    phalanx_log!("[Phalanx FFI] create_video_shard FAILED: {e:?}");
-                    None
+                    phalanx_log!("[Phalanx FFI] spawn_blocking panicked: {e:?}");
                 }
             }
-        })
-        .await;
+        });
 
-        // Step 4: Non-blocking send to MediaEgressActor
-        match &result {
-            Ok(Some(shard)) => {
-                static LOGGED_SEND: std::sync::atomic::AtomicBool =
-                    std::sync::atomic::AtomicBool::new(false);
-                if !LOGGED_SEND.swap(true, Ordering::Relaxed) {
-                    phalanx_log!("[Phalanx FFI] video shard created, sending to egress");
-                }
-                let _ = video_tx.try_send(shard.clone());
-            }
-            Ok(None) => {} // spawn_blocking returned None (pipeline failure logged above)
-            Err(e) => {
-                phalanx_log!("[Phalanx FFI] spawn_blocking panicked: {e:?}");
-            }
-        }
-    });
-
-    PhalanxError::Ok.code()
+        PhalanxError::Ok.code()
+    }
 }
 
 // Audio uses the shared SEQUENCE counter above — no separate counter needed.
@@ -504,7 +510,7 @@ pub unsafe extern "C" fn phalanx_push_video_frame(
 /// * `handle` must be a valid pointer from `phalanx_create`.
 /// * `pcm_data` must point to `pcm_len` valid bytes of 16-bit LE PCM audio.
 /// * `recording_id` must be a valid null-terminated C string.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_push_audio_frame(
     handle: *mut PhalanxHandle,
     pcm_data: *const u8,
@@ -513,67 +519,69 @@ pub unsafe extern "C" fn phalanx_push_audio_frame(
     channels: u8,
     recording_id: *const c_char,
 ) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    if pcm_data.is_null() || recording_id.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-
-    if !h.recording_active.load(Ordering::Relaxed) {
-        return PhalanxError::NotRecording.code();
-    }
-
-    // Parse recording ID from caller (stateless — no Mutex)
-    let rec_str = match CStr::from_ptr(recording_id).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
-    let rec_id = RecordingId::new(rec_str);
-
-    // Get audio sender
-    let audio_tx = match &h.audio_tx {
-        Some(tx) => tx,
-        None => return PhalanxError::ChannelClosed.code(),
-    };
-
-    // Copy PCM data from the FFI boundary
-    let pcm = std::slice::from_raw_parts(pcm_data, pcm_len as usize).to_vec();
-
-    // Create audio shard (LZ4 compressed internally)
-    let sequence = StorageSequence(SEQUENCE.fetch_add(1, Ordering::Relaxed));
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0));
-    let now = PhalanxTimestamp::from_millis(
-        elapsed
-            .as_secs()
-            .saturating_mul(1000)
-            .saturating_add(u64::from(elapsed.subsec_millis())),
-    );
-    let shard = match create_audio_shard(
-        pcm,
-        sequence,
-        SampleRate::new(sample_rate),
-        ChannelCount::new(channels),
-        rec_id,
-        now,
-    ) {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidState.code(),
-    };
-
-    // Non-blocking send to MediaEgressActor
-    // Encryption deferred to MediaEgressActor (async thread) — see media_egress.rs.
-    match audio_tx.try_send(shard) {
-        Ok(()) => PhalanxError::Ok.code(),
-        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-            // Backpressure: audio chunk dropped silently.
-            PhalanxError::Ok.code()
+        if pcm_data.is_null() || recording_id.is_null() {
+            return PhalanxError::NullPointer.code();
         }
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-            PhalanxError::ChannelClosed.code()
+
+        if !h.recording_active.load(Ordering::Relaxed) {
+            return PhalanxError::NotRecording.code();
+        }
+
+        // Parse recording ID from caller (stateless — no Mutex)
+        let rec_str = match CStr::from_ptr(recording_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
+        let rec_id = RecordingId::new(rec_str);
+
+        // Get audio sender
+        let audio_tx = match &h.audio_tx {
+            Some(tx) => tx,
+            None => return PhalanxError::ChannelClosed.code(),
+        };
+
+        // Copy PCM data from the FFI boundary
+        let pcm = std::slice::from_raw_parts(pcm_data, pcm_len as usize).to_vec();
+
+        // Create audio shard (LZ4 compressed internally)
+        let sequence = StorageSequence(SEQUENCE.fetch_add(1, Ordering::Relaxed));
+        let elapsed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::from_secs(0));
+        let now = PhalanxTimestamp::from_millis(
+            elapsed
+                .as_secs()
+                .saturating_mul(1000)
+                .saturating_add(u64::from(elapsed.subsec_millis())),
+        );
+        let shard = match create_audio_shard(
+            pcm,
+            sequence,
+            SampleRate::new(sample_rate),
+            ChannelCount::new(channels),
+            rec_id,
+            now,
+        ) {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidState.code(),
+        };
+
+        // Non-blocking send to MediaEgressActor
+        // Encryption deferred to MediaEgressActor (async thread) — see media_egress.rs.
+        match audio_tx.try_send(shard) {
+            Ok(()) => PhalanxError::Ok.code(),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                // Backpressure: audio chunk dropped silently.
+                PhalanxError::Ok.code()
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                PhalanxError::ChannelClosed.code()
+            }
         }
     }
 }
@@ -585,14 +593,16 @@ pub unsafe extern "C" fn phalanx_push_audio_frame(
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_get_target_fps(handle: *const PhalanxHandle) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return 0;
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return 0;
+        };
 
-    let fps = target_fps(Fps::new(30), h.governor.current_power_state());
-    fps.get().cast_signed()
+        let fps = target_fps(Fps::new(30), h.governor.current_power_state());
+        fps.get().cast_signed()
+    }
 }
 
 // =====================================================================
@@ -609,46 +619,48 @@ pub unsafe extern "C" fn phalanx_get_target_fps(handle: *const PhalanxHandle) ->
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
 /// * `out_json` must be a valid pointer to receive the C string.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_list_recordings(
     handle: *mut PhalanxHandle,
     out_json: *mut *mut c_char,
 ) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    if out_json.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-
-    if !h.is_running() {
-        return PhalanxError::NotRunning.code();
-    }
-
-    let storage_tx = h.storage_tx.clone();
-
-    let result = h.runtime.block_on(async {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        storage_tx
-            .send(StorageCommand::ListRecordings { reply_to: tx })
-            .await
-            .map_err(|_| ())?;
-        rx.await.map_err(|_| ())
-    });
-
-    let ids: Vec<phalanx_proto::identity::RecordingId> = result.unwrap_or_default();
-
-    // Serialize as JSON array of strings
-    let json_parts: Vec<String> = ids.iter().map(|id| format!("\"{}\"", id)).collect();
-    let json = format!("[{}]", json_parts.join(","));
-
-    match CString::new(json) {
-        Ok(cstr) => {
-            *out_json = cstr.into_raw();
-            PhalanxError::Ok.code()
+        if out_json.is_null() {
+            return PhalanxError::NullPointer.code();
         }
-        Err(_) => PhalanxError::InvalidUtf8.code(),
+
+        if !h.is_running() {
+            return PhalanxError::NotRunning.code();
+        }
+
+        let storage_tx = h.storage_tx.clone();
+
+        let result = h.runtime.block_on(async {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            storage_tx
+                .send(StorageCommand::ListRecordings { reply_to: tx })
+                .await
+                .map_err(|_| ())?;
+            rx.await.map_err(|_| ())
+        });
+
+        let ids: Vec<phalanx_proto::identity::RecordingId> = result.unwrap_or_default();
+
+        // Serialize as JSON array of strings
+        let json_parts: Vec<String> = ids.iter().map(|id| format!("\"{}\"", id)).collect();
+        let json = format!("[{}]", json_parts.join(","));
+
+        match CString::new(json) {
+            Ok(cstr) => {
+                *out_json = cstr.into_raw();
+                PhalanxError::Ok.code()
+            }
+            Err(_) => PhalanxError::InvalidUtf8.code(),
+        }
     }
 }
 
@@ -668,49 +680,51 @@ pub unsafe extern "C" fn phalanx_list_recordings(
 /// * `recording_id` must be a valid null-terminated C string.
 /// * `recipient_did` must be a valid null-terminated C string (the peer's DID).
 /// * `out_link` must be a valid pointer to receive the C string.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_get_share_link(
     handle: *const PhalanxHandle,
     recording_id: *const c_char,
     recipient_did: *const c_char,
     out_link: *mut *mut c_char,
 ) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    if recording_id.is_null() || recipient_did.is_null() || out_link.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-
-    let rec_str = match CStr::from_ptr(recording_id).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
-
-    let recipient_str = match CStr::from_ptr(recipient_did).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
-
-    // Generate a sharing secret (random hex string)
-    let secret = format!("{:016x}", rand_u64());
-
-    let locator = phalanx_proto::identity::PhalanxLocator {
-        id: RecordingId::new(rec_str),
-        secret,
-        author: phalanx_proto::prelude::Did::new(&h.node_did),
-        recipient_did: phalanx_proto::prelude::Did::new(recipient_str),
-    };
-
-    let link = locator.to_string();
-
-    match CString::new(link) {
-        Ok(cstr) => {
-            *out_link = cstr.into_raw();
-            PhalanxError::Ok.code()
+        if recording_id.is_null() || recipient_did.is_null() || out_link.is_null() {
+            return PhalanxError::NullPointer.code();
         }
-        Err(_) => PhalanxError::InvalidUtf8.code(),
+
+        let rec_str = match CStr::from_ptr(recording_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
+
+        let recipient_str = match CStr::from_ptr(recipient_did).to_str() {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
+
+        // Generate a sharing secret (random hex string)
+        let secret = format!("{:016x}", rand_u64());
+
+        let locator = phalanx_proto::identity::PhalanxLocator {
+            id: RecordingId::new(rec_str),
+            secret,
+            author: phalanx_proto::prelude::Did::new(&h.node_did),
+            recipient_did: phalanx_proto::prelude::Did::new(recipient_str),
+        };
+
+        let link = locator.to_string();
+
+        match CString::new(link) {
+            Ok(cstr) => {
+                *out_link = cstr.into_raw();
+                PhalanxError::Ok.code()
+            }
+            Err(_) => PhalanxError::InvalidUtf8.code(),
+        }
     }
 }
 
@@ -722,44 +736,46 @@ pub unsafe extern "C" fn phalanx_get_share_link(
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
 /// * `phx_link` must be a valid null-terminated C string containing a `phx://` URI.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_open_link(
     handle: *mut PhalanxHandle,
     phx_link: *const c_char,
 ) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    if phx_link.is_null() {
-        return PhalanxError::NullPointer.code();
+        if phx_link.is_null() {
+            return PhalanxError::NullPointer.code();
+        }
+
+        if !h.is_running() {
+            return PhalanxError::NotRunning.code();
+        }
+
+        let link_str = match CStr::from_ptr(phx_link).to_str() {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
+
+        // Parse the phx:// URI
+        let locator: phalanx_proto::identity::PhalanxLocator = match link_str.parse() {
+            Ok(loc) => loc,
+            Err(_) => return PhalanxError::InvalidState.code(),
+        };
+
+        // Trigger DHT provider discovery for this recording
+        let recording_id = locator.id.clone();
+        let egress_tx = h.egress_tx.clone();
+        h.runtime.spawn(async move {
+            let _ = egress_tx
+                .send(EgressCommand::FindProviders(recording_id))
+                .await;
+        });
+
+        PhalanxError::Ok.code()
     }
-
-    if !h.is_running() {
-        return PhalanxError::NotRunning.code();
-    }
-
-    let link_str = match CStr::from_ptr(phx_link).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
-
-    // Parse the phx:// URI
-    let locator: phalanx_proto::identity::PhalanxLocator = match link_str.parse() {
-        Ok(loc) => loc,
-        Err(_) => return PhalanxError::InvalidState.code(),
-    };
-
-    // Trigger DHT provider discovery for this recording
-    let recording_id = locator.id.clone();
-    let egress_tx = h.egress_tx.clone();
-    h.runtime.spawn(async move {
-        let _ = egress_tx
-            .send(EgressCommand::FindProviders(recording_id))
-            .await;
-    });
-
-    PhalanxError::Ok.code()
 }
 
 /// Debug-only: delete a recording without cryptographic revocation.
@@ -767,43 +783,45 @@ pub unsafe extern "C" fn phalanx_open_link(
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
 /// * `recording_id` must be a valid null-terminated C string.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_debug_delete_recording(
     handle: *mut PhalanxHandle,
     recording_id: *const c_char,
 ) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
-    if recording_id.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-    let id_str = match CStr::from_ptr(recording_id).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
+        if recording_id.is_null() {
+            return PhalanxError::NullPointer.code();
+        }
+        let id_str = match CStr::from_ptr(recording_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
 
-    let rec_id = RecordingId::new(id_str);
-    let storage_tx = h.storage_tx.clone();
+        let rec_id = RecordingId::new(id_str);
+        let storage_tx = h.storage_tx.clone();
 
-    let result = h.runtime.block_on(async {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        storage_tx
-            .send(
-                phalanx_node::actors::storage::StorageCommand::DebugDeleteRecording {
-                    recording_id: rec_id,
-                    reply_to: tx,
-                },
-            )
-            .await
-            .map_err(|_| ())?;
-        rx.await.map_err(|_| ())?.map_err(|_| ())?;
-        Ok::<(), ()>(())
-    });
+        let result = h.runtime.block_on(async {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            storage_tx
+                .send(
+                    phalanx_node::actors::storage::StorageCommand::DebugDeleteRecording {
+                        recording_id: rec_id,
+                        reply_to: tx,
+                    },
+                )
+                .await
+                .map_err(|_| ())?;
+            rx.await.map_err(|_| ())?.map_err(|_| ())?;
+            Ok::<(), ()>(())
+        });
 
-    match result {
-        Ok(()) => PhalanxError::Ok.code(),
-        Err(()) => PhalanxError::InvalidState.code(),
+        match result {
+            Ok(()) => PhalanxError::Ok.code(),
+            Err(()) => PhalanxError::InvalidState.code(),
+        }
     }
 }
 
@@ -816,48 +834,50 @@ pub unsafe extern "C" fn phalanx_debug_delete_recording(
 /// * `handle` must be a valid pointer from `phalanx_create`.
 /// * `recording_id` must be a valid null-terminated C string.
 /// * `out_info` must be a valid pointer to receive the C string.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_debug_recording_info(
     handle: *mut PhalanxHandle,
     recording_id: *const c_char,
     out_info: *mut *mut c_char,
 ) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
-    if recording_id.is_null() || out_info.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-    let id_str = match CStr::from_ptr(recording_id).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
-
-    let rec_id = RecordingId::new(id_str);
-    let storage_tx = h.storage_tx.clone();
-
-    let result = h.runtime.block_on(async {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        storage_tx
-            .send(
-                phalanx_node::actors::storage::StorageCommand::DebugRecordingInfo {
-                    recording_id: rec_id,
-                    reply_to: tx,
-                },
-            )
-            .await
-            .map_err(|_| ())?;
-        rx.await.map_err(|_| ())
-    });
-
-    let (shards, has_key) = result.unwrap_or((0, false));
-    let info = format!("shards={shards},key={has_key}");
-    match std::ffi::CString::new(info) {
-        Ok(cstr) => {
-            *out_info = cstr.into_raw();
-            PhalanxError::Ok.code()
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
+        if recording_id.is_null() || out_info.is_null() {
+            return PhalanxError::NullPointer.code();
         }
-        Err(_) => PhalanxError::InvalidState.code(),
+        let id_str = match CStr::from_ptr(recording_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
+
+        let rec_id = RecordingId::new(id_str);
+        let storage_tx = h.storage_tx.clone();
+
+        let result = h.runtime.block_on(async {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            storage_tx
+                .send(
+                    phalanx_node::actors::storage::StorageCommand::DebugRecordingInfo {
+                        recording_id: rec_id,
+                        reply_to: tx,
+                    },
+                )
+                .await
+                .map_err(|_| ())?;
+            rx.await.map_err(|_| ())
+        });
+
+        let (shards, has_key) = result.unwrap_or((0, false));
+        let info = format!("shards={shards},key={has_key}");
+        match std::ffi::CString::new(info) {
+            Ok(cstr) => {
+                *out_info = cstr.into_raw();
+                PhalanxError::Ok.code()
+            }
+            Err(_) => PhalanxError::InvalidState.code(),
+        }
     }
 }
 

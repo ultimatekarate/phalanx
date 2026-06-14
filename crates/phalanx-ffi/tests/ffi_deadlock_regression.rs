@@ -82,33 +82,37 @@ unsafe fn create_and_start(
     *mut phalanx_ffi::handle::PhalanxHandle,
     *mut std::os::raw::c_char,
 ) {
-    let mut genesis: *mut std::os::raw::c_char = std::ptr::null_mut();
-    let handle = phalanx_create(
-        std::ptr::null(),
-        env.storage_cstr.as_ptr(),
-        env.passphrase_cstr.as_ptr(),
-        &mut genesis as *mut *mut std::os::raw::c_char,
-    );
-    assert!(!handle.is_null(), "phalanx_create must succeed");
-    let started = phalanx_start(handle);
-    assert_eq!(
-        started,
-        PhalanxError::Ok.code(),
-        "phalanx_start must succeed"
-    );
-    // Let the engine's run loop tick into steady state before driving it.
-    std::thread::sleep(Duration::from_millis(200));
-    (handle, genesis)
+    unsafe {
+        let mut genesis: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let handle = phalanx_create(
+            std::ptr::null(),
+            env.storage_cstr.as_ptr(),
+            env.passphrase_cstr.as_ptr(),
+            &mut genesis as *mut *mut std::os::raw::c_char,
+        );
+        assert!(!handle.is_null(), "phalanx_create must succeed");
+        let started = phalanx_start(handle);
+        assert_eq!(
+            started,
+            PhalanxError::Ok.code(),
+            "phalanx_start must succeed"
+        );
+        // Let the engine's run loop tick into steady state before driving it.
+        std::thread::sleep(Duration::from_millis(200));
+        (handle, genesis)
+    }
 }
 
 unsafe fn cleanup(
     handle: *mut phalanx_ffi::handle::PhalanxHandle,
     genesis: *mut std::os::raw::c_char,
 ) {
-    let _ = phalanx_stop(handle);
-    phalanx_destroy(handle);
-    if !genesis.is_null() {
-        phalanx_ffi::memory::phalanx_free_string(genesis);
+    unsafe {
+        let _ = phalanx_stop(handle);
+        phalanx_destroy(handle);
+        if !genesis.is_null() {
+            phalanx_ffi::memory::phalanx_free_string(genesis);
+        }
     }
 }
 

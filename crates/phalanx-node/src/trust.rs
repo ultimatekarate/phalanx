@@ -363,16 +363,22 @@ impl TrustRegistry {
             trust_level: record.level,
         };
 
-        if let Ok(mut scores) = projection.scores.write() {
-            scores.insert(network_id.clone(), info);
-        } else {
-            tracing::error!("scores lock poisoned — cannot sync projection");
+        match projection.scores.write() {
+            Ok(mut scores) => {
+                scores.insert(network_id.clone(), info);
+            }
+            _ => {
+                tracing::error!("scores lock poisoned — cannot sync projection");
+            }
         }
 
-        if let Ok(mut did_map) = projection.did_to_mesh_address.write() {
-            did_map.insert(did.clone(), network_id);
-        } else {
-            tracing::error!("did_to_mesh_address lock poisoned — cannot sync projection");
+        match projection.did_to_mesh_address.write() {
+            Ok(mut did_map) => {
+                did_map.insert(did.clone(), network_id);
+            }
+            _ => {
+                tracing::error!("did_to_mesh_address lock poisoned — cannot sync projection");
+            }
         }
     }
 

@@ -174,7 +174,7 @@ pub struct PhalanxHandle {
 /// * `config_path` must be a valid null-terminated C string, or null for defaults.
 /// * `storage_path` must be a valid null-terminated C string pointing to writable storage.
 /// * `passphrase` must be a valid null-terminated C string.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_create(
     config_path: *const c_char,
     storage_path: *const c_char,
@@ -301,7 +301,7 @@ pub unsafe extern "C" fn phalanx_create(
 ///   string.
 /// * `storage_path`, `passphrase`, and `mnemonic_phrase` must be valid
 ///   null-terminated C strings.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_restore(
     config_path: *const c_char,
     storage_path: *const c_char,
@@ -373,7 +373,7 @@ pub unsafe extern "C" fn phalanx_restore(
 /// Diagnostic: write boot log to a file since stderr doesn't reach logcat
 /// on Android. Caller passes `storage_path`; the closure appends to
 /// `<storage_path>/boot.log`.
-fn make_boot_logger(storage_path: &str) -> impl Fn(&str) {
+fn make_boot_logger(storage_path: &str) -> impl Fn(&str) + use<> {
     let log_path = Path::new(storage_path).join("boot.log");
     move |msg: &str| {
         use std::io::Write;
@@ -683,35 +683,37 @@ async fn bootstrap_with_identity(
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_start(handle: *mut PhalanxHandle) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    let Ok(mut state) = h.state.lock() else {
-        return PhalanxError::InvalidState.code();
-    };
+        let Ok(mut state) = h.state.lock() else {
+            return PhalanxError::InvalidState.code();
+        };
 
-    // Extract the UnspawnedEngine by `mem::replace`-ing the Booting
-    // variant with a temporary Stopped placeholder. The replace is sound:
-    // if anything below fails we restore the prior state.
-    let unspawned = match std::mem::replace(&mut *state, HandleState::Stopped) {
-        HandleState::Booting { unspawned } => unspawned,
-        prior @ HandleState::Running { .. } => {
-            *state = prior;
-            return PhalanxError::AlreadyRunning.code();
-        }
-        HandleState::Stopped => return PhalanxError::InvalidState.code(),
-    };
+        // Extract the UnspawnedEngine by `mem::replace`-ing the Booting
+        // variant with a temporary Stopped placeholder. The replace is sound:
+        // if anything below fails we restore the prior state.
+        let unspawned = match std::mem::replace(&mut *state, HandleState::Stopped) {
+            HandleState::Booting { unspawned } => unspawned,
+            prior @ HandleState::Running { .. } => {
+                *state = prior;
+                return PhalanxError::AlreadyRunning.code();
+            }
+            HandleState::Stopped => return PhalanxError::InvalidState.code(),
+        };
 
-    // Spawn the run loop. `UnspawnedEngine::spawn` consumes by value and
-    // moves the sentinel into the tokio task — no shared reference, no
-    // way for any other code to ever lock the sentinel.
-    let (_engine_handle, lifecycle) = (*unspawned).spawn(&h.runtime);
-    *state = HandleState::Running { lifecycle };
+        // Spawn the run loop. `UnspawnedEngine::spawn` consumes by value and
+        // moves the sentinel into the tokio task — no shared reference, no
+        // way for any other code to ever lock the sentinel.
+        let (_engine_handle, lifecycle) = (*unspawned).spawn(&h.runtime);
+        *state = HandleState::Running { lifecycle };
 
-    PhalanxError::Ok.code()
+        PhalanxError::Ok.code()
+    }
 }
 
 /// Stops the engine gracefully by consuming the `EngineLifecycle` and
@@ -723,45 +725,47 @@ pub unsafe extern "C" fn phalanx_start(handle: *mut PhalanxHandle) -> i32 {
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_stop(handle: *mut PhalanxHandle) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
-
-    // Extract the lifecycle (mem::replace to keep the lock guard short),
-    // then drop the guard before doing async work via block_on.
-    let lifecycle = {
-        let Ok(mut state) = h.state.lock() else {
-            return PhalanxError::InvalidState.code();
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
         };
-        match std::mem::replace(&mut *state, HandleState::Stopped) {
-            HandleState::Running { lifecycle } => lifecycle,
-            prior @ (HandleState::Booting { .. } | HandleState::Stopped) => {
-                *state = prior;
-                return PhalanxError::NotRunning.code();
-            }
-        }
-    };
 
-    // Drive shutdown with a 10s drain deadline. Matches the deadline
-    // `MeshSentinel::shutdown()` already uses internally so the worst-case
-    // is bounded across both layers.
-    match h
-        .runtime
-        .block_on(lifecycle.shutdown(Duration::from_secs(10)))
-    {
-        Ok(()) => PhalanxError::Ok.code(),
-        Err(e) => {
-            tracing::warn!(
-                target: "phalanx::ffi",
-                error = %e,
-                "engine shutdown did not complete cleanly"
-            );
-            // Still return Ok — state is already Stopped; the run-loop
-            // task is either gone or will be cancelled by the runtime
-            // when `phalanx_destroy` drops it.
-            PhalanxError::Ok.code()
+        // Extract the lifecycle (mem::replace to keep the lock guard short),
+        // then drop the guard before doing async work via block_on.
+        let lifecycle = {
+            let Ok(mut state) = h.state.lock() else {
+                return PhalanxError::InvalidState.code();
+            };
+            match std::mem::replace(&mut *state, HandleState::Stopped) {
+                HandleState::Running { lifecycle } => lifecycle,
+                prior @ (HandleState::Booting { .. } | HandleState::Stopped) => {
+                    *state = prior;
+                    return PhalanxError::NotRunning.code();
+                }
+            }
+        };
+
+        // Drive shutdown with a 10s drain deadline. Matches the deadline
+        // `MeshSentinel::shutdown()` already uses internally so the worst-case
+        // is bounded across both layers.
+        match h
+            .runtime
+            .block_on(lifecycle.shutdown(Duration::from_secs(10)))
+        {
+            Ok(()) => PhalanxError::Ok.code(),
+            Err(e) => {
+                tracing::warn!(
+                    target: "phalanx::ffi",
+                    error = %e,
+                    "engine shutdown did not complete cleanly"
+                );
+                // Still return Ok — state is already Stopped; the run-loop
+                // task is either gone or will be cancelled by the runtime
+                // when `phalanx_destroy` drops it.
+                PhalanxError::Ok.code()
+            }
         }
     }
 }
@@ -778,16 +782,18 @@ pub unsafe extern "C" fn phalanx_stop(handle: *mut PhalanxHandle) -> i32 {
 /// * `handle` must be a valid pointer from `phalanx_create`.
 /// * Must be called exactly once per handle.
 /// * Null is a safe no-op.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_destroy(handle: *mut PhalanxHandle) {
-    if !handle.is_null() {
-        // If the engine is still Running, drive shutdown first. Ignore
-        // the return code — destroy proceeds regardless, and the runtime
-        // drop below will force-cancel anything stragglers left over.
-        let _ = phalanx_stop(handle);
-        // Reconstruct the Box so Rust drops everything in order:
-        // runtime drop → cancels any remaining spawned tasks → channels close → actors stop
-        let _ = Box::from_raw(handle);
+    unsafe {
+        if !handle.is_null() {
+            // If the engine is still Running, drive shutdown first. Ignore
+            // the return code — destroy proceeds regardless, and the runtime
+            // drop below will force-cancel anything stragglers left over.
+            let _ = phalanx_stop(handle);
+            // Reconstruct the Box so Rust drops everything in order:
+            // runtime drop → cancels any remaining spawned tasks → channels close → actors stop
+            let _ = Box::from_raw(handle);
+        }
     }
 }
 

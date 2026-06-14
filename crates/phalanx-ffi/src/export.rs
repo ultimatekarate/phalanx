@@ -55,7 +55,7 @@ use tokio::sync::oneshot;
 /// * `handle` must be a valid pointer from `phalanx_create`.
 /// * `recording_id` must be a valid null-terminated C string.
 /// * `out_path` must be a valid null-terminated C string (writable file path).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_export_c2pa(
     handle: *const PhalanxHandle,
     recording_id: *const c_char,
@@ -122,33 +122,35 @@ pub unsafe extern "C" fn phalanx_export_c2pa(
 /// * `handle` must be a valid pointer from `phalanx_create`.
 /// * `recording_id` must be a valid null-terminated C string.
 /// * `out_path` must be a valid pointer to receive the C string.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_get_c2pa_export_path(
     handle: *const PhalanxHandle,
     recording_id: *const c_char,
     out_path: *mut *mut c_char,
 ) -> i32 {
-    let Some(_h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(_h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    if recording_id.is_null() || out_path.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-
-    let rec_str = match CStr::from_ptr(recording_id).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
-
-    let export_name = format!("{rec_str}_c2pa.mp4");
-
-    match CString::new(export_name) {
-        Ok(cstr) => {
-            *out_path = cstr.into_raw();
-            PhalanxError::Ok.code()
+        if recording_id.is_null() || out_path.is_null() {
+            return PhalanxError::NullPointer.code();
         }
-        Err(_) => PhalanxError::InvalidUtf8.code(),
+
+        let rec_str = match CStr::from_ptr(recording_id).to_str() {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
+
+        let export_name = format!("{rec_str}_c2pa.mp4");
+
+        match CString::new(export_name) {
+            Ok(cstr) => {
+                *out_path = cstr.into_raw();
+                PhalanxError::Ok.code()
+            }
+            Err(_) => PhalanxError::InvalidUtf8.code(),
+        }
     }
 }
 

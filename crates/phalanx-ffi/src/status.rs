@@ -17,13 +17,15 @@ use std::os::raw::c_char;
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_get_power_state(handle: *const PhalanxHandle) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    h.governor.current_power_state() as i32
+        h.governor.current_power_state() as i32
+    }
 }
 
 /// Returns whether a recording is currently active.
@@ -32,16 +34,18 @@ pub unsafe extern "C" fn phalanx_get_power_state(handle: *const PhalanxHandle) -
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_is_recording(handle: *const PhalanxHandle) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    i32::from(
-        h.recording_active
-            .load(std::sync::atomic::Ordering::Relaxed),
-    )
+        i32::from(
+            h.recording_active
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
 }
 
 /// Returns the node's DID (Decentralized Identifier) as a C string.
@@ -51,25 +55,27 @@ pub unsafe extern "C" fn phalanx_is_recording(handle: *const PhalanxHandle) -> i
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
 /// * `out` must be a valid pointer to a `*mut c_char` that will receive the result.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_get_node_did(
     handle: *const PhalanxHandle,
     out: *mut *mut c_char,
 ) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    if out.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
-
-    match CString::new(h.node_did.clone()) {
-        Ok(cstr) => {
-            *out = cstr.into_raw();
-            PhalanxError::Ok.code()
+        if out.is_null() {
+            return PhalanxError::NullPointer.code();
         }
-        Err(_) => PhalanxError::InvalidUtf8.code(),
+
+        match CString::new(h.node_did.clone()) {
+            Ok(cstr) => {
+                *out = cstr.into_raw();
+                PhalanxError::Ok.code()
+            }
+            Err(_) => PhalanxError::InvalidUtf8.code(),
+        }
     }
 }
 
@@ -84,18 +90,20 @@ pub unsafe extern "C" fn phalanx_get_node_did(
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_update_battery(
     handle: *mut PhalanxHandle,
     level: u8,
     charging: bool,
 ) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    h.probe.set_battery(level, charging);
-    PhalanxError::Ok.code()
+        h.probe.set_battery(level, charging);
+        PhalanxError::Ok.code()
+    }
 }
 
 /// Updates thermal reading in degrees Celsius.
@@ -105,14 +113,16 @@ pub unsafe extern "C" fn phalanx_update_battery(
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_update_thermal(handle: *mut PhalanxHandle, celsius: i32) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    h.probe.set_thermal(celsius);
-    PhalanxError::Ok.code()
+        h.probe.set_thermal(celsius);
+        PhalanxError::Ok.code()
+    }
 }
 
 /// Updates foreground/background lifecycle state.
@@ -123,17 +133,19 @@ pub unsafe extern "C" fn phalanx_update_thermal(handle: *mut PhalanxHandle, cels
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_update_lifecycle(
     handle: *mut PhalanxHandle,
     is_foreground: bool,
 ) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    h.probe.set_lifecycle(is_foreground);
-    PhalanxError::Ok.code()
+        h.probe.set_lifecycle(is_foreground);
+        PhalanxError::Ok.code()
+    }
 }
 
 /// Updates total device RAM in bytes.
@@ -145,15 +157,17 @@ pub unsafe extern "C" fn phalanx_update_lifecycle(
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_update_device_ram(
     handle: *mut PhalanxHandle,
     total_ram_bytes: u64,
 ) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    h.probe.set_device_ram(total_ram_bytes);
-    PhalanxError::Ok.code()
+        h.probe.set_device_ram(total_ram_bytes);
+        PhalanxError::Ok.code()
+    }
 }

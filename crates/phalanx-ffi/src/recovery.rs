@@ -40,79 +40,81 @@ use std::sync::atomic::Ordering;
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_start_recovery(handle: *const PhalanxHandle) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    if !h.is_running() {
-        return PhalanxError::NotRunning.code();
-    }
-
-    if h.recording_active.load(Ordering::Relaxed) {
-        return PhalanxError::AlreadyRecording.code();
-    }
-
-    // Reject a duplicate start while a previous recovery is mid-walk.
-    {
-        let s = h.recovery_status.lock().unwrap_or_else(|e| e.into_inner());
-        if matches!(
-            s.state,
-            RecoveryState::FetchingManifest
-                | RecoveryState::WalkingManifest
-                | RecoveryState::FetchingChildren
-        ) {
-            return PhalanxError::AlreadyRecovering.code();
+        if !h.is_running() {
+            return PhalanxError::NotRunning.code();
         }
-    }
 
-    // Reset the status snapshot to an Idle baseline so the next poll sees
-    // a fresh walk and not the residual `Complete` / `NoManifestFound` /
-    // `Cancelled` of the previous run.
-    {
-        let mut s = h.recovery_status.lock().unwrap_or_else(|e| e.into_inner());
-        *s = RecoveryStatus::default();
-    }
+        if h.recording_active.load(Ordering::Relaxed) {
+            return PhalanxError::AlreadyRecording.code();
+        }
 
-    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-    let status = h.recovery_status.clone();
+        // Reject a duplicate start while a previous recovery is mid-walk.
+        {
+            let s = h.recovery_status.lock().unwrap_or_else(|e| e.into_inner());
+            if matches!(
+                s.state,
+                RecoveryState::FetchingManifest
+                    | RecoveryState::WalkingManifest
+                    | RecoveryState::FetchingChildren
+            ) {
+                return PhalanxError::AlreadyRecovering.code();
+            }
+        }
 
-    // Dispatch SpawnRecovery to the engine via the SentinelCommand
-    // mailbox. The engine services the command inside its `select!` arm
-    // — `&mut MeshSentinel` is available there without any external
-    // lock — and returns the inner `JoinHandle` via the reply oneshot.
-    // No FFI-side `sentinel.lock().await`, no silent stall on the
-    // engine.run() borrow. (Fixes audit finding H3.)
-    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    if h.sentinel_cmd_tx
-        .blocking_send(SentinelCommand::SpawnRecovery {
-            status,
-            cancel_rx,
-            reply_to: reply_tx,
-        })
-        .is_err()
-    {
-        return PhalanxError::ChannelClosed.code();
-    }
-    let join_handle = match reply_rx.blocking_recv() {
-        Ok(jh) => jh,
-        Err(_) => return PhalanxError::ChannelClosed.code(),
-    };
+        // Reset the status snapshot to an Idle baseline so the next poll sees
+        // a fresh walk and not the residual `Complete` / `NoManifestFound` /
+        // `Cancelled` of the previous run.
+        {
+            let mut s = h.recovery_status.lock().unwrap_or_else(|e| e.into_inner());
+            *s = RecoveryStatus::default();
+        }
 
-    // Replace any prior cancel/handle. Old task is already terminal
-    // (we only get here past the `AlreadyRecovering` gate).
-    {
-        let mut c = h.recovery_cancel.lock().unwrap_or_else(|e| e.into_inner());
-        *c = Some(cancel_tx);
-    }
-    {
-        let mut j = h.recovery_handle.lock().unwrap_or_else(|e| e.into_inner());
-        *j = Some(join_handle);
-    }
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let status = h.recovery_status.clone();
 
-    phalanx_log!("[Phalanx FFI] Recovery walk started");
-    PhalanxError::Ok.code()
+        // Dispatch SpawnRecovery to the engine via the SentinelCommand
+        // mailbox. The engine services the command inside its `select!` arm
+        // — `&mut MeshSentinel` is available there without any external
+        // lock — and returns the inner `JoinHandle` via the reply oneshot.
+        // No FFI-side `sentinel.lock().await`, no silent stall on the
+        // engine.run() borrow. (Fixes audit finding H3.)
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if h.sentinel_cmd_tx
+            .blocking_send(SentinelCommand::SpawnRecovery {
+                status,
+                cancel_rx,
+                reply_to: reply_tx,
+            })
+            .is_err()
+        {
+            return PhalanxError::ChannelClosed.code();
+        }
+        let join_handle = match reply_rx.blocking_recv() {
+            Ok(jh) => jh,
+            Err(_) => return PhalanxError::ChannelClosed.code(),
+        };
+
+        // Replace any prior cancel/handle. Old task is already terminal
+        // (we only get here past the `AlreadyRecovering` gate).
+        {
+            let mut c = h.recovery_cancel.lock().unwrap_or_else(|e| e.into_inner());
+            *c = Some(cancel_tx);
+        }
+        {
+            let mut j = h.recovery_handle.lock().unwrap_or_else(|e| e.into_inner());
+            *j = Some(join_handle);
+        }
+
+        phalanx_log!("[Phalanx FFI] Recovery walk started");
+        PhalanxError::Ok.code()
+    }
 }
 
 /// Postcard-encode a snapshot of the current recovery status. Caller frees
@@ -129,30 +131,32 @@ pub unsafe extern "C" fn phalanx_start_recovery(handle: *const PhalanxHandle) ->
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
 /// * `out_ptr` and `out_len` must be writable pointers.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_recovery_status(
     handle: *const PhalanxHandle,
     out_ptr: *mut *mut u8,
     out_len: *mut u32,
 ) -> i32 {
-    if handle.is_null() || out_ptr.is_null() || out_len.is_null() {
-        return PhalanxError::NullPointer.code();
+    unsafe {
+        if handle.is_null() || out_ptr.is_null() || out_len.is_null() {
+            return PhalanxError::NullPointer.code();
+        }
+        let h = &*handle;
+
+        let snapshot = {
+            let s = h.recovery_status.lock().unwrap_or_else(|e| e.into_inner());
+            s.clone()
+        };
+
+        let serialized = match postcard::to_allocvec(&snapshot) {
+            Ok(bytes) => bytes,
+            Err(_) => return PhalanxError::SerializationFailure.code(),
+        };
+
+        crate::memory::leak_bytes_to_c(serialized.into_boxed_slice(), out_ptr, out_len);
+
+        PhalanxError::Ok.code()
     }
-    let h = &*handle;
-
-    let snapshot = {
-        let s = h.recovery_status.lock().unwrap_or_else(|e| e.into_inner());
-        s.clone()
-    };
-
-    let serialized = match postcard::to_allocvec(&snapshot) {
-        Ok(bytes) => bytes,
-        Err(_) => return PhalanxError::SerializationFailure.code(),
-    };
-
-    crate::memory::leak_bytes_to_c(serialized.into_boxed_slice(), out_ptr, out_len);
-
-    PhalanxError::Ok.code()
 }
 
 /// Cancel an in-progress recovery walk. Idempotent: calling twice or
@@ -165,23 +169,25 @@ pub unsafe extern "C" fn phalanx_recovery_status(
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_cancel_recovery(handle: *const PhalanxHandle) -> i32 {
-    let Some(h) = handle.as_ref() else {
-        return PhalanxError::NullPointer.code();
-    };
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
 
-    let cancel_tx = {
-        let mut c = h.recovery_cancel.lock().unwrap_or_else(|e| e.into_inner());
-        c.take()
-    };
+        let cancel_tx = {
+            let mut c = h.recovery_cancel.lock().unwrap_or_else(|e| e.into_inner());
+            c.take()
+        };
 
-    if let Some(tx) = cancel_tx {
-        // `send` returns Err if the receiver was already dropped (recovery
-        // already completed naturally). Either outcome is fine — caller
-        // sees a no-op return.
-        let _ = tx.send(());
+        if let Some(tx) = cancel_tx {
+            // `send` returns Err if the receiver was already dropped (recovery
+            // already completed naturally). Either outcome is fine — caller
+            // sees a no-op return.
+            let _ = tx.send(());
+        }
+
+        PhalanxError::Ok.code()
     }
-
-    PhalanxError::Ok.code()
 }

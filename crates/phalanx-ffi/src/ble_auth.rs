@@ -47,7 +47,7 @@ pub(crate) fn sign_ble_challenge_inner(
 ///
 /// # Safety
 /// All pointers must be valid. `out_signature` must point to at least 64 writable bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_sign_ble_challenge(
     handle: *const PhalanxHandle,
     challenger_did_ptr: *const u8,
@@ -55,37 +55,40 @@ pub unsafe extern "C" fn phalanx_sign_ble_challenge(
     nonce_ptr: *const u8,
     out_signature: *mut u8,
 ) -> i32 {
-    if handle.is_null()
-        || challenger_did_ptr.is_null()
-        || nonce_ptr.is_null()
-        || out_signature.is_null()
-    {
-        return PhalanxError::NullPointer.code();
+    unsafe {
+        if handle.is_null()
+            || challenger_did_ptr.is_null()
+            || nonce_ptr.is_null()
+            || out_signature.is_null()
+        {
+            return PhalanxError::NullPointer.code();
+        }
+
+        let h = &*handle;
+
+        // Parse challenger DID
+        let challenger_did_bytes =
+            std::slice::from_raw_parts(challenger_did_ptr, challenger_did_len);
+        let challenger_did_str = match std::str::from_utf8(challenger_did_bytes) {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
+        let challenger_did = phalanx_proto::identity::Did::new(challenger_did_str);
+
+        // Read 32-byte nonce
+        let mut nonce = [0u8; 32];
+        std::ptr::copy_nonoverlapping(nonce_ptr, nonce.as_mut_ptr(), 32);
+
+        // Sign using the handle's identity (past-tense; immutable Arc clone of
+        // the engine's identity). The engine's run loop holds a tokio Mutex on
+        // the MeshSentinel for its full lifetime; an FFI `sentinel.lock().await`
+        // would deadlock. Read identity from the handle directly instead.
+        let sig_bytes = sign_ble_challenge_inner(&h.identity, &challenger_did, &nonce);
+
+        std::ptr::copy_nonoverlapping(sig_bytes.as_ptr(), out_signature, 64);
+
+        0 // Success
     }
-
-    let h = &*handle;
-
-    // Parse challenger DID
-    let challenger_did_bytes = std::slice::from_raw_parts(challenger_did_ptr, challenger_did_len);
-    let challenger_did_str = match std::str::from_utf8(challenger_did_bytes) {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
-    let challenger_did = phalanx_proto::identity::Did::new(challenger_did_str);
-
-    // Read 32-byte nonce
-    let mut nonce = [0u8; 32];
-    std::ptr::copy_nonoverlapping(nonce_ptr, nonce.as_mut_ptr(), 32);
-
-    // Sign using the handle's identity (past-tense; immutable Arc clone of
-    // the engine's identity). The engine's run loop holds a tokio Mutex on
-    // the MeshSentinel for its full lifetime; an FFI `sentinel.lock().await`
-    // would deadlock. Read identity from the handle directly instead.
-    let sig_bytes = sign_ble_challenge_inner(&h.identity, &challenger_did, &nonce);
-
-    std::ptr::copy_nonoverlapping(sig_bytes.as_ptr(), out_signature, 64);
-
-    0 // Success
 }
 
 /// Verify a BLE auth response from a remote peer.
@@ -101,7 +104,7 @@ pub unsafe extern "C" fn phalanx_sign_ble_challenge(
 ///
 /// # Safety
 /// All pointers must be valid with the specified lengths.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_verify_ble_peer(
     handle: *const PhalanxHandle,
     responder_did_ptr: *const u8,
@@ -109,60 +112,62 @@ pub unsafe extern "C" fn phalanx_verify_ble_peer(
     our_nonce_ptr: *const u8,
     signature_ptr: *const u8,
 ) -> i32 {
-    if handle.is_null()
-        || responder_did_ptr.is_null()
-        || our_nonce_ptr.is_null()
-        || signature_ptr.is_null()
-    {
-        return PhalanxError::NullPointer.code();
-    }
-
-    let _h = &*handle;
-
-    // Parse responder DID
-    let responder_did_bytes = std::slice::from_raw_parts(responder_did_ptr, responder_did_len);
-    let responder_did_str = match std::str::from_utf8(responder_did_bytes) {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
-    let responder_did = phalanx_proto::identity::Did::new(responder_did_str);
-
-    // Read nonce and signature
-    let mut nonce = [0u8; 32];
-    std::ptr::copy_nonoverlapping(our_nonce_ptr, nonce.as_mut_ptr(), 32);
-    let mut sig = [0u8; 64];
-    std::ptr::copy_nonoverlapping(signature_ptr, sig.as_mut_ptr(), 64);
-
-    // Build challenge and response structs for verification
-    // The challenge sender is us — read our DID from the node_did field
-    let our_did = phalanx_proto::identity::Did::new(&_h.node_did);
-
-    let challenge = phalanx_proto::network::BleChallenge {
-        sender_did: our_did,
-        nonce,
-    };
-    let response = phalanx_proto::network::BleResponse {
-        responder_did,
-        signature: sig.to_vec(),
-    };
-
-    // Verify using the Laboratory's pure verification logic
-    match phalanx_forensics::identity::verify_ble_response(&challenge, &response) {
-        Ok(()) => {
-            tracing::info!(
-                target: "phalanx::ffi",
-                peer_did = %response.responder_did,
-                "BLE auth: peer verified via FFI"
-            );
-            0 // Verified
+    unsafe {
+        if handle.is_null()
+            || responder_did_ptr.is_null()
+            || our_nonce_ptr.is_null()
+            || signature_ptr.is_null()
+        {
+            return PhalanxError::NullPointer.code();
         }
-        Err(_) => {
-            tracing::warn!(
-                target: "phalanx::ffi",
-                peer_did = %response.responder_did,
-                "BLE auth: verification failed via FFI"
-            );
-            PhalanxError::InvalidState.code() // Verification failed
+
+        let _h = &*handle;
+
+        // Parse responder DID
+        let responder_did_bytes = std::slice::from_raw_parts(responder_did_ptr, responder_did_len);
+        let responder_did_str = match std::str::from_utf8(responder_did_bytes) {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
+        let responder_did = phalanx_proto::identity::Did::new(responder_did_str);
+
+        // Read nonce and signature
+        let mut nonce = [0u8; 32];
+        std::ptr::copy_nonoverlapping(our_nonce_ptr, nonce.as_mut_ptr(), 32);
+        let mut sig = [0u8; 64];
+        std::ptr::copy_nonoverlapping(signature_ptr, sig.as_mut_ptr(), 64);
+
+        // Build challenge and response structs for verification
+        // The challenge sender is us — read our DID from the node_did field
+        let our_did = phalanx_proto::identity::Did::new(&_h.node_did);
+
+        let challenge = phalanx_proto::network::BleChallenge {
+            sender_did: our_did,
+            nonce,
+        };
+        let response = phalanx_proto::network::BleResponse {
+            responder_did,
+            signature: sig.to_vec(),
+        };
+
+        // Verify using the Laboratory's pure verification logic
+        match phalanx_forensics::identity::verify_ble_response(&challenge, &response) {
+            Ok(()) => {
+                tracing::info!(
+                    target: "phalanx::ffi",
+                    peer_did = %response.responder_did,
+                    "BLE auth: peer verified via FFI"
+                );
+                0 // Verified
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target: "phalanx::ffi",
+                    peer_did = %response.responder_did,
+                    "BLE auth: verification failed via FFI"
+                );
+                PhalanxError::InvalidState.code() // Verification failed
+            }
         }
     }
 }

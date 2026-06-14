@@ -483,7 +483,7 @@ impl Libp2pAdapter {
             // Shared closure-like helper: process a single swarm event.
             // Extracted as a macro to avoid borrow-checker issues with `swarm`.
             macro_rules! handle_command {
-                ($command_option:expr) => {
+                ($command_option:expr_2021) => {
                     match $command_option {
                         Some(TransportCommand::Publish(topic, data)) => {
                             let ident_topic = libp2p::gossipsub::IdentTopic::new(topic.to_string());
@@ -710,7 +710,7 @@ impl Libp2pAdapter {
             }
 
             macro_rules! handle_swarm_event {
-                ($swarm_event:expr) => {{
+                ($swarm_event:expr_2021) => {{
                     let swarm_event = $swarm_event;
 
                     // Instrument: count every swarm wake

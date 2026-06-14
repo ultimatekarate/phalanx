@@ -140,10 +140,9 @@ impl HardwareProbe for MobileProbe {
     fn lifecycle_events(&self) -> Option<mpsc::Receiver<LifecycleEvent>> {
         // Take-once: the first caller (SystemGovernor) gets the receiver.
         // Subsequent calls return None.
-        if let Ok(mut guard) = self.lifecycle_rx.lock() {
-            guard.take()
-        } else {
-            None
+        match self.lifecycle_rx.lock() {
+            Ok(mut guard) => guard.take(),
+            _ => None,
         }
     }
 }

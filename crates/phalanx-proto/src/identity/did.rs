@@ -291,7 +291,7 @@ impl WitnessId {
     /// Ed25519 public key, so this must only be used as a test fixture.
     pub fn random() -> Self {
         use rand::Rng;
-        let bytes: [u8; 32] = rand::thread_rng().gen();
+        let bytes: [u8; 32] = rand::thread_rng().r#gen();
         Self(format!("z{}", bs58::encode(bytes).into_string()))
     }
 }
@@ -332,7 +332,7 @@ impl MeshAddress {
     /// this must only be used as a test fixture.
     pub fn random() -> Self {
         use rand::Rng;
-        let bytes: [u8; 32] = rand::thread_rng().gen();
+        let bytes: [u8; 32] = rand::thread_rng().r#gen();
         Self(bs58::encode(bytes).into_string())
     }
 }

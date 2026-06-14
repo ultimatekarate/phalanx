@@ -236,7 +236,7 @@ impl SystemGovernor {
         // task stays full, so this term keeps the b integral fed and the
         // homeostasis loop responsive (PowerState transitions, FPS step-down)
         // even though no wire activity is occurring.
-        if let (Some(ref sent), Some(ref recv)) = (&self.io_bytes_sent, &self.io_bytes_received) {
+        if let (Some(sent), Some(recv)) = (&self.io_bytes_sent, &self.io_bytes_received) {
             let cur_sent = sent.load(Ordering::Relaxed);
             let cur_recv = recv.load(Ordering::Relaxed);
             let prev_sent = self.last_io_bytes_sent.swap(cur_sent, Ordering::Relaxed);

@@ -248,18 +248,21 @@ impl RecordStore for RedbStore {
     fn remove(&mut self, key: &RecordKey) {
         let typed_key = DhtRecordKey::new(key);
 
-        if let Ok(write_txn) = self.db.begin_write() {
-            if let Ok(mut table) = write_txn.open_table(DHT_RECORDS_TABLE) {
-                // Execute deletion. Errors are swallowed as the standard RecordStore trait
-                // does not surface Result types for remove operations, and failure implies
-                // the record is either already gone or the disk is inaccessible.
-                let _ = table.remove(typed_key.as_bytes());
-            }
+        match self.db.begin_write() {
+            Ok(write_txn) => {
+                if let Ok(mut table) = write_txn.open_table(DHT_RECORDS_TABLE) {
+                    // Execute deletion. Errors are swallowed as the standard RecordStore trait
+                    // does not surface Result types for remove operations, and failure implies
+                    // the record is either already gone or the disk is inaccessible.
+                    let _ = table.remove(typed_key.as_bytes());
+                }
 
-            // Ensure the transaction is committed to flush the table mutation to disk.
-            let _ = write_txn.commit();
-        } else {
-            tracing::error!("Failed to acquire write transaction for record deletion.");
+                // Ensure the transaction is committed to flush the table mutation to disk.
+                let _ = write_txn.commit();
+            }
+            _ => {
+                tracing::error!("Failed to acquire write transaction for record deletion.");
+            }
         }
     }
 

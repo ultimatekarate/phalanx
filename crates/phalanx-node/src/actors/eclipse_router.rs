@@ -325,7 +325,7 @@ impl EclipseRouter {
             if let Some(oldest_peer) = self
                 .peer_first_seen
                 .iter()
-                .min_by_key(|(_, &ts)| ts)
+                .min_by_key(|&(_, &ts)| ts)
                 .map(|(k, _)| k.clone())
             {
                 self.peer_first_seen.remove(&oldest_peer);

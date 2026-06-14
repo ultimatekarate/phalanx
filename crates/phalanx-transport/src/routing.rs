@@ -39,18 +39,21 @@ impl MeshRoutingTable {
     ) {
         // If there is a task waiting for this specific channel_id, send the response to it.
         // If it was dropped or timed out, we just ignore the stale response.
-        if let Some(sender) = self.pending_responses.remove(&channel_id) {
-            if sender.send(response).await.is_err() {
-                tracing::debug!(
+        match self.pending_responses.remove(&channel_id) {
+            Some(sender) => {
+                if sender.send(response).await.is_err() {
+                    tracing::debug!(
+                        channel = %channel_id,
+                        "Routing Table: Dropped response, receiver task already died."
+                    );
+                }
+            }
+            _ => {
+                tracing::warn!(
                     channel = %channel_id,
-                    "Routing Table: Dropped response, receiver task already died."
+                    "Routing Table: Received response for unknown or expired channel."
                 );
             }
-        } else {
-            tracing::warn!(
-                channel = %channel_id,
-                "Routing Table: Received response for unknown or expired channel."
-            );
         }
     }
 }

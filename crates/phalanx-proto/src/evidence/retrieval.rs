@@ -68,7 +68,7 @@ impl RecordingResponse {
 
 impl crate::wire::WireBound for RecordingResponse {
     fn enforce_wire_bounds(&mut self) {
-        if let RecordingResponse::Success(ref mut units) = self {
+        if let RecordingResponse::Success(units) = self {
             if units.len() > Self::MAX_RESPONSE_ENVELOPES {
                 tracing::warn!(
                     count = units.len(),

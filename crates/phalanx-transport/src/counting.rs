@@ -237,7 +237,7 @@ impl StreamMuxer for CountingMuxer {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<StreamMuxerEvent, Self::Error>> {
-        Pin::new(&mut self.inner).poll(cx)
+        StreamMuxer::poll(Pin::new(&mut self.inner), cx)
     }
 }
 

@@ -318,12 +318,15 @@ impl<I: IngressPort + 'static, E: EgressPort + 'static> StrongholdSentinel<I, E>
             return;
         }
 
-        if let Err(e) = self.aggregation_tx.try_send(AggregationCommand::Revoke {
+        match self.aggregation_tx.try_send(AggregationCommand::Revoke {
             recording_id: token.recording_id.clone(),
         }) {
-            warn!(error = %e, "StrongholdSentinel: aggregation channel full, dropping revocation");
-        } else {
-            info!(recording = %token.recording_id, "Revocation forwarded to aggregation");
+            Err(e) => {
+                warn!(error = %e, "StrongholdSentinel: aggregation channel full, dropping revocation");
+            }
+            _ => {
+                info!(recording = %token.recording_id, "Revocation forwarded to aggregation");
+            }
         }
     }
 
@@ -342,16 +345,19 @@ impl<I: IngressPort + 'static, E: EgressPort + 'static> StrongholdSentinel<I, E>
         match reply_rx.await {
             Ok(routing) => {
                 let did_count = routing.len();
-                if let Err(e) = self
+                match self
                     .aggregation_tx
                     .try_send(AggregationCommand::RefreshRouting { routing })
                 {
-                    warn!(
-                        error = %e,
-                        "StrongholdSentinel: aggregation channel full, routing refresh dropped"
-                    );
-                } else {
-                    debug!(dids = did_count, "StrongholdSentinel: routing refreshed");
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "StrongholdSentinel: aggregation channel full, routing refresh dropped"
+                        );
+                    }
+                    _ => {
+                        debug!(dids = did_count, "StrongholdSentinel: routing refreshed");
+                    }
                 }
             }
             Err(_) => {

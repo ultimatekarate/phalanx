@@ -39,24 +39,26 @@ use zeroize::Zeroize;
 ///
 /// # Safety
 /// * `phrase` must be a valid null-terminated C string.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_validate_mnemonic(phrase: *const c_char) -> i32 {
-    if phrase.is_null() {
-        return PhalanxError::NullPointer.code();
-    }
+    unsafe {
+        if phrase.is_null() {
+            return PhalanxError::NullPointer.code();
+        }
 
-    let phrase_str = match CStr::from_ptr(phrase).to_str() {
-        Ok(s) => s,
-        Err(_) => return PhalanxError::InvalidUtf8.code(),
-    };
+        let phrase_str = match CStr::from_ptr(phrase).to_str() {
+            Ok(s) => s,
+            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        };
 
-    let mut owned = phrase_str.to_string();
-    let outcome = validate_mnemonic(&owned);
-    owned.zeroize();
+        let mut owned = phrase_str.to_string();
+        let outcome = validate_mnemonic(&owned);
+        owned.zeroize();
 
-    match outcome {
-        MnemonicValidation::Valid => PhalanxError::Ok.code(),
-        MnemonicValidation::Invalid => PhalanxError::MnemonicParseError.code(),
+        match outcome {
+            MnemonicValidation::Valid => PhalanxError::Ok.code(),
+            MnemonicValidation::Invalid => PhalanxError::MnemonicParseError.code(),
+        }
     }
 }
 
