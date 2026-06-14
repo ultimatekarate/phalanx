@@ -117,29 +117,14 @@ call in the workspace is the factory loop over `config.subscribe_topics`
 (`crates/phalanx-transport/src/factory.rs:174`); there is no runtime topic subscription anywhere, so the table above
 is exhaustive.
 
-> **Resolved defects (fixed June 2026, in this changeset).** Until the fix, the node compiled `/phalanx/video`,
-> `/phalanx/audio`, and `/phalanx/control` while the Stronghold subscribed the `/1.0.0`-suffixed forms, so a
-> default-configured Stronghold received no gossiped media; the Stronghold's bare `#[serde(skip)]` topic fields meant
-> the mere presence of a `stronghold.toml` silently degraded its subscriptions to `/phalanx/default`; and the
-> revocation topic was published-to but in no default subscribe list, leaving both binaries' inbound revocation
-> handlers unreachable via gossip. All three are fixed: both binaries' defaults now derive from the canonical
-> `MeshTopic` constructors in phalanx-proto (`crates/phalanx-proto/src/network/topic.rs`,
-> `crates/phalanx-node/src/config.rs`, `crates/phalanx-stronghold/src/config.rs` — the skip'd fields carry an explicit
-> `default = …` so a config file no longer changes them), the revocation topic is in both default subscribe lists
-> (`crates/phalanx-node/src/network/orchestrator.rs`, `crates/phalanx-stronghold/src/swarm.rs`), and a cross-crate
-> regression test pins the alignment (`crates/phalanx-stronghold/tests/topic_alignment.rs`). The node's topic fields
-> are now optional in TOML (omitted ⇒ canonical defaults); the Stronghold's remain deliberately non-settable.
->
-> **Two sharp edges remain.** (1) Canary alerts on `/phalanx/mesh/1.0.0` are **deliberately publish-only**: no inbound
+> **One sharp edge remains.** Canary alerts on `/phalanx/mesh/1.0.0` are **deliberately publish-only**: no inbound
 > alert handler exists yet, and `MeshSentinel::handle_data_received` routes unrecognized topics into evidence
 > ingestion, so the topic must be subscribed together with its handler — the doc comment on
-> `orchestrator::subscribe_topics` records this. Publishes to a subscriber-less topic increment the
-> `no_peers_subscribed` counter (§7); the working canary signal is local detection. (2) The node's `revocation_topic`
-> config field steers the subscribe list and the inbound comparison, but the publish sites hardcode
-> `MeshTopic::revocation()` (`crates/phalanx-proto/src/network/events.rs:185-189`,
-> `crates/phalanx-node/src/actors/egress.rs:193-204`) — overriding the field splits publish and receive onto
-> different topics. Leave it at its default. Revocation also has a second, working path regardless of gossip: a
-> one-shot replay to every newly admitted peer (§4).
+> `orchestrator::subscribe_topics` records this, and the cross-crate test allow-lists it explicitly so a *new*
+> publish-only topic fails the suite. Publishes to a subscriber-less topic increment the `no_peers_subscribed`
+> counter (§7); the working canary signal is local detection. (The earlier revocation-override hazard is gone: the
+> revocation topic is now profile-pinned, so publish and subscribe cannot be split. Revocation also has a second,
+> working path regardless of gossip: a one-shot replay to every newly admitted peer, §4.)
 
 ## 4. Discovery and admission
 
@@ -227,18 +212,6 @@ local DHT state is empty, and its custody is re-advertised only as new archive p
 re-announce sweep of previously held recordings (`crates/phalanx-stronghold/src/sentinel.rs:293`). Its evidence on
 disk survives (the filesystem `EvidenceStore` is durable); only the DHT *advertisement* of it lapses.
 
-> **Known defect: the default Kademlia protocol ids differ between binaries.** The Kademlia protocol name is derived
-> as `/phalanx/kad/<protocol_version>` (`crates/phalanx-transport/src/factory.rs:72`). The node passes its own default
-> `protocol_version = "/phalanx/1.0.0"` (`crates/phalanx-node/src/config.rs:208`), while the Stronghold leaves the
-> transport default `"/phalanx/1.1.0"` (`crates/phalanx-transport/src/config.rs:56`). The derived ids —
-> `/phalanx/kad//phalanx/1.0.0` vs `/phalanx/kad//phalanx/1.1.0` (the double slash is real) — do not match, and
-> Kademlia peers only interoperate on matching protocol names. By direct string derivation, **node and Stronghold do
-> not share a DHT at compiled defaults** (we state this from the code, not from a two-binary runtime observation).
-> Gossipsub topics and the fixed retrieval/archive protocol ids are unaffected by `protocol_version`. Workaround: set
-> the node's `protocol_version` to `"/phalanx/1.1.0"` in its TOML. The version bump itself marks the symbol-bundling
-> wire change; the in-code comment calls the identify exchange a diagnostic marker, not enforcement — true for
-> identify, but the derived Kademlia id *is* enforcement.
-
 One neutral production-checklist item: `withdraw_provider` (used by revocation's `WithdrawProvider` command) is a
 default no-op that the libp2p egress does not override, so local DHT provider records for revoked recordings age out
 by TTL rather than being actively withdrawn (`crates/phalanx-proto/src/network/events.rs:191-195`,
@@ -317,8 +290,8 @@ pull/push paths instead:
 
 1. **Directed archive push** — the node pushes a recording's shards to configured Strongholds over
    `/phalanx/archive/1.0.0` (request/response, 20 s timeout) and receives a signed [custody
-   receipt](architecture.md#glossary); `target_replica_count` (default 2) is the policy threshold for distinct custody
-   replicas. Directed sends are connection-gated — pushes to unconnected peers are rejected with only a tracing
+   receipt](architecture.md#glossary); `target_replica_count` — profile-pinned (1 for `community_with_stronghold`, 2
+   for `high_risk_cross_border`) — is the policy threshold for distinct custody replicas. Directed sends are connection-gated — pushes to unconnected peers are rejected with only a tracing
    warning — which is why the node dials its archival peers at startup (`crates/phalanx-node/src/config.rs:130`,
    `libp2p.rs:640`).
 2. **Pull-based retrieval** — `PlaybackCoordinator` queries the DHT for recording providers and requests shards
@@ -348,10 +321,10 @@ graph TB
 
 **Shape A — single LAN, zero config.** Two or more devices on the same network discover each other via mDNS (always
 on), pass admission, and exchange media over the default gossipsub topics. Phone-to-phone works out of the box because
-both phones default to the same topic strings. A default-configured Stronghold on the same LAN is discovered and —
-since the June 2026 topic-alignment fix (§3) — receives gossiped media at defaults, but it still shares no DHT with
-the node (§5 protocol-id mismatch). Custody receipts and export grants still require the directed archive push, which
-requires Shape B's config block on the phones.
+both phones default to the same topic strings. A default-configured Stronghold on the same LAN is discovered
+and — because every profile projects the same topics and `protocol_version` (§3, §5) — receives gossiped media and
+shares the node's Kademlia DHT at defaults. Custody receipts and export grants still require the directed archive
+push, which requires Shape B's config block on the phones.
 
 **Shape B — configured WAN.** Cross-network operation needs explicit addresses: the node's `bootstrap_peers` (and/or
 `[[network.archival_peers]]` blocks) carry dialable multiaddrs. For archive push the multiaddr **must** end in
@@ -380,63 +353,69 @@ deployments, not as a membership layer.
 
 ## 9. Config truth table
 
-**Node** config loads from the TOML path in the `PHALANX_CONFIG` env var. If the variable is unset, compiled defaults
-are used (the normal mobile path — Flutter supplies settings via FFI). **If the variable is set but the file fails to
-load or parse, the node logs a warning and silently falls back to ALL compiled defaults**
-(`crates/phalanx-node/src/config.rs:306-319`). All node config sections use `#[serde(deny_unknown_fields)]`, and two
-`[network]` fields have no serde default and are therefore **required** in any TOML (`max_chunk_size_bytes`,
-`cleanup_interval_secs`; the topic fields became optional in the June 2026 alignment fix) — so a typo'd field name
-*or* a missing required field invalidates the whole file and silently reverts every setting. Production checklist:
-validate the TOML and watch the startup log line.
+**Node** config is now a topology selector: a `profile = "<name>"` line plus optional `[instance.*]` tables. It loads
+from the TOML path in the `PHALANX_CONFIG` env var. If the variable is unset, the default profile (`solo_device`) is
+used and logged (the normal mobile path — Flutter supplies settings via FFI). **If the variable is set but the file
+fails to load, parse, or cohere, the node now fails loudly** — `load_from_env` returns an error and the sentinel
+aborts (`crates/phalanx-node/src/config.rs`, `crates/phalanx-node/src/bin/sentinel.rs`); the old silent fall-back to
+compiled defaults is gone. All sections use `#[serde(deny_unknown_fields)]`, and the coherence-critical values are
+**profile-pinned and structurally absent from the `[instance]` tables**, so a pinned key (e.g. `protocol_version`)
+under `[instance.network]` is a parse error, not a silent desync.
 
-Node `[network]` fields (`crates/phalanx-node/src/config.rs:236-257`):
+Profile-pinned network values (from `DeploymentProfile`; not operator-settable):
 
-| Field | Default | Honored? | Notes |
-|---|---|---|---|
-| `protocol_version` | `/phalanx/1.0.0` | Yes | Feeds identify and the Kademlia protocol id; differs from the Stronghold's `/phalanx/1.1.0` at defaults (§5) |
-| `max_chunk_size_bytes` | 8192 | Yes | Gossipsub ceiling = 2×; inbound oversize reject. Required in TOML |
-| `video_topic` / `audio_topic` / `control_topic` | `/phalanx/video/1.0.0`, `/phalanx/audio/1.0.0`, `/phalanx/control/1.0.0` (the canonical `MeshTopic` constructors) | Yes | Optional in TOML since the §3 alignment fix; override only with the same value on every peer |
-| `cleanup_interval_secs` | 60 | **No** — parsed, never read | Yet required in TOML |
-| `bootstrap_peers` | `[]` | Yes | Dialed once, best-effort |
-| `guardian_service_key` | `phalanx/service/storage/v1` | **No** — never read outside config.rs | |
-| `max_connections` | 192 | **No** — limits hardcoded in the transport (§2) | |
-| `require_psk` | false | Yes | Refuses startup without a PSK |
-| `repair_ratio` | 1.5 | Yes | Fountain-code redundancy |
-| `symbol_size` | 1200 B | Yes | |
-| `symbol_bundle_size` | 1 | Yes | Max 100 |
-| `listen_addresses` | QUIC + TCP on 0.0.0.0, ephemeral ports | Yes | |
-| `revocation_topic` | `/phalanx/revocation/1.0.0` | Subscribe + inbound comparison; **publishers hardcode the default** (§3) | Overriding splits publish and receive — leave at default |
-| `archival_peers` | `[]` | Yes | `address` (with `/p2p/` tail) + optional `stronghold_did` |
-| `target_replica_count` | 2 | Yes | Custody-replica policy threshold |
+| Value | Source | Notes |
+|---|---|---|
+| `protocol_version` | `DEFAULT_PROTOCOL_VERSION` = `/phalanx/1.1.0` | Feeds identify + the Kademlia protocol id; identical node/Stronghold (§5) |
+| `max_chunk_size_bytes` | `DEFAULT_MAX_CHUNK_SIZE_BYTES` = 131072 | Gossipsub ceiling = 2×; inbound oversize reject — pinned so peers don't drop each other's frames |
+| `video_topic` / `audio_topic` / `control_topic` / `revocation_topic` | canonical `MeshTopic` constructors | Exact-match gossipsub strings; pinned identically on every peer |
+| `require_psk` | profile PSK posture | `solo_device`/`community_with_stronghold` → optional; `affinity_group_lan`/`high_risk_cross_border` → required |
+| `target_replica_count` | profile replica policy | 0 (solo, affinity) / 1 (community) / 2 (high-risk); custody-replica policy threshold |
 
-Node `[storage]` fields with network-relevant effect: `vault_path` (dev default `./sim_vault` is replaced by the
-sentinel with `{base}/vault`; explicit values are kept — `crates/phalanx-node/src/bin/sentinel.rs:51`),
-`max_storage_bytes` (1 GB), `max_foreign_storage_bytes` (500 MB), `max_foreign_per_owner_bytes` (50 MB) — all
-hard-enforced caps on mesh-received evidence — and `evidence_ttl_secs` (300), which gates ingestion. Three fields are
-parsed and discarded: `max_peers` (10), `stale_session_threshold` (3600), `shards_needed_to_archive` (10).
+Operator-tunable `[instance.network]` fields (all defaulted; a bare `profile = "..."` file is valid):
+
+| Field | Default | Notes |
+|---|---|---|
+| `bootstrap_peers` | `[]` | Dialed once, best-effort |
+| `repair_ratio` | 1.5 | Fountain-code redundancy (self-describing on the wire via the OTI — safe to tune) |
+| `symbol_size` | 1200 B | Self-describing via the OTI |
+| `symbol_bundle_size` | 1 | Max 100; self-describing |
+| `listen_addresses` | QUIC + TCP on 0.0.0.0, ephemeral ports | |
+| `archival_peers` | `[]` | `address` (with `/p2p/` tail) + optional `stronghold_did`; a missing `/p2p/` tail is a hard coherence error |
+
+The dead `[network]` knobs that the old flat schema parsed and never read — `cleanup_interval_secs`,
+`guardian_service_key`, `max_connections` — have been removed.
+
+Operator-tunable `[instance.storage]` fields with network-relevant effect: `vault_path` (dev default `./sim_vault` is
+replaced by the sentinel with `{base}/vault`; explicit values are kept), `max_storage_bytes` (1 GB),
+`max_foreign_storage_bytes` (500 MB), `max_foreign_per_owner_bytes` (50 MB) — all hard-enforced caps on mesh-received
+evidence — and `evidence_ttl_secs` (300), which gates ingestion. The dead storage knobs `max_peers`,
+`stale_session_threshold`, and `shards_needed_to_archive` have been removed.
 
 Environment variables:
 
 | Variable | Binary | Behavior |
 |---|---|---|
-| `PHALANX_CONFIG` | node/sentinel | TOML path; silent default-fallback on failure (above) |
+| `PHALANX_CONFIG` | node/sentinel | TOML path (`profile` + `[instance]`); unset ⇒ default profile (logged); set-but-invalid ⇒ loud abort (above) |
 | `PHALANX_IDENTITY_PASSPHRASE` | sentinel, stronghold CLI | **Mandatory** — sentinel refuses to start without it (`bin/sentinel.rs:58`); stronghold CLI likewise (`bin/stronghold.rs:653`); the GUI pre-fills from it but tolerates absence |
 | `PHALANX_HOME` | sentinel | Overrides the entire state base dir; else `ProjectDirs("app","Phalanx","phalanx-sentinel")` local data dir; refuses to fall back to the working directory (`paths.rs:26-74`) |
 | `PHALANX_STRONGHOLD_HOME` | stronghold | Data-root precedence: `--data-dir` flag > this var > explicit non-default config `vault_path` > platform dir; fails loudly otherwise (`crates/phalanx-stronghold/src/paths.rs:35-55`) |
 
-**Stronghold** config loads from `--config` (default `stronghold.toml`). A **missing** file falls back to compiled
-defaults with a printed notice; a **present-but-invalid** file is a hard error — the opposite polarity of the node's
-silent fallback (`crates/phalanx-stronghold/src/bin/stronghold.rs:629-643`). After parsing, `custody_ttl_secs` is
-clamped up to a 60-second floor with an operator warning. Honored fields and defaults: `listen_addresses`
-(`["/ip4/0.0.0.0/tcp/0"]` — TCP-only, §8), `bootstrap_peers` (`[]`), `max_storage_bytes` (100 GiB),
-`max_per_community_bytes` (20 GiB), `max_bytes_per_owner` (2 GiB), `owner_fair_share_ratio` (0.25), `custody_ttl_secs`
-(604,800 s = 7 days), `export_quiescence_secs` (120; 0 disables autonomous export), `export_path` (`{vault}/exports`
-when unset), `release_custody_after_export` (false), `min_overlap_ms` (5000), `divergence_alpha` (0.05),
-`c2pa_cert_path`/`c2pa_key_path` (optional; both set ⇒ exports signed with the on-disk certificate). The media topic
-fields are **not** configurable via TOML at all (`#[serde(skip)]`, §3) — deliberately; since the June 2026 fix they
-hold the canonical defaults whether or not a config file is present. Identity is Argon2-sealed at
-`{vault}/stronghold_identity.bin`; first run generates via `PhalanxIdentity::new_ephemeral()` and seals to disk
-(`bin/stronghold.rs:650-677`).
+**Stronghold** config uses the same `profile` + `[instance]` schema and loads from `--config` (default
+`stronghold.toml`). A **missing** file falls back to the default Stronghold profile (`community_with_stronghold`) with
+a printed notice; a **present-but-invalid or incoherent** file is a hard error — the same loud polarity as the node.
+A `stronghold.toml` whose profile has no Stronghold role (e.g. `solo_device`) is rejected with a named error
+(`ProfileHasNoStrongholdRole`). After assembly, `custody_ttl_secs` is clamped up to a 60-second floor with an operator
+warning. Operator-tunable `[instance]` fields and defaults: `[instance.network]` `listen_addresses`
+(`["/ip4/0.0.0.0/tcp/0"]` — TCP-only ephemeral, §8; flagged with a warning under an inbound-reachable profile),
+`bootstrap_peers` (`[]`); `[instance.storage]` `max_storage_bytes` (100 GiB), `max_per_community_bytes` (20 GiB),
+`max_bytes_per_owner` (2 GiB), `owner_fair_share_ratio` (0.25), `custody_ttl_secs` (604,800 s = 7 days),
+`export_quiescence_secs` (120; 0 disables autonomous export), `export_path` (`{vault}/exports` when unset),
+`release_custody_after_export` (false); `[instance.corroboration]` `min_overlap_ms` (5000), `divergence_alpha` (0.05),
+`c2pa_cert_path`/`c2pa_key_path` (optional; both set ⇒ exports signed with the on-disk certificate). The topics and
+`protocol_version` are **profile-pinned** — projected from the same `DeploymentProfile` as the node, so the two
+binaries cannot drift (§3, §5). Identity is Argon2-sealed at `{vault}/stronghold_identity.bin`; first run generates
+via `PhalanxIdentity::new_ephemeral()` and seals to disk.
 
 Finally, the transport-internal `AdapterConfig` (event channel capacity 2048, 100 events/peer/sec rate limit, optional
 poll cadence for power management) is not exposed in either binary's config file — both use its defaults
