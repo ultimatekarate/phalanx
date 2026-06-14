@@ -6,19 +6,19 @@
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation
 )]
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use phalanx_forensics::Reassembler;
 use phalanx_forensics::gate::WitnessGate;
 use phalanx_forensics::reassembler::FountainChunkifier;
-use phalanx_forensics::Reassembler;
 use phalanx_node::actors::shutdown::ShutdownSignal;
 use phalanx_node::actors::storage::{NoOpJournal, StorageActor, StorageCommand};
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::journal::FileJournal;
-use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
+use phalanx_node::persistence::vault::{Guardian, derive_vault_key};
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::evidence::{
     ChunkType, DataPayload, Evidence, ForensicMetrics, StorageSequence, VideoShard,

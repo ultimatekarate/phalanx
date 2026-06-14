@@ -30,16 +30,16 @@ fn audio_channels(frame: &[u8]) -> u8 {
 }
 use tokio::sync::mpsc;
 
+use phalanx_forensics::PayloadCipher;
 use phalanx_forensics::crucible::EnvelopeHashExt;
 use phalanx_forensics::reassembler::{create_audio_shard, create_video_shard};
 use phalanx_forensics::witness::WitnessAuthority;
-use phalanx_forensics::PayloadCipher;
 use phalanx_node::actors::egress::EgressCommand;
 use phalanx_node::actors::playback::PlaybackCoordinator;
 use phalanx_node::actors::storage::StorageCommand;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
-use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
+use phalanx_node::persistence::vault::{Guardian, derive_vault_key};
 use phalanx_node::playback::sink::VideoPlayerSink;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{
@@ -634,8 +634,8 @@ async fn test_horrendous_stuttering_mesh_resurrection() {
 /// This test would have caught the original split-brain bug where playback returned raw ciphertext.
 #[tokio::test]
 async fn test_encrypted_playback_round_trip() {
-    use phalanx_forensics::reassembler::compress_payload;
     use phalanx_forensics::PayloadCipher;
+    use phalanx_forensics::reassembler::compress_payload;
 
     let temp_dir = tempdir().expect("Failed to create temporary directory");
     let vault_path = temp_dir.path().to_string_lossy().to_string();
@@ -759,8 +759,8 @@ async fn test_encrypted_playback_round_trip() {
 /// Verify that playback with the wrong key produces an error, not raw ciphertext.
 #[tokio::test]
 async fn test_encrypted_playback_wrong_key_fails() {
-    use phalanx_forensics::reassembler::compress_payload;
     use phalanx_forensics::PayloadCipher;
+    use phalanx_forensics::reassembler::compress_payload;
 
     let temp_dir = tempdir().expect("Failed to create temporary directory");
     let vault_path = temp_dir.path().to_string_lossy().to_string();

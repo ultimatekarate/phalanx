@@ -6,9 +6,9 @@
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation
 )]
+use phalanx_forensics::Reassembler;
 use phalanx_forensics::reassembler::FountainChunkifier;
 use phalanx_forensics::witness::WitnessAuthority;
-use phalanx_forensics::Reassembler;
 use phalanx_node::actors::storage::NoOpJournal;
 use phalanx_proto::evidence::ChunkType;
 use phalanx_proto::evidence::Evidence;

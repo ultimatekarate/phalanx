@@ -11,7 +11,7 @@ use phalanx_forensics::gate::WitnessGate;
 use phalanx_forensics::reassembler::create_video_shard;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
-use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
+use phalanx_node::persistence::vault::{Guardian, derive_vault_key};
 use phalanx_proto::evidence::{Evidence, ForensicMetrics, StorageSequence, WitnessEnvelope};
 use phalanx_proto::identity::{PhalanxIdentity, RecordingId, WitnessId};
 use phalanx_proto::time::{PhalanxTimestamp, SystemClock};

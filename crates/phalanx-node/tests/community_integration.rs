@@ -22,7 +22,7 @@
 // tested against `TrustRegistry::dissolve_expired_communities` directly.
 
 use ed25519_dalek::SigningKey;
-use phalanx_forensics::identity::{assemble_community, sign_vouch, CommunityAssemblyParams};
+use phalanx_forensics::identity::{CommunityAssemblyParams, assemble_community, sign_vouch};
 use phalanx_node::actors::shutdown::ShutdownSignal;
 use phalanx_node::actors::trust_actor::{TrustActor, TrustCommand};
 use phalanx_node::config::NodeConfig;

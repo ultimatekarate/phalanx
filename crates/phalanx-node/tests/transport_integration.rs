@@ -14,7 +14,7 @@ use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::persistence::kademlia::RedbStore;
 use phalanx_proto::identity::MeshAddress;
 use phalanx_proto::prelude::PhalanxIdentity;
-use phalanx_transport::prelude::{build_mesh_transport_with_store, MeshTransportConfig};
+use phalanx_transport::prelude::{MeshTransportConfig, build_mesh_transport_with_store};
 use tempfile::tempdir;
 
 /// A minimal PeerEvaluator for testing that trusts all peers.

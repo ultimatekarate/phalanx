@@ -77,11 +77,7 @@ pub struct Quorum(u8);
 impl Quorum {
     /// Create a quorum threshold. Returns None if n == 0.
     pub fn new(n: u8) -> Option<Self> {
-        if n == 0 {
-            None
-        } else {
-            Some(Self(n))
-        }
+        if n == 0 { None } else { Some(Self(n)) }
     }
 
     pub fn value(&self) -> u8 {

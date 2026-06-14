@@ -10,14 +10,14 @@ mod common;
 
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 
+use phalanx_forensics::Reassembler;
 use phalanx_forensics::gate::PromotionGate;
 use phalanx_forensics::policy::EgressGovernor;
 use phalanx_forensics::unit::ForensicUnit;
-use phalanx_forensics::Reassembler;
 use phalanx_node::actors::shutdown::ShutdownSignal;
 use phalanx_node::actors::storage::{NoOpJournal, StorageActor, StorageCommand};
 use phalanx_node::config::NodeConfig;
-use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
+use phalanx_node::persistence::vault::{Guardian, derive_vault_key};
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::WitnessEnvelope;

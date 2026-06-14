@@ -19,17 +19,17 @@
 //! libp2p, no SimulationWorld. Validates the manifest-walk control flow
 //! end-to-end up to (but not including) the wire.
 
+use phalanx_forensics::Reassembler;
 use phalanx_forensics::crucible::EnvelopeHashExt;
 use phalanx_forensics::cryptography::dek::derive_manifest_recording_id;
 use phalanx_forensics::witness::WitnessAuthority;
-use phalanx_forensics::Reassembler;
 use phalanx_node::actors::egress::EgressCommand;
-use phalanx_node::actors::recovery::{run_recovery, RecoveryContext};
+use phalanx_node::actors::recovery::{RecoveryContext, run_recovery};
 use phalanx_node::actors::shutdown::ShutdownSignal;
 use phalanx_node::actors::storage::{NoOpJournal, StorageActor, StorageCommand};
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
-use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
+use phalanx_node::persistence::vault::{Guardian, derive_vault_key};
 use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::evidence::{
     Evidence, ManifestEntry, SignatureHash, StorageSequence, WitnessEnvelope,

@@ -6,14 +6,14 @@
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation
 )]
+use phalanx_forensics::Reassembler;
 use phalanx_forensics::crucible::EnvelopeHashExt;
 use phalanx_forensics::reassembler::create_video_shard;
 use phalanx_forensics::witness::WitnessAuthority;
-use phalanx_forensics::Reassembler;
 use phalanx_node::actors::storage::NoOpJournal;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
-use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
+use phalanx_node::persistence::vault::{Guardian, derive_vault_key};
 use phalanx_proto::evidence::{
     EnvelopeState, Evidence, StorageSequence, VideoShard, WitnessEnvelope,
 };

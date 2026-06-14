@@ -10,7 +10,7 @@ use phalanx_forensics::crucible::EnvelopeHashExt;
 use phalanx_forensics::witness::WitnessAuthority;
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
-use phalanx_node::persistence::vault::{derive_vault_key, Guardian};
+use phalanx_node::persistence::vault::{Guardian, derive_vault_key};
 use phalanx_proto::evidence::{
     DataPayload, EnvelopeState, Evidence, ForensicMetrics, StorageSequence, VideoShard,
     WitnessEnvelope,

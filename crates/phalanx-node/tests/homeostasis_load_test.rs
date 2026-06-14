@@ -50,8 +50,8 @@
     clippy::too_many_lines
 )]
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use phalanx_node::hardware::camera::target_fps;
@@ -238,7 +238,9 @@ async fn homeostasis_load_test() {
         .with_ansi(false)
         .try_init();
 
-    eprintln!("=== homeostasis_load_test ({SAMPLE_DURATION_SECS}s, FPS={BASE_FPS} base, {SYMBOLS_PER_FRAME} symbols/frame) ===");
+    eprintln!(
+        "=== homeostasis_load_test ({SAMPLE_DURATION_SECS}s, FPS={BASE_FPS} base, {SYMBOLS_PER_FRAME} symbols/frame) ==="
+    );
 
     // Per-node dedicated tokio runtimes. Each node's swarm task and async
     // helpers run on its own runtime so tokio-scheduler-level contention
@@ -373,7 +375,9 @@ async fn homeostasis_load_test() {
     // `io_ops_per_publish` is the swarm-side socket-op-to-publish-attempt ratio.
     // `err_*` columns are per-variant rejection-cause breakdowns. Sum to
     // `publish_errors_delta` (modulo small read races).
-    println!("t_sec,fps_target,power_state,composite_stress,publish_attempts_delta,publish_errors_delta,bytes_sent_delta,bytes_recv_delta,queue_depth,mean_call_us,io_ops_per_publish,err_all_queues_full,err_no_peers_subscribed,err_message_too_large,err_duplicate,err_signing,err_transform_failed");
+    println!(
+        "t_sec,fps_target,power_state,composite_stress,publish_attempts_delta,publish_errors_delta,bytes_sent_delta,bytes_recv_delta,queue_depth,mean_call_us,io_ops_per_publish,err_all_queues_full,err_no_peers_subscribed,err_message_too_large,err_duplicate,err_signing,err_transform_failed"
+    );
 
     // Per-second sampling loop on the test task.
     let test_start = Instant::now();

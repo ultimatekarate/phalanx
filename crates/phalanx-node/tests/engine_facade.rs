@@ -35,8 +35,8 @@ use phalanx_node::vitals::SystemGovernor;
 use phalanx_node::{UnspawnedEngine, VideoPlayerSink};
 use phalanx_proto::identity::{PhalanxIdentity, RecordingId};
 use phalanx_proto::playback::PlaybackSink;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 

@@ -42,7 +42,7 @@ pub use network::wire;
 pub mod prelude {
     // Identity Nouns
     pub use crate::identity::{
-        Did, MeshAddress, PhalanxIdentity, RecordingId, ShardId, WitnessId, IDENTITY_VERSION,
+        Did, IDENTITY_VERSION, MeshAddress, PhalanxIdentity, RecordingId, ShardId, WitnessId,
     };
 
     // Evidence Nouns
@@ -54,8 +54,8 @@ pub mod prelude {
     pub use crate::constants::{RECORDING_SIZE_THRESHOLD, RECORDING_TIME_THRESHOLD};
     // Contextual Nouns
     pub use crate::network::deployment::{
-        DeploymentProfile, Incoherence, TopicSet, DEFAULT_MAX_CHUNK_SIZE_BYTES,
-        DEFAULT_PROTOCOL_VERSION,
+        DEFAULT_MAX_CHUNK_SIZE_BYTES, DEFAULT_PROTOCOL_VERSION, DeploymentProfile, Incoherence,
+        TopicSet,
     };
     pub use crate::network::topic::MeshTopic;
     pub use crate::time::{PhalanxTimestamp, TimeError, TrustedClock};
@@ -76,7 +76,7 @@ pub mod prelude {
     pub use crate::identity::trust::{PetName, TrustLevel};
     pub use crate::network::kademlia::{DhtPayload, PayloadKind};
     pub use crate::network::topology::{EclipseRisk, SubnetBucket, SubnetQuota, TransportClass};
-    pub use crate::network::{NetworkEvent, DISCOVERY_TOPIC_ID, RETRIEVAL_PROTOCOL_ID};
+    pub use crate::network::{DISCOVERY_TOPIC_ID, NetworkEvent, RETRIEVAL_PROTOCOL_ID};
     pub use crate::time::MonotonicClock;
     pub use crate::vitals::ControlMessage;
 

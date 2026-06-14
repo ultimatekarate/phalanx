@@ -18,8 +18,8 @@ use phalanx_node::vitals::SystemGovernor;
 use phalanx_proto::identity::{MeshAddress, RecordingId};
 use phalanx_proto::network::EgressPort;
 use phalanx_proto::prelude::{MeshTopic, PhalanxTimestamp, RecordingResponse};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 

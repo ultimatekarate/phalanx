@@ -8,7 +8,7 @@
 )]
 use phalanx_node::config::NodeConfig;
 use phalanx_node::identity::PhalanxNodeIdentityExt;
-use phalanx_node::persistence::vault::{derive_vault_key, read_encrypted_file, Guardian};
+use phalanx_node::persistence::vault::{Guardian, derive_vault_key, read_encrypted_file};
 use phalanx_node::vitals::init_observability;
 use phalanx_proto::evidence::{
     EnvelopeState, Evidence, ForensicMetrics, Recording, StorageSequence, WitnessEnvelope,
@@ -109,18 +109,24 @@ async fn test_legal_identity_handover() {
     .unwrap();
 
     // VERIFICATION
-    assert!(guardian
-        .ingest_envelope(EnvelopeState::Intact(env_1), Duration::from_secs(1))
-        .await
-        .is_ok());
-    assert!(guardian
-        .ingest_envelope(EnvelopeState::Intact(env_2), Duration::from_secs(1))
-        .await
-        .is_ok());
-    assert!(guardian
-        .ingest_envelope(EnvelopeState::Intact(env_3), Duration::from_secs(1))
-        .await
-        .is_ok());
+    assert!(
+        guardian
+            .ingest_envelope(EnvelopeState::Intact(env_1), Duration::from_secs(1))
+            .await
+            .is_ok()
+    );
+    assert!(
+        guardian
+            .ingest_envelope(EnvelopeState::Intact(env_2), Duration::from_secs(1))
+            .await
+            .is_ok()
+    );
+    assert!(
+        guardian
+            .ingest_envelope(EnvelopeState::Intact(env_3), Duration::from_secs(1))
+            .await
+            .is_ok()
+    );
 
     guardian.salvage().await.expect("Salvage failed");
 
