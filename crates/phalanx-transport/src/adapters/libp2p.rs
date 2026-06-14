@@ -305,10 +305,6 @@ pub struct AdapterConfig {
     pub event_channel_capacity: usize,
     /// Max events per peer per second before dropping (default: 100)
     pub max_events_per_peer_per_sec: u64,
-    /// When Some, the swarm event loop sleeps for this duration between poll
-    /// bursts. None means continuous polling (default). This is the production
-    /// mechanism for power-state-dependent cadencing.
-    pub poll_cadence: Option<Duration>,
     /// When true, the adapter records timestamps for every swarm wake into a
     /// shared log. Intended for benchmarks only — not for production use.
     pub enable_wake_log: bool,
@@ -328,7 +324,6 @@ impl Default for AdapterConfig {
         Self {
             event_channel_capacity: 2048,
             max_events_per_peer_per_sec: 100,
-            poll_cadence: None,
             enable_wake_log: false,
             enable_io_log: false,
             enable_publish_timing: false,
@@ -458,8 +453,6 @@ impl Libp2pAdapter {
 
         let publish_error_breakdown = PublishErrorCounters::default();
         let publish_error_breakdown_task = publish_error_breakdown.clone();
-
-        let poll_cadence = config.poll_cadence;
 
         tokio::spawn(async move {
             // H3 FIX: Per-peer rate limiting state
@@ -892,45 +885,18 @@ impl Libp2pAdapter {
                 }};
             }
 
-            if let Some(cadence) = poll_cadence {
-                // ── Cadenced polling: drain pending events, then sleep ──
-                loop {
-                    // Drain phase: process all pending events with a short timeout
-                    loop {
-                        tokio::select! {
-                            biased;
-                            command_option = command_rx.recv() => {
-                                if command_option.is_none() {
-                                    return; // Channel dropped; shutdown
-                                }
-                                outbound_queue_depth_task.fetch_sub(1, Ordering::Relaxed);
-                                handle_command!(command_option);
-                            }
-                            swarm_event = swarm.select_next_some() => {
-                                handle_swarm_event!(swarm_event);
-                            }
-                            _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                                break; // No more pending events
-                            }
+            // ── Continuous polling ──
+            loop {
+                tokio::select! {
+                    command_option = command_rx.recv() => {
+                        if command_option.is_none() {
+                            break; // Channel dropped; initiate actor shutdown
                         }
-                    }
-                    // Sleep phase: wait for the configured cadence
-                    tokio::time::sleep(cadence).await;
-                }
-            } else {
-                // ── Continuous polling (original behaviour) ──
-                loop {
-                    tokio::select! {
-                        command_option = command_rx.recv() => {
-                            if command_option.is_none() {
-                                break; // Channel dropped; initiate actor shutdown
-                            }
-                            outbound_queue_depth_task.fetch_sub(1, Ordering::Relaxed);
-                            handle_command!(command_option);
-                        },
-                        swarm_event = swarm.select_next_some() => {
-                            handle_swarm_event!(swarm_event);
-                        }
+                        outbound_queue_depth_task.fetch_sub(1, Ordering::Relaxed);
+                        handle_command!(command_option);
+                    },
+                    swarm_event = swarm.select_next_some() => {
+                        handle_swarm_event!(swarm_event);
                     }
                 }
             }
@@ -1491,7 +1457,6 @@ mod tests {
         let config = AdapterConfig::default();
         assert_eq!(config.event_channel_capacity, 2048);
         assert_eq!(config.max_events_per_peer_per_sec, 100);
-        assert!(config.poll_cadence.is_none());
         assert!(!config.enable_wake_log);
         assert!(!config.enable_io_log);
         assert!(!config.enable_publish_timing);

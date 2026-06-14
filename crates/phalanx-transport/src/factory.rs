@@ -117,13 +117,8 @@ where
     // ── Swarm assembly ───────────────────────────────────────
     let idle_timeout = Duration::from_secs(config.idle_timeout_secs);
 
-    // Connection limits are currently hardcoded in build_behaviour().
-    // These config fields are reserved for future per-deployment tuning.
-    let _ = (
-        config.max_established,
-        config.max_established_incoming,
-        config.max_established_per_peer,
-    );
+    // Connection limits are hardcoded in build_behaviour() (see the
+    // connection_limits behaviour there).
 
     let mut swarm = SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()

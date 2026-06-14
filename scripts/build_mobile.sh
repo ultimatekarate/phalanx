@@ -20,8 +20,12 @@
 
 set -euo pipefail
 
-# Ensure Flutter and Android SDK CMake/Ninja are on PATH.
-export PATH="$PATH:/c/Users/joevo/git-repo/flutter/bin"
+# Ensure Flutter is on PATH. If `flutter` is not already found, append
+# $FLUTTER_BIN — point it at your Flutter SDK's bin/ (e.g. export it in your
+# shell profile). No machine-specific paths are baked in.
+if ! command -v flutter >/dev/null 2>&1 && [ -n "${FLUTTER_BIN:-}" ]; then
+  export PATH="$PATH:$FLUTTER_BIN"
+fi
 export PATH="$PATH:$(ls -d $HOME/AppData/Local/Android/Sdk/cmake/*/bin 2>/dev/null | head -1)"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

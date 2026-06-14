@@ -102,7 +102,6 @@ fn make_config(base_port: u16, node_index: usize) -> MeshTransportConfig {
             enable_wake_log: true,
             enable_io_log: true,
             enable_publish_timing: true,
-            poll_cadence: None,
             ..AdapterConfig::default()
         },
         ..MeshTransportConfig::default()

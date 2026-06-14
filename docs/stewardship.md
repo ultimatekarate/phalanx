@@ -52,11 +52,9 @@ production caller); **Seam only** (the Rust side of an interface exists, the oth
 | Compile-time contractivity assertion (stability certificate) | Feature-gated (`stability-analysis`, non-default, never enabled in CI) | `crates/phalanx-node/src/lib.rs:73-78`, `.github/workflows/ci.yml:33-37` |
 | Lean 4 proofs | Manual-only (`lake build`; no CI job) | `.github/workflows/ci.yml:1-157`, `proofs/lakefile.lean` |
 | BLE / WiFi Direct local mesh | Seam only — 5-function FFI surface and typed event plumbing exist; no Dart/Kotlin/Swift radio code exists, and the Dart bridge does not bind the seam | `crates/phalanx-ffi/src/local_mesh.rs:1-279`, `crates/phalanx-transport/src/adapters/local_mesh.rs:1-9`, `crates/phalanx-ffi/src/ble_auth.rs:1-14` |
-| Direct phone→Stronghold QUIC (s2n-quic + `MergedIngress`) | Dormant — implemented and integration-tested, zero production constructors | `crates/phalanx-transport/src/adapters/quic/mod.rs:1-23`, `crates/phalanx-transport/src/lib.rs:31-40` |
-| `poll_cadence` radio-wake batched polling | Dormant — implemented and benchmarked; production orchestrator never sets it | `crates/phalanx-transport/src/adapters/libp2p.rs:311-331,895-919`, `crates/phalanx-node/src/network/orchestrator.rs:28-46` |
 | `DualPresence` offense (same DID at incompatible network locations) | Deferred — offense type and 50-point penalty exist; detection logic does not | `crates/phalanx-proto/src/identity/trust.rs:22`, `crates/phalanx-forensics/src/trust/evaluation.rs:9`, `threat-model.md:365` |
 | Android app | Functional dev build: fixed dev passphrase, debug signing config, no foreground service, synthetic 25 °C thermal feed | `flutter_app/lib/main.dart:58-62,249-263`, `flutter_app/android/app/build.gradle:57-61`, `flutter_app/android/app/src/main/AndroidManifest.xml:23-80` |
-| iOS app | Rust static lib cross-compiles (CI builds `aarch64-apple-ios`); loader expects static linkage; no iOS runner project is tracked, and deployment-target metadata disagrees (14 vs 15) | `.github/workflows/ci.yml:86-105`, `flutter_app/lib/ffi/library_loader.dart:8-18`, `flutter_app/ios/build_rust.sh:10` |
+| iOS app | Rust static lib cross-compiles (CI builds `aarch64-apple-ios`); loader expects static linkage; no iOS runner project is tracked | `.github/workflows/ci.yml:86-105`, `flutter_app/lib/ffi/library_loader.dart:8-18`, `flutter_app/ios/build_rust.sh:10` |
 
 The Android dev-build items are production-checklist work, not alarms — they are TODO-marked placeholders in a
 pre-release app (`flutter_app/lib/main.dart:58-61`). They appear again in §7 with effort attached.
@@ -141,9 +139,9 @@ Two caveats. First, the entire stability module — including the compile-time a
 enables the feature. A drift-guard test (`test_const_config_matches_runtime`, `contractivity.rs:419-449`) exists
 but only runs under the same feature. A steward should put `-p phalanx-node --features stability-analysis` in CI
 on day one.
-Second, a documentation drift: [threat model §4](threat-model.md) and a comment at
-`crates/phalanx-forensics/src/policy.rs:488-493` state a stale endowment formula; the implementation and
-`jacobian.rs:44-51` agree with each other (half-endowment at e = 1/k).
+Second, a documentation drift (now corrected): [threat model §4](threat-model.md) and the comment at
+`crates/phalanx-forensics/src/policy.rs:488-493` previously stated a stale endowment formula; both now match the
+implementation and `jacobian.rs:44-51` — `psi_max / (1 + (k·e)²)`, half-endowment at e = 1/k.
 
 ### The Byzantine-detectability claim, precisely
 
@@ -193,27 +191,27 @@ concrete failure mode. **Sign-off on this table is part of the handoff checklist
 | I-4 | **`evidence_hash` excludes the signature.** It is `blake3(postcard(evidence))`, computed before signing; verification re-derives it from the actual bytes (the R3-1 fix); Gate 7 recomputes it again. | `crates/phalanx-forensics/src/pipeline/witness.rs:34-53`, `crates/phalanx-forensics/src/verification/gate.rs:497-510` | Keying dedup on a signature-covering hash lets an attacker re-sign the same evidence to bypass deduplication. The exclusion is also exactly what creates I-2's accepted poisoning surface — I-2 and I-4 are one tradeoff, documented together in [threat model §3](threat-model.md). |
 | I-5 | **The signature covers ciphertext.** On the capture path, `gate_and_encrypt` (LensGate, then payload AEAD) runs *before* `evidence.seal(...)` signs. | `crates/phalanx-node/src/actors/media_egress.rs:184-217,263-313` | Sign-then-encrypt would make downstream verification require decryption (impossible without a grant), and an encryption failure could let plaintext reach the mesh — the code's own contract is "plaintext MUST NOT reach the mesh." LensGate must also stay *before* encryption, or provenance is checked against bytes nobody can inspect. |
 | I-6 | **`ForensicUnit` has no serde, and five `compile_fail` doc-tests prove it.** Private fields, sealed `ValidationState`, `pub(crate)` unchecked constructors. | `crates/phalanx-forensics/src/unit.rs:14-61` | Each doc-test is compiled as an external crate and must *fail*. If one starts compiling, an evidence-forgery path has reopened — treat it as a security regression, never as a test to "fix." Deserialization would mint `Verified`/`Sealed` states without passing any gate. |
-| I-7 | **Crucible placeholder thresholds.** `RECORDING_SIZE_THRESHOLD = 100` shards / `RECORDING_TIME_THRESHOLD = 60 s` gate finalization; an integration test pins the 100. | `crates/phalanx-forensics/src/pipeline/crucible.rs:18-20,469`, `crates/phalanx-forensics/tests/integration.rs:73` | Production-checklist item, not an alarm: the values are explicit placeholders. Naming hazard: phalanx-proto exports a *different* same-named pair (50 / 1 s, `crates/phalanx-proto/src/constants.rs:7-8`) that `phalanx-transport/src/io.rs:2-23` consumes as a **byte** cap — a shard-count constant used as a byte limit. Tune one and you may silently change the other's semantics. |
+| I-7 | **Crucible placeholder thresholds.** `RECORDING_SIZE_THRESHOLD = 100` shards / `RECORDING_TIME_THRESHOLD = 60 s` gate finalization; an integration test pins the 100. | `crates/phalanx-forensics/src/pipeline/crucible.rs:18-20,469`, `crates/phalanx-forensics/tests/integration.rs:73` | Production-checklist item, not an alarm: the values are explicit placeholders. Naming hazard: phalanx-proto exports a *different* same-named pair (50 / 1 s, `crates/phalanx-proto/src/constants.rs:7-8`). The misuse that consumed it as a **byte** cap lived in `phalanx-transport/src/io.rs`, now deleted (§5); the same-name / different-value / different-unit collision between the two pairs remains a tuning hazard. |
 | I-8 | **`handle_revoke`'s equality check is a consistency gate, not the trust anchor.** Step 1, `verify_revocation_token`, is the cryptographic authorization (token signed by the BIP-39-derived key); the comparison against `envelopes.first().revocation_key` only catches inconsistency; unknown recordings are rejected to block cross-identity revocation. | `crates/phalanx-node/src/actors/storage.rs:759-836`, `threat-model.md:190` | "Hardening" the lookup with `verify_envelope` adds hot-path cost and closes no attack: no matching token can exist without the mnemonic. This was flagged, investigated, and closed — the in-code audit note says so explicitly. |
 | I-9 | **Senders must consult the publish gate.** Anything sending on `commit_notify_tx` must first check `Guardian::is_recording_publishable`; both ingest paths do. | `crates/phalanx-node/src/actors/storage.rs:38-46,663-671,736-743` | Bypassing the gate silently re-announces to the mesh a recording the operator marked local-only — a privacy regression with no error to notice. |
 
 ## 5. Dead and unwired code register
 
 Frame: **inherited intent, not rot.** `dead_code` is denied workspace-wide (`Cargo.toml:35-66`), so everything
-below survives because it is `pub` in a library crate or referenced by tests — i.e., deliberately kept. Each row
-needs a steward decision: wire it into a production path, or delete it and its dependencies.
+here survived because it was `pub` in a library crate or referenced by tests. **Most rows were actioned in the
+2026-06 cleanup pass**; outcomes are recorded below (deleted code is recoverable from git history).
 
-| Item | Anchors | State | Decision needed |
-|---|---|---|---|
-| s2n-quic adapter + `MergedIngress` | `crates/phalanx-transport/src/adapters/quic/mod.rs:1-23` (constructed only in its own `#[cfg(test)]` at `:250`), `crates/phalanx-transport/src/lib.rs:31-40,156-157`, dep `Cargo.toml:18` | Implemented, integration-tested, documented intent: direct phone→Stronghold QUIC bypassing the libp2p mesh, with `MergedIngress` unifying both event streams for [MeshSentinel](architecture.md#glossary). Zero production constructors. | Wire into the Stronghold binary, or delete the adapter and drop the s2n-quic 1.75 dependency. |
-| `phalanx/stronghold` DHT namespace | `announce_stronghold` (`crates/phalanx-transport/src/behaviour.rs:56`), `find_strongholds` (`behaviour.rs:80`); only caller is an in-crate test (`crates/phalanx-transport/src/builder.rs:362-395`) | Stronghold provider announce/discover over Kademlia, fully implemented, no production caller (re-verified for this document). Bonus hazard: two divergent namespace constants exist — `b"phalanx/stronghold"` (`behaviour.rs:13`) and `b"phalanx.stronghold.v1"` (`crates/phalanx-proto/src/constants.rs:5`). | Wire (Stronghold announces at boot; nodes discover instead of static `archival_peers`) or delete; either way collapse the duplicate constants. |
-| `DiscoverySource::Kademlia`, `::Identify` | `crates/phalanx-proto/src/telemetry.rs:34-42`; match arms in `crates/phalanx-node/src/vitals/governor.rs:579-591` | Never constructed in production — reserved telemetry sources for discovery paths that do not currently emit `PeerDiscovered` events. | Keep as reserved wire-stable variants (cheap) or prune with the match arms. |
-| `PayloadKind::NodeDiscovery`, `::SecurityPolicy` | `crates/phalanx-proto/src/network/kademlia.rs:6-13` | Versioned DHT record kinds, never constructed; only `ShardPointer` is used. Explicit u16 discriminants + `Unspecified` catch-all say this is deliberate wire-format headroom. | Keep (documented reservation) — lowest-priority row here. |
-| Connection-limit config fields | `crates/phalanx-transport/src/config.rs:38-43`; discarded with an explicit `let _ =` (`factory.rs:118-126`); real limits hardcoded (`builder.rs:231-237`) | `max_established`/`max_established_incoming`/`max_established_per_peer` are parsed and thrown away — the in-code comment calls them "reserved for future per-deployment tuning." Cross-referenced in the [config truth table](network.md#9-config-truth-table). | Honor them in `build_behaviour` or remove them; a config field that parses but does nothing is an operator trap. |
-| `poll_cadence` cadenced event loop | `crates/phalanx-transport/src/adapters/libp2p.rs:311-331,895-919`; benchmark `crates/phalanx-transport/tests/radio_wake_benchmark.rs:39-70` | Radio-wake batching for battery: implemented, benchmarked, default `None`, and the production orchestrator builds config with `..default()` — continuous polling always wins. | Enable per power state, or accept continuous polling as the floor (the mesh-presence invariant already sets the battery floor) and delete. |
-| `read/write_length_prefixed_payload` | `crates/phalanx-transport/src/io.rs:1-43` | Zero callers anywhere; additionally caps payloads with proto's `RECORDING_SIZE_THRESHOLD` (50) — the byte/shard-count semantic mismatch from I-7. | Delete, or fix the cap and use them. |
-| `StorageCommand::GetContentKey` `Option` | `crates/phalanx-node/src/actors/storage.rs:114-123,393-408` | Documented dead branch: `None` is never emitted under the v2 deterministic-DEK regime; callers' fallbacks still compile. | Collapse the channel type to non-optional when convenient. |
-| `/phalanx/discovery/1.0.0` topic constant | `crates/phalanx-proto/src/network/events.rs:14` | Defined and re-exported, never published or subscribed (see [topic table](network.md#3-topics-who-publishes-who-listens)). | Delete or implement. |
+| Item | Outcome |
+|---|---|
+| s2n-quic adapter + `MergedIngress` | **Deleted.** The `crates/phalanx-transport/src/adapters/quic/` adapter and `MergedIngress` were removed and the `s2n-quic` dependency dropped (with the orphaned `rcgen` dev-dep and stale `deny.toml` entries). No production code used it — the direct phone→Stronghold QUIC path is recoverable from git if ever wanted. |
+| `phalanx/stronghold` DHT namespace | **Kept (deliberate).** `announce_stronghold`/`find_strongholds` (`crates/phalanx-transport/src/behaviour.rs:56,80`) are the auto-discovery successor to the manual Stronghold pairing in the profile picker ([operations.md](operations.md)) — now viable since node and Stronghold share a DHT. **Still to reconcile when wired:** the two divergent namespace constants `b"phalanx/stronghold"` (`behaviour.rs:13`) and `STRONGHOLD_NAMESPACE = b"phalanx.stronghold.v1"` (`crates/phalanx-proto/src/constants.rs:5`). |
+| `PayloadKind::NodeDiscovery`, `::SecurityPolicy` | **Kept (deliberate).** `crates/phalanx-proto/src/network/kademlia.rs:6-13` — serialized DHT-record discriminants reserved as wire-format headroom. Deleting reserved discriminants is the one cleanup git cannot make safe (later reuse breaks old records); keeping costs nothing. |
+| ~~`DiscoverySource::Kademlia`, `::Identify`~~ | **Register error — not dead; removed from the register.** These are live in production: `TransportClass::from_discovery_source` (`crates/phalanx-node/src/network/topology.rs:85-89`) and `record_peer_discovery` (`crates/phalanx-node/src/vitals/governor.rs:587-590`, internet-peer counting) both match them. The earlier "never constructed in production" claim was wrong — caught during the cleanup pass. |
+| Connection-limit config fields | **Deleted.** `max_established`/`_incoming`/`_per_peer` (the parse-and-discard "operator trap") removed from `config.rs`/`factory.rs`; the real hardcoded limits (`builder.rs:231-237`) stay. |
+| `poll_cadence` cadenced event loop | **Deleted.** Superseded — the battery-optimization inquiry closed with the floor set by the mesh-presence invariant, so this benchmarked path was a dead end. The event loop runs its continuous-polling form (the former default). |
+| `read/write_length_prefixed_payload` | **Deleted.** `crates/phalanx-transport/src/io.rs` had zero callers and carried the byte-cap-vs-shard-count misuse noted in I-7 — both gone. (`codec.rs`'s live `read/write_length_prefixed` is unrelated and untouched.) |
+| `StorageCommand::GetContentKey` `Option` | **Deferred.** Tightening `Option<…>` → non-optional ripples across the emit site, handler, watch-channel, and a test (`crates/phalanx-node/src/actors/storage.rs:114-123,393-408`) — do it when next touching that path. |
+| `/phalanx/discovery/1.0.0` topic constant | **Deleted.** `crates/phalanx-proto/src/network/events.rs` — defined and re-exported but never published or subscribed. |
 
 ## 6. Repository completeness
 
@@ -221,15 +219,15 @@ What a fresh `git clone` actually gets, as fix-plan rows. Effort: S (hours), M (
 
 | Issue | Current behavior | Anchors | Fix | Effort |
 |---|---|---|---|---|
-| `.gitignore` excludes `flutter_app/*` | Only 21 app files are tracked; 18 on-disk Dart files (all community screens, onboarding/restore/verify, link service, bridges) are not. The tracked `main.dart` imports 10+ untracked files — **a fresh clone's app does not compile**, and the app being pitched is effectively not in the repository. Side effect: ripgrep silently skips `flutter_app/` even for tracked files. | `.gitignore:15-17`, `flutter_app/lib/main.dart:11-27` | Replace the blanket rule with targeted ignores (build output, `jniLibs`, `local.properties`); review and commit the sources. | S |
+| ~~`.gitignore` excludes `flutter_app/*`~~ **(fixed)** | The blanket `flutter_app/*` rule was narrowed to build artifacts (`flutter_app/.dart_tool/`, `flutter_app/build/`). The app's Dart sources are now tracked (42 files, including the profile-picker additions), so a fresh clone gets a buildable app and search tools no longer skip the tree. | `.gitignore:15-16` | Done. | — |
 | No LICENSE file | README says "License: TBD. Phalanx will always be open source and free" — but with no license grant the repository is legally all-rights-reserved, which blocks every other adoption step. | README § License | Owner picks a license (the `software-transcode` patent-encumbered-codec boundary, `crates/phalanx-forensics/Cargo.toml:50-64`, is relevant input); add the file. | Decision M, mechanics S |
-| CI runs on manual dispatch only | No push/PR triggers — nothing runs automatically on commits. The README badge reflects manually dispatched runs. | `.github/workflows/ci.yml:3-4`, `README.md:3` | Add `push`/`pull_request` triggers. | S |
-| CI `build-ios` cbindgen path is wrong | Writes/uploads `phalanx-ffi/phalanx.h`, but no such root directory exists — the crate lives at `crates/phalanx-ffi/` with its own committed `phalanx.h`. | `.github/workflows/ci.yml:96-113` | Point at `crates/phalanx-ffi/`. | S |
-| CI clippy omits `--all-targets` | Tests and benches are not linted in CI, unlike the documented workspace convention. | `.github/workflows/ci.yml:7-37` | Add the flag. | S |
+| ~~CI runs on manual dispatch only~~ **(fixed)** | Now triggers on push to `master` and every PR (plus manual); the expensive `bench` job stays gated to manual dispatch. | `.github/workflows/ci.yml:3-7` | Done. | — |
+| ~~CI `build-ios` cbindgen path is wrong~~ **(fixed)** | The generate step and the artifact upload now point at `crates/phalanx-ffi/` (both `--config` and `--output`). | `.github/workflows/ci.yml:96-113` | Done. | — |
+| ~~CI clippy omits `--all-targets`~~ **(fixed)** | The workspace clippy step now passes `--all-targets`, matching the local convention. | `.github/workflows/ci.yml:33-34` | Done. | — |
 | CI never exercises feature-gated code | The ffi crate's own comment prescribes: build feature-off and assert openh264/fdk-aac absent, *and* run `--features software-transcode` for the export E2E — CI does neither. Same gap for `stability-analysis` (the contractivity assertion) and the Lean `lake build`. | `crates/phalanx-ffi/Cargo.toml:45-52`, `.github/workflows/ci.yml:1-157` | Three additional jobs. | M |
-| Build script hardcodes the author's machine | `export PATH="$PATH:/c/Users/joevo/git-repo/flutter/bin"`, plus Windows-specific SDK/cygpath assumptions. | `scripts/build_mobile.sh:24,38,84` | Parameterize via env vars with documented defaults. | S |
-| iOS deployment-target mismatch | Build script says iOS 14+, CI pins `IPHONEOS_DEPLOYMENT_TARGET: 15.0`. | `flutter_app/ios/build_rust.sh:10`, `.github/workflows/ci.yml:104` | Pick one. | S |
-| CI builds one Android ABI, never the APK | Only `aarch64-linux-android` `.so` is built and uploaded; no `x86_64` ABI, no Flutter build (compounded by the gitignore row — CI *couldn't* build the app from a clone today). | `.github/workflows/ci.yml:39-75` | Add after the gitignore fix lands. | M |
+| ~~Build script hardcodes the author's machine~~ **(mostly fixed)** | The hardcoded author Flutter path is gone — `build_mobile.sh` appends `$FLUTTER_BIN` only if `flutter` isn't already on PATH. The remaining `$HOME`-based Android-SDK defaults are Windows-shaped but already env-overridable. | `scripts/build_mobile.sh:23-25` | Author path done; cross-platform SDK paths an optional follow-up. | — |
+| ~~iOS deployment-target mismatch~~ **(fixed)** | `build_rust.sh` now states iOS 15, matching CI's `IPHONEOS_DEPLOYMENT_TARGET: 15.0`. | `flutter_app/ios/build_rust.sh:10`, `.github/workflows/ci.yml:104` | Done. | — |
+| CI builds one Android ABI, never the APK | Only `aarch64-linux-android` `.so` is built and uploaded; no `x86_64` ABI, no Flutter build. (The gitignore fix now unblocks building the app from a clone, so this is actionable.) | `.github/workflows/ci.yml:39-75` | Add the `x86_64` ABI + a Flutter build job. | M |
 
 ## 7. The productization gap list
 
@@ -237,7 +235,7 @@ What stands between today's repository and a product an at-risk person can rely 
 dependency, with the funding question made explicit.
 
 | Gap | Today | Done looks like | Anchor |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | License decision | No grant at all (§6) | LICENSE file + contribution policy | README § License |
 | Repository completeness | §6 table | Clone-and-build on a clean machine, CI on every PR | §6 |
 | Hardware-keystore identity | Every mobile identity vault sealed under the fixed dev passphrase `phalanx-mobile-dev` in three flows | Android Keystore / iOS Keychain via the TODO's own plan | `flutter_app/lib/main.dart:58-62,116,129,166` |
@@ -321,12 +319,14 @@ this codebase is the reading below plus the sign-offs.
       default subscribe lists; a set-but-invalid config now fails loudly; and a cross-crate test pins per-profile
       agreement (`crates/phalanx-stronghold/tests/topic_alignment.rs`). Still open, deliberately: canary alerts on
       `/phalanx/mesh/1.0.0` are publish-only until an inbound alert handler exists ([network.md §3](network.md#3-topics-who-publishes-who-listens), [§5](network.md#5-the-dht)).
-- [ ] Stale endowment formula in [threat model §4](threat-model.md) and `crates/phalanx-forensics/src/policy.rs:488-493`
-      vs the implementation (`crates/phalanx-node/src/vitals/governor.rs:778-786`) — §3 above.
+- [x] ~~Stale endowment formula in threat model §4 / `policy.rs` vs the implementation~~ — fixed: the threat-model
+      formula and the `policy.rs` comment now match the implemented `psi_max / (1 + (k·e)²)` (full ceiling at
+      e=0, half-endowment at e = 1/k; `crates/phalanx-node/src/vitals/governor.rs:778-786`). See §3.
 - [ ] Same-named threshold constants with different values and units (I-7), and two `STRONGHOLD_NAMESPACE`
       constants (§5).
-- [ ] `ripgrep`/`grep` silently skip `flutter_app/` because of the gitignore rule — pass `--no-ignore` until the
-      §6 fix lands.
+- [x] ~~`ripgrep`/`grep` silently skip `flutter_app/` because of the gitignore rule~~ — fixed: the blanket
+      `flutter_app/*` ignore was narrowed to build artifacts (`flutter_app/.dart_tool/`, `flutter_app/build/`), so
+      the app's Dart sources are tracked and search tools see them.
 - [x] README wording corrections — landed in the 2026-06 README rework: stability is now "numerically
       certified" (§3), the transport claim is scoped to QUIC/TCP with the radios marked unimplemented (§2), and
       the two-XChaCha20-layers sentence was replaced by "encrypted in transit and at rest" (§3 remains the

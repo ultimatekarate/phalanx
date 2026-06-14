@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  push:
+    branches: [master]
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -31,7 +34,7 @@ jobs:
         run: cargo machete
 
       - name: Clippy (workspace)
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test (workspace)
         run: cargo test --workspace
@@ -97,7 +100,7 @@ jobs:
         run: cargo install cbindgen
 
       - name: Generate C Headers
-        run: cbindgen --config cbindgen.toml --crate phalanx-ffi --output phalanx-ffi/phalanx.h
+        run: cbindgen --config crates/phalanx-ffi/cbindgen.toml --crate phalanx-ffi --output crates/phalanx-ffi/phalanx.h
 
       - name: Build iOS Static Library (Release)
         env:
@@ -110,13 +113,16 @@ jobs:
           name: phalanx-ios-lib
           path: |
             target/aarch64-apple-ios/release/libphalanx_ffi.a
-            phalanx-ffi/phalanx.h
+            crates/phalanx-ffi/phalanx.h
 
   # Manual performance-comparison job. Benchmarks the dispatched branch against
   # `main` and prints a critcmp table to the run summary. Informational only —
   # GitHub-hosted runners are too noisy for a hard regression gate.
   bench:
     needs: lint-and-test
+    # Informational and expensive (two full cargo bench runs + a main checkout).
+    # Keep it manual — running it on every push/PR would be slow and noisy.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

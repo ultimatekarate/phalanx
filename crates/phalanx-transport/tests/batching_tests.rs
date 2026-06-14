@@ -88,7 +88,6 @@ fn make_config(base_port: u16, node_index: usize) -> MeshTransportConfig {
         adapter: AdapterConfig {
             enable_wake_log: true,
             enable_io_log: true,
-            poll_cadence: None,
             ..AdapterConfig::default()
         },
         ..MeshTransportConfig::default()

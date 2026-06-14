@@ -11,7 +11,6 @@ use crate::telemetry::DiscoverySource;
 use crate::topology::{SubnetBucket, TransportClass};
 
 pub const RETRIEVAL_PROTOCOL_ID: &str = "/phalanx/retrieval/1.0.0";
-pub const DISCOVERY_TOPIC_ID: &str = "/phalanx/discovery/1.0.0";
 /// Unicast request/response protocol for directed evidence PUSH to an archival
 /// Stronghold (the custody tier). Distinct from the pull-only retrieval protocol.
 pub const ARCHIVE_PROTOCOL_ID: &str = "/phalanx/archive/1.0.0";

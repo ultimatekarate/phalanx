@@ -78,11 +78,10 @@ or requests a relay reservation — the factory only calls `listen_on` for the c
 nothing does it for them. Cross-NAT deployments need explicitly reachable addresses (§8).
 
 **Connection limits are hardcoded**, not configurable: 192 established total, 128 incoming, 64 outgoing, 4 per peer,
-64/32 pending in/out (`crates/phalanx-transport/src/builder.rs:232-239`). The `MeshTransportConfig` fields
-`max_established`, `max_established_incoming`, and `max_established_per_peer` are read and explicitly discarded with a
-comment that they are reserved for future tuning (`crates/phalanx-transport/src/factory.rs:120-126`).
-`idle_timeout_secs` (default 60) **is** honored as the swarm idle-connection timeout, and the swarm caps negotiating
-inbound streams at 128 (`crates/phalanx-transport/src/factory.rs:154-157`).
+64/32 pending in/out (`crates/phalanx-transport/src/builder.rs:232-239`). `idle_timeout_secs` (default 60) **is**
+honored as the swarm idle-connection timeout, and the swarm caps negotiating inbound streams at 128
+(`crates/phalanx-transport/src/factory.rs:154-157`). (The unused `max_established*` config fields that previously
+parsed-and-discarded here were removed in the 2026-06 cleanup.)
 
 **Gossipsub configuration** (`crates/phalanx-transport/src/builder.rs:147-187`): every message is signed by the node's
 Ed25519 identity key with strict validation; the heartbeat interval derives from the physics model's RTT constant (200
@@ -111,9 +110,7 @@ either binary.
 | `/phalanx/revocation/1.0.0` | [RevocationToken](architecture.md#glossary)s, DHT tombstones | Node `EgressActor` (`crates/phalanx-node/src/actors/egress.rs:175-204`) | Nodes + Stronghold (both have inbound handlers: `crates/phalanx-node/src/actors/meshsentinel.rs:886`, `crates/phalanx-stronghold/src/sentinel.rs:153`) |
 | `/phalanx/mesh/1.0.0` | Per-community encrypted [Silent Canary](architecture.md#glossary) alerts | Node `CanarySupervisor` (`crates/phalanx-node/src/actors/canary_supervisor.rs:288`) | **nobody — deliberately publish-only** (see below) |
 
-Two footnotes: `/phalanx/discovery/1.0.0` is defined and re-exported (`crates/phalanx-proto/src/network/events.rs:14`)
-but never published or subscribed anywhere in the workspace — a dead constant. And the only gossipsub `subscribe`
-call in the workspace is the factory loop over `config.subscribe_topics`
+One footnote: the only gossipsub `subscribe` call in the workspace is the factory loop over `config.subscribe_topics`
 (`crates/phalanx-transport/src/factory.rs:174`); there is no runtime topic subscription anywhere, so the table above
 is exhaustive.
 
@@ -187,7 +184,7 @@ Kademlia runs in **Server mode unconditionally** — phones included act as DHT 
   only `announce_stronghold` caller is a unit test, `find_strongholds` has no callers, the swarm-task command enum
   has no stronghold variant, and `EgressPort` exposes no such method
   (`crates/phalanx-transport/src/adapters/libp2p.rs:27-45`, `crates/phalanx-proto/src/network/events.rs:152-216`).
-  Like the dead `/phalanx/discovery/1.0.0` constant (§3), this is plumbing without a driver. Strongholds are found
+  This is plumbing without a driver (kept deliberately as the future auto-discovery path). Strongholds are found
   via configured `[[network.archival_peers]]` multiaddrs (§8), not DHT discovery.
 - `phalanx/recording/<recording-id>` — the live namespace: any holder of a publishable recording announces itself as a shard provider,
   deduplicated per recording within a 30-second window (`crates/phalanx-node/src/actors/egress.rs:218-232`). Playback

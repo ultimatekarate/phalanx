@@ -7,7 +7,7 @@
 #
 # Prerequisites:
 #   rustup target add aarch64-apple-ios aarch64-apple-ios-sim
-#   Minimum deployment target: iOS 14+
+#   Minimum deployment target: iOS 15 (matches CI IPHONEOS_DEPLOYMENT_TARGET)
 #   Bitcode: disabled (Apple deprecated it in Xcode 14)
 # =====================================================================
 

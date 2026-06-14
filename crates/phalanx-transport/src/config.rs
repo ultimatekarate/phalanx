@@ -35,10 +35,7 @@ pub struct MeshTransportConfig {
     /// Enable `StoreInserts::FilterBoth` for Kademlia record validation.
     pub kademlia_filter_both: bool,
 
-    // ── Connection limits (E1/E5 hardening) ──────────────────
-    pub max_established: u32,
-    pub max_established_incoming: u32,
-    pub max_established_per_peer: u32,
+    // ── Connection idle timeout ──────────────────────────────
     pub idle_timeout_secs: u64,
 }
 
@@ -67,9 +64,6 @@ impl Default for MeshTransportConfig {
             kademlia_query_timeout_secs: 30,
             kademlia_record_ttl_secs: 3600,
             kademlia_filter_both: true,
-            max_established: 192,
-            max_established_incoming: 128,
-            max_established_per_peer: 4,
             idle_timeout_secs: 60,
         }
     }

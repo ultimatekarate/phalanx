@@ -76,7 +76,7 @@ The system tracks new peer arrivals as an exponentially decaying integral. As en
 
 - **Entry pressure integral.** Each new peer arrival adds an impulse to the entry integral `e(t)`, which decays with a 7-second half-life. Under normal conditions, the integral stays low. During a Sybil flood, it spikes.
 
-- **Lorentzian endowment.** Each peer's resource ceiling is `psi_max / (1 + k * (e / psi_max)^2)`. At low entry pressure, each peer gets the full ceiling (50 units). As entry pressure rises toward `psi_max / k`, the endowment halves. This is smooth, not a cliff — the system degrades gracefully under attack.
+- **Lorentzian endowment.** Each peer's resource ceiling is `psi_max / (1 + (k * e)^2)`. At zero entry pressure, each peer gets the full ceiling (50 units); the endowment halves at `e = 1/k`. This is smooth, not a cliff — the system degrades gracefully under attack.
 
 - **Reciprocity enforcement.** Peers that consume resources without contributing (non-reciprocal behavior) accumulate reputation penalties. A 10-minute grace period prevents false positives for newly joined peers.
 

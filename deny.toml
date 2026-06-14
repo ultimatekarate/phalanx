@@ -13,11 +13,10 @@ deny = [
         "phalanx-stronghold",
         "phalanx-sim",
         "phalanx-forensics",
-        # Third-party transitive deps of libp2p/s2n-quic that use tokio internally
+        # Third-party transitive deps of libp2p that use tokio internally
         "hickory-proto", "hickory-resolver", "if-watch",
         "libp2p-mdns", "libp2p-quic", "libp2p-swarm", "libp2p-tcp",
         "netlink-sys", "quinn", "rtnetlink",
-        "s2n-quic", "s2n-quic-platform",
         "tokio-stream", "tokio-test",
     ]},
     { crate = "libp2p", wrappers = [
@@ -25,7 +24,7 @@ deny = [
     ]},
 ]
 
-# Transitive duplicates pulled in by c2pa, libp2p, and s2n-quic.
+# Transitive duplicates pulled in by c2pa and libp2p.
 # We can't control these — skip them so the duplicate check stays
 # useful for crates we DO control.
 skip = [

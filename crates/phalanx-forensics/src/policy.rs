@@ -489,7 +489,8 @@ impl Default for HomeostaticConfig {
             // psi_max: per-peer resource ceiling. At 64 max connections,
             // total system capacity = 50 × 64 = 3200 units.
             psi_max: 50.0,
-            // k_sybil: at entry pressure = psi_max/k = 25, endowment halves.
+            // k_sybil: endowment halves at entry pressure e = 1/k_sybil = 0.5,
+            // matching the implemented psi_max / (1 + (k_sybil * e)^2) (governor.rs).
             k_sybil: 2.0,
             // omega: reputation scaling. With half-life=69s, a single evidence
             // (±1.0) decays to ±0.5 after 69s. At omega=100, ~100 valid

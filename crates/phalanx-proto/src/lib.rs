@@ -76,7 +76,7 @@ pub mod prelude {
     pub use crate::identity::trust::{PetName, TrustLevel};
     pub use crate::network::kademlia::{DhtPayload, PayloadKind};
     pub use crate::network::topology::{EclipseRisk, SubnetBucket, SubnetQuota, TransportClass};
-    pub use crate::network::{DISCOVERY_TOPIC_ID, NetworkEvent, RETRIEVAL_PROTOCOL_ID};
+    pub use crate::network::{NetworkEvent, RETRIEVAL_PROTOCOL_ID};
     pub use crate::time::MonotonicClock;
     pub use crate::vitals::ControlMessage;
 
