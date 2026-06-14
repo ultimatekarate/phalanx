@@ -66,25 +66,31 @@ same care as the vault.
 
 ### Annotated `stronghold.toml`
 
-All three sections are **required** — the config structs have no serde defaults at the section level
-(`crates/phalanx-stronghold/src/config.rs:6-11`). A **missing file** falls back to compiled defaults with a stderr
-note (`Config file ... not found, using defaults.`); a **present-but-invalid** file is a hard error — the opposite
-polarity of the node's silent fallback ([network.md §9](network.md#9-config-truth-table)). Unknown keys are
-**silently ignored** (no `deny_unknown_fields` on these structs): a typo in an *optional* key silently reverts that
-setting to its default; a typo in a *required* key is a missing-field parse error. Re-read the file after editing.
+A Stronghold config is a `profile` selector plus optional `[instance.*]` tables
+(`crates/phalanx-stronghold/src/config.rs`). A **missing file** falls back to the default Stronghold profile
+(`community_with_stronghold`) with a stderr note; a **present-but-invalid or incoherent** file is a hard error — the
+same loud polarity as the node ([network.md §9](network.md#9-config-truth-table)). A profile with no Stronghold role
+(e.g. `solo_device`) is rejected with a named error (`ProfileHasNoStrongholdRole`). All tables use
+`deny_unknown_fields`, so a typo — or a profile-pinned key such as `protocol_version` placed under
+`[instance.network]` — is a parse error, not a silent revert. The pinned values (topics, protocol version, PSK
+posture) are projected from the profile and are not settable here.
 
 ```toml
 # stronghold.toml — complete annotated example.
 # Field semantics: crates/phalanx-stronghold/src/config.rs
 
-[storage]
-# REQUIRED. Root for identity, communities, evidence, custody, proofs, exports.
-# Overridden by --data-dir and PHALANX_STRONGHOLD_HOME (precedence below); the
-# dev default "./stronghold-data" is treated as *unset* by the path resolver.
+# The deployment topology. Omitted => community_with_stronghold. Must be a
+# Stronghold-bearing profile; solo_device / affinity_group_lan are rejected.
+profile = "community_with_stronghold"
+
+[instance.storage]
+# Optional, default "./stronghold-data" (treated as *unset* by the path
+# resolver). Root for identity, communities, evidence, custody, proofs, exports.
+# Overridden by --data-dir and PHALANX_STRONGHOLD_HOME (precedence below).
 vault_path = "/srv/phalanx/stronghold"
-# REQUIRED. Global evidence cap in bytes (compiled default 100 GiB).
+# Optional, default 100 GiB. Global evidence cap in bytes.
 max_storage_bytes = 107374182400
-# REQUIRED. Per-community quota (compiled default 20 GiB).
+# Optional, default 20 GiB. Per-community quota.
 max_per_community_bytes = 21474836480
 # Optional, default 2147483648 (2 GiB): absolute per-owner custody ceiling.
 max_bytes_per_owner = 2147483648
@@ -107,25 +113,24 @@ export_path = "/mnt/archive/phalanx-exports"
 # autonomous export instead of holding to TTL.
 release_custody_after_export = false
 
-[network]
-# REQUIRED. Pin a port: the compiled default "/ip4/0.0.0.0/tcp/0" takes an
-# OS-assigned ephemeral port that changes every restart — useless as a push
-# target. Default is TCP-only; add a /udp/<port>/quic-v1 address to accept
-# inbound QUIC (network.md §8).
+[instance.network]
+# Optional, default "/ip4/0.0.0.0/tcp/0". Pin a port: the ephemeral default
+# changes every restart and is useless as a push target — a custody-bearing
+# profile warns when it sees only an ephemeral listen port. Default is TCP-only;
+# add a /udp/<port>/quic-v1 address to accept inbound QUIC (network.md §8).
 listen_addresses = ["/ip4/0.0.0.0/tcp/4001"]
-# REQUIRED (may be empty). Dialed once at startup, best-effort.
+# Optional, default []. Dialed once at startup, best-effort.
 bootstrap_peers = []
-# NOTE — there are no video_topic/audio_topic keys. They are #[serde(skip)]
-# (config.rs) and cannot be set in TOML: the mesh runs a small fixed set of
-# well-known topics by design. Since the June 2026 alignment fix they hold the
-# canonical /phalanx/{video,audio}/1.0.0 values whether or not a config file
-# is present (an earlier serde(skip) footgun degraded them to /phalanx/default;
-# regression-tested in tests/topic_alignment.rs). See network.md §3.
+# NOTE — there are no video_topic/audio_topic/protocol_version keys. They are
+# PROFILE-PINNED (projected from the DeploymentProfile, identical to the node)
+# and structurally absent here; setting one is a deny_unknown_fields parse
+# error. The mesh runs a small fixed set of well-known topics by design.
+# See network.md §3, §5.
 
-[corroboration]
-# REQUIRED. Minimum temporal overlap between recordings, ms (compiled default 5000).
+[instance.corroboration]
+# Optional, default 5000. Minimum temporal overlap between recordings, ms.
 min_overlap_ms = 5000
-# REQUIRED. KS-test alpha for divergence detection (compiled default 0.05).
+# Optional, default 0.05. KS-test alpha for divergence detection.
 divergence_alpha = 0.05
 # Optional pair: CA-issued C2PA signing material. BOTH must be set, or the
 # export signer falls back to a self-signed X.509 cert built from the
@@ -147,9 +152,10 @@ OS-correct platform data directory (`ProjectDirs("app","Phalanx","phalanx-strong
 dir). It fails loudly rather than falling back to the working directory.
 
 **GUI divergence** — the GUI binary does *not* use this resolver: `DaemonBridge::launch` takes `vault_path` literally
-(CWD-relative for the default), ignores `PHALANX_STRONGHOLD_HOME`, has no `--data-dir`, skips the `custody_ttl_secs`
-clamp, and silently uses defaults when the file is missing (`crates/phalanx-stronghold/src/gui/bridge.rs:52-54`,
-`:112-120`). A CLI-managed vault and a GUI-managed vault on the same machine are not the same directory unless you
+(CWD-relative for the default), ignores `PHALANX_STRONGHOLD_HOME`, has no `--data-dir`, and falls
+back to the default Stronghold profile when the file is missing (`crates/phalanx-stronghold/src/gui/bridge.rs:52-54`,
+`:112-120`). It now goes through the same `assemble` path as the CLI, so the `custody_ttl_secs` clamp is applied (the
+earlier divergence where the GUI skipped it is closed). A CLI-managed vault and a GUI-managed vault on the same machine are not the same directory unless you
 make them so. The GUI also pre-fills (but does not require) the passphrase env var and wipes the typed buffer after
 launch (`crates/phalanx-stronghold/src/gui/mod.rs:24-37`).
 
@@ -261,20 +267,15 @@ documented decisions:
 
 ## 5. Config-alignment footgun checklist
 
-One consolidated table for the topic/protocol misalignments. **The June 2026 topic-alignment fix resolved the worst
-of these:** node and Stronghold topic defaults now share the canonical `MeshTopic` constructors, the revocation topic
-is in both default subscribe lists, and the Stronghold's `serde(skip)` fields no longer degrade to `/phalanx/default`
-when a config file is present — all pinned by a cross-crate regression test
-(`crates/phalanx-stronghold/tests/topic_alignment.rs`). Full mechanics:
+One consolidated table for the topic/protocol misalignments. Full mechanics:
 [network.md §3](network.md#3-topics-who-publishes-who-listens) and [§5](network.md#5-the-dht). What remains:
 
 | # | Footgun | Symptom | Remedy |
 |---|---|---|---|
-| 1 | `/phalanx/mesh/1.0.0` (Silent Canary alerts) is **deliberately publish-only** — no inbound alert handler exists yet, so it is in no subscribe list (doc comment on `orchestrator::subscribe_topics`, `crates/phalanx-node/src/network/orchestrator.rs`) | Canary *detection* is local and works; the encrypted alert *broadcast* is not received by anyone | None yet — the topic must be subscribed together with its handler. Pair the canary with a human alerting protocol (§8) |
-| 2 | Overriding `video_topic`/`audio_topic`/`control_topic` on a subset of peers (settable on the node, deliberately fixed on the Stronghold) | Peers on different topic strings silently never exchange traffic — gossipsub topics are exact-match | Leave topics at defaults; since the fix they are optional in TOML and need not be restated |
-| 3 | Overriding `revocation_topic`: the field steers the subscribe list and inbound comparison, but publish sites hardcode `MeshTopic::revocation()` ([network.md §3](network.md#3-topics-who-publishes-who-listens)) | A custom value splits publish and receive onto different topics | Leave at default |
-| 4 | Node TOML `deny_unknown_fields` + silent whole-file fallback: one typo or omission reverts the **entire file** to defaults (`crates/phalanx-node/src/config.rs:299-319`) | A fleet with one malformed TOML has one phone on divergent settings, and nothing fails loudly | Validate the TOML; watch for the startup fallback warning ([network.md §9](network.md#9-config-truth-table)). Only `max_chunk_size_bytes` and `cleanup_interval_secs` remain required in `[network]` |
-| 5 | Kademlia protocol-id mismatch: node default `protocol_version` `/phalanx/1.0.0` vs Stronghold's transport default `/phalanx/1.1.0` — **not covered by the topic fix** | Node and Stronghold share **no DHT** at compiled defaults | Set `protocol_version = "/phalanx/1.1.0"` in the node TOML ([network.md §5](network.md#5-the-dht)) |
+| 1 | `/phalanx/mesh/1.0.0` (Silent Canary alerts) is **deliberately publish-only** — no inbound alert handler exists yet, so it is in no subscribe list (doc comment on `orchestrator::subscribe_topics`, `crates/phalanx-node/src/network/orchestrator.rs`) | Canary *detection* is local and works; the encrypted alert *broadcast* is not received by anyone | None yet — the topic must be subscribed together with its handler. 
+| 2 | Overriding `revocation_topic`: the field steers the subscribe list and inbound comparison, but publish sites hardcode `MeshTopic::revocation()` ([network.md §3](network.md#3-topics-who-publishes-who-listens)) | A custom value splits publish and receive onto different topics | Leave at default |
+| 3 | Node TOML `deny_unknown_fields`: a typo, or a profile-pinned key under `[instance]`, is a parse error | **Resolved polarity**: a set-but-invalid `PHALANX_CONFIG` now **fails the node loudly** (no silent revert to defaults); unset selects the default profile | Validate the TOML; a malformed file aborts startup rather than silently diverging ([network.md §9](network.md#9-config-truth-table)) |
+
 
 ## 6. Failure modes as the user sees them
 
@@ -292,9 +293,10 @@ shedding, never blocking ([network.md §7](network.md#7-delivery-semantics)).
 
 **"Is my recording safe yet?"** "Safe" means custody receipts. The archive coordinator records each verified signed
 receipt against the recording and logs `Archive: custody confirmed at a Stronghold` with `replicas=N target=K`
-(`crates/phalanx-node/src/actors/archive_coordinator.rs:178-200`). `target_replica_count` defaults to 2
-(`crates/phalanx-node/src/config.rs:75-83`) — in a single-Stronghold deployment set it to 1 or the target is never
-met. Until that log line (or its UI surface) appears, treat the recording as unreplicated.
+(`crates/phalanx-node/src/actors/archive_coordinator.rs:178-200`). `target_replica_count` is profile-pinned —
+`community_with_stronghold` sets K=1 (the single-Stronghold case), `high_risk_cross_border` sets K=2 — so it matches
+the topology by construction rather than needing a hand-set value. Until that log line (or its UI surface) appears,
+treat the recording as unreplicated.
 
 **"The mesh looks healthy but nothing is arriving."** Publish failures are silent at the API — `publish()` returns
 `Ok` on enqueue — and loud only in the always-on counters: `duplicate`, `signing_error`, `no_peers_subscribed`,
@@ -332,8 +334,9 @@ codepaths nor the Lean proofs — so simulation passing says nothing about expor
 Honest preconditions: the phone legs exercise capture, ceremony, and LAN witnessing; the custody/corroborate/export
 legs need a **configured node**, which today means a desktop `sentinel` with `PHALANX_CONFIG` (the shipped app loads
 no config — §1) — its stub camera produces synthetic frames that still exercise the full signing, fountain-coding,
-push, and export plumbing (§1). Sentinel TOML: `[[network.archival_peers]]` with the Stronghold's `/p2p/` address
-*and* `stronghold_did`, `target_replica_count = 1`, `protocol_version = "/phalanx/1.1.0"` (§5).
+push, and export plumbing (§1). Sentinel TOML: `profile = "community_with_stronghold"` plus
+`[[instance.network.archival_peers]]` with the Stronghold's `/p2p/` address *and* `stronghold_did`. The replica
+target and protocol version are pinned by the profile — no longer hand-set (§5).
 
 | Step | Action | Expected output |
 |---|---|---|
