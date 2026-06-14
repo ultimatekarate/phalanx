@@ -183,7 +183,7 @@ Step by step, with the crate and file at each hop:
 
 11. **Bundle and publish.** Symbols are batched into bundles of `symbol_bundle_size` (default 1; max 100) and published as one postcard `Vec<ShardChunk>` per `egress.publish()` call (`media_egress.rs:315-334`) through the `EgressPort` trait — the Dictionary-level contract whose production implementation is the libp2p adapter. Every gossipsub publish is individually signed by the node's libp2p key (`MessageAuthenticity::Signed`, `ValidationMode::Strict`, `crates/phalanx-transport/src/builder.rs:155-161`); bundling exists to amortize exactly that per-message signing cost. Failed publishes go to a WAL-backed on-disk queue: 5 s retry tick, exponential backoff capped at 5 minutes, abandonment after 10 attempts with a forensic log event, 16 MiB queue cap (`crates/phalanx-node/src/persistence/outbound.rs`). Queue pressure feeds back into the control system, which lowers capture FPS — the queue regulates its own growth (`media_egress.rs:468`).
 
-The default publish topics are the canonical `/phalanx/video/1.0.0` / `/phalanx/audio/1.0.0` pair shared by node and Stronghold since the June 2026 alignment fix — see the topic note in the taxonomy section and [network.md §3](network.md#3-topics-who-publishes-who-listens).
+The publish topics are the canonical `/phalanx/video/1.0.0` / `/phalanx/audio/1.0.0` pair, and the node and the Stronghold both **project them from the same `DeploymentProfile`** (`crates/phalanx-proto/src/network/deployment.rs`) rather than each compiling an independent default — so they cannot drift, and neither can the libp2p `protocol_version` that keys the Kademlia DHT. See [network.md §3](network.md#3-topics-who-publishes-who-listens) and [§5](network.md#5-the-dht).
 
 ---
 
