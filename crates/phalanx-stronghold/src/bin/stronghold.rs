@@ -631,16 +631,10 @@ fn load_config(path: &str) -> Result<StrongholdConfig, Box<dyn std::error::Error
         eprintln!("Config file {path} not found, using defaults.");
         return Ok(StrongholdConfig::default());
     }
-
-    let text = std::fs::read_to_string(path)?;
-    let mut config: StrongholdConfig =
-        toml::from_str(&text).map_err(|e| format!("Failed to parse config {path}: {e}"))?;
-    // Clamp hand-edited values up to safe floors (e.g. a custody TTL of 0 that
-    // would expire recordings before they can be exported).
-    for field in config.storage.clamp_floors() {
-        eprintln!("Config: {field} below its minimum — clamped to the safe floor.");
-    }
-    Ok(config)
+    // Parse the profile + [instance] schema and assemble. A set-but-invalid or
+    // incoherent file (e.g. a non-Stronghold profile) is a hard error here.
+    // The custody-TTL floor clamp is applied inside `assemble`.
+    Ok(StrongholdConfig::load(path)?.into_inner())
 }
 
 /// Load or generate the Stronghold's identity.

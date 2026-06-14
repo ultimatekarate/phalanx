@@ -113,10 +113,9 @@ fn load_config(path: &str) -> Result<StrongholdConfig, String> {
     if !Path::new(path).exists() {
         return Ok(StrongholdConfig::default());
     }
-
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("Failed to read config {path}: {e}"))?;
-    toml::from_str(&text).map_err(|e| format!("Failed to parse config {path}: {e}"))
+    // Profile + [instance] schema; assemble applies the custody-TTL floor clamp
+    // and rejects an incoherent file (e.g. a non-Stronghold profile).
+    StrongholdConfig::load(path).map(|v| v.into_inner())
 }
 
 /// Load or generate the Stronghold's identity.

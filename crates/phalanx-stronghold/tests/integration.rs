@@ -1081,16 +1081,18 @@ fn create_and_import_community_envelope_roundtrip() {
     // confusion; both OSes accept them through `tokio::fs`.
     let vault_for_toml = vault.display().to_string().replace('\\', "/");
     let config_toml = format!(
-        "[storage]\n\
+        "profile = \"community_with_stronghold\"\n\
+         \n\
+         [instance.storage]\n\
          vault_path = \"{vault_for_toml}\"\n\
          max_storage_bytes = 10485760\n\
          max_per_community_bytes = 1048576\n\
          \n\
-         [network]\n\
+         [instance.network]\n\
          listen_addresses = [\"/ip4/0.0.0.0/tcp/0\"]\n\
          bootstrap_peers = []\n\
          \n\
-         [corroboration]\n\
+         [instance.corroboration]\n\
          min_overlap_ms = 5000\n\
          divergence_alpha = 0.05\n"
     );
