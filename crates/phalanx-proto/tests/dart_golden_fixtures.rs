@@ -38,11 +38,11 @@
 //! with the same bytes and the new canonical field values. Both sides
 //! ship in one PR.
 
+use phalanx_proto::identity::Did;
 use phalanx_proto::identity::community::{
     CeremonyError, CommunityAssemblyError, CommunityGrants, CommunityId, CommunityRoster,
     CommunitySummary, CommunityVerifyError, MemberSummary, Quorum, VouchRequestPreview,
 };
-use phalanx_proto::identity::Did;
 use phalanx_proto::time::PhalanxTimestamp;
 use phalanx_proto::trust::PetName;
 

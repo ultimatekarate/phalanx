@@ -38,8 +38,8 @@ use phalanx_node::config::NodeConfig;
 use phalanx_proto::evidence::{Evidence, StorageSequence, VideoShard, WitnessEnvelope};
 use phalanx_proto::identity::{NodeRole, PhalanxIdentity, RecordingId};
 use phalanx_proto::time::PhalanxTimestamp;
-use phalanx_sim::physics::PhalanxPhysics;
 use phalanx_sim::SimulationHarness;
+use phalanx_sim::physics::PhalanxPhysics;
 
 use std::time::Duration;
 

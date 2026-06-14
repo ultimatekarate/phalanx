@@ -2,8 +2,8 @@ use crate::crypto::DekMaster;
 use crate::error::IdentityError;
 use crate::revocation::RevocationKey;
 use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
 use rand::RngCore;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -704,9 +704,10 @@ mod tests {
         let id = RecordingId::new("/absolute/path");
         let safe = id.to_safe_name();
         assert!(!safe.contains('/'));
-        assert!(safe
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        assert!(
+            safe.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        );
     }
 
     #[test]

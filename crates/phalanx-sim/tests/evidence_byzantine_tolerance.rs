@@ -40,8 +40,8 @@ use phalanx_proto::evidence::{Evidence, VideoShard, WitnessEnvelope};
 use phalanx_proto::identity::{Did, NodeRole, PhalanxIdentity, RecordingId};
 use phalanx_proto::telemetry::ChaosMode;
 use phalanx_proto::time::PhalanxTimestamp;
-use phalanx_sim::physics::PhalanxPhysics;
 use phalanx_sim::SimulationHarness;
+use phalanx_sim::physics::PhalanxPhysics;
 
 use std::collections::HashSet;
 use std::time::Duration;

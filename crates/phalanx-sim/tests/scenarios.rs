@@ -23,8 +23,8 @@ use phalanx_proto::identity::{MeshAddress, NodeRole};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::{Did, EncodingSymbolId, PhalanxTimestamp, ShardId};
 use phalanx_proto::types::PowerState;
-use phalanx_sim::physics::PhalanxPhysics;
 use phalanx_sim::SimulationHarness;
+use phalanx_sim::physics::PhalanxPhysics;
 
 use std::sync::Arc;
 use std::time::Duration;

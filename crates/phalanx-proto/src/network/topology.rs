@@ -57,11 +57,7 @@ impl SubnetQuota {
     pub const DEFAULT: Self = Self(8);
 
     pub fn new(n: usize) -> Option<Self> {
-        if n == 0 {
-            None
-        } else {
-            Some(Self(n))
-        }
+        if n == 0 { None } else { Some(Self(n)) }
     }
 
     pub fn limit(&self) -> usize {

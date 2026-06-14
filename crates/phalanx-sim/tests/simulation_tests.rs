@@ -24,8 +24,8 @@ use phalanx_proto::prelude::{Did, EncodingSymbolId, PhalanxTimestamp, ShardId};
 use phalanx_proto::telemetry::{ChaosMode, SimEvent};
 use phalanx_proto::types::ByteCapacity;
 use phalanx_proto::vitals::{ControlMessage, StressLoad};
-use phalanx_sim::physics::PhalanxPhysics;
 use phalanx_sim::SimulationHarness;
+use phalanx_sim::physics::PhalanxPhysics;
 
 use std::time::Duration;
 

@@ -27,8 +27,8 @@ use phalanx_node::config::NodeConfig;
 use phalanx_proto::identity::NodeRole;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::{MeshAddress, MeshTopic};
-use phalanx_sim::physics::PhalanxPhysics;
 use phalanx_sim::SimulationHarness;
+use phalanx_sim::physics::PhalanxPhysics;
 
 use std::time::Duration;
 

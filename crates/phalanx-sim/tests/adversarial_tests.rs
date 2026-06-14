@@ -24,8 +24,8 @@ use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::{Did, EncodingSymbolId, PhalanxTimestamp, ShardId};
 use phalanx_proto::topology::{SubnetBucket, SubnetQuota, TransportClass};
 use phalanx_proto::trust::TrustLevel;
-use phalanx_sim::physics::PhalanxPhysics;
 use phalanx_sim::SimulationHarness;
+use phalanx_sim::physics::PhalanxPhysics;
 
 use std::time::Duration;
 
@@ -1094,7 +1094,7 @@ async fn coordinated_kill_attempt() {
 fn black_hole_peer_detected_via_reciprocity_floor() {
     use phalanx_forensics::policy::HomeostaticConfig;
     use phalanx_forensics::trust::{
-        evaluate_reciprocity, PeerContribution, ReciprocityParams, ReciprocityVerdict,
+        PeerContribution, ReciprocityParams, ReciprocityVerdict, evaluate_reciprocity,
     };
     use phalanx_node::vitals::SystemGovernor;
 

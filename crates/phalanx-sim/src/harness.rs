@@ -26,7 +26,7 @@ use phalanx_transport::adapters::local_mesh::LocalMeshAdapter;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 // ===========================================================================
 //  SimIngress — IngressPort adapter for simulated nodes

@@ -284,9 +284,7 @@ pub enum Incoherence {
 
     /// A Stronghold was configured from a profile that has no Stronghold role
     /// (e.g. a `stronghold.toml` selecting `solo_device`).
-    #[error(
-        "profile {profile} has no Stronghold role — a Stronghold cannot be configured from it"
-    )]
+    #[error("profile {profile} has no Stronghold role — a Stronghold cannot be configured from it")]
     ProfileHasNoStrongholdRole { profile: &'static str },
 }
 
@@ -322,9 +320,11 @@ mod tests {
 
     #[test]
     fn high_risk_requires_psk_solo_does_not() {
-        assert!(DeploymentProfile::HighRiskCrossBorder
-            .psk_posture()
-            .require_psk());
+        assert!(
+            DeploymentProfile::HighRiskCrossBorder
+                .psk_posture()
+                .require_psk()
+        );
         assert!(!DeploymentProfile::SoloDevice.psk_posture().require_psk());
     }
 
