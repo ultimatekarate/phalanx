@@ -32,7 +32,7 @@ use phalanx_proto::identity::{MeshAddress, RecordingId};
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::retrieval::{RecordingRequest, RecordingResponse};
 use phalanx_proto::topic::MeshTopic;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 use phalanx_proto::network::{EgressPort, IngressPort};
 
@@ -258,7 +258,7 @@ pub(crate) async fn translate_response(
 mod tests {
     use super::*;
     use phalanx_proto::MAX_PAYLOAD_SIZE;
-    use wire::{read_frame, write_frame, QuicWireMessage};
+    use wire::{QuicWireMessage, read_frame, write_frame};
 
     // ── Test Cert Generation ─────────────────────────────────────────
 

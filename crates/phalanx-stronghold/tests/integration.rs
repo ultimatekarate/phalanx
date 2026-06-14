@@ -1010,7 +1010,7 @@ async fn export_end_to_end_c2pa() {
 #[test]
 fn create_and_import_community_envelope_roundtrip() {
     use phalanx_forensics::identity::sign_vouch;
-    use phalanx_proto::community::{CommunityId, Quorum, COMMUNITY_PAYLOAD_VERSION};
+    use phalanx_proto::community::{COMMUNITY_PAYLOAD_VERSION, CommunityId, Quorum};
     use phalanx_proto::time::PhalanxTimestamp;
     use phalanx_proto::trust::PetName;
     use std::process::Command;

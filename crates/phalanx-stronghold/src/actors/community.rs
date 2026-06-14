@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use phalanx_forensics::identity::{
-    assemble_community, verify_community_vouches, verify_vouch_response, CommunityAssemblyParams,
+    CommunityAssemblyParams, assemble_community, verify_community_vouches, verify_vouch_response,
 };
 use phalanx_proto::community::{
     CeremonyError, Community, CommunityId, CommunityRoster, CommunitySummary, CommunityVerifyError,

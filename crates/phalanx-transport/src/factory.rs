@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use libp2p::kad::store::RecordStore;
 use libp2p::{
-    core::upgrade::Version, kad, noise, pnet, relay, yamux, Multiaddr, StreamProtocol,
-    SwarmBuilder, Transport,
+    Multiaddr, StreamProtocol, SwarmBuilder, Transport, core::upgrade::Version, kad, noise, pnet,
+    relay, yamux,
 };
 use phalanx_proto::identity::PhalanxIdentity;
 

@@ -477,9 +477,9 @@ fn cmd_create_community(
     stronghold_did_str: Option<&str>,
     output: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use phalanx_forensics::identity::{
-        assemble_community, wrap_payload_version, CommunityAssemblyParams,
+        CommunityAssemblyParams, assemble_community, wrap_payload_version,
     };
     use phalanx_proto::community::{
         CeremonyMember, CommunityGrants, Quorum, Vouch, VouchSignature,

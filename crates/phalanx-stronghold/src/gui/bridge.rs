@@ -15,6 +15,7 @@ use phalanx_proto::identity::PhalanxIdentity;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::StrongholdSentinel;
 use crate::actors::aggregation::AggregationCommand;
 use crate::actors::community::CommunityCommand;
 use crate::config::StrongholdConfig;
@@ -22,7 +23,6 @@ use crate::governor::StrongholdGovernor;
 use crate::persistence::evidence_store::EvidenceStore;
 use crate::sentinel::StrongholdDependencies;
 use crate::swarm::setup_stronghold_swarm;
-use crate::StrongholdSentinel;
 
 // ── DaemonBridge ───────────────────────────────────────────────────────
 

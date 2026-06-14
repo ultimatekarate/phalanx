@@ -12,7 +12,7 @@
 
 use phalanx_node::config::NodeConfig;
 use phalanx_node::network::orchestrator;
-use phalanx_proto::prelude::{DeploymentProfile, MeshTopic, DEFAULT_PROTOCOL_VERSION};
+use phalanx_proto::prelude::{DEFAULT_PROTOCOL_VERSION, DeploymentProfile, MeshTopic};
 use phalanx_stronghold::config::{StrongholdConfig, StrongholdConfigFile};
 use phalanx_stronghold::swarm;
 

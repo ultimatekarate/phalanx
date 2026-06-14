@@ -2,9 +2,9 @@
 //
 // Wire protocol types and length-prefixed framing for the QUIC transport.
 
+use phalanx_proto::MAX_PAYLOAD_SIZE;
 use phalanx_proto::retrieval::{RecordingRequest, RecordingResponse};
 use phalanx_proto::wire::WireBound;
-use phalanx_proto::MAX_PAYLOAD_SIZE;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

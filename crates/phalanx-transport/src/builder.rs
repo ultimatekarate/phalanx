@@ -2,9 +2,9 @@ use crate::builder::kad::store::RecordStore;
 use crate::counting::{CountingMuxer, IoCounters};
 use futures::future::Either;
 use libp2p::{
-    autonat, connection_limits, core::upgrade::Version, dcutr, gossipsub, identify,
-    identity::Keypair, kad, mdns, noise, pnet, relay, request_response, tcp, yamux, PeerId,
-    StreamProtocol, Transport,
+    PeerId, StreamProtocol, Transport, autonat, connection_limits, core::upgrade::Version, dcutr,
+    gossipsub, identify, identity::Keypair, kad, mdns, noise, pnet, relay, request_response, tcp,
+    yamux,
 };
 use std::error::Error;
 use std::time::Duration;

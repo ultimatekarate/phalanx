@@ -110,7 +110,9 @@ async fn run_benchmark(label: &str, poll_cadence: Option<Duration>) -> u64 {
     let io_ops: Vec<_> = egresses.iter().map(|e| e.socket_io_ops()).collect();
 
     // Print CSV header
-    println!("timestamp_ms,cumulative_wakes,wakes_per_sec,bytes_sent,bytes_received,io_ops,io_ops_per_sec");
+    println!(
+        "timestamp_ms,cumulative_wakes,wakes_per_sec,bytes_sent,bytes_received,io_ops,io_ops_per_sec"
+    );
 
     let start = tokio::time::Instant::now();
     let mut prev_total: u64 = 0;
@@ -141,7 +143,9 @@ async fn run_benchmark(label: &str, poll_cadence: Option<Duration>) -> u64 {
         prev_io_ops = total_io_ops;
 
         let elapsed_ms = start.elapsed().as_millis();
-        println!("{elapsed_ms},{cumulative},{wakes_per_sec},{bytes_sent},{bytes_received},{total_io_ops},{io_ops_per_sec}");
+        println!(
+            "{elapsed_ms},{cumulative},{wakes_per_sec},{bytes_sent},{bytes_received},{total_io_ops},{io_ops_per_sec}"
+        );
     }
 
     // Print wake log statistics if available
@@ -205,7 +209,9 @@ async fn run_benchmark(label: &str, poll_cadence: Option<Duration>) -> u64 {
         .map(|c| c.load(Ordering::Relaxed))
         .sum();
     let final_io_ops: u64 = io_ops.iter().map(|c| c.load(Ordering::Relaxed)).sum();
-    eprintln!("I/O diagnostic: bytes_sent={final_bytes_sent} bytes_received={final_bytes_recv} io_ops={final_io_ops}");
+    eprintln!(
+        "I/O diagnostic: bytes_sent={final_bytes_sent} bytes_received={final_bytes_recv} io_ops={final_io_ops}"
+    );
 
     prev_total
 }

@@ -14,12 +14,12 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use eframe::egui;
 use phalanx_forensics::identity::{
-    strip_vouch_response, wrap_payload_version, wrap_vouch_request, CommunityAssemblyParams,
-    MAX_EXPIRES_SECS, QR_PAYLOAD_BUDGET_BYTES,
+    CommunityAssemblyParams, MAX_EXPIRES_SECS, QR_PAYLOAD_BUDGET_BYTES, strip_vouch_response,
+    wrap_payload_version, wrap_vouch_request,
 };
 use phalanx_proto::community::{
     CeremonyMember, CeremonyNonce, Community, CommunityGrants, CommunityId, Quorum, Vouch,

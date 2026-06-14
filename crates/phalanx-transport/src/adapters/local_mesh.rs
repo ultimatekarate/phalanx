@@ -11,8 +11,8 @@
 use async_trait::async_trait;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::prelude::MeshAddress;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 
 use phalanx_proto::network::{LocalMeshPort, TransportError};

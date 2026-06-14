@@ -423,7 +423,7 @@ impl PanelStates {
     clippy::arithmetic_side_effects
 )]
 mod tests {
-    use super::{AsyncReply, ASYNC_REPLY_TIMEOUT};
+    use super::{ASYNC_REPLY_TIMEOUT, AsyncReply};
     use std::time::Duration;
 
     /// A Pending reply whose sender never delivers must surface the

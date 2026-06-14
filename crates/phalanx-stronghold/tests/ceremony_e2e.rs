@@ -44,11 +44,11 @@ use ed25519_dalek::SigningKey;
 use rand_core::OsRng;
 
 use phalanx_forensics::identity::{
-    sign_vouch_response, verify_vouch_response, CommunityAssemblyParams,
+    CommunityAssemblyParams, sign_vouch_response, verify_vouch_response,
 };
 use phalanx_proto::community::{
-    CeremonyError, CeremonyMember, CeremonyNonce, CommunityGrants, CommunityId, Quorum,
-    VouchRequest, VouchResponse, CEREMONY_RESPONSE_FRESHNESS_SECS,
+    CEREMONY_RESPONSE_FRESHNESS_SECS, CeremonyError, CeremonyMember, CeremonyNonce,
+    CommunityGrants, CommunityId, Quorum, VouchRequest, VouchResponse,
 };
 use phalanx_proto::identity::Did;
 use phalanx_proto::time::PhalanxTimestamp;

@@ -19,12 +19,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use phalanx_forensics::PayloadCipher;
 use phalanx_forensics::archive::verify_export_receipt;
 use phalanx_forensics::cryptography::grant::GrantAuthority;
-use phalanx_forensics::gate::{verify_provenance_from_jpeg, LensThresholds};
+use phalanx_forensics::gate::{LensThresholds, verify_provenance_from_jpeg};
 use phalanx_forensics::reassembler::{compress_frame, create_video_shard};
 use phalanx_forensics::witness::WitnessAuthority;
-use phalanx_forensics::PayloadCipher;
 use phalanx_proto::archive::ExportReceipt;
 use phalanx_proto::community::CommunityId;
 use phalanx_proto::crypto::{GrantPermissions, SealedLocator, SymmetricKey};

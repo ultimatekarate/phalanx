@@ -19,11 +19,11 @@ use phalanx_proto::network::EgressPort;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::topic::MeshTopic;
 
+use phalanx_transport::PeerMapper;
 use phalanx_transport::adapters::mock::MockAdapter;
 use phalanx_transport::routing::MeshRoutingTable;
-use phalanx_transport::PeerMapper;
 
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 // ─── MockAdapter mesh simulation ──────────────────────────────────────────
 
@@ -107,8 +107,8 @@ async fn mesh_publish_subscribe_roundtrip() {
 
 #[test]
 fn peer_mapper_roundtrip() {
-    use libp2p::identity::Keypair;
     use libp2p::PeerId;
+    use libp2p::identity::Keypair;
 
     let keypair = Keypair::generate_ed25519();
     let peer_id = PeerId::from(keypair.public());

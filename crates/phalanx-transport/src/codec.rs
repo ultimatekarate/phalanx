@@ -4,7 +4,7 @@ use libp2p::request_response;
 use libp2p::swarm::StreamProtocol;
 use phalanx_proto::archive::{ArchiveReceipt, ArchiveRequest};
 use phalanx_proto::wire::WireBound;
-use phalanx_proto::{RecordingRequest, RecordingResponse, MAX_PAYLOAD_SIZE};
+use phalanx_proto::{MAX_PAYLOAD_SIZE, RecordingRequest, RecordingResponse};
 use std::io;
 
 /// Reads a 4-byte little-endian length prefix then that many payload bytes,

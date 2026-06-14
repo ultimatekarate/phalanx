@@ -152,6 +152,8 @@ mod merged_ingress_tests {
 // Capability contracts (EgressPort, IngressPort, etc.) live in phalanx_proto::network.
 // Import them directly: use phalanx_proto::network::{EgressPort, IngressPort, ...};
 pub mod prelude {
+    pub use crate::MergedIngress;
+    pub use crate::PeerMapper;
     pub use crate::adapters::libp2p::{Libp2pEgress, Libp2pIngress};
     pub use crate::adapters::quic::{
         QuicAdapter, QuicClientConfig, QuicEgress, QuicIngress, QuicServerConfig,
@@ -159,6 +161,4 @@ pub mod prelude {
     pub use crate::config::MeshTransportConfig;
     pub use crate::factory::{build_mesh_transport, build_mesh_transport_with_store};
     pub use crate::identity_ext::Libp2pExt;
-    pub use crate::MergedIngress;
-    pub use crate::PeerMapper;
 }

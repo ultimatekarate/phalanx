@@ -5,7 +5,7 @@
 // Hands layer — wiring only. Crypto logic lives in the Laboratory (c2pa_ext).
 // Two paths: file-based cert/key (production) or self-signed (development/forensic).
 
-use c2pa::{create_signer, CallbackSigner, SigningAlg};
+use c2pa::{CallbackSigner, SigningAlg, create_signer};
 use phalanx_forensics::c2pa_ext::generate_self_signed_cert;
 use phalanx_proto::identity::PhalanxIdentity;
 

@@ -1,14 +1,14 @@
-use crate::behaviour::{recording_id_from_key, PhalanxBehaviour};
+use crate::PeerMapper;
+use crate::behaviour::{PhalanxBehaviour, recording_id_from_key};
 use crate::counting::{IoCounters, IoLogEntry};
 use crate::events::PhalanxEvent;
-use crate::PeerMapper;
 use async_trait::async_trait;
 use futures::StreamExt; // Required to bring StreamExt::select_next_some into scope
+use libp2p::PeerId;
 use libp2p::kad;
 use libp2p::kad::store::RecordStore;
 use libp2p::swarm::Swarm;
 use libp2p::swarm::SwarmEvent;
-use libp2p::PeerId;
 use phalanx_proto::archive::{ArchiveReceipt, ArchiveRequest};
 use phalanx_proto::identity::MeshAddress;
 use phalanx_proto::network::TransportError;
@@ -1330,13 +1330,13 @@ impl EgressPort for Libp2pEgress {
 )]
 mod tests {
     use super::*;
-    use libp2p::swarm::{ConnectionId, SwarmEvent};
     use libp2p::PeerId;
+    use libp2p::swarm::{ConnectionId, SwarmEvent};
     use phalanx_proto::network::NetworkEvent;
 
+    use libp2p::Multiaddr;
     use libp2p::gossipsub::{self, IdentTopic, MessageId};
     use libp2p::mdns;
-    use libp2p::Multiaddr;
 
     fn make_gossipsub_message_event(
         propagation_source: PeerId,

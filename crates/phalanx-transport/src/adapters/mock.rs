@@ -5,7 +5,7 @@ use phalanx_proto::network::EgressPort;
 use phalanx_proto::network::{IngressPort, NetworkEvent};
 use phalanx_proto::prelude::*;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 #[derive(Clone)]
 pub struct MockAdapter {

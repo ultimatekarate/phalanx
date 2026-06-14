@@ -13,8 +13,8 @@ use phalanx_proto::topic::MeshTopic;
 use phalanx_proto::topology::{SubnetBucket, TransportClass};
 use tokio::sync::mpsc;
 
-use super::wire::{read_frame, write_frame, QuicError, QuicWireMessage};
-use super::{translate_response, QuicCommand};
+use super::wire::{QuicError, QuicWireMessage, read_frame, write_frame};
+use super::{QuicCommand, translate_response};
 
 // ── Backoff ──────────────────────────────────────────────────────────────
 
