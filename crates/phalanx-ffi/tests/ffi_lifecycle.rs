@@ -22,7 +22,10 @@
 //! returns rather than hanging.
 
 use phalanx_ffi::error::PhalanxError;
-use phalanx_ffi::handle::{phalanx_create, phalanx_destroy, phalanx_start, phalanx_stop};
+use phalanx_ffi::handle::{
+    phalanx_create, phalanx_create_with_profile, phalanx_destroy, phalanx_start, phalanx_stop,
+};
+use phalanx_ffi::profile::{phalanx_profile_flags, phalanx_validate_pairing};
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -282,4 +285,171 @@ fn phalanx_destroy_without_stop_drains_cleanly() {
             }
         }
     });
+}
+
+// ── Profile-picker entry points (the phone leg) ─────────────────────────────
+
+/// Hold a `CString` alive while its raw pointer is passed across the boundary.
+fn cstr(s: &str) -> CString {
+    CString::new(s).expect("no interior NUL")
+}
+
+#[test]
+fn profile_create_solo_then_destroy() {
+    // SoloDevice needs no companion data: a null pairing boots on defaults.
+    under_timeout(Duration::from_secs(30), || {
+        let env = TestEnv::new();
+        let profile = cstr("solo_device");
+        let mut genesis: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let handle = unsafe {
+            phalanx_create_with_profile(
+                profile.as_ptr(),
+                std::ptr::null(), // stronghold_addr
+                std::ptr::null(), // stronghold_did
+                env.storage_cstr.as_ptr(),
+                env.passphrase_cstr.as_ptr(),
+                &mut genesis as *mut *mut std::os::raw::c_char,
+            )
+        };
+        assert!(!handle.is_null(), "solo_device must boot");
+        unsafe {
+            phalanx_destroy(handle);
+            if !genesis.is_null() {
+                phalanx_ffi::memory::phalanx_free_string(genesis);
+            }
+        }
+    });
+}
+
+#[test]
+fn profile_create_community_unpaired_boots() {
+    // CommunityWithStronghold boots WITHOUT a pairing: the replica-count
+    // shortfall is only a warn, so passive gossip works before pairing.
+    under_timeout(Duration::from_secs(30), || {
+        let env = TestEnv::new();
+        let profile = cstr("community_with_stronghold");
+        let mut genesis: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let handle = unsafe {
+            phalanx_create_with_profile(
+                profile.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                env.storage_cstr.as_ptr(),
+                env.passphrase_cstr.as_ptr(),
+                &mut genesis as *mut *mut std::os::raw::c_char,
+            )
+        };
+        assert!(!handle.is_null(), "un-paired Community must still boot");
+        unsafe {
+            phalanx_destroy(handle);
+            if !genesis.is_null() {
+                phalanx_ffi::memory::phalanx_free_string(genesis);
+            }
+        }
+    });
+}
+
+#[test]
+fn profile_create_community_paired_boots() {
+    // A well-formed, dialable (/p2p/-tailed) pairing boots — the dial itself is
+    // best-effort, so an unreachable target does not block bootstrap.
+    under_timeout(Duration::from_secs(45), || {
+        let env = TestEnv::new();
+        let profile = cstr("community_with_stronghold");
+        let addr = cstr("/ip4/127.0.0.1/udp/4001/quic-v1/p2p/12D3KooWStronghold");
+        let did = cstr("did:key:z6MkStronghold");
+        let mut genesis: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let handle = unsafe {
+            phalanx_create_with_profile(
+                profile.as_ptr(),
+                addr.as_ptr(),
+                did.as_ptr(),
+                env.storage_cstr.as_ptr(),
+                env.passphrase_cstr.as_ptr(),
+                &mut genesis as *mut *mut std::os::raw::c_char,
+            )
+        };
+        assert!(!handle.is_null(), "paired Community must boot");
+        unsafe {
+            phalanx_destroy(handle);
+            if !genesis.is_null() {
+                phalanx_ffi::memory::phalanx_free_string(genesis);
+            }
+        }
+    });
+}
+
+#[test]
+fn profile_create_rejects_malformed_pairing_and_unknown_profile() {
+    under_timeout(Duration::from_secs(30), || {
+        // Community + an address with NO /p2p/ tail → hard UndialableArchivalPeer.
+        let env = TestEnv::new();
+        let profile = cstr("community_with_stronghold");
+        let bad_addr = cstr("/ip4/1.2.3.4/udp/4001/quic-v1");
+        let mut genesis: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let handle = unsafe {
+            phalanx_create_with_profile(
+                profile.as_ptr(),
+                bad_addr.as_ptr(),
+                std::ptr::null(),
+                env.storage_cstr.as_ptr(),
+                env.passphrase_cstr.as_ptr(),
+                &mut genesis as *mut *mut std::os::raw::c_char,
+            )
+        };
+        assert!(handle.is_null(), "addr without /p2p/ tail must be rejected");
+
+        // Unknown profile name → null (no silent default).
+        let env2 = TestEnv::new();
+        let nonsense = cstr("nonsense");
+        let mut genesis2: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let handle2 = unsafe {
+            phalanx_create_with_profile(
+                nonsense.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                env2.storage_cstr.as_ptr(),
+                env2.passphrase_cstr.as_ptr(),
+                &mut genesis2 as *mut *mut std::os::raw::c_char,
+            )
+        };
+        assert!(handle2.is_null(), "unknown profile must be rejected");
+    });
+}
+
+#[test]
+fn validate_pairing_verdicts() {
+    // Well-formed dialable address → Ok.
+    let good = cstr("/ip4/10.0.0.5/udp/4001/quic-v1/p2p/12D3KooWStronghold");
+    assert_eq!(
+        unsafe { phalanx_validate_pairing(good.as_ptr(), std::ptr::null()) },
+        PhalanxError::Ok.code()
+    );
+    // No /p2p/ tail → ConfigError (the same verdict `create` reaches at assemble).
+    let bad = cstr("/ip4/10.0.0.5/udp/4001/quic-v1");
+    assert_eq!(
+        unsafe { phalanx_validate_pairing(bad.as_ptr(), std::ptr::null()) },
+        PhalanxError::ConfigError.code()
+    );
+    // Null address → NullPointer.
+    assert_eq!(
+        unsafe { phalanx_validate_pairing(std::ptr::null(), std::ptr::null()) },
+        PhalanxError::NullPointer.code()
+    );
+}
+
+#[test]
+fn profile_flags_match_capability() {
+    let flag = |name: &str| {
+        let c = cstr(name);
+        unsafe { phalanx_profile_flags(c.as_ptr()) }
+    };
+    // bit0=known(1), bit1=needs_stronghold(2), bit2=requires_psk(4).
+    assert_eq!(flag("solo_device"), 1);
+    assert_eq!(flag("community_with_stronghold"), 3);
+    assert_eq!(flag("affinity_group_lan"), 5);
+    assert_eq!(flag("high_risk_cross_border"), 7);
+    // Internal / unknown names are not addressable → negative (ConfigError).
+    assert_eq!(flag("simulation"), PhalanxError::ConfigError.code());
+    assert!(flag("nonsense") < 0);
 }

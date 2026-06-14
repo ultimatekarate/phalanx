@@ -263,6 +263,18 @@ impl DeploymentProfile {
             Self::HighRiskCrossBorder,
         ]
     }
+
+    /// Look up a public archetype by its stable [`name`](Self::name) — the
+    /// inverse of `name()` over [`public_archetypes`](Self::public_archetypes),
+    /// used by the FFI profile selector. Returns `None` for an unknown name or
+    /// an internal-only one (`development`, `simulation`), which are deliberately
+    /// not addressable by name, matching their `#[serde(skip)]`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::public_archetypes()
+            .into_iter()
+            .find(|p| p.name() == name)
+    }
 }
 
 impl Default for DeploymentProfile {
@@ -326,6 +338,18 @@ mod tests {
                 .require_psk()
         );
         assert!(!DeploymentProfile::SoloDevice.psk_posture().require_psk());
+    }
+
+    #[test]
+    fn from_name_round_trips_public_archetypes_and_rejects_internal() {
+        for p in DeploymentProfile::public_archetypes() {
+            assert_eq!(DeploymentProfile::from_name(p.name()), Some(p));
+        }
+        // Internal profiles are not addressable by name (mirrors serde skip).
+        assert_eq!(DeploymentProfile::from_name("development"), None);
+        assert_eq!(DeploymentProfile::from_name("simulation"), None);
+        assert_eq!(DeploymentProfile::from_name("nonsense"), None);
+        assert_eq!(DeploymentProfile::from_name(""), None);
     }
 
     // Deserialization behavior (snake_case names, `#[serde(skip)]` on the

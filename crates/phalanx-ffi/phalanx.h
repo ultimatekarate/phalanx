@@ -150,6 +150,15 @@ enum PhalanxError {
    * untouched.
    */
   IDENTITY_ALREADY_EXISTS = -22,
+  /**
+   * No media encoder is available in this build. The FOSS/mobile artifact
+   * compiles without the software H.264/AAC codecs and delegates on-device
+   * export to a registered native platform encoder; until that backend is
+   * registered (or a `software-transcode` build is used), export is
+   * unsupported. Distinct code so the UI can say "export not available on
+   * this build" rather than a generic failure.
+   */
+  NO_ENCODER = -23,
 };
 typedef int32_t PhalanxError;
 
@@ -809,6 +818,54 @@ struct PhalanxHandle *phalanx_restore(const char *config_path,
 ;
 
 /**
+ * Profile-aware variant of [`phalanx_create`]: select a [`DeploymentProfile`]
+ * by name and optionally pair a Stronghold, instead of loading a config file.
+ * This is the phone's normal create path.
+ *
+ * `profile_name` is a stable snake_case name (`solo_device`,
+ * `community_with_stronghold`, …). `stronghold_addr` / `stronghold_did` carry
+ * the Stronghold pairing, both nullable: a null `stronghold_addr` ⇒ no archival
+ * peer (Solo, or an un-paired Community that boots for passive gossip); a
+ * non-null address must carry a `/p2p/<peer-id>` tail or create fails loud. An
+ * unknown profile or an undialable pairing yields a null handle — never a
+ * silent default.
+ *
+ * # Safety
+ * * `profile_name` must be a valid null-terminated C string.
+ * * `stronghold_addr` and `stronghold_did` must each be null or a valid
+ *   null-terminated C string.
+ * * `storage_path` and `passphrase` must be valid null-terminated C strings.
+ * * `out_genesis_phrase` must be null or a valid writable `*mut *mut c_char`.
+ */
+
+struct PhalanxHandle *phalanx_create_with_profile(const char *profile_name,
+                                                  const char *stronghold_addr,
+                                                  const char *stronghold_did,
+                                                  const char *storage_path,
+                                                  const char *passphrase,
+                                                  char **out_genesis_phrase)
+;
+
+/**
+ * Profile-aware variant of [`phalanx_restore`]. See
+ * [`phalanx_create_with_profile`] for the profile/pairing parameters and
+ * [`phalanx_restore`] for the restore semantics (existing-identity guard,
+ * mnemonic parsing).
+ *
+ * # Safety
+ * Same as [`phalanx_create_with_profile`], and additionally `mnemonic_phrase`
+ * must be a valid null-terminated C string.
+ */
+
+struct PhalanxHandle *phalanx_restore_with_profile(const char *profile_name,
+                                                   const char *stronghold_addr,
+                                                   const char *stronghold_did,
+                                                   const char *storage_path,
+                                                   const char *passphrase,
+                                                   const char *mnemonic_phrase)
+;
+
+/**
  * Starts the engine's main run loop on a background tokio task.
  *
  * Transitions: `Booting → Running`. Consumes the `UnspawnedEngine` stored
@@ -1043,6 +1100,41 @@ int32_t phalanx_poll_audio_frame(struct PlaybackSession *session,
  * * Must be called exactly once per session. Null is a safe no-op.
  */
  void phalanx_stop_playback(struct PlaybackSession *session) ;
+
+/**
+ * Validate a Stronghold pairing (address + optional DID) before it is handed to
+ * [`phalanx_create_with_profile`](crate::handle::phalanx_create_with_profile).
+ * Stateless — no engine required.
+ *
+ * Returns `PhalanxError::Ok` (0) iff `stronghold_addr` is a dialable multiaddr
+ * carrying a `/p2p/<peer-id>` tail — the same hard check `NodeConfig::assemble`
+ * enforces, so a green result here guarantees create will not reject the
+ * address. A typo'd or tail-less address returns `ConfigError`, letting the UI
+ * say "that address looks malformed" rather than surfacing a blank boot failure
+ * later. `stronghold_did` is optional (null ⇒ custody-only push); when present
+ * it must be valid UTF-8.
+ *
+ * # Safety
+ * `stronghold_addr` must be null or a valid null-terminated C string;
+ * `stronghold_did` must be null or a valid null-terminated C string.
+ */
+ int32_t phalanx_validate_pairing(const char *stronghold_addr, const char *stronghold_did) ;
+
+/**
+ * Capability flags for a profile name, so the Dart picker is driven by Rust
+ * truth rather than a hardcoded list. Returns a non-negative bitfield for a
+ * known public archetype, or a negative `PhalanxError` code (`NullPointer`,
+ * `InvalidUtf8`, or `ConfigError` for an unknown name) otherwise.
+ *
+ * Bitfield: `bit0 (1)` = known; `bit1 (2)` = needs a Stronghold pairing;
+ * `bit2 (4)` = requires a PSK (not yet supplied on mobile, so the UI disables
+ * those profiles). Thus `solo_device` → 1, `community_with_stronghold` → 3,
+ * `affinity_group_lan` → 5, `high_risk_cross_border` → 7.
+ *
+ * # Safety
+ * `profile_name` must be null or a valid null-terminated C string.
+ */
+ int32_t phalanx_profile_flags(const char *profile_name) ;
 
 /**
  * Start a recovery walk: locate the per-identity manifest on the mesh,

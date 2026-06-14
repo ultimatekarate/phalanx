@@ -115,6 +115,18 @@ enum Commands {
         #[arg(short, long)]
         output: String,
     },
+    /// Print this Stronghold's pairing payload (a dialable multiaddr + DID) for
+    /// a phone to scan or paste when selecting the Community profile. The phone
+    /// must be able to *route* to the address, so pass `--addr` with the
+    /// externally-reachable multiaddr (the configured listen address is often an
+    /// unspecified `0.0.0.0` bind a phone cannot dial).
+    Pairing {
+        /// The externally-reachable base multiaddr WITHOUT the `/p2p/...` tail,
+        /// e.g. `/ip4/203.0.113.4/udp/4001/quic-v1`. Defaults to the first
+        /// configured listen address (with a warning if it is unspecified).
+        #[arg(long)]
+        addr: Option<String>,
+    },
 }
 
 // ── Main ────────────────────────────────────────────────────────────────
@@ -227,6 +239,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 stronghold_did.as_deref(),
                 &output,
             )?;
+        }
+        Commands::Pairing { addr } => {
+            let identity = load_identity(&vault_path)?;
+            cmd_pairing(&identity, &config, addr.as_deref())?;
         }
     }
 
@@ -622,6 +638,106 @@ fn cmd_vouch(
     println!("  Output:  {output}");
     println!("  Size:    {} bytes", bytes.len());
     Ok(())
+}
+
+/// Print this Stronghold's pairing payload — a dialable multiaddr + DID — in
+/// human-readable form and as the `phalanx://pair#data=...` carrier the mobile
+/// pairing link service decodes. The phone feeds the multiaddr into
+/// `[[instance.network.archival_peers]]` (via the profile picker) and seals
+/// export grants to the DID.
+fn cmd_pairing(
+    identity: &PhalanxIdentity,
+    config: &StrongholdConfig,
+    addr_override: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use phalanx_transport::identity_ext::Libp2pExt;
+
+    let peer_id = identity.libp2p_peer_id();
+    let did = identity.did.to_string();
+
+    // An operator-supplied reachable address wins; otherwise fall back to the
+    // first configured listen address and warn if it is not dialable remotely.
+    let base = match addr_override {
+        Some(a) => a.to_string(),
+        None => {
+            let listen = config
+                .network
+                .listen_addresses
+                .first()
+                .ok_or("no configured listen address; pass --addr <reachable-multiaddr>")?;
+            if listen.contains("/0.0.0.0/") || listen.contains("/ip6/::/") || listen.ends_with("/0")
+            {
+                eprintln!(
+                    "warning: listen address {listen} is an unspecified/ephemeral bind a phone \
+                     cannot dial. Pass --addr with this Stronghold's externally-reachable \
+                     multiaddr, e.g. /ip4/<public-ip>/udp/<port>/quic-v1"
+                );
+            }
+            listen.clone()
+        }
+    };
+
+    // Append the /p2p/<peer-id> tail unless the operator already supplied one.
+    let multiaddr = if base.contains("/p2p/") {
+        base
+    } else {
+        let sep = if base.ends_with('/') { "" } else { "/" };
+        format!("{base}{sep}p2p/{peer_id}")
+    };
+
+    let carrier = build_pairing_carrier(&multiaddr, &did);
+
+    println!("Stronghold pairing payload");
+    println!("  DID:       {did}");
+    println!("  Peer ID:   {peer_id}");
+    println!("  Multiaddr: {multiaddr}");
+    println!();
+    println!("Scan or paste this into the phone (Community pairing):");
+    println!("  {carrier}");
+    Ok(())
+}
+
+/// Build the `phalanx://pair#data=<base64url>` carrier the mobile pairing link
+/// service decodes. The payload is `<multiaddr>\n<did>` (newline-separated,
+/// base64url-unpadded) — no JSON, so both the emitter and the Dart decoder stay
+/// dependency-light. Mirrors the base64url-fragment carrier of community links.
+fn build_pairing_carrier(multiaddr: &str, did: &str) -> String {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let payload = format!("{multiaddr}\n{did}");
+    format!("phalanx://pair#data={}", URL_SAFE_NO_PAD.encode(payload))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod pairing_tests {
+    use super::*;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use phalanx_node::config::ArchivalPeer;
+
+    #[test]
+    fn carrier_round_trips_to_a_dialable_addr_and_did() {
+        let multiaddr = "/ip4/203.0.113.4/udp/4001/quic-v1/p2p/12D3KooWStronghold";
+        let did = "did:key:z6MkStronghold";
+        let carrier = build_pairing_carrier(multiaddr, did);
+
+        // Carrier shape: phalanx://pair#data=<base64url>.
+        let data = carrier
+            .strip_prefix("phalanx://pair#data=")
+            .expect("carrier carries the pair#data= prefix");
+        let decoded = URL_SAFE_NO_PAD.decode(data).expect("valid base64url");
+        let text = String::from_utf8(decoded).expect("utf8 payload");
+        let (addr_out, did_out) = text.split_once('\n').expect("newline-separated payload");
+        assert_eq!(addr_out, multiaddr);
+        assert_eq!(did_out, did);
+
+        // The address the phone feeds into archival_peers is dialable — i.e. the
+        // assemble hard-check `ArchivalPeer::peer_id()` accepts it.
+        let peer = ArchivalPeer {
+            address: addr_out.to_string(),
+            stronghold_did: None,
+        };
+        assert!(peer.peer_id().is_some());
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────

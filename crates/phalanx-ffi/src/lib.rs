@@ -68,6 +68,7 @@ pub mod mnemonic;
 mod panic_safety;
 pub mod playback;
 pub mod probe;
+pub mod profile;
 pub mod recovery;
 pub mod status;
 pub mod trust;

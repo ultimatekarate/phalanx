@@ -18,7 +18,7 @@ use phalanx_node::actors::egress::EgressCommand;
 use phalanx_node::actors::meshsentinel::{SentinelCommand, SentinelDependencies};
 use phalanx_node::actors::storage::StorageCommand;
 use phalanx_node::actors::trust_actor::TrustCommand;
-use phalanx_node::config::NodeConfig;
+use phalanx_node::config::{ArchivalPeer, NodeConfig, NodeInstance};
 use phalanx_node::identity::PhalanxNodeIdentityExt;
 use phalanx_node::network::orchestrator::setup_transport;
 use phalanx_node::persistence::vault::{derive_vault_key, load_or_create_vault_salt};
@@ -28,7 +28,8 @@ use phalanx_node::{EngineLifecycle, FileJournal, UnspawnedEngine};
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{AudioShard, ForensicMetrics, PrnuPosterior, VideoShard};
 use phalanx_proto::network::NetworkEvent;
-use phalanx_proto::prelude::PhalanxIdentity;
+use phalanx_proto::network::deployment::DeploymentProfile;
+use phalanx_proto::prelude::{Did, PhalanxIdentity};
 use phalanx_proto::recovery::RecoveryStatus;
 use phalanx_transport::adapters::local_mesh::{LocalMeshAdapter, OutboundLocalPacket};
 use phalanx_transport::prelude::Libp2pIngress;
@@ -349,6 +350,215 @@ pub unsafe extern "C" fn phalanx_restore(
                     Err(_) => return std::ptr::null_mut(),
                 }
             };
+
+            let runtime = match Runtime::new() {
+                Ok(rt) => rt,
+                Err(_) => return std::ptr::null_mut(),
+            };
+
+            let handle_result = runtime.block_on(async {
+                restore_bootstrap(config, storage_str, passphrase_str, mnemonic_str).await
+            });
+
+            match handle_result {
+                Ok(mut handle) => {
+                    handle.runtime = runtime;
+                    Box::into_raw(Box::new(handle))
+                }
+                Err(_) => std::ptr::null_mut(),
+            }
+        }
+    })
+}
+
+/// Assemble a validated [`NodeConfig`] from a profile name plus an optional
+/// Stronghold pairing, for the mobile profile picker. Returns `None` on any
+/// failure (unknown profile, invalid UTF-8, or an undialable pairing address);
+/// the caller turns `None` into a null handle — the same loud-fail polarity as
+/// `phalanx_create`'s config-load path.
+///
+/// # Safety
+/// `profile_name` must be a valid null-terminated C string; `stronghold_addr`
+/// and `stronghold_did` must each be null or a valid null-terminated C string.
+unsafe fn assemble_profile_config(
+    profile_name: *const c_char,
+    stronghold_addr: *const c_char,
+    stronghold_did: *const c_char,
+) -> Option<NodeConfig> {
+    if profile_name.is_null() {
+        return None;
+    }
+    // SAFETY: non-null checked above; caller guarantees a valid NUL-terminated
+    // C string per the # Safety contract.
+    let name = unsafe { CStr::from_ptr(profile_name) }.to_str().ok()?;
+    let profile = match DeploymentProfile::from_name(name) {
+        Some(p) => p,
+        None => {
+            tracing::warn!(
+                target: "phalanx::ffi",
+                profile = %name,
+                "unknown deployment profile; refusing to start"
+            );
+            return None;
+        }
+    };
+
+    let mut instance = NodeInstance::default();
+    if !stronghold_addr.is_null() {
+        // SAFETY: non-null checked; caller guarantees a valid C string.
+        let addr = unsafe { CStr::from_ptr(stronghold_addr) }.to_str().ok()?;
+        let did = if stronghold_did.is_null() {
+            None
+        } else {
+            // SAFETY: non-null checked; caller guarantees a valid C string.
+            Some(Did::new(
+                unsafe { CStr::from_ptr(stronghold_did) }.to_str().ok()?,
+            ))
+        };
+        instance.network.archival_peers = vec![ArchivalPeer {
+            address: addr.to_string(),
+            stronghold_did: did,
+        }];
+    }
+
+    match NodeConfig::assemble(profile, &instance) {
+        Ok(validated) => Some(validated.into_inner()),
+        Err(e) => {
+            tracing::warn!(
+                target: "phalanx::ffi",
+                profile = %name,
+                error = %e,
+                "profile assembly failed (incoherent pairing); refusing to start"
+            );
+            None
+        }
+    }
+}
+
+/// Profile-aware variant of [`phalanx_create`]: select a [`DeploymentProfile`]
+/// by name and optionally pair a Stronghold, instead of loading a config file.
+/// This is the phone's normal create path.
+///
+/// `profile_name` is a stable snake_case name (`solo_device`,
+/// `community_with_stronghold`, …). `stronghold_addr` / `stronghold_did` carry
+/// the Stronghold pairing, both nullable: a null `stronghold_addr` ⇒ no archival
+/// peer (Solo, or an un-paired Community that boots for passive gossip); a
+/// non-null address must carry a `/p2p/<peer-id>` tail or create fails loud. An
+/// unknown profile or an undialable pairing yields a null handle — never a
+/// silent default.
+///
+/// # Safety
+/// * `profile_name` must be a valid null-terminated C string.
+/// * `stronghold_addr` and `stronghold_did` must each be null or a valid
+///   null-terminated C string.
+/// * `storage_path` and `passphrase` must be valid null-terminated C strings.
+/// * `out_genesis_phrase` must be null or a valid writable `*mut *mut c_char`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn phalanx_create_with_profile(
+    profile_name: *const c_char,
+    stronghold_addr: *const c_char,
+    stronghold_did: *const c_char,
+    storage_path: *const c_char,
+    passphrase: *const c_char,
+    out_genesis_phrase: *mut *mut c_char,
+) -> *mut PhalanxHandle {
+    crate::panic_safety::ffi_panic_safe(std::ptr::null_mut(), || {
+        // SAFETY: caller upholds the # Safety contract on the parent
+        // `unsafe extern "C" fn`; wrapped in the panic boundary like
+        // `phalanx_create`. The profile/pairing pointers are validated and
+        // dereferenced inside `assemble_profile_config`.
+        unsafe {
+            if !out_genesis_phrase.is_null() {
+                *out_genesis_phrase = std::ptr::null_mut();
+            }
+            if storage_path.is_null() || passphrase.is_null() {
+                return std::ptr::null_mut();
+            }
+            let storage_str = match CStr::from_ptr(storage_path).to_str() {
+                Ok(s) => s,
+                Err(_) => return std::ptr::null_mut(),
+            };
+            let passphrase_str = match CStr::from_ptr(passphrase).to_str() {
+                Ok(s) => s,
+                Err(_) => return std::ptr::null_mut(),
+            };
+            let config =
+                match assemble_profile_config(profile_name, stronghold_addr, stronghold_did) {
+                    Some(c) => c,
+                    None => return std::ptr::null_mut(),
+                };
+
+            let runtime = match Runtime::new() {
+                Ok(rt) => rt,
+                Err(_) => return std::ptr::null_mut(),
+            };
+
+            let handle_result =
+                runtime.block_on(async { bootstrap(config, storage_str, passphrase_str).await });
+
+            match handle_result {
+                Ok((mut handle, genesis_phrase)) => {
+                    handle.runtime = runtime;
+                    if let Some(phrase) = genesis_phrase {
+                        if !out_genesis_phrase.is_null() {
+                            match CString::new(phrase) {
+                                Ok(cstr) => *out_genesis_phrase = cstr.into_raw(),
+                                Err(_) => tracing::warn!(
+                                    target: "phalanx::ffi",
+                                    "BIP39 genesis phrase contained an interior NUL; dropping (unreachable path)"
+                                ),
+                            }
+                        }
+                    }
+                    Box::into_raw(Box::new(handle))
+                }
+                Err(_) => std::ptr::null_mut(),
+            }
+        }
+    })
+}
+
+/// Profile-aware variant of [`phalanx_restore`]. See
+/// [`phalanx_create_with_profile`] for the profile/pairing parameters and
+/// [`phalanx_restore`] for the restore semantics (existing-identity guard,
+/// mnemonic parsing).
+///
+/// # Safety
+/// Same as [`phalanx_create_with_profile`], and additionally `mnemonic_phrase`
+/// must be a valid null-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn phalanx_restore_with_profile(
+    profile_name: *const c_char,
+    stronghold_addr: *const c_char,
+    stronghold_did: *const c_char,
+    storage_path: *const c_char,
+    passphrase: *const c_char,
+    mnemonic_phrase: *const c_char,
+) -> *mut PhalanxHandle {
+    crate::panic_safety::ffi_panic_safe(std::ptr::null_mut(), || {
+        // SAFETY: caller upholds the # Safety contract on the parent
+        // `unsafe extern "C" fn`; panic boundary as in `phalanx_restore`.
+        unsafe {
+            if storage_path.is_null() || passphrase.is_null() || mnemonic_phrase.is_null() {
+                return std::ptr::null_mut();
+            }
+            let storage_str = match CStr::from_ptr(storage_path).to_str() {
+                Ok(s) => s,
+                Err(_) => return std::ptr::null_mut(),
+            };
+            let passphrase_str = match CStr::from_ptr(passphrase).to_str() {
+                Ok(s) => s,
+                Err(_) => return std::ptr::null_mut(),
+            };
+            let mnemonic_str = match CStr::from_ptr(mnemonic_phrase).to_str() {
+                Ok(s) => s,
+                Err(_) => return std::ptr::null_mut(),
+            };
+            let config =
+                match assemble_profile_config(profile_name, stronghold_addr, stronghold_did) {
+                    Some(c) => c,
+                    None => return std::ptr::null_mut(),
+                };
 
             let runtime = match Runtime::new() {
                 Ok(rt) => rt,
