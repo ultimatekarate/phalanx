@@ -48,16 +48,17 @@ impl Default for MeshTransportConfig {
             listen_addresses: vec![],
             bootstrap_peers: vec![],
             subscribe_topics: vec![],
-            // Bumped from 1.0.0 to mark the wire-format change introduced
-            // by symbol bundling (Vec<ShardChunk> per egress.publish() call).
-            // libp2p identify exchanges this as informational metadata; old
-            // peers will still connect, but their decoders silently drop
-            // bundled payloads. Diagnostic marker, not enforcement.
-            protocol_version: "/phalanx/1.1.0".to_string(),
+            // Single source of truth: the same constant every node and
+            // Stronghold projects from its DeploymentProfile. This feeds the
+            // Kademlia StreamProtocol id (factory.rs) and the identify agent
+            // string; peers on different versions form different DHTs, so a
+            // divergent literal here is a silent partition.
+            protocol_version: phalanx_proto::network::deployment::DEFAULT_PROTOCOL_VERSION
+                .to_string(),
             // Sized to fit a 100-symbol bundle (100 × 1200 = 120 KB) plus
             // postcard framing overhead with margin. gossipsub max_transmit
             // is derived as 2× this (see builder.rs) → 256 KiB ceiling.
-            max_chunk_size_bytes: 131072,
+            max_chunk_size_bytes: phalanx_proto::network::deployment::DEFAULT_MAX_CHUNK_SIZE_BYTES,
             physics: PhalanxPhysics::default_wan(),
             psk: None,
             require_psk: false,
