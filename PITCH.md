@@ -164,7 +164,7 @@ with strong evidence behind its claims (§9) and no operational track record. Se
 
 ## 5. The deepfake claim, stated with its conditions
 
-Precision matters most here, because this is where overclaiming would be easiest.
+Precision matters most here, because this is where over claiming would be easiest.
 
 **What a single device proves.** Every frame is measured at capture for the noise fingerprint a physical sensor
 cannot help producing and the interference signature screen re-filming cannot help producing; frames that fail
@@ -250,30 +250,31 @@ Four things, in order of importance:
    credibility step available for the money.
 3. **Pilot partners.** An organization already doing witness work — a legal-observer network, an NGO, a
    newsroom — willing to run Strongholds and phones in a real deployment and feed reality back into the defaults.
-4. **Funding.** The dependency-ordered budget picture is in
-   [docs/stewardship.md §7](docs/stewardship.md#7-the-productization-gap-list): six months funds one person
-   making the Android app production-honest; twelve adds distribution, the start of iOS, and the external audit;
-   twenty-four funds the offline radio story and a real field pilot. None of it requires inventing anything —
-   the engine underneath already exists and is tested.
 
 ## 9. Credibility appendix
 
 So that no claim in this document outruns its evidence, here is the project's own classification of its headline
 claims, from strongest artifact to weakest ([docs/stewardship.md §3](docs/stewardship.md#3-claims-to-evidence-registry)).
-**Machine-checked** (a proof assistant verified it): exactly one development qualifies — the Lean 4 theorem
+
+**Machine-checked**: exactly one development qualifies — the Lean 4 theorem
 `recording_order_independent`, that reassembling fragments in any order yields the identical recording
 (`proofs/Phalanx/MoldCommutativity.lean:263-270`), with its scope limits documented (the assembly function is
 axiomatized, the Rust correspondence is by-hand mirroring, and CI does not yet build the proofs).
-**Numerically certified** (a strong computational artifact that is *not* a formal proof, and is never called
-one): the stability of the adaptive control system — an SDP-derived Lyapunov matrix checked by compile-time
+
+**Numerically certified**: the stability of the adaptive control system — an SDP-derived Lyapunov matrix checked by compile-time
 Cholesky at all 15,552 grid vertices (`crates/phalanx-node/src/stability/contractivity.rs:328-407`), behind a
-non-default build feature. **Simulation-tested**: Sybil resistance, eclipse resistance, replay defense, recovery
+non-default build feature.
+
+**Simulation-tested**: Sybil resistance, eclipse resistance, replay defense, recovery
 from overload, and evidence survival against silent, corrupting, forging, and colluding peers — asserted by
 adversarial simulation suites running real actor constellations over a virtual transport
-(`crates/phalanx-sim/tests/`). **Code-anchored**: the signing, encryption, gating, and revocation mechanisms —
+(`crates/phalanx-sim/tests/`).
+
+**Code-anchored**: the signing, encryption, gating, and revocation mechanisms —
 implemented and unit/integration tested, including five compile-failure tests proving verified evidence cannot
 be forged from outside the crate (`crates/phalanx-forensics/src/unit.rs:14-61`) — without a separate certificate
-for each headline property. **Asserted**: the emergent-behavior narratives (natural load-shedding order, load
+for each headline property.
+
+**Asserted**: the emergent-behavior narratives (natural load-shedding order, load
 balancing without a balancer), which are design consequences with partial, indirect simulation coverage and no
-dedicated artifact. The README's pre-rework wording overstated two of these classifications; the reworked
-README, the stewardship document, and this document now share the corrected language.
+dedicated artifact.
