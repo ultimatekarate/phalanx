@@ -1,7 +1,7 @@
 [package]
 name = "phalanx-transport"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 description = "The Phalanx Post Office: Handling the Prepositions of the Mesh."
 
 [dependencies]
