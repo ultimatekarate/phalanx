@@ -22,9 +22,12 @@ import 'screens/onboarding_choice_screen.dart';
 import 'screens/peers_screen.dart';
 import 'screens/playback_screen.dart';
 import 'screens/restore_phrase_screen.dart';
+import 'screens/profile_choice_screen.dart';
 import 'screens/settings_screen.dart';
+import 'screens/stronghold_pairing_screen.dart';
 import 'screens/verify_phrase_screen.dart';
 import 'services/community_link_service.dart';
+import 'services/pairing_store.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -54,6 +57,15 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
   bool _engineReady = false;
   bool _needsOnboarding = false;
   String? _genesisPhrase;
+
+  // Deployment profile + optional Stronghold pairing (Community), persisted in
+  // the platform keystore. Resolved during [_initEngine] and passed to the
+  // profile-aware create/restore entry points.
+  final PairingStore _pairingStore = PairingStore();
+  String _selectedProfile = 'solo_device';
+  String? _strongholdAddr;
+  String? _strongholdDid;
+  bool _needsProfileChoice = false;
 
   // TODO: replace with a hardware-keystore-backed key (Android Keystore /
   // iOS Keychain via flutter_secure_storage). Dev-only placeholder; the
@@ -89,21 +101,31 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
         dir.createSync(recursive: true);
       }
 
+      // Resolve any persisted deployment profile + Stronghold pairing from the
+      // keystore before deciding the flow (companion data is create-time).
+      final storedProfile = await _pairingStore.profile();
+      final pairing = await _pairingStore.pairing();
+      _strongholdAddr = pairing?.addr;
+      _strongholdDid = pairing?.did;
+
       // Branch on whether an identity is already on disk. If yes, load and
-      // proceed normally. If no, surface the onboarding choice — the user
-      // either generates a new identity or restores from a recovery phrase.
-      // We deliberately do NOT call `bridge.create()` for the no-identity
-      // case any more, because `create` silently generates a fresh identity
-      // — fine for first-time setup, but it would silently overwrite the
-      // recovery flow if the user intends to restore.
+      // proceed normally. If no, the user first picks a deployment topology,
+      // then chooses to generate a new identity or restore from a phrase.
+      // We deliberately do NOT call `create` for the no-identity case (it
+      // silently generates a fresh identity, which would clobber the restore
+      // flow).
       final identityExists =
           File('$storagePath${Platform.pathSeparator}identity.bin').existsSync();
 
       if (identityExists) {
+        // Back-compat: an identity created before the profile picker has no
+        // stored profile — default to the most conservative topology.
+        _selectedProfile = storedProfile ?? 'solo_device';
         await _loadExistingIdentity(storagePath);
       } else {
+        // Fresh install: choose a deployment topology before creating identity.
         setState(() {
-          _needsOnboarding = true;
+          _needsProfileChoice = true;
         });
       }
     } catch (e) {
@@ -113,7 +135,13 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
 
   Future<void> _loadExistingIdentity(String storagePath) async {
     final bridge = ref.read(phalanxProvider);
-    bridge.create(storagePath, _devPassphrase); // returns null on load
+    bridge.createWithProfile(
+      _selectedProfile,
+      storagePath,
+      _devPassphrase,
+      strongholdAddr: _strongholdAddr,
+      strongholdDid: _strongholdDid,
+    ); // returns null on load
     bridge.start();
     setState(() {
       _engineReady = true;
@@ -126,7 +154,13 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
     final bridge = ref.read(phalanxProvider);
     try {
       final storagePath = _getStoragePath();
-      final genesisPhrase = bridge.create(storagePath, _devPassphrase);
+      final genesisPhrase = bridge.createWithProfile(
+        _selectedProfile,
+        storagePath,
+        _devPassphrase,
+        strongholdAddr: _strongholdAddr,
+        strongholdDid: _strongholdDid,
+      );
       bridge.start();
       setState(() {
         _engineReady = true;
@@ -136,6 +170,52 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
       _startSensorPolling();
     } catch (e) {
       debugPrint('Phalanx engine init (create) failed: $e');
+    }
+  }
+
+  /// Persist the chosen profile, then (for a Stronghold-bearing profile that
+  /// isn't paired yet) collect the pairing before advancing to the
+  /// create/restore onboarding choice.
+  Future<void> _onProfileChosen(String profileName) async {
+    final bridge = ref.read(phalanxProvider);
+    await _pairingStore.setProfile(profileName);
+    _selectedProfile = profileName;
+
+    final flags = bridge.profileFlags(profileName);
+    final needsStronghold = flags > 0 && (flags & 2) != 0;
+
+    if (needsStronghold && _strongholdAddr == null) {
+      _navigatorKey.currentState?.push(
+        MaterialPageRoute<void>(
+          builder: (_) => StrongholdPairingScreen(
+            bridge: bridge,
+            onPaired: (addr, did) async {
+              await _pairingStore.setPairing(addr, did);
+              setState(() {
+                _strongholdAddr = addr;
+                _strongholdDid = did;
+                _needsProfileChoice = false;
+                _needsOnboarding = true;
+              });
+              _navigatorKey.currentState?.popUntil((r) => r.isFirst);
+            },
+            onSkip: () {
+              // Un-paired Community still boots (passive gossip); the operator
+              // can pair later in Settings.
+              setState(() {
+                _needsProfileChoice = false;
+                _needsOnboarding = true;
+              });
+              _navigatorKey.currentState?.popUntil((r) => r.isFirst);
+            },
+          ),
+        ),
+      );
+    } else {
+      setState(() {
+        _needsProfileChoice = false;
+        _needsOnboarding = true;
+      });
     }
   }
 
@@ -164,6 +244,9 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
           bridge: bridge,
           storagePath: _getStoragePath(),
           passphrase: _devPassphrase,
+          profileName: _selectedProfile,
+          strongholdAddr: _strongholdAddr,
+          strongholdDid: _strongholdDid,
           onRestored: _onRestoredFromPhrase,
         ),
       ),
@@ -302,7 +385,12 @@ class _PhalanxAppState extends ConsumerState<PhalanxApp>
     // identity.bin on disk). After it lands the user either sees the
     // genesis phrase (new identity) or the capture screen (restored).
     final Widget home;
-    if (!_engineReady && _needsOnboarding) {
+    if (!_engineReady && _needsProfileChoice) {
+      home = ProfileChoiceScreen(
+        bridge: ref.read(phalanxProvider),
+        onProfileChosen: _onProfileChosen,
+      );
+    } else if (!_engineReady && _needsOnboarding) {
       home = OnboardingChoiceScreen(
         onCreateNew: _createNewIdentity,
         onRestoreExisting: _pushRestorePhraseScreen,

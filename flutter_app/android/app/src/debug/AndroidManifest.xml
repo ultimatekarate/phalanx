@@ -1,0 +1,29 @@
+<!-- flutter_app/android/app/src/debug/AndroidManifest.xml
+     Debug-only manifest overlay. Gradle merges this into debug/offline
+     builds and strips it from release builds. Keeps the phalanx://community
+     custom scheme usable during development (flutter run, adb shell am
+     start) without shipping a phishing surface to production: any app on
+     a production device can claim a custom scheme, so the canonical
+     production path for Community Join is the https://phalanx.app/c/join
+     App Link defined in src/main/AndroidManifest.xml. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    package="com.phalanx.app">
+
+    <application>
+        <!-- tools:node="merge" appends the intent-filter onto the
+             .MainActivity already declared in src/main rather than
+             creating a duplicate <activity> element. Without this
+             directive the merged manifest would fail validation. -->
+        <activity
+            android:name=".MainActivity"
+            tools:node="merge">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="phalanx" android:host="community" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

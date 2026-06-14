@@ -238,6 +238,31 @@ typedef _PhalanxFreeStringDart = void Function(Pointer<Utf8>);
 typedef _PhalanxFreeBytesC = Void Function(Pointer<Uint8>, Uint32);
 typedef _PhalanxFreeBytesDart = void Function(Pointer<Uint8>, int);
 
+// Profile-aware lifecycle (phone profile picker). Same shape as create/restore
+// with a leading profile_name + the (nullable) stronghold_addr / stronghold_did
+// pairing.
+typedef _PhalanxCreateWithProfileC = Pointer<Void> Function(
+  Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>,
+  Pointer<Pointer<Utf8>>,
+);
+typedef _PhalanxCreateWithProfileDart = Pointer<Void> Function(
+  Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>,
+  Pointer<Pointer<Utf8>>,
+);
+typedef _PhalanxRestoreWithProfileC = Pointer<Void> Function(
+  Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>,
+  Pointer<Utf8>,
+);
+typedef _PhalanxRestoreWithProfileDart = Pointer<Void> Function(
+  Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>,
+  Pointer<Utf8>,
+);
+// Stateless profile helpers (no handle).
+typedef _PhalanxValidatePairingC = Int32 Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _PhalanxValidatePairingDart = int Function(Pointer<Utf8>, Pointer<Utf8>);
+typedef _PhalanxProfileFlagsC = Int32 Function(Pointer<Utf8>);
+typedef _PhalanxProfileFlagsDart = int Function(Pointer<Utf8>);
+
 // =====================================================================
 // PHALANX BRIDGE
 // =====================================================================
@@ -285,6 +310,10 @@ class PhalanxBridge {
   late final _PhalanxValidateMnemonicDart _validateMnemonic;
   late final _PhalanxFreeStringDart _freeString;
   late final _PhalanxFreeBytesDart _freeBytes;
+  late final _PhalanxCreateWithProfileDart _createWithProfile;
+  late final _PhalanxRestoreWithProfileDart _restoreWithProfile;
+  late final _PhalanxValidatePairingDart _validatePairing;
+  late final _PhalanxProfileFlagsDart _profileFlags;
 
   PhalanxBridge() {
     _lib = loadPhalanxLibrary();
@@ -419,6 +448,22 @@ class PhalanxBridge {
         _lib.lookupFunction<_PhalanxFreeBytesC, _PhalanxFreeBytesDart>(
           'phalanx_free_bytes',
         );
+    _createWithProfile = _lib.lookupFunction<
+      _PhalanxCreateWithProfileC,
+      _PhalanxCreateWithProfileDart
+    >('phalanx_create_with_profile');
+    _restoreWithProfile = _lib.lookupFunction<
+      _PhalanxRestoreWithProfileC,
+      _PhalanxRestoreWithProfileDart
+    >('phalanx_restore_with_profile');
+    _validatePairing = _lib
+        .lookupFunction<_PhalanxValidatePairingC, _PhalanxValidatePairingDart>(
+          'phalanx_validate_pairing',
+        );
+    _profileFlags = _lib
+        .lookupFunction<_PhalanxProfileFlagsC, _PhalanxProfileFlagsDart>(
+          'phalanx_profile_flags',
+        );
   }
 
   void _check(int code, String fn) {
@@ -519,6 +564,129 @@ class PhalanxBridge {
         if (configNative != nullptr) calloc.free(configNative);
       }
     });
+  }
+
+  /// Like [create], but selects a [DeploymentProfile] by name and optionally
+  /// pairs a Stronghold, instead of loading a config file. The phone's normal
+  /// create path. [strongholdAddr] / [strongholdDid] are the Community
+  /// pairing (both optional; a non-null address must carry a `/p2p/` tail).
+  ///
+  /// Returns the BIP39 genesis phrase if a new identity was created, or null if
+  /// an existing identity was loaded. Throws [PhalanxException] (bootFailed) if
+  /// the engine refuses to start (unknown profile, malformed pairing, etc.).
+  String? createWithProfile(
+    String profileName,
+    String storagePath,
+    String passphrase, {
+    String? strongholdAddr,
+    String? strongholdDid,
+  }) {
+    final profileNative = profileName.toNativeUtf8();
+    final addrNative = strongholdAddr?.toNativeUtf8() ?? nullptr;
+    final didNative = strongholdDid?.toNativeUtf8() ?? nullptr;
+    final storageNative = storagePath.toNativeUtf8();
+    final passphraseNative = passphrase.toNativeUtf8();
+    final outPhrase = calloc<Pointer<Utf8>>();
+
+    try {
+      _handle = _createWithProfile(
+        profileNative.cast(),
+        addrNative.cast(),
+        didNative.cast(),
+        storageNative.cast(),
+        passphraseNative.cast(),
+        outPhrase,
+      );
+      if (_handle == nullptr) {
+        throw PhalanxException(
+          PhalanxError.bootFailed,
+          'phalanx_create_with_profile',
+        );
+      }
+      if (outPhrase.value != nullptr) {
+        final phrase = outPhrase.value.toDartString();
+        _freeString(outPhrase.value);
+        return phrase;
+      }
+      return null;
+    } finally {
+      calloc.free(profileNative);
+      if (addrNative != nullptr) calloc.free(addrNative);
+      if (didNative != nullptr) calloc.free(didNative);
+      calloc.free(storageNative);
+      calloc.free(passphraseNative);
+      calloc.free(outPhrase);
+    }
+  }
+
+  /// Like [restoreFromPhrase], but selects a profile and optional Stronghold
+  /// pairing (see [createWithProfile]). Used by the restore onboarding path
+  /// once a profile has been chosen.
+  void restoreWithProfile(
+    String profileName,
+    String storagePath,
+    String passphrase,
+    Uint8List mnemonicPhrase, {
+    String? strongholdAddr,
+    String? strongholdDid,
+  }) {
+    final profileNative = profileName.toNativeUtf8();
+    final addrNative = strongholdAddr?.toNativeUtf8() ?? nullptr;
+    final didNative = strongholdDid?.toNativeUtf8() ?? nullptr;
+    final storageNative = storagePath.toNativeUtf8();
+    final passphraseNative = passphrase.toNativeUtf8();
+
+    _withZeroedNativeBytes(mnemonicPhrase, (phrasePtr) {
+      try {
+        _handle = _restoreWithProfile(
+          profileNative.cast(),
+          addrNative.cast(),
+          didNative.cast(),
+          storageNative.cast(),
+          passphraseNative.cast(),
+          phrasePtr.cast(),
+        );
+        if (_handle == nullptr) {
+          throw PhalanxException(
+            PhalanxError.bootFailed,
+            'phalanx_restore_with_profile',
+          );
+        }
+      } finally {
+        calloc.free(profileNative);
+        if (addrNative != nullptr) calloc.free(addrNative);
+        if (didNative != nullptr) calloc.free(didNative);
+        calloc.free(storageNative);
+        calloc.free(passphraseNative);
+      }
+    });
+  }
+
+  /// Validate a Stronghold pairing before create. Returns the raw status code
+  /// ([PhalanxError.ok] = 0; negative = a PhalanxError). Stateless — safe to
+  /// call before the engine exists. The UI surfaces a friendly message on != ok.
+  int validatePairing(String strongholdAddr, {String? strongholdDid}) {
+    final addrNative = strongholdAddr.toNativeUtf8();
+    final didNative = strongholdDid?.toNativeUtf8() ?? nullptr;
+    try {
+      return _validatePairing(addrNative.cast(), didNative.cast());
+    } finally {
+      calloc.free(addrNative);
+      if (didNative != nullptr) calloc.free(didNative);
+    }
+  }
+
+  /// Capability flags for a profile name (stateless). Non-negative bitfield for
+  /// a known public archetype, negative for unknown. `bit0 (1)` = known,
+  /// `bit1 (2)` = needs a Stronghold pairing, `bit2 (4)` = requires a PSK
+  /// (disabled on mobile until swarm-key provisioning lands).
+  int profileFlags(String profileName) {
+    final nameNative = profileName.toNativeUtf8();
+    try {
+      return _profileFlags(nameNative.cast());
+    } finally {
+      calloc.free(nameNative);
+    }
   }
 
   /// Start the engine's run loop.

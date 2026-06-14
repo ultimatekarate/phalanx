@@ -26,6 +26,10 @@ dependencies:
   # File picker for Import-from-file fallback on the Vouch scan stage
   # and Save-to-file on the Vouch signed stage (Phase 7).
   file_picker: ^8.0.0
+  # Hardware-keystore-backed persistence (iOS Keychain / Android Keymaster-
+  # wrapped) for the selected deployment profile and the Stronghold pairing
+  # (Community profile). Durable infrastructure, persisted for usability.
+  flutter_secure_storage: ^9.2.2
 
 dev_dependencies:
   flutter_test:

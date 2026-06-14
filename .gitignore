@@ -13,8 +13,7 @@ Cargo.lock
 .vscode/
 .claude/
 flutter_app/.dart_tool/
-flutter_app/android/
-flutter_app/*
+flutter_app/build/
 *.swp
 *.iml
 .DS_Store
