@@ -208,20 +208,25 @@ pub unsafe extern "C" fn phalanx_create(
                 Err(_) => return std::ptr::null_mut(),
             };
 
-            // Optional config path — use defaults if null
+            // Optional config path — use the default profile if null. A
+            // non-null but unparseable/incoherent config is a loud failure
+            // (null handle), not a silent fall back to defaults.
             let config = if config_path.is_null() {
                 NodeConfig::default()
             } else {
                 match CStr::from_ptr(config_path).to_str() {
-                    Ok(path) => NodeConfig::load(path).unwrap_or_else(|e| {
-                        tracing::warn!(
-                            target: "phalanx::ffi",
-                            config_path = %path,
-                            error = ?e,
-                            "NodeConfig::load failed; falling back to default config"
-                        );
-                        NodeConfig::default()
-                    }),
+                    Ok(path) => match NodeConfig::load(path) {
+                        Ok(validated) => validated.into_inner(),
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "phalanx::ffi",
+                                config_path = %path,
+                                error = %e,
+                                "NodeConfig::load failed; refusing to start on a silent default"
+                            );
+                            return std::ptr::null_mut();
+                        }
+                    },
                     Err(_) => return std::ptr::null_mut(),
                 }
             };
@@ -329,15 +334,18 @@ pub unsafe extern "C" fn phalanx_restore(
                 NodeConfig::default()
             } else {
                 match CStr::from_ptr(config_path).to_str() {
-                    Ok(path) => NodeConfig::load(path).unwrap_or_else(|e| {
-                        tracing::warn!(
-                            target: "phalanx::ffi",
-                            config_path = %path,
-                            error = ?e,
-                            "NodeConfig::load failed; falling back to default config"
-                        );
-                        NodeConfig::default()
-                    }),
+                    Ok(path) => match NodeConfig::load(path) {
+                        Ok(validated) => validated.into_inner(),
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "phalanx::ffi",
+                                config_path = %path,
+                                error = %e,
+                                "NodeConfig::load failed; refusing to start on a silent default"
+                            );
+                            return std::ptr::null_mut();
+                        }
+                    },
                     Err(_) => return std::ptr::null_mut(),
                 }
             };
