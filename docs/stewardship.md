@@ -314,12 +314,13 @@ this codebase is the reading below plus the sign-offs.
 
 **Where the bodies are buried** (known sharp edges, all documented elsewhere — this is the index):
 
-- [x] ~~Gossipsub topic defaults misaligned~~ — fixed June 2026: node and Stronghold defaults unified on the
-      canonical `MeshTopic` constructors, the `serde(skip)`/`/phalanx/default` footgun closed with explicit field
-      defaults, the revocation topic added to both default subscribe lists, and a cross-crate regression test pins
-      the alignment (`crates/phalanx-stronghold/tests/topic_alignment.rs`). Still open, deliberately: canary alerts
-      on `/phalanx/mesh/1.0.0` are publish-only until an inbound alert handler exists, and the Kademlia protocol-id
-      defaults still differ ([network.md §3](network.md#3-topics-who-publishes-who-listens), [§5](network.md#5-the-dht)).
+- [x] ~~Gossipsub topic defaults misaligned~~ and ~~Kademlia protocol-id defaults differ~~ — both fixed: every
+      coherence-critical value (topics, `protocol_version`, wire chunk ceiling) is now projected from a shared
+      `DeploymentProfile` (`crates/phalanx-proto/src/network/deployment.rs`) and is structurally absent from the
+      operator-editable `[instance]` config, so node and Stronghold cannot drift; the revocation topic is in both
+      default subscribe lists; a set-but-invalid config now fails loudly; and a cross-crate test pins per-profile
+      agreement (`crates/phalanx-stronghold/tests/topic_alignment.rs`). Still open, deliberately: canary alerts on
+      `/phalanx/mesh/1.0.0` are publish-only until an inbound alert handler exists ([network.md §3](network.md#3-topics-who-publishes-who-listens), [§5](network.md#5-the-dht)).
 - [ ] Stale endowment formula in [threat model §4](threat-model.md) and `crates/phalanx-forensics/src/policy.rs:488-493`
       vs the implementation (`crates/phalanx-node/src/vitals/governor.rs:778-786`) — §3 above.
 - [ ] Same-named threshold constants with different values and units (I-7), and two `STRONGHOLD_NAMESPACE`
