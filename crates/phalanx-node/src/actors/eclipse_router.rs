@@ -17,7 +17,7 @@ use tokio::time::interval;
 use phalanx_forensics::eclipse::{self, EclipseProbe, MeshFingerprint};
 use phalanx_forensics::prelude::*;
 use phalanx_forensics::trust::{
-    evaluate_reciprocity, PeerContribution, ReciprocityParams, ReciprocityVerdict,
+    PeerContribution, ReciprocityParams, ReciprocityVerdict, evaluate_reciprocity,
 };
 use phalanx_proto::identity::{Did, MeshAddress};
 use phalanx_proto::network::topology::EclipseRisk;

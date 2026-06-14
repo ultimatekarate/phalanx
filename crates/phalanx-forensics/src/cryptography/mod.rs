@@ -5,8 +5,8 @@ pub mod identity;
 pub mod mnemonic;
 
 use chacha20poly1305::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
     XChaCha20Poly1305, XNonce,
+    aead::{Aead, AeadCore, KeyInit, OsRng},
 };
 use phalanx_proto::crypto::{CryptoError, SymmetricKey};
 

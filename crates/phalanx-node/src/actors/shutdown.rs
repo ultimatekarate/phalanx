@@ -1,7 +1,7 @@
 // crates/phalanx-node/src/actors/shutdown.rs
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Notify;
 
 /// Broadcast-style cancellation signal shared by every MeshSentinel-spawned task.

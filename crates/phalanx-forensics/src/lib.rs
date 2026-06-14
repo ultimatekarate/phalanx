@@ -50,8 +50,8 @@ pub use cryptography::dek::{
     derive_dek_master, derive_manifest_recording_id, derive_recording_dek,
 };
 pub use cryptography::{decrypt_bytes, encrypt_bytes, generate_session_key};
-pub use export::{export_recording_to_signed_mp4, identity_signer, ExportError, ExportedArtifact};
-pub use judge::{decode_payload, HandoverJudge, PayloadCipher};
+pub use export::{ExportError, ExportedArtifact, export_recording_to_signed_mp4, identity_signer};
+pub use judge::{HandoverJudge, PayloadCipher, decode_payload};
 pub use policy::TrafficGovernor;
 pub use policy::{
     BandwidthScale, ConnectionScale, DecayingIntegral, FinalizationScale, Homeostasis,
@@ -61,7 +61,7 @@ pub use policy::{
 pub use reassembler::{AudioWeaver, FountainChunkifier, Reassembler, ShardMold, VideoWeaver};
 #[cfg(feature = "software-transcode")]
 pub use transcode::SoftwareTranscoder;
-pub use transcode::{transcode_recording, EncodedMedia, MediaTranscoder};
+pub use transcode::{EncodedMedia, MediaTranscoder, transcode_recording};
 pub use trust::{PeerEvaluator, ReputationGate};
 pub use unit::{ForensicUnit, Sealed, Unverified, ValidationState, Verified};
 
@@ -69,7 +69,7 @@ pub use unit::{ForensicUnit, Sealed, Unverified, ValidationState, Verified};
 pub mod prelude {
     pub use crate::crucible::{Crucible, Mold, RecordingAmalgam};
     pub use crate::cryptography::{decrypt_bytes, encrypt_bytes};
-    pub use crate::judge::{decode_payload, HandoverJudge, PayloadCipher};
+    pub use crate::judge::{HandoverJudge, PayloadCipher, decode_payload};
     pub use crate::policy::TrafficGovernor;
     pub use crate::reassembler::{Reassembler, ShardMold};
     // TransientJournal is now in phalanx_proto::storage (canonical location).

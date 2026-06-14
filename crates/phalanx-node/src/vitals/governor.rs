@@ -874,8 +874,8 @@ mod tests {
     use phalanx_proto::types::{PowerState, SystemStress, TaskCost};
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio::time::Instant;

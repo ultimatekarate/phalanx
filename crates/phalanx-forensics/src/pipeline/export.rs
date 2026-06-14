@@ -22,11 +22,11 @@ use phalanx_proto::evidence::{Evidence, ForensicMetrics, MediaType, WitnessEnvel
 use phalanx_proto::identity::PhalanxIdentity;
 use phalanx_proto::types::Fps;
 
-use crate::c2pa_ext::{generate_self_signed_cert, C2paOrchestrator};
-use crate::gate::{verify_provenance_from_jpeg, LensThresholds};
+use crate::c2pa_ext::{C2paOrchestrator, generate_self_signed_cert};
+use crate::gate::{LensThresholds, verify_provenance_from_jpeg};
 use crate::judge::decode_payload;
 use crate::transcode::{
-    transcode_recording, DecodedAudioShard, DecodedVideoShard, MediaTranscoder,
+    DecodedAudioShard, DecodedVideoShard, MediaTranscoder, transcode_recording,
 };
 
 /// Failure modes of the export verb. Deliberately coarse — callers map these to

@@ -11,12 +11,12 @@ use phalanx_forensics::crucible::EvidenceExt;
 use phalanx_forensics::gate::PromotionGate;
 use phalanx_forensics::policy::EgressGovernor;
 use phalanx_forensics::unit::ForensicUnit;
+use phalanx_proto::RecordingRequest;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::prelude::*;
 use phalanx_proto::trust::Offense;
 use phalanx_proto::types::TaskCost;
-use phalanx_proto::RecordingRequest;
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};

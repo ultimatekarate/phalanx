@@ -14,8 +14,8 @@
 use std::collections::HashMap;
 use std::ffi::CString;
 
-use tracing::span::Id;
 use tracing::Subscriber;
+use tracing::span::Id;
 use tracing_subscriber::filter::FilterFn;
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;

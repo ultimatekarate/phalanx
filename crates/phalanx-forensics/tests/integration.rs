@@ -17,9 +17,9 @@
 use std::time::Duration;
 
 use phalanx_forensics::crucible::{Crucible, EnvelopeHashExt, RecordingAmalgam};
-use phalanx_forensics::gate::{unmarshal, IntegrityGate, PromotionGate};
+use phalanx_forensics::gate::{IntegrityGate, PromotionGate, unmarshal};
 use phalanx_forensics::judge::PayloadCipher;
-use phalanx_forensics::reassembler::{create_video_shard, FountainChunkifier, Reassembler};
+use phalanx_forensics::reassembler::{FountainChunkifier, Reassembler, create_video_shard};
 use phalanx_forensics::storage::handover::HandoverAuthority;
 use phalanx_forensics::witness::WitnessAuthority;
 

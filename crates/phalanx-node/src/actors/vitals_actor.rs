@@ -11,8 +11,8 @@
 // processing inbound heartbeats must never reset it, or a busy mesh would
 // starve our own publish cadence.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::{mpsc, watch};
 use tokio::time::{Duration, Instant};

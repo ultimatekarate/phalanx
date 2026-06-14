@@ -1,5 +1,5 @@
-use crate::clock::TrustedClock;
 use crate::NodeConfig;
+use crate::clock::TrustedClock;
 use phalanx_forensics::trust::{PeerEvaluator, ReputationGate};
 use phalanx_proto::prelude::*;
 use phalanx_proto::trust::MonotonicClock;
@@ -199,8 +199,8 @@ pub struct TrustRegistry {
     pub community_ids_tx: tokio::sync::watch::Sender<Vec<phalanx_proto::community::CommunityId>>,
 }
 
-fn default_community_ids_channel(
-) -> tokio::sync::watch::Sender<Vec<phalanx_proto::community::CommunityId>> {
+fn default_community_ids_channel()
+-> tokio::sync::watch::Sender<Vec<phalanx_proto::community::CommunityId>> {
     tokio::sync::watch::channel(Vec::new()).0
 }
 

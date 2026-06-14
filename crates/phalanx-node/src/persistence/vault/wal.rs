@@ -3,7 +3,7 @@
 // FileJournal's TransientJournal implementation: WAL chunk I/O,
 // egress salvage, workbench state, and revocation persistence.
 
-use super::crypto::{atomic_encrypted_write, read_encrypted_file, AEAD_NONCE_LEN};
+use super::crypto::{AEAD_NONCE_LEN, atomic_encrypted_write, read_encrypted_file};
 use crate::FileJournal;
 use async_trait::async_trait;
 use phalanx_forensics::cryptography::{decrypt_bytes, encrypt_bytes};

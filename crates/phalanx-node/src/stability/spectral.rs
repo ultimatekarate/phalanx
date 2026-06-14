@@ -3,7 +3,7 @@ use nalgebra::{Complex, DMatrix};
 
 use super::config::*;
 use super::jacobian::build_jacobian;
-use super::nonlinear::{compute_lyapunov_exponent, PartitionConfig};
+use super::nonlinear::{PartitionConfig, compute_lyapunov_exponent};
 
 // =====================================================================
 // SPECTRAL GAP & EIGENVECTOR ORTHOGONALITY ANALYSIS

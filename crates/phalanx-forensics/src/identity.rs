@@ -1,9 +1,9 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use phalanx_proto::community::{
-    CeremonyError, CeremonyMember, Community, CommunityAssemblyError, CommunityGrants, CommunityId,
-    CommunityVerifyError, MemberEntry, Quorum, Vouch, VouchRequest, VouchRequestPreview,
-    VouchResponse, VouchSignature, CEREMONY_RESPONSE_FRESHNESS_SECS, COMMUNITY_PAYLOAD_VERSION,
-    VOUCH_REQUEST_VERSION, VOUCH_RESPONSE_VERSION,
+    CEREMONY_RESPONSE_FRESHNESS_SECS, COMMUNITY_PAYLOAD_VERSION, CeremonyError, CeremonyMember,
+    Community, CommunityAssemblyError, CommunityGrants, CommunityId, CommunityVerifyError,
+    MemberEntry, Quorum, VOUCH_REQUEST_VERSION, VOUCH_RESPONSE_VERSION, Vouch, VouchRequest,
+    VouchRequestPreview, VouchResponse, VouchSignature,
 };
 use phalanx_proto::crypto::CryptoError;
 use phalanx_proto::network::{BleChallenge, BleResponse};
@@ -889,7 +889,7 @@ mod tests {
         let name = PetName::new("stale").unwrap();
         let quorum = Quorum::new(1).unwrap();
         let now = PhalanxTimestamp(10 * 60 * 60 * 1000); // 10 hours
-                                                         // joined_at 2h earlier — outside the 1h freshness window.
+        // joined_at 2h earlier — outside the 1h freshness window.
         let joined_at = PhalanxTimestamp(now.0 - 2 * 60 * 60 * 1000);
         let expires_at = PhalanxTimestamp(now.0 + 10 * 60_000);
 

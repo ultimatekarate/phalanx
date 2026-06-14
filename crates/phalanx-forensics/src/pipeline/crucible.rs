@@ -8,9 +8,9 @@ use phalanx_proto::evidence::WitnessEnvelope;
 use phalanx_proto::identity::Ownership;
 use phalanx_proto::prelude::*;
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::collections::btree_map::Entry as MapEntry;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry as MapEntry;
 use std::time::Duration;
 use std::time::Instant;
 use tracing::{debug, error, info, instrument, warn};

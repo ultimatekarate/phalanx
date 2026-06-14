@@ -2,10 +2,10 @@ use crate::vitals::HomeostaticConfig;
 use nalgebra::DMatrix;
 
 use super::config::*;
-use super::dyson::{compute_dyson_terms, evolve, ThreatProfile, TimeSeries};
+use super::dyson::{ThreatProfile, TimeSeries, compute_dyson_terms, evolve};
 use super::integrators::{
-    adaptive_step, advance_to, dopri5_step, interpolate_state, rk4_step, rk4_variational_step,
-    AdaptiveStepConfig, StepStatistics,
+    AdaptiveStepConfig, StepStatistics, adaptive_step, advance_to, dopri5_step, interpolate_state,
+    rk4_step, rk4_variational_step,
 };
 use super::jacobian::build_jacobian;
 

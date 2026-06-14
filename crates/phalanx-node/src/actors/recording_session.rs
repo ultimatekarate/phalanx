@@ -8,8 +8,8 @@
 use phalanx_proto::corroboration::ProximityWitness;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::identity::RecordingId;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::watch;
 
 /// State for the currently-active recording, if any. Recording is enabled

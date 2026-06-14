@@ -11,8 +11,8 @@ use phalanx_proto::evidence::{ForensicMetrics, StorageSequence, VideoShard};
 use phalanx_proto::time::PhalanxTimestamp;
 use phalanx_proto::types::{BlackLevel, Fps, PowerState};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use tokio::sync::{broadcast, mpsc};

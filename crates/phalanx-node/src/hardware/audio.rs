@@ -10,8 +10,8 @@ use phalanx_proto::prelude::*;
 use phalanx_proto::time::PhalanxTimestamp;
 use phalanx_proto::types::{ChannelCount, SampleRate};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
 use std::time::Instant;
@@ -168,7 +168,9 @@ impl PhalanxAudioThread {
 
                             // Transmission
                             if tx.send(actual_shard).await.is_err() {
-                                error!("Main channel closed (MeshSentinel dropped). Stopping Audio Processor.");
+                                error!(
+                                    "Main channel closed (MeshSentinel dropped). Stopping Audio Processor."
+                                );
                                 self.stop();
                                 break;
                             }

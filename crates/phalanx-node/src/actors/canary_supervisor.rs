@@ -27,8 +27,8 @@ use crate::actors::shutdown::ShutdownSignal;
 use crate::actors::storage::StorageCommand;
 use crate::clock::TrustedClock;
 use crate::trust::{ReputationProjection, TrustOracle};
-use crate::vitals::canary::{CanaryMonitor, CanaryState};
 use crate::vitals::HealthTracker;
+use crate::vitals::canary::{CanaryMonitor, CanaryState};
 
 /// Commands accepted by the canary supervisor.
 #[derive(Debug)]

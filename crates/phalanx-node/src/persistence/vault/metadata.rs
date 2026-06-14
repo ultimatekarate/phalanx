@@ -90,7 +90,7 @@ impl RecordingMetadataStore {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use phalanx_proto::evidence::{RecordingOptions, RECORDING_METADATA_VERSION};
+    use phalanx_proto::evidence::{RECORDING_METADATA_VERSION, RecordingOptions};
     use phalanx_proto::identity::PhalanxIdentity;
     use tempfile::tempdir;
 

@@ -1,7 +1,7 @@
-use chacha20poly1305::aead::Aead;
 use chacha20poly1305::KeyInit;
 use chacha20poly1305::XChaCha20Poly1305;
 use chacha20poly1305::XNonce;
+use chacha20poly1305::aead::Aead;
 use ed25519_dalek::Signer;
 use ed25519_dalek::{Signature, VerifyingKey}; // Crypto stays here!
 use phalanx_proto::crypto::CryptoError;
@@ -303,7 +303,9 @@ mod tests {
         // Because the tamper_result was an Err, we can't even construct a
         // RecordingResponse::Success(vec![...]) with this data.
 
-        info!("Forensic Boundary: Successfully verified that Gate 3 and Gate 4 block tampered evidence.");
+        info!(
+            "Forensic Boundary: Successfully verified that Gate 3 and Gate 4 block tampered evidence."
+        );
     }
 
     // ── PayloadCipher: encryption state machine ─────────────────────────

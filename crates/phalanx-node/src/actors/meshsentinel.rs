@@ -8,7 +8,7 @@ use crate::actors::ingestion::{IngestionActor, IngestionCommand};
 use crate::actors::media_egress::{MediaEgressActor, MediaEgressConfig};
 use crate::actors::playback::PlaybackCoordinator;
 use crate::actors::recording_session::RecordingSessionState;
-use crate::actors::recovery::{run_recovery, RecoveryContext, PROVIDERS_CHANNEL_BUFFER};
+use crate::actors::recovery::{PROVIDERS_CHANNEL_BUFFER, RecoveryContext, run_recovery};
 use crate::actors::retrieval::{RetrievalActor, RetrievalCommand};
 use crate::actors::revocation::RevocationCommand;
 use crate::actors::shutdown::ShutdownSignal;
@@ -18,9 +18,9 @@ use crate::actors::vitals_actor::VitalsCommand;
 use crate::clock::TrustedClock;
 use crate::config::NodeConfig;
 
-use crate::vitals::{HealthTracker, Homeostasis, LifecycleEvent, SystemGovernor};
 use crate::Guardian;
-use crate::{trust::TrustRegistry, StorageActor};
+use crate::vitals::{HealthTracker, Homeostasis, LifecycleEvent, SystemGovernor};
+use crate::{StorageActor, trust::TrustRegistry};
 
 use phalanx_forensics::policy::{IngressGovernor, TrafficGovernor};
 use phalanx_forensics::prelude::*;
@@ -40,7 +40,7 @@ use phalanx_proto::evidence::{AudioShard, PrnuPosterior, StorageSequence, VideoS
 use std::error::Error;
 use std::sync::Mutex;
 use tokio::task::JoinHandle;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 /// Returned when `spawn_playback` is invoked while a previous playback
 /// coordinator is still live. The playback singleton is enforced

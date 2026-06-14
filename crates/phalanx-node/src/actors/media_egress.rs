@@ -297,13 +297,17 @@ impl<E: EgressPort> MediaEgressActor<E> {
         match evidence {
             Evidence::Video(v) => {
                 if let Err(e) = v.payload.apply_encryption(&key) {
-                    tracing::error!("Video encryption failed — dropping shard to prevent plaintext broadcast: {e}");
+                    tracing::error!(
+                        "Video encryption failed — dropping shard to prevent plaintext broadcast: {e}"
+                    );
                     return false;
                 }
             }
             Evidence::Audio(a) => {
                 if let Err(e) = a.payload.apply_encryption(&key) {
-                    tracing::error!("Audio encryption failed — dropping shard to prevent plaintext broadcast: {e}");
+                    tracing::error!(
+                        "Audio encryption failed — dropping shard to prevent plaintext broadcast: {e}"
+                    );
                     return false;
                 }
             }

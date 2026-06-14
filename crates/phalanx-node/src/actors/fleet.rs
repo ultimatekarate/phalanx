@@ -7,8 +7,8 @@
 // spawned together. The storage/pipeline actors stay inline in `new()` because
 // they are interleaved with channel + Guardian setup and do not extract cleanly.
 
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;

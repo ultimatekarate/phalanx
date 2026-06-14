@@ -10,7 +10,7 @@
 // Run: cargo bench -p phalanx-forensics
 #![allow(clippy::expect_used)] // Bench setup — not production code.
 
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion};
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use ed25519_dalek::Signer;
 
 use phalanx_forensics::witness::WitnessAuthority;

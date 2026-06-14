@@ -270,8 +270,8 @@ pub fn verify_provenance_from_jpeg(
     thresholds: &LensThresholds,
 ) -> Result<(), ShardError> {
     use crate::transcode::decode_jpeg_to_yuv420;
-    use phalanx_lens::scalar::ScalarLens;
     use phalanx_lens::ForensicLens;
+    use phalanx_lens::scalar::ScalarLens;
     use phalanx_proto::types::BlackLevel;
 
     // Decode JPEG → YUV420 → extract Y-plane

@@ -12,7 +12,7 @@ use phalanx_proto::storage::PendingEgress;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{interval, Duration, Instant};
+use tokio::time::{Duration, Instant, interval};
 
 pub enum EgressCommand {
     Dispatch {

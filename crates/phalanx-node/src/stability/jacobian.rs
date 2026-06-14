@@ -28,13 +28,7 @@ pub fn build_jacobian(
     // Helper: derivative of scaler σ(x) = max(0, 1 − x/x_crit) w.r.t. x.
     // In the linear regime (x < x_crit): dσ/dx = −1/x_crit.
     // In the saturated regime (x ≥ x_crit): dσ/dx = 0.
-    let dscaler = |val: f64, crit: f64| -> f64 {
-        if val < crit {
-            -1.0 / crit
-        } else {
-            0.0
-        }
-    };
+    let dscaler = |val: f64, crit: f64| -> f64 { if val < crit { -1.0 / crit } else { 0.0 } };
 
     // Scaler values at the operating point (used as throughput multipliers).
     let sigma_s = (1.0 - op.vals[S] / cfg.s_crit).max(0.0);

@@ -61,7 +61,7 @@ MATLAB days, but MATLAB is a scripting language. Rust is not. I don't
 want to misrepresent my compiler knowledge. I'm only mostly sure that
 it works this way.
 */
-use crate::{ForensicLens, ANALYSIS_CROP_SIZE};
+use crate::{ANALYSIS_CROP_SIZE, ForensicLens};
 use phalanx_proto::evidence::ForensicMetrics;
 use phalanx_proto::types::BlackLevel;
 

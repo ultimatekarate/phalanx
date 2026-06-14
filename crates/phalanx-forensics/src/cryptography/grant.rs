@@ -1,8 +1,8 @@
 // crates/phalanx-forensics/src/cryptography/grant.rs
 use crate::cryptography::bridge::{ed_to_x25519_pk, ed_to_x25519_sk, resolve_did_pk};
 use chacha20poly1305::{
-    aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
+    aead::{Aead, KeyInit, Payload},
 };
 use phalanx_proto::crypto::{CryptoError, GrantPermissions, SealedLocator};
 use phalanx_proto::prelude::*;

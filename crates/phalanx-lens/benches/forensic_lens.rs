@@ -11,9 +11,9 @@
     clippy::arithmetic_side_effects  // Bench arithmetic — not production code.
 )]
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use phalanx_lens::scalar::ScalarLens;
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use phalanx_lens::ForensicLens;
+use phalanx_lens::scalar::ScalarLens;
 use phalanx_proto::types::BlackLevel;
 
 const WIDTH_1080P: usize = 1920;

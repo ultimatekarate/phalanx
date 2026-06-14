@@ -130,11 +130,11 @@ pub use persistence::vault::Guardian;
 pub use playback::sink::VideoPlayerSink;
 
 pub mod prelude {
+    pub use crate::NodeResult;
     pub use crate::clock::TrustedClock;
     pub use crate::config::NodeConfig;
     pub use crate::persistence::journal::FileJournal;
     pub use crate::persistence::vault::Guardian;
-    pub use crate::NodeResult;
 }
 
 pub type NodeResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;

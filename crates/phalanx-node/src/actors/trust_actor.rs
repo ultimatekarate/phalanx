@@ -11,7 +11,7 @@ use phalanx_proto::trust::{Offense, PetName, TrustError};
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 
 /// JSON-serializable peer summary for FFI transport.
 #[derive(Debug, Serialize)]
@@ -256,7 +256,7 @@ impl TrustActor {
                             "Dissolving community — zeroizing membership data"
                         );
                         community.dissolve(); // Consumes and zeroizes
-                                              // Re-sync projection without the dissolved community
+                        // Re-sync projection without the dissolved community
                         let community_data: Vec<_> = self
                             .registry
                             .communities

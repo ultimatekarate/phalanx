@@ -55,7 +55,7 @@ impl TrustArbiter {
                 let recovery_factor = (normalized * normalized).max(0.05);
                 let scaled_step = ((recovery_step as f64) * recovery_factor) as i64;
                 let effective_step = scaled_step.max(1); // At least 1 per interval
-                                                         // intervals is bounded by elapsed/interval_secs, safe to cast.
+                // intervals is bounded by elapsed/interval_secs, safe to cast.
                 #[allow(clippy::cast_possible_wrap)]
                 let total_recovery = (intervals as i64) * effective_step;
 
@@ -751,17 +751,19 @@ mod tests {
             .unwrap();
 
         // Verify full
-        assert!(gov
-            .try_allocate(mock_peer(), TrustLevel::Verified, SystemStress::Nominal)
-            .is_err());
+        assert!(
+            gov.try_allocate(mock_peer(), TrustLevel::Verified, SystemStress::Nominal)
+                .is_err()
+        );
 
         // RELEASE via Causal Feedback
         gov.release_slot(&peer);
 
         // Verify slot is now usable again
-        assert!(gov
-            .try_allocate(mock_peer(), TrustLevel::Verified, SystemStress::Nominal)
-            .is_ok());
+        assert!(
+            gov.try_allocate(mock_peer(), TrustLevel::Verified, SystemStress::Nominal)
+                .is_ok()
+        );
     }
 
     // ── Additional coverage: cooldown + should_verify_signature ──────────

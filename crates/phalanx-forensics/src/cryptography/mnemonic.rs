@@ -44,8 +44,7 @@ pub fn validate_mnemonic(phrase: &str) -> MnemonicValidation {
 mod tests {
     use super::*;
 
-    const VALID_ENGLISH: &str =
-        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const VALID_ENGLISH: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
     #[test]
     fn valid_english_phrase_validates() {

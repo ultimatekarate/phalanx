@@ -9,8 +9,8 @@
 use phalanx_node::vitals::{
     BatteryLevel, Celsius, HardwareProbe, LifecycleEvent, ThermalThresholds,
 };
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
 use tokio::sync::mpsc;
 
 /// Lock-free hardware probe driven by FFI calls from the Flutter layer.
@@ -130,11 +130,7 @@ impl HardwareProbe for MobileProbe {
 
     fn total_ram_bytes(&self) -> Option<u64> {
         let val = self.total_ram_bytes.load(Ordering::Relaxed);
-        if val > 0 {
-            Some(val)
-        } else {
-            None
-        }
+        if val > 0 { Some(val) } else { None }
     }
 
     fn lifecycle_events(&self) -> Option<mpsc::Receiver<LifecycleEvent>> {

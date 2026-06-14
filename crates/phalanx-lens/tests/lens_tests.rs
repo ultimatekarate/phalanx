@@ -9,8 +9,8 @@
     clippy::cast_possible_truncation
 )] // Test pixel buffers — bounds governed by loop invariants.
 
-use phalanx_lens::scalar::ScalarLens;
 use phalanx_lens::ForensicLens;
+use phalanx_lens::scalar::ScalarLens;
 use phalanx_proto::types::BlackLevel;
 
 const CROP_SIZE: usize = 256;
