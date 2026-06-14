@@ -33,6 +33,7 @@ pub use identity::crypto;
 pub use identity::trust;
 
 // network/*
+pub use network::deployment;
 pub use network::kademlia;
 pub use network::topic;
 pub use network::topology;
@@ -52,6 +53,10 @@ pub mod prelude {
 
     pub use crate::constants::{RECORDING_SIZE_THRESHOLD, RECORDING_TIME_THRESHOLD};
     // Contextual Nouns
+    pub use crate::network::deployment::{
+        DeploymentProfile, Incoherence, TopicSet, DEFAULT_MAX_CHUNK_SIZE_BYTES,
+        DEFAULT_PROTOCOL_VERSION,
+    };
     pub use crate::network::topic::MeshTopic;
     pub use crate::time::{PhalanxTimestamp, TimeError, TrustedClock};
     pub use crate::types::PhalanxPhysics;

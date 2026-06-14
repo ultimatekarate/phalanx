@@ -1,17 +1,30 @@
 // crates/phalanx-node/src/config.rs
+//
+// Configuration as topology selection. An operator chooses a `DeploymentProfile`
+// (the topology); the profile PINS every cross-binary coherence-critical value
+// (gossipsub topics, protocol version, wire chunk ceiling, replica policy, PSK
+// posture). Everything else is INSTANCE data — local, defaulted, operator-
+// tunable, and incapable of desyncing the mesh. Operator instance data is
+// validated when assembled; a hard incoherence fails loudly, a suspicious-but-
+// legal value is logged.
 
+use phalanx_proto::network::deployment::{DeploymentProfile, Incoherence};
 use phalanx_proto::prelude::{Did, MeshTopic};
 use phalanx_proto::types::{
     ByteCapacity, ChannelCount, Fps, RepairRatio, SampleRate, SymbolBundleSize, SymbolSize,
 };
 use serde::Deserialize;
-use std::path::PathBuf;
 
 use std::env;
 use std::fmt;
 use std::fs;
 use std::path::Path;
 
+/// The assembled, runtime node configuration. Produced by [`NodeConfig::assemble`]
+/// from a profile plus [`NodeInstance`] data — never deserialized directly from
+/// an operator file (the operator file is a [`NodeConfigFile`]). Keeps its
+/// `Deserialize` derive only so the ~35 programmatic constructors and tests that
+/// build it by value continue to compile.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct NodeConfig {
@@ -20,74 +33,45 @@ pub struct NodeConfig {
     pub hardware: HardwareConfig,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct IdentityConfig {
-    pub did: Did,
-    pub key_path: PathBuf,
-}
-
+/// The full network configuration consumed by the transport. Profile-pinned
+/// fields (protocol version, topics, chunk ceiling, PSK, replica target) are
+/// populated by [`NetworkConfig::from_profile`]; the remainder is instance data.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkConfig {
-    #[serde(default = "default_protocol_version")]
+    // ── Profile-pinned (coherence-critical; sourced from DeploymentProfile) ──
     pub protocol_version: String,
     pub max_chunk_size_bytes: usize,
-    /// Gossipsub media/control topics. Defaults are the canonical well-known
-    /// topics from `MeshTopic`'s constructors — the same values the Stronghold
-    /// compiles in, so a default node and a default Stronghold share a mesh.
-    /// Gossipsub topics are exact-match strings: override these only with the
-    /// same value on every peer.
-    #[serde(default = "default_video_topic")]
     pub video_topic: MeshTopic,
-    #[serde(default = "default_audio_topic")]
     pub audio_topic: MeshTopic,
-    #[serde(default = "default_control_topic")]
     pub control_topic: MeshTopic,
-    pub cleanup_interval_secs: u64,
+    pub revocation_topic: MeshTopic,
+    /// When true, the node refuses to start without a valid PSK (no silent
+    /// fallback to unencrypted transport).
+    pub require_psk: bool,
+    /// Target number of distinct Stronghold custody replicas (K) before a
+    /// recording is considered safely in custody. Policy threshold.
+    pub target_replica_count: usize,
+
+    // ── Instance (local, operator-tunable) ──────────────────────────────────
     #[serde(default)]
     pub bootstrap_peers: Vec<String>,
-    #[serde(default = "default_service_key")]
-    pub guardian_service_key: String,
-    #[serde(default = "default_max_connections")]
-    pub max_connections: usize,
-    /// N3 FIX: When true, the node will refuse to start without a valid PSK.
-    /// This prevents silent fallback to unencrypted transport when the swarm key
-    /// is missing or corrupt.
-    #[serde(default)]
-    pub require_psk: bool,
-    /// RaptorQ fountain code repair ratio. 1.0 = source symbols only, 1.5 = 50% extra.
-    /// Higher ratios increase resilience to packet loss at the cost of bandwidth.
+    /// RaptorQ fountain code repair ratio. Self-describing on the wire (the OTI
+    /// is serialized into every chunk), so it is instance data, not pinned.
     #[serde(default)]
     pub repair_ratio: RepairRatio,
-    /// RaptorQ symbol payload size in bytes. Must fit within a single UDP datagram.
+    /// RaptorQ symbol payload size in bytes. Self-describing via the OTI.
     #[serde(default)]
     pub symbol_size: SymbolSize,
-    /// Number of RaptorQ symbols bundled into a single `egress.publish()` call.
-    /// Default 1 preserves single-symbol-per-publish behavior. Larger values
-    /// reduce the message-rate demand on the per-peer outbound queue at the
-    /// cost of larger individual messages and coarser-grained loss.
+    /// RaptorQ symbols bundled per `egress.publish()` call. Self-describing.
     #[serde(default)]
     pub symbol_bundle_size: SymbolBundleSize,
     /// Multiaddr strings the swarm will listen on.
-    /// Default: `["/ip4/0.0.0.0/udp/0/quic-v1", "/ip4/0.0.0.0/tcp/0"]`.
     #[serde(default = "default_listen_addresses")]
     pub listen_addresses: Vec<String>,
-    /// Topic for revocation token propagation (Cryptographic Forgetting).
-    #[serde(default = "default_revocation_topic")]
-    pub revocation_topic: MeshTopic,
-    /// Archival custody peers (Strongholds) to push recordings to directly, for
-    /// export-staging durability. Empty = the directed-push feature is inert
-    /// (mesh broadcast still applies).
+    /// Archival custody peers (Strongholds) to push recordings to directly.
     #[serde(default)]
     pub archival_peers: Vec<ArchivalPeer>,
-    /// Target number of distinct Stronghold custody replicas (K) before a
-    /// recording is considered safely in custody. Policy threshold.
-    #[serde(default = "default_target_replica_count")]
-    pub target_replica_count: usize,
-}
-
-fn default_target_replica_count() -> usize {
-    2
 }
 
 /// A configured archival custody peer (a Stronghold). One block makes the
@@ -96,19 +80,15 @@ fn default_target_replica_count() -> usize {
 /// it (the peer id extracted from the multiaddr), and SEALS export grants to it:
 ///
 /// ```toml
-/// [[network.archival_peers]]
+/// [[instance.network.archival_peers]]
 /// address = "/ip4/10.0.0.5/udp/4001/quic-v1/p2p/12D3KooW...the-stronghold"
 /// stronghold_did = "did:key:z...the-stronghold"
 /// ```
 ///
 /// `address` is a **dialable multiaddr** whose `/p2p/<peer-id>` tail is also the
 /// push target. `stronghold_did`, when set, is the Stronghold's `did:key` used
-/// to *seal* an export grant (the publisher re-derives the recording's DEK and
-/// seals it with `export` permission, authorizing autonomous export). The DID
-/// and the address identify the same Stronghold via different keypairs, so both
-/// are given explicitly — sealing is offline (the public key falls out of
-/// `did:key`). Absent DID ⇒ custody-only push (the Stronghold holds ciphertext
-/// it cannot export).
+/// to *seal* an export grant. Absent DID ⇒ custody-only push (the Stronghold
+/// holds ciphertext it cannot export).
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ArchivalPeer {
@@ -119,8 +99,8 @@ pub struct ArchivalPeer {
 
 impl ArchivalPeer {
     /// The push target: the libp2p peer id from the `/p2p/<peer-id>` tail of the
-    /// dial multiaddr. `None` if the address carries no peer id (not dialable to
-    /// a specific peer, so it cannot be a directed-push target).
+    /// dial multiaddr. `None` if the address carries no peer id (so it cannot be
+    /// a directed-push target).
     #[must_use]
     pub fn peer_id(&self) -> Option<String> {
         let (_, after) = self.address.rsplit_once("/p2p/")?;
@@ -131,9 +111,8 @@ impl ArchivalPeer {
 
 impl NetworkConfig {
     /// Peers the node dials at startup: the bootstrap set plus every archival
-    /// Stronghold's dial address, so directed push has a live connection (custody
-    /// peers are otherwise never dialed, and the transport rejects pushes to
-    /// unconnected peers). Deduplicated; bootstrap order preserved.
+    /// Stronghold's dial address, so directed push has a live connection.
+    /// Deduplicated; bootstrap order preserved.
     #[must_use]
     pub fn dial_peers(&self) -> Vec<String> {
         let mut peers = self.bootstrap_peers.clone();
@@ -144,37 +123,48 @@ impl NetworkConfig {
         }
         peers
     }
-}
 
-#[derive(Debug)]
-pub enum ConfigError {
-    NotFound(String),
-    ParseError(String),
-    PermissionDenied(String),
-}
-
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotFound(msg) => write!(f, "Configuration not found: {msg}"),
-            Self::ParseError(msg) => write!(f, "Failed to parse configuration: {msg}"),
-            Self::PermissionDenied(msg) => write!(f, "Permission denied reading config: {msg}"),
+    /// Project a profile (pinned fields) over instance data (everything else).
+    #[must_use]
+    pub fn from_profile(profile: DeploymentProfile, instance: &NetworkInstance) -> Self {
+        let topics = profile.topics();
+        Self {
+            protocol_version: profile.protocol_version().to_string(),
+            max_chunk_size_bytes: profile.max_chunk_size_bytes(),
+            video_topic: topics.video,
+            audio_topic: topics.audio,
+            control_topic: topics.control,
+            revocation_topic: topics.revocation,
+            require_psk: profile.psk_posture().require_psk(),
+            target_replica_count: profile.replica_policy().target_replica_count,
+            bootstrap_peers: instance.bootstrap_peers.clone(),
+            repair_ratio: instance.repair_ratio,
+            symbol_size: instance.symbol_size,
+            symbol_bundle_size: instance.symbol_bundle_size,
+            listen_addresses: instance.listen_addresses.clone(),
+            archival_peers: instance.archival_peers.clone(),
         }
     }
 }
 
-impl std::error::Error for ConfigError {}
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self::from_profile(
+            DeploymentProfile::default_profile(),
+            &NetworkInstance::default(),
+        )
+    }
+}
 
-/// The Root Configuration for the Phalanx Engine.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct StorageConfig {
+    #[serde(default = "default_vault_path")]
     pub vault_path: String,
+    #[serde(default = "default_buffer")]
     pub max_video_buffer: usize,
+    #[serde(default = "default_buffer")]
     pub max_audio_buffer: usize,
-    pub max_peers: usize,
-    pub stale_session_threshold: u64,
-    pub shards_needed_to_archive: usize,
     #[serde(default = "default_max_storage")]
     pub max_storage_bytes: ByteCapacity,
     #[serde(default = "default_max_foreign")]
@@ -189,15 +179,17 @@ pub struct StorageConfig {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct HardwareConfig {
+    #[serde(default = "default_camera_fps")]
     pub camera_fps: Fps,
+    #[serde(default = "default_audio_sample_rate")]
     pub audio_sample_rate: SampleRate,
+    #[serde(default = "default_audio_channels")]
     pub audio_channels: ChannelCount,
 }
 
 impl HardwareConfig {
-    /// Re-wraps deserialized values through validating constructors.
-    /// Call after TOML/env deserialization to enforce invariants that
-    /// `#[serde(transparent)]` alone cannot guarantee (e.g. zero FPS).
+    /// Re-wraps deserialized values through validating constructors, enforcing
+    /// invariants that `#[serde(transparent)]` alone cannot (e.g. zero FPS).
     #[must_use]
     pub fn validated(self) -> Self {
         Self {
@@ -208,14 +200,138 @@ impl HardwareConfig {
     }
 }
 
+// ── Operator file schema: profile + instance ────────────────────────────────
+
+/// The instance (local, operator-tunable) subset of the network config. The
+/// profile-pinned fields are *structurally absent* here — there is no field for
+/// `protocol_version`, the topics, the chunk ceiling, `require_psk`, or
+/// `target_replica_count`, so an operator cannot set (and thereby desync) them.
+/// `deny_unknown_fields` turns an attempt into a parse error.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkInstance {
+    #[serde(default)]
+    pub bootstrap_peers: Vec<String>,
+    #[serde(default)]
+    pub repair_ratio: RepairRatio,
+    #[serde(default)]
+    pub symbol_size: SymbolSize,
+    #[serde(default)]
+    pub symbol_bundle_size: SymbolBundleSize,
+    #[serde(default = "default_listen_addresses")]
+    pub listen_addresses: Vec<String>,
+    #[serde(default)]
+    pub archival_peers: Vec<ArchivalPeer>,
+}
+
+impl Default for NetworkInstance {
+    fn default() -> Self {
+        Self {
+            bootstrap_peers: vec![],
+            repair_ratio: RepairRatio::default(),
+            symbol_size: SymbolSize::default(),
+            symbol_bundle_size: SymbolBundleSize::default(),
+            listen_addresses: default_listen_addresses(),
+            archival_peers: vec![],
+        }
+    }
+}
+
+/// All operator-tunable instance data, grouped by subsystem. Storage and
+/// hardware are entirely instance, so the runtime structs are reused directly.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct NodeInstance {
+    #[serde(default)]
+    pub storage: StorageConfig,
+    #[serde(default)]
+    pub network: NetworkInstance,
+    #[serde(default)]
+    pub hardware: HardwareConfig,
+}
+
+/// The on-disk operator config schema. A bare `profile = "..."` file is valid;
+/// everything under `[instance]` is optional and defaulted.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct NodeConfigFile {
+    #[serde(default)]
+    pub profile: DeploymentProfile,
+    #[serde(default)]
+    pub instance: NodeInstance,
+}
+
+// ── The validated-config edge newtype ────────────────────────────────────────
+
+/// A [`NodeConfig`] that has passed the boot coherence gate.
+///
+/// The only constructors are [`NodeConfig::assemble`], [`NodeConfig::for_profile`],
+/// and [`NodeConfig::load`] — each runs the gate. The boot path calls
+/// [`ValidatedNodeConfig::into_inner`] to hand the plain config to the actors;
+/// the typestate is a transient proof token (edge newtype), not threaded inward.
+///
+/// Forgery resistance is structural: the field is private (no struct literal)
+/// and the type has no `Deserialize` impl (it cannot be conjured from bytes).
+///
+/// The field is private — no struct literal outside this module:
+///
+/// ```compile_fail
+/// use phalanx_node::config::{NodeConfig, ValidatedNodeConfig};
+/// let _forge = ValidatedNodeConfig(NodeConfig::default());
+/// ```
+///
+/// It has no `Deserialize` impl — it cannot be conjured from attacker bytes:
+///
+/// ```compile_fail
+/// fn assert_de<T: serde::de::DeserializeOwned>() {}
+/// assert_de::<phalanx_node::config::ValidatedNodeConfig>();
+/// ```
+#[derive(Debug, Clone)]
+pub struct ValidatedNodeConfig(NodeConfig);
+
+impl ValidatedNodeConfig {
+    /// Consume the proof token and yield the plain config for the actors.
+    #[must_use]
+    pub fn into_inner(self) -> NodeConfig {
+        self.0
+    }
+
+    /// Borrow the validated config without consuming the token.
+    #[must_use]
+    pub fn get(&self) -> &NodeConfig {
+        &self.0
+    }
+}
+
+#[derive(Debug)]
+pub enum ConfigError {
+    NotFound(String),
+    ParseError(String),
+    PermissionDenied(String),
+    Incoherent(Incoherence),
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound(msg) => write!(f, "Configuration not found: {msg}"),
+            Self::ParseError(msg) => write!(f, "Failed to parse configuration: {msg}"),
+            Self::PermissionDenied(msg) => write!(f, "Permission denied reading config: {msg}"),
+            Self::Incoherent(e) => write!(f, "Incoherent configuration: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+impl From<Incoherence> for ConfigError {
+    fn from(e: Incoherence) -> Self {
+        Self::Incoherent(e)
+    }
+}
+
 // --- Helper Functions and Initializers ---
 
-fn default_service_key() -> String {
-    "phalanx/service/storage/v1".to_string()
-}
-fn default_protocol_version() -> String {
-    "/phalanx/1.0.0".to_string()
-}
 fn default_max_storage() -> ByteCapacity {
     ByteCapacity(1_000_000_000)
 }
@@ -228,8 +344,14 @@ fn default_max_foreign_per_owner() -> ByteCapacity {
 fn default_evidence_ttl() -> u64 {
     300
 }
-fn default_max_connections() -> usize {
-    192
+fn default_vault_path() -> String {
+    // Dev-only default. The shipped sentinel binary overrides this with an
+    // OS-correct data dir via `crate::paths::NodePaths` (and mobile overrides
+    // it with the app sandbox dir); see `paths::DEV_DEFAULT_VAULT_PATH`.
+    "./sim_vault".to_string()
+}
+fn default_buffer() -> usize {
+    100
 }
 fn default_listen_addresses() -> Vec<String> {
     vec![
@@ -237,55 +359,22 @@ fn default_listen_addresses() -> Vec<String> {
         "/ip4/0.0.0.0/tcp/0".to_string(),
     ]
 }
-fn default_revocation_topic() -> MeshTopic {
-    MeshTopic::revocation()
+fn default_camera_fps() -> Fps {
+    Fps::new(10)
 }
-fn default_video_topic() -> MeshTopic {
-    MeshTopic::video()
+fn default_audio_sample_rate() -> SampleRate {
+    SampleRate::new(16_000)
 }
-fn default_audio_topic() -> MeshTopic {
-    MeshTopic::audio()
-}
-fn default_control_topic() -> MeshTopic {
-    MeshTopic::control()
-}
-
-impl Default for NetworkConfig {
-    fn default() -> Self {
-        Self {
-            protocol_version: default_protocol_version(),
-            max_chunk_size_bytes: 8192,
-            video_topic: default_video_topic(),
-            audio_topic: default_audio_topic(),
-            control_topic: default_control_topic(),
-            cleanup_interval_secs: 60,
-            bootstrap_peers: vec![],
-            guardian_service_key: default_service_key(),
-            max_connections: default_max_connections(),
-            require_psk: false,
-            repair_ratio: RepairRatio::default(),
-            symbol_size: SymbolSize::default(),
-            symbol_bundle_size: SymbolBundleSize::default(),
-            listen_addresses: default_listen_addresses(),
-            revocation_topic: default_revocation_topic(),
-            archival_peers: vec![],
-            target_replica_count: default_target_replica_count(),
-        }
-    }
+fn default_audio_channels() -> ChannelCount {
+    ChannelCount::new(1)
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            // Dev-only default. The shipped sentinel binary overrides this with
-            // an OS-correct data dir via `crate::paths::NodePaths` (and mobile
-            // overrides it with the app sandbox dir); see `paths::DEV_DEFAULT_VAULT_PATH`.
-            vault_path: "./sim_vault".to_string(),
-            max_video_buffer: 100,
-            max_audio_buffer: 100,
-            max_peers: 10,
-            stale_session_threshold: 3600,
-            shards_needed_to_archive: 10,
+            vault_path: default_vault_path(),
+            max_video_buffer: default_buffer(),
+            max_audio_buffer: default_buffer(),
             max_storage_bytes: default_max_storage(),
             max_foreign_storage_bytes: default_max_foreign(),
             max_foreign_per_owner_bytes: default_max_foreign_per_owner(),
@@ -297,71 +386,177 @@ impl Default for StorageConfig {
 impl Default for HardwareConfig {
     fn default() -> Self {
         Self {
-            camera_fps: Fps::new(10),
-            audio_sample_rate: SampleRate::new(16_000),
-            audio_channels: ChannelCount::new(1),
+            camera_fps: default_camera_fps(),
+            audio_sample_rate: default_audio_sample_rate(),
+            audio_channels: default_audio_channels(),
         }
     }
 }
 
 impl NodeConfig {
-    #[allow(clippy::missing_errors_doc)]
-    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
-        let content = fs::read_to_string(path)?;
-        let mut config: NodeConfig = toml::from_str(&content)?;
-        config.hardware = config.hardware.validated();
-        Ok(config)
+    /// Build a [`NodeConfig`] from a profile (pinned fields) and instance data.
+    fn from_parts(profile: DeploymentProfile, instance: &NodeInstance) -> Self {
+        Self {
+            storage: instance.storage.clone(),
+            network: NetworkConfig::from_profile(profile, &instance.network),
+            hardware: instance.hardware.clone().validated(),
+        }
+    }
+
+    /// Assemble and validate a config from a profile + operator instance data.
+    ///
+    /// Hard incoherence (a deployment guaranteed broken from this binary's own
+    /// viewpoint) returns `Err`. Suspicious-but-legal values are logged via
+    /// `tracing::warn!` and do not block boot.
+    ///
+    /// # Errors
+    /// Returns [`Incoherence`] for a hard coherence violation (e.g. an archival
+    /// custody peer with no dialable `/p2p/` tail).
+    pub fn assemble(
+        profile: DeploymentProfile,
+        instance: &NodeInstance,
+    ) -> Result<ValidatedNodeConfig, Incoherence> {
+        let config = Self::from_parts(profile, instance);
+        validate_node(&config, profile)?;
+        Ok(ValidatedNodeConfig(config))
+    }
+
+    /// Assemble from a profile with default instance data. Infallible in
+    /// practice (defaults are coherent) but returns `Result` for uniformity.
+    ///
+    /// # Errors
+    /// Propagates [`Incoherence`] from [`NodeConfig::assemble`].
+    pub fn for_profile(profile: DeploymentProfile) -> Result<ValidatedNodeConfig, Incoherence> {
+        Self::assemble(profile, &NodeInstance::default())
+    }
+
+    /// Load a validated config from a TOML file (`profile = "..."` + optional
+    /// `[instance]` tables).
+    ///
+    /// # Errors
+    /// [`ConfigError::ParseError`] on IO/TOML failure, [`ConfigError::Incoherent`]
+    /// on a hard coherence violation.
+    pub fn load<P: AsRef<Path>>(path: P) -> Result<ValidatedNodeConfig, ConfigError> {
+        let content =
+            fs::read_to_string(path).map_err(|e| ConfigError::ParseError(e.to_string()))?;
+        let file: NodeConfigFile =
+            toml::from_str(&content).map_err(|e| ConfigError::ParseError(e.to_string()))?;
+        Ok(Self::assemble(file.profile, &file.instance)?)
     }
 
     /// Load configuration from the `PHALANX_CONFIG` environment variable.
     ///
-    /// - If `PHALANX_CONFIG` is set, the file **must** parse successfully —
-    ///   a warning is emitted and compiled defaults are used on failure.
-    /// - If `PHALANX_CONFIG` is not set, compiled defaults are used directly.
+    /// - `PHALANX_CONFIG` set: the file **must** parse and cohere, else `Err`
+    ///   (loud failure — no silent fallback to defaults).
+    /// - `PHALANX_CONFIG` unset: the default profile is used, logged loudly.
     ///   This is the normal path on mobile (Flutter provides config via FFI).
-    #[must_use]
-    pub fn load_from_env() -> Self {
+    ///
+    /// # Errors
+    /// Propagates [`ConfigError`] from [`NodeConfig::load`].
+    pub fn load_from_env() -> Result<ValidatedNodeConfig, ConfigError> {
         match env::var("PHALANX_CONFIG") {
-            Ok(path) => Self::load(&path).unwrap_or_else(|e| {
+            Ok(path) => Self::load(&path),
+            Err(_) => {
+                let profile = DeploymentProfile::default_profile();
                 tracing::warn!(
                     target: "phalanx::config",
-                    path = %path,
-                    error = %e,
-                    "PHALANX_CONFIG set but failed to load — falling back to compiled defaults"
+                    profile = profile.name(),
+                    "PHALANX_CONFIG not set — starting with the default deployment profile"
                 );
-                Self::default()
-            }),
-            Err(_) => Self::default(),
+                Ok(Self::for_profile(profile)?)
+            }
         }
     }
 
-    /// Restored: Specifically for simulation environments (src/sim.rs).
+    /// Simulation defaults (the `Simulation` profile, default instance).
     #[must_use]
     pub fn test_defaults() -> Self {
-        let mut cfg = Self::default();
-        cfg.network.cleanup_interval_secs = 5; // Aggressive cleanup for tests
-        cfg
+        Self::from_parts(DeploymentProfile::Simulation, &NodeInstance::default())
     }
 
     #[must_use]
     pub fn test_salvage_on_node_death() -> Self {
-        let mut cfg = Self::default();
+        let mut cfg = Self::test_defaults();
         cfg.storage.vault_path = "sim_vault".to_string();
-        // Aggressive cleanup to trigger salvage within the test's sleep window
-        cfg.network.cleanup_interval_secs = 1;
         cfg
     }
 }
 
 impl Default for NodeConfig {
-    /// Provides the standard clinical default configuration.
+    /// The standard default configuration: the default profile, default instance.
     fn default() -> Self {
-        Self {
-            network: NetworkConfig::default(),
-            storage: StorageConfig::default(),
-            hardware: HardwareConfig::default(),
+        Self::from_parts(
+            DeploymentProfile::default_profile(),
+            &NodeInstance::default(),
+        )
+    }
+}
+
+/// Boot coherence validation over assembled instance data. Hard violations
+/// return `Err`; suspicious-but-legal values are logged and tolerated.
+fn validate_node(config: &NodeConfig, profile: DeploymentProfile) -> Result<(), Incoherence> {
+    let net = &config.network;
+
+    // HARD: a configured archival custody peer that cannot be dialed to a
+    // specific peer is a directed-push target that can never receive a push.
+    for peer in &net.archival_peers {
+        if peer.peer_id().is_none() {
+            return Err(Incoherence::UndialableArchivalPeer {
+                address: peer.address.clone(),
+            });
         }
     }
+
+    // WARN: target replica count the operator cannot meet with the configured
+    // Strongholds. `target_replica_count` is a log-only policy field, so this
+    // must not block boot.
+    if net.target_replica_count > net.archival_peers.len() {
+        tracing::warn!(
+            target: "phalanx::config",
+            target_replica_count = net.target_replica_count,
+            archival_peers = net.archival_peers.len(),
+            "target_replica_count exceeds configured archival peers — custody quorum cannot be met"
+        );
+    }
+
+    // WARN: archival peers on a profile with no Stronghold role.
+    if !profile.has_stronghold_role() && !net.archival_peers.is_empty() {
+        tracing::warn!(
+            target: "phalanx::config",
+            profile = profile.name(),
+            "profile has no Stronghold role but archival peers are configured"
+        );
+    }
+
+    // WARN: storage caps out of nesting order (silent-incoherence leak).
+    let per_owner = config.storage.max_foreign_per_owner_bytes.0;
+    let foreign = config.storage.max_foreign_storage_bytes.0;
+    let total = config.storage.max_storage_bytes.0;
+    if per_owner > foreign || foreign > total {
+        tracing::warn!(
+            target: "phalanx::config",
+            max_foreign_per_owner_bytes = per_owner,
+            max_foreign_storage_bytes = foreign,
+            max_storage_bytes = total,
+            "storage caps out of order: expected per_owner <= foreign <= total"
+        );
+    }
+
+    // WARN: a single egress bundle that exceeds this node's own chunk ceiling
+    // would be rejected by its own inbound gate at peers with the same cap.
+    let bundle = usize::try_from(net.symbol_bundle_size.get()).unwrap_or(usize::MAX);
+    if let Some(product) = bundle.checked_mul(net.symbol_size.0) {
+        if product > net.max_chunk_size_bytes {
+            tracing::warn!(
+                target: "phalanx::config",
+                bundle_bytes = product,
+                max_chunk_size_bytes = net.max_chunk_size_bytes,
+                "symbol_bundle_size × symbol_size exceeds max_chunk_size_bytes — egress bundles may be rejected"
+            );
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -373,8 +568,11 @@ impl Default for NodeConfig {
 )]
 mod validation_tests {
     use super::*;
+    use phalanx_proto::network::deployment::{
+        DEFAULT_MAX_CHUNK_SIZE_BYTES, DEFAULT_PROTOCOL_VERSION,
+    };
 
-    // ── Turnkey archival-peer targeting (M2.5) ──────────────────────────
+    // ── Turnkey archival-peer targeting ─────────────────────────────────────
 
     #[test]
     fn archival_peer_extracts_peer_id_from_multiaddr() {
@@ -387,7 +585,6 @@ mod validation_tests {
 
     #[test]
     fn archival_peer_peer_id_is_none_without_p2p_component() {
-        // A bare transport multiaddr names no specific peer — not a push target.
         let p = ArchivalPeer {
             address: "/ip4/10.0.0.5/udp/4001/quic-v1".to_string(),
             stronghold_did: None,
@@ -397,7 +594,6 @@ mod validation_tests {
 
     #[test]
     fn archival_peer_peer_id_ignores_trailing_protocols() {
-        // A relay-circuit suffix after /p2p/<id> must not corrupt the peer id.
         let p = ArchivalPeer {
             address: "/ip4/1.2.3.4/tcp/4001/p2p/12D3KooWRelay/p2p-circuit".to_string(),
             stronghold_did: None,
@@ -414,7 +610,6 @@ mod validation_tests {
                 address: "/ip4/2.2.2.2/tcp/2/p2p/12D3KooWA".to_string(),
                 stronghold_did: None,
             },
-            // Duplicate of a bootstrap entry — must not be dialed twice.
             ArchivalPeer {
                 address: "/ip4/1.1.1.1/tcp/1".to_string(),
                 stronghold_did: None,
@@ -429,42 +624,132 @@ mod validation_tests {
         );
     }
 
-    // ── Topic-default alignment (gossipsub topics are exact-match strings) ──
+    // ── Profile projection ──────────────────────────────────────────────────
 
     #[test]
-    fn default_topics_are_the_canonical_proto_constructors() {
-        // Regression: these defaults were once raw strings ("/phalanx/video")
-        // that disagreed with the Stronghold's "/phalanx/video/1.0.0", so a
-        // default node and a default Stronghold shared no media topic.
+    fn default_projects_canonical_topics_and_pinned_wire_values() {
         let net = NetworkConfig::default();
         assert_eq!(net.video_topic, MeshTopic::video());
         assert_eq!(net.audio_topic, MeshTopic::audio());
         assert_eq!(net.control_topic, MeshTopic::control());
         assert_eq!(net.revocation_topic, MeshTopic::revocation());
+        assert_eq!(net.protocol_version, DEFAULT_PROTOCOL_VERSION);
+        assert_eq!(net.max_chunk_size_bytes, DEFAULT_MAX_CHUNK_SIZE_BYTES);
     }
 
     #[test]
-    fn topics_omitted_from_config_file_deserialize_to_canonical_defaults() {
-        let net: NetworkConfig = toml::from_str(
+    fn solo_device_pins_zero_replicas_community_pins_one() {
+        let solo = NodeConfig::for_profile(DeploymentProfile::SoloDevice)
+            .unwrap()
+            .into_inner();
+        assert_eq!(solo.network.target_replica_count, 0);
+        assert!(!solo.network.require_psk);
+
+        let community = NodeConfig::for_profile(DeploymentProfile::CommunityWithStronghold)
+            .unwrap()
+            .into_inner();
+        assert_eq!(community.network.target_replica_count, 1);
+    }
+
+    #[test]
+    fn high_risk_pins_psk_required() {
+        let cfg = NodeConfig::for_profile(DeploymentProfile::HighRiskCrossBorder)
+            .unwrap()
+            .into_inner();
+        assert!(cfg.network.require_psk);
+        assert_eq!(cfg.network.target_replica_count, 2);
+    }
+
+    // ── File schema: profile selection + pinned-field absence ───────────────
+
+    #[test]
+    fn bare_profile_file_uses_named_profile_and_default_instance() {
+        let file: NodeConfigFile =
+            toml::from_str("profile = \"community_with_stronghold\"").expect("TOML parses");
+        assert_eq!(file.profile, DeploymentProfile::CommunityWithStronghold);
+        let cfg = NodeConfig::assemble(file.profile, &file.instance)
+            .unwrap()
+            .into_inner();
+        assert_eq!(cfg.network.video_topic, MeshTopic::video());
+        assert_eq!(cfg.network.protocol_version, DEFAULT_PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn omitted_profile_defaults_to_solo_device() {
+        let file: NodeConfigFile = toml::from_str("").expect("empty TOML parses");
+        assert_eq!(file.profile, DeploymentProfile::default_profile());
+        assert_eq!(file.profile, DeploymentProfile::SoloDevice);
+    }
+
+    #[test]
+    fn internal_profile_is_not_selectable_from_a_file() {
+        // `#[serde(skip)]` removes Development/Simulation from the deserializer.
+        let parsed: Result<NodeConfigFile, _> = toml::from_str("profile = \"simulation\"");
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn a_pinned_field_in_the_instance_table_is_a_parse_error() {
+        // `protocol_version` is profile-pinned and structurally absent from
+        // NetworkInstance; deny_unknown_fields rejects it.
+        let parsed: Result<NodeConfigFile, _> = toml::from_str(
             r#"
-            max_chunk_size_bytes = 8192
-            cleanup_interval_secs = 60
+            profile = "solo_device"
+            [instance.network]
+            protocol_version = "/phalanx/9.9.9"
+            "#,
+        );
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn instance_network_tunables_are_accepted() {
+        let file: NodeConfigFile = toml::from_str(
+            r#"
+            profile = "solo_device"
+            [instance.network]
+            bootstrap_peers = ["/ip4/1.2.3.4/tcp/4001"]
             "#,
         )
         .expect("TOML parses");
-        assert_eq!(net.video_topic, MeshTopic::video());
-        assert_eq!(net.audio_topic, MeshTopic::audio());
-        assert_eq!(net.control_topic, MeshTopic::control());
+        assert_eq!(
+            file.instance.network.bootstrap_peers,
+            vec!["/ip4/1.2.3.4/tcp/4001".to_string()]
+        );
     }
 
-    // The purpose of `HardwareConfig::validated()` is to repair values that
-    // slipped through `#[serde(transparent)]` deserialization (which bypasses
-    // `Fps::new`, `SampleRate::new`, `ChannelCount::new`). We test that
-    // out-of-range TOML values are clamped to safe bounds.
+    // ── Boot validation ─────────────────────────────────────────────────────
+
+    #[test]
+    fn undialable_archival_peer_is_a_hard_incoherence() {
+        let mut instance = NodeInstance::default();
+        instance.network.archival_peers = vec![ArchivalPeer {
+            address: "/ip4/10.0.0.5/udp/4001/quic-v1".to_string(), // no /p2p tail
+            stronghold_did: None,
+        }];
+        let result = NodeConfig::assemble(DeploymentProfile::CommunityWithStronghold, &instance);
+        assert!(matches!(
+            result,
+            Err(Incoherence::UndialableArchivalPeer { .. })
+        ));
+    }
+
+    #[test]
+    fn dialable_archival_peer_assembles() {
+        let mut instance = NodeInstance::default();
+        instance.network.archival_peers = vec![ArchivalPeer {
+            address: "/ip4/10.0.0.5/udp/4001/quic-v1/p2p/12D3KooWStronghold".to_string(),
+            stronghold_did: None,
+        }];
+        assert!(
+            NodeConfig::assemble(DeploymentProfile::CommunityWithStronghold, &instance).is_ok()
+        );
+    }
+
+    // ── HardwareConfig::validated() repairs out-of-range deserialized values ─
 
     #[test]
     fn validated_clamps_zero_fps_to_one() {
-        // `Fps` has a floor of 1 — zero would divide-by-zero downstream.
         let cfg: HardwareConfig = toml::from_str(
             r#"
             camera_fps = 0
@@ -474,7 +759,6 @@ mod validation_tests {
         )
         .expect("TOML parses");
         assert_eq!(cfg.camera_fps.get(), 0, "serde accepts raw zero");
-
         let v = cfg.validated();
         assert_eq!(
             v.camera_fps.get(),
@@ -485,8 +769,6 @@ mod validation_tests {
 
     #[test]
     fn validated_clamps_sample_rate_above_maximum() {
-        // SampleRate::new clamps to [1, 192_000]. A malicious or wrong TOML
-        // must not leak an out-of-range audio sample rate into capture pipelines.
         let cfg: HardwareConfig = toml::from_str(
             r#"
             camera_fps = 30
@@ -505,7 +787,6 @@ mod validation_tests {
 
     #[test]
     fn validated_clamps_excessive_channel_count_to_maximum() {
-        // ChannelCount::new clamps to [1, 8].
         let cfg: HardwareConfig = toml::from_str(
             r#"
             camera_fps = 30
@@ -525,8 +806,6 @@ mod validation_tests {
 
     #[test]
     fn validated_preserves_valid_values_unchanged() {
-        // Regression guard: values already within bounds must pass through
-        // untouched — validated() must not be a silent rescaler.
         let cfg: HardwareConfig = toml::from_str(
             r#"
             camera_fps = 30

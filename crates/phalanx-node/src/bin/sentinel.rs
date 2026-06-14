@@ -43,8 +43,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     })?;
 
-    // Configuration Loading
-    let mut config = NodeConfig::load_from_env();
+    // Configuration Loading. A set-but-invalid PHALANX_CONFIG aborts here
+    // (loud failure) rather than silently falling back to compiled defaults;
+    // unset selects the default deployment profile (logged). The validated
+    // proof token is unwrapped into the plain config the actors consume.
+    let mut config = NodeConfig::load_from_env()?.into_inner();
     // Place the vault under the resolved state root unless the operator set an
     // explicit (non-dev-default) vault_path via PHALANX_CONFIG. The salt, DHT
     // store, and PRNU posterior all live under this directory.
