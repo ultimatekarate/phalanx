@@ -59,7 +59,7 @@ I'm not an expert in cryptography, control theory, networking, or any of the oth
 
 I want to preface this section with the fact that I am not a DevOps expert. If you are a DevOps expert I would love your help. Please.
 
-Minimum Rust version: **1.93.1**
+Minimum Rust version: **1.93.1**. The workspace is on Rust **edition 2024**.
 
 ### Dev Container (recommended)
 
