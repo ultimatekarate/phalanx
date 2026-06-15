@@ -191,27 +191,26 @@ concrete failure mode. **Sign-off on this table is part of the handoff checklist
 | I-4 | **`evidence_hash` excludes the signature.** It is `blake3(postcard(evidence))`, computed before signing; verification re-derives it from the actual bytes (the R3-1 fix); Gate 7 recomputes it again. | `crates/phalanx-forensics/src/pipeline/witness.rs:34-53`, `crates/phalanx-forensics/src/verification/gate.rs:497-510` | Keying dedup on a signature-covering hash lets an attacker re-sign the same evidence to bypass deduplication. The exclusion is also exactly what creates I-2's accepted poisoning surface — I-2 and I-4 are one tradeoff, documented together in [threat model §3](threat-model.md). |
 | I-5 | **The signature covers ciphertext.** On the capture path, `gate_and_encrypt` (LensGate, then payload AEAD) runs *before* `evidence.seal(...)` signs. | `crates/phalanx-node/src/actors/media_egress.rs:184-217,263-313` | Sign-then-encrypt would make downstream verification require decryption (impossible without a grant), and an encryption failure could let plaintext reach the mesh — the code's own contract is "plaintext MUST NOT reach the mesh." LensGate must also stay *before* encryption, or provenance is checked against bytes nobody can inspect. |
 | I-6 | **`ForensicUnit` has no serde, and five `compile_fail` doc-tests prove it.** Private fields, sealed `ValidationState`, `pub(crate)` unchecked constructors. | `crates/phalanx-forensics/src/unit.rs:14-61` | Each doc-test is compiled as an external crate and must *fail*. If one starts compiling, an evidence-forgery path has reopened — treat it as a security regression, never as a test to "fix." Deserialization would mint `Verified`/`Sealed` states without passing any gate. |
-| I-7 | **Crucible placeholder thresholds.** `RECORDING_SIZE_THRESHOLD = 100` shards / `RECORDING_TIME_THRESHOLD = 60 s` gate finalization; an integration test pins the 100. | `crates/phalanx-forensics/src/pipeline/crucible.rs:18-20,469`, `crates/phalanx-forensics/tests/integration.rs:73` | Production-checklist item, not an alarm: the values are explicit placeholders. Naming hazard: phalanx-proto exports a *different* same-named pair (50 / 1 s, `crates/phalanx-proto/src/constants.rs:7-8`). The misuse that consumed it as a **byte** cap lived in `phalanx-transport/src/io.rs`, now deleted (§5); the same-name / different-value / different-unit collision between the two pairs remains a tuning hazard. |
+| I-7 | **Crucible placeholder thresholds.** `RECORDING_SIZE_THRESHOLD = 100` shards / `RECORDING_TIME_THRESHOLD = 60 s` gate finalization; an integration test pins the 100. | `crates/phalanx-forensics/src/pipeline/crucible.rs:18-20,469`, `crates/phalanx-forensics/tests/integration.rs:73` | Production-checklist item, not an alarm: the values are explicit placeholders. Naming hazard: phalanx-proto exports a *different* same-named pair (50 / 1 s, `crates/phalanx-proto/src/constants.rs:7-8`). The misuse that consumed it as a **byte** cap lived in `phalanx-transport/src/io.rs`, now deleted; the same-name / different-value / different-unit collision between the two pairs remains a tuning hazard. |
 | I-8 | **`handle_revoke`'s equality check is a consistency gate, not the trust anchor.** Step 1, `verify_revocation_token`, is the cryptographic authorization (token signed by the BIP-39-derived key); the comparison against `envelopes.first().revocation_key` only catches inconsistency; unknown recordings are rejected to block cross-identity revocation. | `crates/phalanx-node/src/actors/storage.rs:759-836`, `threat-model.md:190` | "Hardening" the lookup with `verify_envelope` adds hot-path cost and closes no attack: no matching token can exist without the mnemonic. This was flagged, investigated, and closed — the in-code audit note says so explicitly. |
 | I-9 | **Senders must consult the publish gate.** Anything sending on `commit_notify_tx` must first check `Guardian::is_recording_publishable`; both ingest paths do. | `crates/phalanx-node/src/actors/storage.rs:38-46,663-671,736-743` | Bypassing the gate silently re-announces to the mesh a recording the operator marked local-only — a privacy regression with no error to notice. |
+| I-10 | **Validated config carries no serde and has no bypass constructor.** `ValidatedNodeConfig`/`ValidatedStrongholdConfig` wrap a private field, derive no `Deserialize`, and are mintable only via `assemble`/`for_profile`/`load`/`load_from_env`, each of which runs the boot coherence gate (`validate_node`). Two `compile_fail` doc-tests per type pin the private field and the absent `Deserialize`; `into_inner()` hands the plain config to the actors — the token is a transient edge-newtype, deliberately not threaded inward. | `crates/phalanx-node/src/config.rs:266-304,415-456`, `crates/phalanx-stronghold/src/config.rs:269-348` | Adding `Deserialize`, a `From<NodeConfig>`, or any public constructor mints a "validated" config that never passed the gate — reopening the silent boot on an incoherent deployment (node↔Stronghold topic / `protocol_version` drift, the parse-and-discard config traps) that this layer exists to make loud. The five boot mint-sites (sentinel, stronghold, FFI create+restore, GUI bridge) must keep going through `assemble`/`load`. Like I-6, a doc-test that starts compiling is a security regression, not a test to "fix." |
 
 ## 5. Dead and unwired code register
 
-Frame: **inherited intent, not rot.** `dead_code` is denied workspace-wide (`Cargo.toml:35-66`), so everything
-here survived because it was `pub` in a library crate or referenced by tests. **Most rows were actioned in the
-2026-06 cleanup pass**; outcomes are recorded below (deleted code is recoverable from git history).
+Frame: **inherited intent, not rot.** `dead_code` is denied workspace-wide (`Cargo.toml:35-66`), so anything
+unwired survives only because it is `pub` in a library crate or referenced by tests. This lists the unwired code
+**still in the tree** — each is a standing wire-it-or-delete-it decision a steward inherits. (A 2026-06 cleanup
+pass deleted the dead items previously catalogued here — the s2n-quic adapter, `poll_cadence`, the parse-and-discard
+connection-limit fields, `io.rs`'s length-prefixed helpers, the `/phalanx/discovery` topic constant; they live in
+git history, not in this table. `DiscoverySource::Kademlia`/`::Identify` were on that list in error — they are live
+in production — and were left in place.)
 
-| Item | Outcome |
+| Item | Standing decision |
 |---|---|
-| s2n-quic adapter + `MergedIngress` | **Deleted.** The `crates/phalanx-transport/src/adapters/quic/` adapter and `MergedIngress` were removed and the `s2n-quic` dependency dropped (with the orphaned `rcgen` dev-dep and stale `deny.toml` entries). No production code used it — the direct phone→Stronghold QUIC path is recoverable from git if ever wanted. |
-| `phalanx/stronghold` DHT namespace | **Kept (deliberate).** `announce_stronghold`/`find_strongholds` (`crates/phalanx-transport/src/behaviour.rs:56,80`) are the auto-discovery successor to the manual Stronghold pairing in the profile picker ([operations.md](operations.md)) — now viable since node and Stronghold share a DHT. **Still to reconcile when wired:** the two divergent namespace constants `b"phalanx/stronghold"` (`behaviour.rs:13`) and `STRONGHOLD_NAMESPACE = b"phalanx.stronghold.v1"` (`crates/phalanx-proto/src/constants.rs:5`). |
-| `PayloadKind::NodeDiscovery`, `::SecurityPolicy` | **Kept (deliberate).** `crates/phalanx-proto/src/network/kademlia.rs:6-13` — serialized DHT-record discriminants reserved as wire-format headroom. Deleting reserved discriminants is the one cleanup git cannot make safe (later reuse breaks old records); keeping costs nothing. |
-| ~~`DiscoverySource::Kademlia`, `::Identify`~~ | **Register error — not dead; removed from the register.** These are live in production: `TransportClass::from_discovery_source` (`crates/phalanx-node/src/network/topology.rs:85-89`) and `record_peer_discovery` (`crates/phalanx-node/src/vitals/governor.rs:587-590`, internet-peer counting) both match them. The earlier "never constructed in production" claim was wrong — caught during the cleanup pass. |
-| Connection-limit config fields | **Deleted.** `max_established`/`_incoming`/`_per_peer` (the parse-and-discard "operator trap") removed from `config.rs`/`factory.rs`; the real hardcoded limits (`builder.rs:231-237`) stay. |
-| `poll_cadence` cadenced event loop | **Deleted.** Superseded — the battery-optimization inquiry closed with the floor set by the mesh-presence invariant, so this benchmarked path was a dead end. The event loop runs its continuous-polling form (the former default). |
-| `read/write_length_prefixed_payload` | **Deleted.** `crates/phalanx-transport/src/io.rs` had zero callers and carried the byte-cap-vs-shard-count misuse noted in I-7 — both gone. (`codec.rs`'s live `read/write_length_prefixed` is unrelated and untouched.) |
-| `StorageCommand::GetContentKey` `Option` | **Deferred.** Tightening `Option<…>` → non-optional ripples across the emit site, handler, watch-channel, and a test (`crates/phalanx-node/src/actors/storage.rs:114-123,393-408`) — do it when next touching that path. |
-| `/phalanx/discovery/1.0.0` topic constant | **Deleted.** `crates/phalanx-proto/src/network/events.rs` — defined and re-exported but never published or subscribed. |
+| `phalanx/stronghold` DHT namespace | **Keep (deliberate).** `announce_stronghold`/`find_strongholds` (`crates/phalanx-transport/src/behaviour.rs:56,80`) are the auto-discovery successor to the manual Stronghold pairing in the profile picker ([operations.md](operations.md)) — now viable since node and Stronghold share a DHT. **Still to reconcile when wired:** the two divergent namespace constants `b"phalanx/stronghold"` (`behaviour.rs:13`) and `STRONGHOLD_NAMESPACE = b"phalanx.stronghold.v1"` (`crates/phalanx-proto/src/constants.rs:5`). |
+| `PayloadKind::NodeDiscovery`, `::SecurityPolicy` | **Keep (deliberate).** `crates/phalanx-proto/src/network/kademlia.rs:6-13` — serialized DHT-record discriminants reserved as wire-format headroom. Deleting reserved discriminants is the one cleanup git cannot make safe (later reuse breaks old records); keeping costs nothing. |
+| `StorageCommand::GetContentKey` `Option` | **Deferred tightening.** The `None` arm is dead under the deterministic-DEK regime, but narrowing `Option<…>` → non-optional ripples across the emit site, handler, watch-channel, and a test (`crates/phalanx-node/src/actors/storage.rs:114-123,393-408`) — do it when next touching that path. |
 
 ## 6. Repository completeness
 
@@ -312,25 +311,9 @@ this codebase is the reading below plus the sign-offs.
 
 **Where the bodies are buried** (known sharp edges, all documented elsewhere — this is the index):
 
-- [x] ~~Gossipsub topic defaults misaligned~~ and ~~Kademlia protocol-id defaults differ~~ — both fixed: every
-      coherence-critical value (topics, `protocol_version`, wire chunk ceiling) is now projected from a shared
-      `DeploymentProfile` (`crates/phalanx-proto/src/network/deployment.rs`) and is structurally absent from the
-      operator-editable `[instance]` config, so node and Stronghold cannot drift; the revocation topic is in both
-      default subscribe lists; a set-but-invalid config now fails loudly; and a cross-crate test pins per-profile
-      agreement (`crates/phalanx-stronghold/tests/topic_alignment.rs`). Still open, deliberately: canary alerts on
-      `/phalanx/mesh/1.0.0` are publish-only until an inbound alert handler exists ([network.md §3](network.md#3-topics-who-publishes-who-listens), [§5](network.md#5-the-dht)).
-- [x] ~~Stale endowment formula in threat model §4 / `policy.rs` vs the implementation~~ — fixed: the threat-model
-      formula and the `policy.rs` comment now match the implemented `psi_max / (1 + (k·e)²)` (full ceiling at
-      e=0, half-endowment at e = 1/k; `crates/phalanx-node/src/vitals/governor.rs:778-786`). See §3.
+
 - [ ] Same-named threshold constants with different values and units (I-7), and two `STRONGHOLD_NAMESPACE`
       constants (§5).
-- [x] ~~`ripgrep`/`grep` silently skip `flutter_app/` because of the gitignore rule~~ — fixed: the blanket
-      `flutter_app/*` ignore was narrowed to build artifacts (`flutter_app/.dart_tool/`, `flutter_app/build/`), so
-      the app's Dart sources are tracked and search tools see them.
-- [x] README wording corrections — landed in the 2026-06 README rework: stability is now "numerically
-      certified" (§3), the transport claim is scoped to QUIC/TCP with the radios marked unimplemented (§2), and
-      the two-XChaCha20-layers sentence was replaced by "encrypted in transit and at rest" (§3 remains the
-      precise record of the layering).
 
 A steward who has done the reading, run the four builds, and signed off the invariant register knows where every
 known body is buried. Everything else is ordinary engineering.
