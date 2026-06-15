@@ -45,7 +45,7 @@ The adaptive control system produces behaviors that were never explicitly progra
 
 ## Architecture
 
-The codebase is governed by a [Linguistic Code Model](linguistic-code-model.md) and composed of [34 subsystems](docs/subsystems.md) spanning evidence lifecycle, cryptography, trust, adaptive control, corroboration, and infrastructure. The crate-by-crate map, node taxonomy, and the life of a frame from sensor to custody are in [docs/architecture.md](docs/architecture.md).
+The codebase is governed by a [Linguistic Code Model](linguistic-code-model.md) and composed of [37 subsystems](docs/subsystems.md) spanning evidence lifecycle, cryptography, trust, adaptive control, corroboration, and infrastructure. The crate-by-crate map, node taxonomy, and the life of a frame from sensor to custody are in [docs/architecture.md](docs/architecture.md).
 
 ## Contributing
 

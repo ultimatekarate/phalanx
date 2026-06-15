@@ -2,7 +2,7 @@
 
 > New to Phalanx? Start with [architecture.md](architecture.md) for orientation — this file is the per-subsystem code index.
 
-Phalanx is built from 34 subsystems. Each one does exactly one thing. The [Linguistic Code Model](../linguistic-code-model.md) prevents them from growing into each other — crate boundaries make entanglement a compiler error, not a code review finding. This document maps every subsystem, what it does, and where it lives.
+Phalanx is built from 37 subsystems. Each one does exactly one thing. The [Linguistic Code Model](../linguistic-code-model.md) prevents them from growing into each other — crate boundaries make entanglement a compiler error, not a code review finding. This document maps every subsystem, what it does, and where it lives.
 
 ---
 
@@ -207,6 +207,12 @@ Networking, storage, capture, and testing.
 libp2p swarm with QUIC primary and TCP fallback. Gossipsub for pub/sub, Kademlia DHT for peer discovery, mDNS for local discovery, relay and hole-punching for NAT traversal. Connection limits, peer scoring, and PSK support for private networks.
 
 **Files:** `phalanx-transport/src/factory.rs`, `transport/src/builder.rs`, `transport/src/behaviour.rs`
+
+### Deployment Profile
+
+The operator selects a deployment topology — `SoloDevice`, `AffinityGroupLan`, `CommunityWithStronghold`, or `HighRiskCrossBorder` — and the profile pins every cross-binary coherence-critical knob: gossipsub topics, protocol version, PSK posture, and replica policy. Everything else is operator-tunable instance data. Node and Stronghold assemble from the same profile, and the sentinel constructors accept only a validated config, so an incoherent deployment fails to assemble instead of booting on silent defaults.
+
+**Files:** `phalanx-proto/src/network/deployment.rs`, `phalanx-node/src/config.rs`, `phalanx-stronghold/src/config.rs`
 
 ### Kademlia Governor
 
