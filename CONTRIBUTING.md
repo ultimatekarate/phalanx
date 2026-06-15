@@ -148,17 +148,12 @@ libp2p swarm management, gossipsub, Kademlia DHT, QUIC transport, mDNS discovery
 | File | What it does |
 | ------ | ------------- |
 | `phalanx-transport/src/adapters/libp2p.rs` | `Libp2pAdapter` — mesh publish/subscribe, peer messaging, `PeerId` → `NetworkId` boundary |
-| `phalanx-transport/src/adapters/quic/client.rs` | QUIC client with connection cycling and backoff |
-| `phalanx-transport/src/adapters/quic/server.rs` | QUIC server with identity handshake and message routing |
-| `phalanx-transport/src/adapters/quic/wire.rs` | QUIC wire protocol framing |
-| `phalanx-transport/src/adapters/quic/config.rs` | QUIC transport configuration |
 | `phalanx-transport/src/behaviour.rs` | `PhalanxBehaviour` — aggregates gossipsub, Kademlia, mDNS, relay, request-response |
 | `phalanx-transport/src/builder.rs` | QUIC and TCP fallback transport builders with TLS 1.3 |
 | `phalanx-transport/src/codec.rs` | `PhalanxRetrievalProtocol` — postcard serialization with length-prefixed framing |
 | `phalanx-transport/src/dht.rs` | Re-exports of libp2p DHT types for custom backends |
 | `phalanx-transport/src/events.rs` | `PhalanxEvent` — unified swarm event enum |
 | `phalanx-transport/src/factory.rs` | Swarm construction with persistent Kademlia store and gossipsub |
-| `phalanx-transport/src/io.rs` | Async length-prefixed I/O with size validation |
 | `phalanx-transport/src/kademlia.rs` | `KademliaGovernor` — reputation-weighted provider insertion with temporal decay |
 | `phalanx-transport/src/routing.rs` | Central switchboard routing `NetworkEvent`s to actors |
 | `phalanx-proto/src/network/events.rs` | `NetworkEvent`, `IngressPort`, `EgressPort`, `LocalMeshPort` trait contracts |
@@ -167,6 +162,17 @@ libp2p swarm management, gossipsub, Kademlia DHT, QUIC transport, mDNS discovery
 | `phalanx-node/src/network/orchestrator.rs` | Transport stack factory for swarm construction |
 | `phalanx-node/src/persistence/kademlia.rs` | redb-backed `RecordStore` for persistent DHT records |
 | `phalanx-stronghold/src/swarm.rs` | Stronghold-side swarm management |
+
+### Configuration & Deployment
+
+Deployment-topology profiles, the config typestate, and the loud-failing assembly path. A profile pins every cross-binary coherence-critical knob (gossipsub topics, protocol version, PSK posture, replica policy); everything else is operator-tunable instance data. The sentinel constructors accept only a `Validated*Config`, so an incoherent deployment fails to assemble rather than booting on silent defaults.
+
+| File | What it does |
+| ------ | ------------- |
+| `phalanx-proto/src/network/deployment.rs` | `DeploymentProfile` — the deployment-topology Noun. Pins coherence-critical knobs per archetype (`SoloDevice`, `AffinityGroupLan`, `CommunityWithStronghold`, `HighRiskCrossBorder`); `Incoherence` errors; `DEFAULT_PROTOCOL_VERSION` |
+| `phalanx-node/src/config.rs` | `NodeConfigFile`/`NodeInstance` operator surface, `assemble` (project profile + validate), and `ValidatedNodeConfig` — the boundary typestate the sentinel constructor requires |
+| `phalanx-stronghold/src/config.rs` | Stronghold analogue: `StrongholdConfigFile`/instance, `assemble`, `ValidatedStrongholdConfig`, and `clamp_floors` for the custody-TTL safe floor |
+| `phalanx-ffi/src/profile.rs` | Pure FFI helpers for the mobile profile picker — `phalanx_profile_flags` (capability bitfield from Rust truth) and `phalanx_validate_pairing` (pre-screen a Stronghold pairing) |
 
 ### Network Security
 
