@@ -75,24 +75,24 @@ Classification ladder, strongest to weakest:
 | README claim | Classification | Evidence | Caveats |
 |---|---|---|---|
 | Shard-order-independent reconstruction, "formally proven in Lean 4" (README § Capabilities) | **Machine-checked** | `recording_order_independent` (`proofs/Phalanx/MoldCommutativity.lean:263-270`) | See "The Lean development, precisely" below |
-| "Proven stability" (pre-rework README; now "Certified stability", README § Capabilities) | **Numerically certified** | `crates/phalanx-node/src/stability/contractivity.rs:328-407` | A numerical certificate, not a formal proof — the reworked README now says so itself. See below |
+| "Certified stability" (README § Capabilities) | **Numerically certified** | `crates/phalanx-node/src/stability/contractivity.rs:328-407` | A numerical certificate, not a formal proof — the README says so itself. See below |
 | "Self-healing" (README § Emergent Properties) | **Numerically certified** consequence + **simulation-tested** | `contractivity-proof.md:89-104`; `scenario_2_burst_recovery`, `scenario_8_full_recovery_from_critical` (`crates/phalanx-sim/tests/scenarios.rs`) | Derived from contractivity ("not an engineered behavior"), then observed in sim |
-| "Byzantine actors are mathematically detectable via Jacobian analysis" (pre-rework README; split in the rework) | **Code-anchored** (runtime) + **numerically certified** (offline) | Runtime: `crates/phalanx-node/src/vitals/spectral.rs:1-66`; offline: the `stability-analysis` Jacobian model | The claim conflates two artifacts — see below |
+| "Byzantine peer detection" — nodes that lie are exposed by behavioral consistency checks (README § Capabilities) | **Code-anchored** (runtime) + **numerically certified** (offline) | Runtime: `crates/phalanx-node/src/vitals/spectral.rs:1-66`; offline: the `stability-analysis` Jacobian model | Two distinct artifacts — runtime detection vs the offline certificate; see below |
 | "Every envelope is signed and verified" (README § Security Posture) | **Code-anchored** | `crates/phalanx-forensics/src/pipeline/witness.rs:34-75`, promotion chain `crates/phalanx-forensics/src/verification/gate.rs:538-585` | `promote_signed` is a signature-only path for archive replay (still verifies the signature; skips freshness/continuity) |
-| "Two independent XChaCha20-Poly1305 layers with distinct keys" (pre-rework README; reworded in the rework) | **Code-anchored**, phrasing imprecise | See "The encryption layering, precisely" below | The in-transit outer layer is QUIC TLS 1.3, not XChaCha20 |
+| "Encrypted in transit and at rest" (README § Security Posture) | **Code-anchored** | See "The encryption layering, precisely" below | The in-transit outer layer is QUIC TLS 1.3, not XChaCha20 — see below for the full layering |
 | "Compile-time evidence integrity" (README § Capabilities) | **Code-anchored**, with CI-enforced negative tests | `ForensicUnit` typestate + five `compile_fail` doc-tests (`crates/phalanx-forensics/src/unit.rs:14-61`) | The doc-tests are the executable proof the typestate cannot be forged from outside the crate |
 | "The encryption key is destroyed before the data is removed" (README § Capabilities) | **Code-anchored** | `Guardian::revoke_recording` (`crates/phalanx-node/src/persistence/vault/mod.rs:535-568`); ghost-key cleanup after partial crash (`crates/phalanx-node/src/actors/storage.rs:301-325`) | |
 | "The pipeline adapts frame rate to device load" (README § Capabilities) | **Code-anchored** | `target_fps(base: Fps, power: PowerState) -> Fps` — Normal=base, Conserving=½, Leaf=⅕, Dormant=0 (`crates/phalanx-node/src/hardware/camera.rs:40-46`) | Policy-layer threshold at the integral-to-actor boundary, by design |
 | "Trusted communities" (README § Capabilities) | **Code-anchored** | Validated `Quorum` newtype, external-voucher counting, `dissolve()` consumes self with `Zeroize` (`crates/phalanx-proto/src/identity/community.rs:73-286`) | |
-| Mesh "over QUIC, Bluetooth, and WiFi Direct" (pre-rework README; now scoped to QUIC/TCP with the radios marked unimplemented) | QUIC **code-anchored**; BLE/WiFi-Direct **asserted** | QUIC: `crates/phalanx-transport/src/builder.rs:25-48`; BLE/WiFi-Direct: seam only (§2) | No radio implementation exists in any language |
+| Mesh "over QUIC and TCP", with a Bluetooth/WiFi-Direct seam "not yet implemented" (README § Capabilities) | QUIC **code-anchored** | QUIC: `crates/phalanx-transport/src/builder.rs:25-48` | The README already marks the radios unimplemented; the BLE/WiFi-Direct seam is "seam only" (§2) — no radio code in any language |
 | "Sybil resistance with diminishing returns" (README § Emergent Properties) | **Simulation-tested** | `scenario_4_sybil_attack_endowment_shrink` (`crates/phalanx-sim/tests/scenarios.rs:365-412`); `rapid_identity_churn_does_not_exhaust_resources` (`crates/phalanx-sim/tests/adversarial_tests.rs:574`) | Mechanism root: quadratic-denominator endowment (`crates/phalanx-node/src/vitals/governor.rs:778-786`) |
 | Replay defense ([threat model §3](threat-model.md)) | **Code-anchored** + **simulation-tested** | `crates/phalanx-forensics/src/verification/bloom.rs:68-112`; `bloom_replay_detection_blocks_duplicates`, rotation survival, WAL re-seeding (`crates/phalanx-sim/tests/adversarial_tests.rs:71-95`) | Empirical FPR < 1% at 10k insertions is itself a test (`bloom.rs:187-213`) |
 | Eclipse resistance ([threat model §5](threat-model.md)) | **Simulation-tested** | `eclipse_attack_limited_by_subnet_diversity` (`crates/phalanx-sim/tests/adversarial_tests.rs:280`) | |
 | Evidence survives Byzantine peers | **Simulation-tested** | Five tests: silent / corrupting / forging / colluding peers + forgery rejected at all k (`crates/phalanx-sim/tests/evidence_byzantine_tolerance.rs:186-399`) | |
 | "Adaptive resource management" / homeostasis (README § Capabilities) | **Simulation-tested** | Scenario suite 1–8 (`crates/phalanx-sim/tests/scenarios.rs:77-521`) | Numbering skips scenario 7 |
-| Sensor fingerprinting; "Honesty is cheap, dishonesty is expensive" (pre-rework README § Emergent Properties) | **Code-anchored mechanism** | Mandatory `ForensicMetrics` on every shard (`crates/phalanx-proto/src/evidence/envelope.rs:114-192`); LensGate before encryption (`crates/phalanx-node/src/actors/media_egress.rs:268-286`) | Specific detector thresholds are doc-asserted, not separately tested |
-| "Anticipatory memory pressure" (pre-rework README § Emergent Properties) | **Asserted** (design-modeled) | Jacobian M-row commentary (`crates/phalanx-node/src/stability/jacobian.rs:118-138`) | The same file zeroes `J[M,W]` — the coupling is threshold-activated, not proportional; partial sim coverage via scenario 3 isolation tests |
-| "Natural load shedding order", "Load balancing without a balancer", "Rejections regulate throughput", "Peer loss identifies at-risk data" (pre-rework README § Emergent Properties) | **Asserted** | Narrative consequences of the coupled-integral design (pre-rework README § Emergent Properties) | Partial, indirect sim coverage (multi-vector stress, reciprocity-floor black-hole detection); no dedicated artifact maps to each claim. Honest status: asserted |
+| Sensor fingerprinting; "Honesty is cheap, dishonesty is expensive" (README § Emergent Properties) | **Code-anchored mechanism** | Mandatory `ForensicMetrics` on every shard (`crates/phalanx-proto/src/evidence/envelope.rs:114-192`); LensGate before encryption (`crates/phalanx-node/src/actors/media_egress.rs:268-286`) | Specific detector thresholds are doc-asserted, not separately tested |
+| "Anticipatory memory pressure" (README § Emergent Properties) | **Asserted** (design-modeled) | Jacobian M-row commentary (`crates/phalanx-node/src/stability/jacobian.rs:118-138`) | The same file zeroes `J[M,W]` — the coupling is threshold-activated, not proportional; partial sim coverage via scenario 3 isolation tests |
+| "Natural load shedding order", "Load balancing without a balancer", "Rejections regulate throughput", "Peer loss identifies at-risk data" (README § Emergent Properties) | **Asserted** | Narrative consequences of the coupled-integral design (README § Emergent Properties) | Partial, indirect sim coverage (multi-vector stress, reciprocity-floor black-hole detection); no dedicated artifact maps to each claim. Honest status: asserted |
 
 ### The Lean development, precisely
 
@@ -113,7 +113,7 @@ yields the identical Recording. Scope limits a steward must know:
   linking the two. If `crucible.rs` drifts, nothing turns red.
 - CI never builds the proofs (`.github/workflows/ci.yml:1-157`).
 
-This is the **only** machine-checked artifact in the repository. The reworked README scopes its "formally
+This is the **only** machine-checked artifact in the repository. The README scopes its "formally
 proven" language to exactly this theorem; every other certification is weaker, detailed next.
 
 ### The contractivity certificate, precisely
@@ -133,31 +133,28 @@ The certificate's three stated code prerequisites (`contractivity-proof.md:13-18
 | Unit normalization (each integral scaled by its critical threshold) | Landed | `SCALES` and `build_jn` (`crates/phalanx-node/src/stability/contractivity.rs:56-77,158-256`) |
 | M–W coupling removed (threshold-activated, not proportional) | Landed | `crates/phalanx-node/src/stability/jacobian.rs:135-138` |
 
-Two caveats. First, the entire stability module — including the compile-time assertion — sits behind the
+The entire stability module — including the compile-time assertion — sits behind the
 **non-default** `stability-analysis` feature (`crates/phalanx-node/src/lib.rs:73-78`,
 `crates/phalanx-node/Cargo.toml:67-68`); `cargo build --workspace` does not evaluate the proof and CI never
 enables the feature. A drift-guard test (`test_const_config_matches_runtime`, `contractivity.rs:419-449`) exists
 but only runs under the same feature. A steward should put `-p phalanx-node --features stability-analysis` in CI
 on day one.
-Second, a documentation drift (now corrected): [threat model §4](threat-model.md) and the comment at
-`crates/phalanx-forensics/src/policy.rs:488-493` previously stated a stale endowment formula; both now match the
-implementation and `jacobian.rs:44-51` — `psi_max / (1 + (k·e)²)`, half-endowment at e = 1/k.
 
 ### The Byzantine-detectability claim, precisely
 
-The pre-rework README claim "fabricated state is exposed via Jacobian analysis" conflated two artifacts. The **runtime**
+The Byzantine-detectability story rests on two distinct artifacts. The **runtime**
 mechanism is the spectral observer: three residual consistency checks against the coupled-integral model, per
 peer, anomaly threshold 0.3, in production with no feature gate (`crates/phalanx-node/src/vitals/spectral.rs:1-66`,
 [threat model §6](threat-model.md)); it is simulation-tested (`test_phase3_shield_wall_lying_peer_triggers_spectral_anomaly`,
 `crates/phalanx-sim/tests/simulation_tests.rs`). The **offline** Jacobian analysis is the feature-gated stability
 module above. Detection in deployed nodes comes from the former; the latter justifies why faked signals are
-internally inconsistent. The reworked README splits the sentence accordingly: runtime behavioral checks under
+internally inconsistent. The README keeps these separate: runtime behavioral checks under
 § Capabilities, the offline certificate under "Certified stability".
 
 ### The encryption layering, precisely
 
-What the pre-rework README sentence "two independent XChaCha20-Poly1305 layers with distinct keys" actually
-corresponds to, verified in source:
+The precise layering behind "encrypted in transit and at rest" — four distinct mechanisms,
+verified in source:
 
 1. **Payload layer** — every media payload is AEAD-encrypted with XChaCha20-Poly1305 under the per-recording
    [DEK](trust.md#2-the-key-hierarchy) *before* signing (`PayloadCipher::apply_encryption`,
@@ -172,11 +169,11 @@ corresponds to, verified in source:
 4. **Transit outer layer** — libp2p QUIC's native TLS 1.3, with TCP+Noise as fallback
    (`crates/phalanx-transport/src/builder.rs:25-54`). This is *not* XChaCha20.
 
-So "encrypted in transit and at rest" is accurate; "two independent XChaCha20-Poly1305 layers" describes the
-at-rest and key-wrapping picture but not the wire, and for a node's *own* recordings the payload key and the
-recording-log key both derive from the same `dek_master` (`crates/phalanx-node/src/actors/storage.rs:716-732`),
-so "distinct keys" needs qualification there. The cryptography is sound; the reworked README now says simply
-"encrypted in transit and at rest", and this section remains the precise record of the layering.
+So "encrypted in transit and at rest" (the README's wording) is accurate. A "two independent XChaCha20-Poly1305
+layers with distinct keys" reading would not be: the in-transit outer layer is QUIC TLS 1.3, not XChaCha20, and
+for a node's *own* recordings the payload key and the recording-log key both derive from the same `dek_master`
+(`crates/phalanx-node/src/actors/storage.rs:716-732`), so "distinct keys" needs qualification. The cryptography
+is sound; this section is the precise record of the layering.
 
 ## 4. Invariant register
 
