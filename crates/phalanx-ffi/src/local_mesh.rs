@@ -12,60 +12,144 @@ use crate::error::PhalanxError;
 use crate::handle::PhalanxHandle;
 
 use phalanx_proto::identity::MeshAddress;
-use phalanx_proto::network::NetworkEvent;
+use phalanx_proto::network::{BleChallenge, BleResponse, NetworkEvent};
 use phalanx_proto::telemetry::DiscoverySource;
+use phalanx_proto::time::PhalanxTimestamp;
 use phalanx_proto::topology::{SubnetBucket, TransportClass};
 
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::sync::atomic::Ordering;
 
-/// Pushes a peer discovery event from Flutter into the local mesh channel.
+/// Current wall-clock time in milliseconds since the Unix epoch, for the BLE
+/// challenge freshness window. The verifier IS the challenger (it answers its
+/// own challenge), so this shares the local-time basis the challenge's
+/// `issued_at` was stamped with — the comparison holds even with no NTP.
+fn now_millis() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// Verify a BLE auth response and, only on success, admit the peer as an
+/// authenticated LocalMesh discovery. This is the Rust-side trust boundary for
+/// proximity corroboration.
 ///
-/// Called when BLE/WiFi Direct discovers a nearby device.
+/// A `PeerDiscovered{LocalMesh}` event — and therefore a `ProximityWitness` —
+/// is emitted ONLY when all three hold:
+///   1. the responder's Ed25519 signature verifies over the recording/time-bound
+///      message (`verify_ble_response`),
+///   2. the challenge is fresh — within `BLE_CHALLENGE_MAX_AGE` of now,
+///   3. the challenge nonce has not already been admitted (single-use).
+///
+/// There is deliberately NO bare "push a discovered peer" entry point: the
+/// platform plugin cannot mint an unauthenticated LocalMesh peer, because the
+/// only path that emits the discovery runs this verification first. The DID the
+/// witness binds is the one whose signature just verified — not an
+/// FFI-supplied string the engine would otherwise trust blindly.
+///
+/// `challenge` and `response` are opaque postcard blobs the plugin relays over
+/// BLE; it never constructs or parses them.
 ///
 /// # Safety
 /// * `handle` must be a valid pointer from `phalanx_create`.
-/// * `peer_id` must be a valid null-terminated C string.
+/// * `challenge_ptr`/`response_ptr` must point to the declared number of
+///   readable bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn phalanx_local_mesh_push_peer_discovered(
+pub unsafe extern "C" fn phalanx_ble_verify_and_admit(
     handle: *mut PhalanxHandle,
-    peer_id: *const c_char,
+    challenge_ptr: *const u8,
+    challenge_len: usize,
+    response_ptr: *const u8,
+    response_len: usize,
 ) -> i32 {
     // SAFETY: caller upholds the # Safety contract on the parent
     // `unsafe extern "C" fn`. `handle` is null-checked via `as_ref`;
-    // `peer_id` is read only as a caller-guaranteed NUL-terminated C
-    // string.
+    // `challenge_ptr`/`response_ptr` are null-checked before being read via
+    // `from_raw_parts` for the caller-declared lengths.
     unsafe {
         let Some(h) = handle.as_ref() else {
             return PhalanxError::NullPointer.code();
         };
-
-        if peer_id.is_null() {
+        if challenge_ptr.is_null() || response_ptr.is_null() {
             return PhalanxError::NullPointer.code();
         }
 
-        let peer_str = match CStr::from_ptr(peer_id).to_str() {
-            Ok(s) => s,
-            Err(_) => return PhalanxError::InvalidUtf8.code(),
+        let challenge_bytes = std::slice::from_raw_parts(challenge_ptr, challenge_len);
+        let response_bytes = std::slice::from_raw_parts(response_ptr, response_len);
+
+        let challenge: BleChallenge = match postcard::from_bytes(challenge_bytes) {
+            Ok(c) => c,
+            Err(_) => return PhalanxError::SerializationFailure.code(),
+        };
+        let response: BleResponse = match postcard::from_bytes(response_bytes) {
+            Ok(r) => r,
+            Err(_) => return PhalanxError::SerializationFailure.code(),
         };
 
+        // (1) Signature over the recording/time-bound message.
+        if phalanx_forensics::identity::verify_ble_response(&challenge, &response).is_err() {
+            tracing::warn!(
+                target: "phalanx::ffi",
+                peer = %response.responder_did,
+                "BLE admit rejected: signature did not verify"
+            );
+            return PhalanxError::InvalidState.code();
+        }
+
+        // (2) Freshness — reject stale or far-future challenges (later replay).
+        let now_ms = now_millis();
+        if !phalanx_forensics::identity::ble_challenge_is_fresh(
+            challenge.issued_at,
+            PhalanxTimestamp::from_u64(now_ms),
+            phalanx_forensics::identity::BLE_CHALLENGE_MAX_AGE,
+        ) {
+            tracing::warn!(
+                target: "phalanx::ffi",
+                peer = %response.responder_did,
+                "BLE admit rejected: stale challenge"
+            );
+            return PhalanxError::InvalidState.code();
+        }
+
+        // (3) Single-use nonce — reject immediate replay of a valid pair.
+        {
+            let mut seen = h
+                .ble_admitted_nonces
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let max_age = phalanx_forensics::identity::BLE_CHALLENGE_MAX_AGE.as_u64();
+            // Prune entries outside the freshness window so the set stays bounded.
+            seen.retain(|_, &mut admitted_at| now_ms.saturating_sub(admitted_at) <= max_age);
+            if seen.contains_key(&challenge.nonce) {
+                tracing::warn!(
+                    target: "phalanx::ffi",
+                    peer = %response.responder_did,
+                    "BLE admit rejected: replayed nonce"
+                );
+                return PhalanxError::InvalidState.code();
+            }
+            seen.insert(challenge.nonce, now_ms);
+        }
+
+        // Admit: emit an authenticated LocalMesh discovery. The engine binds the
+        // witness's `remote_did` to this now-verified DID.
         let tx = match &h.local_mesh_tx {
             Some(tx) => tx,
             None => return PhalanxError::ChannelClosed.code(),
         };
-
         let event = NetworkEvent::PeerDiscovered {
-            peer: MeshAddress::new(peer_str.to_string()),
+            peer: MeshAddress::new(response.responder_did.as_str()),
             source: DiscoverySource::LocalMesh,
             bucket: SubnetBucket::local_mesh(),
             transport: TransportClass::LocalMesh,
         };
-
         match tx.try_send(event) {
             Ok(()) => PhalanxError::Ok.code(),
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                // Backpressure: drop silently, same as video frames
+                // Backpressure: drop silently, same as video frames.
                 PhalanxError::Ok.code()
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {

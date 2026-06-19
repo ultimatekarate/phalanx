@@ -158,6 +158,12 @@ pub struct PhalanxHandle {
     /// handle without leaking. Aborted on FFI shutdown via `Drop` of the
     /// runtime.
     pub(crate) recovery_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Single-use guard for admitted BLE-auth challenge nonces. Maps a consumed
+    /// nonce to the millisecond timestamp it was admitted at, so
+    /// `phalanx_ble_verify_and_admit` can reject replays of a valid
+    /// (challenge, response) pair. Pruned to the freshness window on each
+    /// admission, so it stays bounded by the live-challenge window.
+    pub(crate) ble_admitted_nonces: Mutex<std::collections::HashMap<[u8; 32], u64>>,
 }
 
 // =====================================================================
@@ -893,6 +899,7 @@ async fn bootstrap_with_identity(
         recovery_status: Arc::new(Mutex::new(RecoveryStatus::default())),
         recovery_cancel: Mutex::new(None),
         recovery_handle: Mutex::new(None),
+        ble_admitted_nonces: Mutex::new(std::collections::HashMap::new()),
     })
 }
 
