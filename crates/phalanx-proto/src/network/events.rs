@@ -83,22 +83,34 @@ pub enum NetworkEvent {
 
 // ── BLE Mutual Authentication ───────────────────────────────────────────
 
-/// BLE challenge: "I am A, prove you're B."
+/// BLE challenge: "I am A, recording R at time T — prove you're B."
 /// Sent as the first message in the 4-message handshake.
+///
+/// The `recording_id` and `issued_at` are signed by the responder, so a
+/// captured signature cannot be replayed to forge a `ProximityWitness` for a
+/// *different* recording or at a *later* time. The verifier additionally
+/// rejects stale challenges (max-age) and reused nonces.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BleChallenge {
     pub sender_did: Did,
-    /// 32-byte random nonce for replay protection.
+    /// 32-byte random nonce for replay protection (single-use per verifier).
     pub nonce: [u8; 32],
+    /// The challenger's active recording this proximity attestation binds to.
+    pub recording_id: RecordingId,
+    /// When the challenger issued this challenge. Verifiers reject challenges
+    /// older than the freshness window, defeating later replay.
+    pub issued_at: crate::time::PhalanxTimestamp,
 }
 
 /// BLE response: "I am B, here's proof."
-/// Ed25519 signature over (responder_did || challenger_did || challenge_nonce).
+/// Ed25519 signature over (responder_did || challenger_did || nonce ||
+/// recording_id || issued_at).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BleResponse {
     pub responder_did: Did,
-    /// Ed25519 signature proving DID ownership.
-    /// Covers: (responder_did || challenger_did || challenge_nonce).
+    /// Ed25519 signature proving DID ownership AND binding the attestation to
+    /// the challenge's recording and time.
+    /// Covers: responder_did || challenger_did || nonce || recording_id || issued_at.
     pub signature: Vec<u8>,
 }
 

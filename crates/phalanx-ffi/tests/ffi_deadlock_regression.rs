@@ -126,8 +126,17 @@ fn h1_sign_ble_challenge_does_not_deadlock_against_engine_run() {
         let env = TestEnv::new();
         let (handle, genesis) = unsafe { create_and_start(&env) };
 
-        let challenger_did = b"did:key:z6MkTestChallengerForH1Regression";
-        let nonce = [0xABu8; 32];
+        // The challenge is an opaque postcard blob at the FFI boundary; build
+        // one the way the plugin would relay it (recording/time-bound).
+        let challenge = phalanx_proto::network::BleChallenge {
+            sender_did: phalanx_proto::identity::Did::new(
+                "did:key:z6MkTestChallengerForH1Regression",
+            ),
+            nonce: [0xABu8; 32],
+            recording_id: phalanx_proto::identity::RecordingId::new("rec-h1"),
+            issued_at: phalanx_proto::time::PhalanxTimestamp::from_u64(1_000),
+        };
+        let challenge_blob = postcard::to_allocvec(&challenge).expect("serialize challenge");
         let mut signature = [0u8; 64];
 
         // The actual deadlock candidate: must return in milliseconds.
@@ -135,9 +144,8 @@ fn h1_sign_ble_challenge_does_not_deadlock_against_engine_run() {
         let code = unsafe {
             phalanx_ffi::ble_auth::phalanx_sign_ble_challenge(
                 handle,
-                challenger_did.as_ptr(),
-                challenger_did.len(),
-                nonce.as_ptr(),
+                challenge_blob.as_ptr(),
+                challenge_blob.len(),
                 signature.as_mut_ptr(),
             )
         };
