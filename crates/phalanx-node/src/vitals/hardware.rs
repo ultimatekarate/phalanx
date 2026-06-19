@@ -89,7 +89,9 @@ pub trait HardwareProbe: Send + Sync {
     fn is_background(&self) -> bool;
 
     /// Whether the platform allows camera capture in the background.
-    /// Android (foreground service): true. iOS: false. Desktop: true.
+    /// Mobile: false — Phalanx captures foreground/screen-on only (Android background
+    /// capture would need a foreground service, deliberately not built; iOS disallows it).
+    /// Desktop: true.
     fn can_capture_in_background(&self) -> bool;
 
     /// Platform-specific thermal thresholds for this SoC.

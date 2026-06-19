@@ -756,10 +756,26 @@ async fn bootstrap_with_identity(
         })?;
         log("vault dir created");
     }
+    // Load the optional pre-shared swarm key from `{storage}/swarm.key`,
+    // provisioned BEFORE create via `phalanx_generate_swarm_key` (founder) or
+    // `phalanx_import_swarm_key` (joiner). Absent => public swarm; present =>
+    // closed-swarm posture. A `require_psk` profile (e.g. AffinityGroupLan)
+    // turns absence into a hard, fail-closed boot error downstream in the
+    // transport factory — which is why the FFI path previously returned a null
+    // handle 100% of the time under such profiles (PSK was hardcoded `None`).
+    // The swarm key gates only the TCP fallback (QUIC is not pnet-wrapped), so
+    // it is defense-in-depth for the TCP path, not an access boundary on a
+    // local link — see docs/network.md §6.
+    let psk = phalanx_node::psk::load_swarm_key(&Path::new(storage_path).join("swarm.key"));
+    log(if psk.is_some() {
+        "swarm key: loaded (closed swarm)"
+    } else {
+        "swarm key: absent (public swarm)"
+    });
     let (ingress, egress) = setup_transport(
         &identity,
         &config,
-        None, // PSK: None for public swarm on mobile (can be extended later)
+        psk,
         Arc::new(reputation_projection) as Arc<dyn PeerEvaluator>,
     )
     .map_err(|e| {

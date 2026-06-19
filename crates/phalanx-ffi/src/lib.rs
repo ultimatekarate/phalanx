@@ -71,4 +71,5 @@ pub mod probe;
 pub mod profile;
 pub mod recovery;
 pub mod status;
+pub mod swarm_key;
 pub mod trust;

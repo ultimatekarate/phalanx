@@ -119,8 +119,8 @@ impl HardwareProbe for MobileProbe {
     }
 
     fn can_capture_in_background(&self) -> bool {
-        // Android foreground service: yes. iOS: no.
-        // Conservative default — Flutter overrides per-platform.
+        // Phalanx captures foreground/screen-on only: Android background capture
+        // would need a foreground service (deliberately not built), iOS disallows it.
         false
     }
 

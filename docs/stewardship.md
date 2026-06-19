@@ -53,7 +53,7 @@ production caller); **Seam only** (the Rust side of an interface exists, the oth
 | Lean 4 proofs | Manual-only (`lake build`; no CI job) | `.github/workflows/ci.yml:1-157`, `proofs/lakefile.lean` |
 | BLE / WiFi Direct local mesh | Seam only — 5-function FFI surface and typed event plumbing exist; no Dart/Kotlin/Swift radio code exists, and the Dart bridge does not bind the seam | `crates/phalanx-ffi/src/local_mesh.rs:1-279`, `crates/phalanx-transport/src/adapters/local_mesh.rs:1-9`, `crates/phalanx-ffi/src/ble_auth.rs:1-14` |
 | `DualPresence` offense (same DID at incompatible network locations) | Deferred — offense type and 50-point penalty exist; detection logic does not | `crates/phalanx-proto/src/identity/trust.rs:22`, `crates/phalanx-forensics/src/trust/evaluation.rs:9`, `threat-model.md:365` |
-| Android app | Functional dev build: fixed dev passphrase, debug signing config, no foreground service, synthetic 25 °C thermal feed | `flutter_app/lib/main.dart:58-62,249-263`, `flutter_app/android/app/build.gradle:57-61`, `flutter_app/android/app/src/main/AndroidManifest.xml:23-80` |
+| Android app | Functional dev build: fixed dev passphrase, debug signing config, screen-on capture only (deliberate — no background service), synthetic 25 °C thermal feed | `flutter_app/lib/main.dart:58-62,249-263`, `flutter_app/android/app/build.gradle:57-61`, `flutter_app/android/app/src/main/AndroidManifest.xml:18-75` |
 | iOS app | Rust static lib cross-compiles (CI builds `aarch64-apple-ios`); loader expects static linkage; no iOS runner project is tracked | `.github/workflows/ci.yml:86-105`, `flutter_app/lib/ffi/library_loader.dart:8-18`, `flutter_app/ios/build_rust.sh:10` |
 
 The Android dev-build items are production-checklist work, not alarms — they are TODO-marked placeholders in a
@@ -235,11 +235,10 @@ dependency, with the funding question made explicit.
 | License decision | No grant at all (§6) | LICENSE file + contribution policy | README § License |
 | Repository completeness | §6 table | Clone-and-build on a clean machine, CI on every PR | §6 |
 | Hardware-keystore identity | Every mobile identity vault sealed under the fixed dev passphrase `phalanx-mobile-dev` in three flows | Android Keystore / iOS Keychain via the TODO's own plan | `flutter_app/lib/main.dart:58-62,116,129,166` |
-| Background recording | Manifest declares the three foreground-service permissions but no `<service>` element exists — recording stops when backgrounded | A camera/microphone foreground service | `flutter_app/android/app/src/main/AndroidManifest.xml:5-21,23-80` |
-| On-device peer discovery validation | mDNS is unconditionally on in the transport, but the manifest lacks `CHANGE_WIFI_MULTICAST_STATE`; Android generally requires a MulticastLock to receive multicast, so on-device discovery needs hardware validation | Verified phone-to-phone discovery on real devices; add the permission + lock if confirmed | `crates/phalanx-transport/src/builder.rs:194`, `AndroidManifest.xml:5-21` |
+| On-device peer discovery validation | mDNS is unconditionally on in the transport, but the manifest lacks `CHANGE_WIFI_MULTICAST_STATE`; Android generally requires a MulticastLock to receive multicast, so on-device discovery needs hardware validation | Verified phone-to-phone discovery on real devices; add the permission + lock if confirmed | `crates/phalanx-transport/src/builder.rs:194`, `AndroidManifest.xml:5-16` |
 | Mobile export encoder | Every current mobile artifact returns `NoEncoder` (-23) from `phalanx_export_c2pa` — `software-transcode` is off in all build paths by patent-policy design (fail-closed FOSS builds) | Either platform-encoder delegation (MediaCodec/VideoToolbox — the path the code comment already plans) or a distribution decision that can carry the licensed codecs | `crates/phalanx-ffi/src/export.rs:202-237`, `crates/phalanx-forensics/Cargo.toml:50-64` |
 | Production signing + store distribution | Release builds signed with the debug config | Signing keys, Play listing, F-Droid evaluation | `flutter_app/android/app/build.gradle:57-61` |
-| `phalanx.app` link infrastructure | App Links declare `https://phalanx.app/c/join` with `autoVerify` — verification requires hosting `assetlinks.json`; the fragment-based link format is already privacy-correct (payload never reaches server logs) | The domain serving assetlinks + a landing page | `AndroidManifest.xml:48-67`, `flutter_app/lib/services/community_link_service.dart:8-13` |
+| `phalanx.app` link infrastructure | App Links declare `https://phalanx.app/c/join` with `autoVerify` — verification requires hosting `assetlinks.json`; the fragment-based link format is already privacy-correct (payload never reaches server logs) | The domain serving assetlinks + a landing page | `AndroidManifest.xml:43-62`, `flutter_app/lib/services/community_link_service.dart:8-13` |
 | iOS app | Static lib cross-compiles; no tracked runner project | A shipping iOS app (the FFI surface and loader path already assume static linkage) | §2 |
 | BLE / WiFi Direct radios | Seam only (§2) — this is the README's offline-mesh story | Platform radio implementations driving the 5-function seam + `ble_auth` mutual authentication, then field-tested offline capture-to-mesh | `crates/phalanx-ffi/src/local_mesh.rs:1-279` |
 | External security audit | Internal audit rounds only (C2, R3-1, M7 markers in code) | An independent cryptography/protocol audit and published findings | e.g. `crates/phalanx-node/src/persistence/vault/crypto.rs:16` |
@@ -250,7 +249,7 @@ What funding buys, in dependency order:
 ```mermaid
 flowchart LR
     subgraph M6["Months 0–6 — credible Android beta"]
-        A[License + repo completeness + CI on PR] --> B[Hardware keystore<br/>foreground service<br/>discovery validation]
+        A[License + repo completeness + CI on PR] --> B[Hardware keystore<br/>discovery validation]
         B --> C[Encoder decision<br/>production signing]
     end
     subgraph M12["Months 6–12 — distribution"]
