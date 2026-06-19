@@ -115,7 +115,7 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 **Retained inline state** (structural, not business logic):
 
 - **playback slot** — the at-most-one-playback `JoinHandle` invariant (`spawn_playback` / `spawn_recovery`)
-- **RecordingSessionState** — active recording id, content-key watch, proximity-witness buffer
+- **RecordingSessionState** — active recording id, content-key watch, proximity-witness buffer (drained to the egress actor on stop, sealed as `Evidence::Proximity`)
 - **edge gates** in `handle_data_received` / `handle_data_chunk` — oversized-message rejection, bandwidth gating
 - writes the shared `Arc<HealthTracker>` (data-volume observation on inbound chunks; spectral-peer cleanup on disconnect)
 

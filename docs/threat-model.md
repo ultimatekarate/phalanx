@@ -361,7 +361,7 @@ The spyware exfiltrates the Ed25519 signing key. The attacker operates a shadow 
 
 - **`IdentityTheft` offense.** The existing offense type triggers immediate blacklisting (101 points).
 - **Eclipse detection.** The `EclipseProbe` detects anomalous changes in peer set composition.
-- **ProximityWitness BLE auth.** BLE mutual authentication verifies physical presence — a remote impersonator cannot produce valid proximity witnesses.
+- **ProximityWitness BLE auth.** BLE mutual authentication verifies physical presence, enforced engine-side in `phalanx_ble_verify_and_admit` (the platform cannot mint an unauthenticated proximity peer): the signed handshake is bound to the active recording id and issue time, rejected outside a freshness window, single-use per nonce, and rate-capped per window — so a remote impersonator cannot produce valid proximity witnesses.
 - **`DualPresence` offense (new).** Detects simultaneous evidence arrival from the same DID at geographically incompatible network locations. Type defined in this iteration; detection logic deferred (requires `Did -> Set<NetworkId>` tracking in MeshSentinel and heuristics to distinguish key theft from NAT/mobile-network transitions).
 
 ### Explicit Non-Goals
@@ -395,7 +395,7 @@ Phalanx assumes two device classes with different physical threat profiles, and 
 - **Trusted community membership.** `TrustRegistry.communities` is `#[serde(skip)]` at `phalanx-node/src/trust.rs:186`; `TrustRegistry::save()` serialises only the peer roster. Community rosters enter RAM via `phalanx_import_community` (typically from a QR code at event start) and die with the process. A seized phone reveals nothing about which groups the user belonged to.
 - **Silent Canary watch set.** Section 12; peer-presence monitoring state is never persisted.
 - **Replay Bloom filter.** Section 3; both generations are ephemeral and never disclose which evidence was seen.
-- **Proximity witnesses.** `phalanx-ffi/src/community.rs` flushes `sentinel.proximity_witnesses` via `std::mem::take` on recording stop.
+- **Proximity witnesses.** Held in a RAM-only buffer during recording; `RecordingSessionState::stop` drains the buffer on recording stop (`crates/phalanx-node/src/actors/recording_session.rs:93`), sealing each witness into a signed `Evidence::Proximity` envelope for egress to a Stronghold. Nothing proximity-related is written to mobile disk.
 
 ### What persists on mobile (seizure-tolerable)
 

@@ -218,23 +218,36 @@ by TTL rather than being actively withdrawn (`crates/phalanx-proto/src/network/e
 
 The integration seam exists; the radios do not. State of the code:
 
-- **Rust side: complete and wired.** Flutter is designed to own the radio stacks (CoreBluetooth, Android BLE GATT,
-  WiFi Direct) and bridge them through C-ABI functions: `phalanx_local_mesh_push_peer_discovered`,
-  `push_data_received`, `push_peer_disconnected`, an outbound poll, and an availability toggle
-  (`crates/phalanx-ffi/src/local_mesh.rs`). The `LocalMeshAdapter` (channel capacity 64) is constructed in the FFI
-  engine bootstrap (`crates/phalanx-ffi/src/handle.rs:570`). BLE mutual authentication scaffolding also exists: a
-  4-message Ed25519 challenge/response (32-byte nonce; signature over `responder_did || challenger_did || nonce`)
-  exposed via `phalanx_sign_ble_challenge` / `phalanx_verify_ble_peer` (`crates/phalanx-ffi/src/ble_auth.rs`).
-  Local-mesh peers carry `TransportClass::LocalMesh`, exempting them from the subnet-diversity check but subjecting
-  them to the 25% local-mesh transport quota (§4).
+- **Rust side: a hardened trust boundary, not just plumbing.** Flutter is designed to own the radio stacks
+  (CoreBluetooth, Android BLE GATT, WiFi Direct) and bridge them through C-ABI functions: `phalanx_sign_ble_challenge`
+  for the local half of the handshake, `phalanx_ble_verify_and_admit` to admit a verified peer, plus
+  `phalanx_local_mesh_push_data_received`, `push_peer_disconnected`, an outbound poll, and an availability toggle
+  (`crates/phalanx-ffi/src/local_mesh.rs`, `crates/phalanx-ffi/src/ble_auth.rs`). The `LocalMeshAdapter` (channel
+  capacity 64) is constructed in the FFI engine bootstrap (`crates/phalanx-ffi/src/handle.rs:817`). Crucially there is
+  **no** bare "a peer appeared" entry point: a LocalMesh `PeerDiscovered` — and therefore a `ProximityWitness` — is
+  emitted only through `phalanx_ble_verify_and_admit` (`crates/phalanx-ffi/src/local_mesh.rs:60-184`), which admits the
+  peer only after (1) an Ed25519 mutual-auth handshake whose signed message is bound to the active recording id and
+  issue time (`ble_auth_message`, `crates/phalanx-forensics/src/identity.rs:596-618`), (2) a freshness window, (3) a
+  per-window anti-sybil admission cap, and (4) a single-use nonce. The DID the witness binds is the one whose signature
+  just verified — not an FFI-supplied string. Authenticated proximity is then sealed into a signed `Evidence::Proximity`
+  envelope and fountain-published with the recording (`crates/phalanx-node/src/actors/media_egress.rs:286`), where a
+  custody Stronghold's corroboration gate folds it into the proof. Local-mesh peers carry `TransportClass::LocalMesh`,
+  exempting them from the subnet-diversity check but subjecting them to the 25% local-mesh transport quota (§4).
 - **Radio side: not implemented.** `flutter_app/pubspec.yaml` declares no BLE or WiFi-Direct plugin, and no Dart code
   references any `phalanx_local_mesh_*` function. In the shipped app the local-mesh transport never becomes available;
-  the desktop `sentinel` binary explicitly injects `local_mesh: None` (`crates/phalanx-node/src/bin/sentinel.rs:116`).
+  the desktop `sentinel` binary explicitly injects `local_mesh: None` (`crates/phalanx-node/src/bin/sentinel.rs:119`).
 
 Read any "BLE / WiFi Direct" transport claim in the README accordingly: the Rust engine is ready to accept a
-local-mesh transport pushed in from platform code, and the admission, authentication, and quota logic for it is built
-and tested — but no radio implementation ships today. Off-grid phone-to-phone operation currently requires a shared IP
-network (§8).
+local-mesh transport pushed in from platform code — admission, recording-bound authentication, anti-sybil capping, and
+proximity-to-corroboration egress are built and tested — but no radio implementation ships today. Off-grid
+phone-to-phone operation currently requires a shared IP network (§8).
+
+**Power governance is the platform's job.** When the radios are implemented, the plugin owns their duty cycle: it
+should gate BLE scan/advertise on the engine's power state (`phalanx_get_power_state` — the same homeostatic
+`SystemGovernor` signal that drives `target_fps` for capture) and flip `phalanx_local_mesh_set_available` accordingly,
+so off-grid presence yields to the battery floor instead of fighting it. The engine-side cost is already bounded
+without a radio: proximity egress rides the governed `MediaEgressActor` publish path (its byte count feeds the
+storage-pressure integral, §7), and LocalMesh admission is rate-capped per window.
 
 ## 7. Delivery semantics
 
