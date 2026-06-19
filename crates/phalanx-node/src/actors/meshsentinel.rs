@@ -297,6 +297,10 @@ impl<I: IngressPort> MeshSentinel<I> {
 
         let (video_tx, video_rx) = mpsc::channel(deps.config.storage.max_video_buffer);
         let (audio_tx, audio_rx) = mpsc::channel(deps.config.storage.max_audio_buffer);
+        // Proximity-witness egress channel. RecordingSessionState drains
+        // witnesses on stop() and hands them to MediaEgressActor through this
+        // sender; MeshSentinel only wires it (no field, no witness logic here).
+        let (proximity_tx, proximity_rx) = mpsc::channel(phys_capacity);
 
         let (storage_tx, storage_rx) = mpsc::channel(phys_capacity);
         let (ingestion_tx, ingestion_rx) = mpsc::channel(phys_capacity);
@@ -433,6 +437,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             MediaEgressConfig {
                 video_rx,
                 audio_rx,
+                proximity_rx,
                 video_topic: deps.config.network.video_topic.clone(),
                 audio_topic: deps.config.network.audio_topic.clone(),
                 symbol_size: deps.config.network.symbol_size,
@@ -555,7 +560,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             vitals_tx,
             archive_tx,
             revocation_tx,
-            session: RecordingSessionState::new(content_key_tx),
+            session: RecordingSessionState::new(content_key_tx, proximity_tx),
             clock: clock_handle.clone(),
             community_ids_rx,
             extra_community_ids,
@@ -628,7 +633,7 @@ impl<I: IngressPort> MeshSentinel<I> {
                 match id {
                     Some(rec_id) => self.start_recording(rec_id, None),
                     None => {
-                        let _ = self.stop_recording();
+                        self.stop_recording();
                     }
                 }
                 let _ = reply_to.send(());
@@ -700,12 +705,12 @@ impl<I: IngressPort> MeshSentinel<I> {
             .try_send(CanaryCommand::RecordingStarted { recording_id: id });
     }
 
-    /// Stop the active recording. Returns drained proximity witnesses.
-    /// Clears the content-key watch channel (revert to vault_key encryption)
-    /// and signals CanarySupervisor to clear watched state.
-    pub fn stop_recording(&mut self) -> Vec<phalanx_proto::corroboration::ProximityWitness> {
+    /// Stop the active recording. The session seals and egresses any captured
+    /// proximity witnesses, clears the content-key watch channel (revert to
+    /// vault_key encryption), and signals CanarySupervisor to clear watched state.
+    pub fn stop_recording(&mut self) {
         let _ = self.canary_tx.try_send(CanaryCommand::RecordingStopped);
-        self.session.stop()
+        self.session.stop();
     }
 
     /// Clone of the content-key watch sender for the FFI handle. Allows FFI

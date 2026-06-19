@@ -164,6 +164,12 @@ pub struct PhalanxHandle {
     /// (challenge, response) pair. Pruned to the freshness window on each
     /// admission, so it stays bounded by the live-challenge window.
     pub(crate) ble_admitted_nonces: Mutex<std::collections::HashMap<[u8; 32], u64>>,
+    /// Rolling-window timestamps (ms) of admitted LocalMesh peers, for the
+    /// per-window anti-sybil admission cap. A co-located attacker minting
+    /// `did:key`s and completing valid handshakes is throttled to the cap even
+    /// though each handshake individually verifies. Front of the deque is
+    /// oldest; pruned to the window on each admission.
+    pub(crate) ble_admit_times: Mutex<std::collections::VecDeque<u64>>,
 }
 
 // =====================================================================
@@ -900,6 +906,7 @@ async fn bootstrap_with_identity(
         recovery_cancel: Mutex::new(None),
         recovery_handle: Mutex::new(None),
         ble_admitted_nonces: Mutex::new(std::collections::HashMap::new()),
+        ble_admit_times: Mutex::new(std::collections::VecDeque::new()),
     })
 }
 

@@ -33,16 +33,42 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// Rolling window (ms) for the LocalMesh admission rate cap.
+const LOCAL_MESH_ADMIT_WINDOW_MS: u64 = 60_000;
+/// Max authenticated LocalMesh peers admitted per window — the anti-sybil
+/// throttle. A co-located attacker who mints `did:key`s and completes valid
+/// handshakes is still bounded to this many new LocalMesh admissions per
+/// window, so it cannot flood the privileged LocalMesh admission lane or inflate
+/// the corroboration proximity count. A policy-layer threshold at the admission
+/// boundary (not on the integral path), like `target_fps(PowerState)`.
+const LOCAL_MESH_ADMIT_MAX_PER_WINDOW: usize = 8;
+
+/// Drop admission timestamps older than `window` (front of the deque is oldest)
+/// and return how many remain within the window. Pure, so the cap is
+/// unit-testable without a live handle.
+fn prune_and_count(times: &mut std::collections::VecDeque<u64>, now: u64, window: u64) -> usize {
+    while let Some(&front) = times.front() {
+        if now.saturating_sub(front) > window {
+            times.pop_front();
+        } else {
+            break;
+        }
+    }
+    times.len()
+}
+
 /// Verify a BLE auth response and, only on success, admit the peer as an
 /// authenticated LocalMesh discovery. This is the Rust-side trust boundary for
 /// proximity corroboration.
 ///
 /// A `PeerDiscovered{LocalMesh}` event — and therefore a `ProximityWitness` —
-/// is emitted ONLY when all three hold:
+/// is emitted ONLY when all four hold:
 ///   1. the responder's Ed25519 signature verifies over the recording/time-bound
 ///      message (`verify_ble_response`),
 ///   2. the challenge is fresh — within `BLE_CHALLENGE_MAX_AGE` of now,
-///   3. the challenge nonce has not already been admitted (single-use).
+///   3. the per-window LocalMesh admission cap is not yet reached — the
+///      anti-sybil throttle for a co-located attacker minting valid handshakes,
+///   4. the challenge nonce has not already been admitted (single-use).
 ///
 /// There is deliberately NO bare "push a discovered peer" entry point: the
 /// platform plugin cannot mint an unauthenticated LocalMesh peer, because the
@@ -114,7 +140,25 @@ pub unsafe extern "C" fn phalanx_ble_verify_and_admit(
             return PhalanxError::InvalidState.code();
         }
 
-        // (3) Single-use nonce — reject immediate replay of a valid pair.
+        // (3) Per-window admission cap — throttle co-located sybil floods even
+        // when each handshake individually verifies. Checked before the nonce is
+        // consumed so a rate-limited honest peer can retry the same challenge in
+        // a later window.
+        {
+            let mut times = h.ble_admit_times.lock().unwrap_or_else(|e| e.into_inner());
+            let in_window = prune_and_count(&mut times, now_ms, LOCAL_MESH_ADMIT_WINDOW_MS);
+            if in_window >= LOCAL_MESH_ADMIT_MAX_PER_WINDOW {
+                tracing::warn!(
+                    target: "phalanx::ffi",
+                    peer = %response.responder_did,
+                    in_window,
+                    "BLE admit rejected: per-window LocalMesh cap reached"
+                );
+                return PhalanxError::InvalidState.code();
+            }
+        }
+
+        // (4) Single-use nonce — reject immediate replay of a valid pair.
         {
             let mut seen = h
                 .ble_admitted_nonces
@@ -133,6 +177,14 @@ pub unsafe extern "C" fn phalanx_ble_verify_and_admit(
             }
             seen.insert(challenge.nonce, now_ms);
         }
+
+        // All checks passed — record this admission in the rate window before
+        // emitting. Recorded here (not at the cap check) so a replay-rejected
+        // attempt does not count against the window.
+        h.ble_admit_times
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(now_ms);
 
         // Admit: emit an authenticated LocalMesh discovery. The engine binds the
         // witness's `remote_did` to this now-verified DID.
@@ -392,5 +444,65 @@ pub unsafe extern "C" fn phalanx_local_mesh_set_available(
 
         h.local_mesh_available.store(available, Ordering::Relaxed);
         PhalanxError::Ok.code()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LOCAL_MESH_ADMIT_MAX_PER_WINDOW, LOCAL_MESH_ADMIT_WINDOW_MS, prune_and_count};
+    use std::collections::VecDeque;
+
+    #[test]
+    fn empty_window_counts_zero() {
+        let mut times = VecDeque::new();
+        assert_eq!(
+            prune_and_count(&mut times, 1_000, LOCAL_MESH_ADMIT_WINDOW_MS),
+            0
+        );
+    }
+
+    #[test]
+    fn in_window_admissions_are_retained() {
+        // Three admissions, all within a 60s window ending at now = 60_000.
+        let mut times = VecDeque::from([10_000_u64, 30_000, 60_000]);
+        assert_eq!(
+            prune_and_count(&mut times, 60_000, LOCAL_MESH_ADMIT_WINDOW_MS),
+            3
+        );
+        assert_eq!(times.len(), 3);
+    }
+
+    #[test]
+    fn expired_admissions_are_pruned() {
+        // now = 100_000, window = 60_000 → anything stamped before 40_000 expires.
+        let mut times = VecDeque::from([5_000_u64, 39_999, 40_000, 70_000]);
+        assert_eq!(
+            prune_and_count(&mut times, 100_000, LOCAL_MESH_ADMIT_WINDOW_MS),
+            2
+        );
+        // The boundary entry (exactly `window` old) survives; older ones are gone.
+        assert_eq!(times.front().copied(), Some(40_000));
+    }
+
+    #[test]
+    fn window_boundary_is_inclusive() {
+        // Exactly `window` old → retained; pruning drops only strictly-older.
+        let mut times = VecDeque::from([40_000_u64]);
+        assert_eq!(
+            prune_and_count(&mut times, 100_000, LOCAL_MESH_ADMIT_WINDOW_MS),
+            1
+        );
+    }
+
+    #[test]
+    fn count_reaches_cap_after_a_burst() {
+        // `cap` admissions all inside one window → the window reads as full, so
+        // the next verify_and_admit sees `in_window >= cap` and is throttled.
+        let mut times: VecDeque<u64> = VecDeque::new();
+        for _ in 0..LOCAL_MESH_ADMIT_MAX_PER_WINDOW {
+            times.push_back(1_000);
+        }
+        let in_window = prune_and_count(&mut times, 2_000, LOCAL_MESH_ADMIT_WINDOW_MS);
+        assert_eq!(in_window, LOCAL_MESH_ADMIT_MAX_PER_WINDOW);
     }
 }

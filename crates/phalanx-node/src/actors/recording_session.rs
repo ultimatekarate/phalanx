@@ -10,7 +10,7 @@ use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::identity::RecordingId;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 /// State for the currently-active recording, if any. Recording is enabled
 /// when `active_recording_id` is `Some`. The fields are only mutated through
@@ -27,6 +27,12 @@ pub struct RecordingSessionState {
     /// channel keeps the latest value, so simultaneous senders do not
     /// conflict.
     content_key_tx: watch::Sender<Option<SymmetricKey>>,
+    /// Egress sender to `MediaEgressActor` for captured proximity witnesses.
+    /// On `stop`, drained witnesses are handed off here to be sealed into signed
+    /// `Evidence::Proximity` envelopes and fountain-published with the recording.
+    /// The session owns this so the witness lifecycle stays out of
+    /// `MeshSentinel` — the orchestrator only wires the channel at construction.
+    proximity_tx: mpsc::Sender<ProximityWitness>,
     /// Cheap-to-read "is a recording in progress?" flag. The engine flips
     /// this in `start` / `stop`; FFI consumers obtain an `Arc` clone via
     /// `recording_active_handle()` and read it lock-free. This is the
@@ -38,12 +44,16 @@ pub struct RecordingSessionState {
 
 impl RecordingSessionState {
     #[must_use]
-    pub fn new(content_key_tx: watch::Sender<Option<SymmetricKey>>) -> Self {
+    pub fn new(
+        content_key_tx: watch::Sender<Option<SymmetricKey>>,
+        proximity_tx: mpsc::Sender<ProximityWitness>,
+    ) -> Self {
         Self {
             active_recording_id: None,
             active_recording_key: None,
             proximity_witnesses: Vec::new(),
             content_key_tx,
+            proximity_tx,
             recording_active: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -73,16 +83,31 @@ impl RecordingSessionState {
         self.recording_active.store(true, Ordering::Release);
     }
 
-    /// Stop the recording. Returns drained proximity witnesses, clears the
-    /// active recording id, and signals `MediaEgressActor` to revert to
-    /// vault-key encryption (sends `None` on the watch channel).
-    #[must_use]
-    pub fn stop(&mut self) -> Vec<ProximityWitness> {
+    /// Stop the recording. Hands every proximity witness captured during the
+    /// recording to `MediaEgressActor` (via `proximity_tx`) to be sealed into a
+    /// signed `Evidence::Proximity` envelope and fountain-published with the
+    /// recording, where a custody Stronghold's `collect_proximity` folds it into
+    /// the `CorroborationProof`. Also clears the active recording id and signals
+    /// `MediaEgressActor` to revert to vault-key encryption (`None` on the watch
+    /// channel).
+    pub fn stop(&mut self) {
         self.active_recording_id = None;
         self.active_recording_key = None;
         let _ = self.content_key_tx.send(None);
         self.recording_active.store(false, Ordering::Release);
-        std::mem::take(&mut self.proximity_witnesses)
+
+        // Hand captured witnesses to the egress specialist. Dropped on
+        // backpressure (full) or after the actor has shut down (closed), like
+        // media shards — proximity is supporting evidence, never a gate.
+        for witness in self.proximity_witnesses.drain(..) {
+            if let Err(e) = self.proximity_tx.try_send(witness) {
+                tracing::warn!(
+                    target: "phalanx::mesh",
+                    error = %e,
+                    "Proximity witness dropped — egress channel full or closed"
+                );
+            }
+        }
     }
 
     /// Append a proximity witness captured during the current recording.
