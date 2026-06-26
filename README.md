@@ -4,7 +4,7 @@
 
 Phalanx is a mobile app that records video, proves it hasn't been tampered with, and distributes it so that destroying the device doesn't destroy the footage — without trusting any server, any network, or any other person. That problem touches cryptography, distributed systems, control theory, signal processing, and adversarial security simultaneously. You can't drop any of them and still solve it. Every subsystem exists because the problem required it. Nothing here is for show.
 
-> **Status (June 2026):** the Rust engine — capture forensics, encryption, signing, fountain-coding, mesh transport, vault, communities, recovery — is real and tested. A functional Android app builds from source (development build); the Stronghold custody server works, including C2PA export. There is no iOS app, no app-store presence, and no field deployment yet. License: TBD. The candid inventory of what exists is [docs/stewardship.md](docs/stewardship.md); the case for adoption is [PITCH.md](PITCH.md).
+> **Status (June 2026):** the Rust engine — capture forensics, encryption, signing, fountain-coding, mesh transport, vault, communities, recovery — is real and tested. A functional Android app builds from source (development build); the Stronghold custody server works, including C2PA export. There is no iOS app, no app-store presence, and no field deployment yet. License: Apache-2.0. The candid inventory of what exists is [docs/stewardship.md](docs/stewardship.md); the case for adoption is [PITCH.md](PITCH.md).
 
 ## Where to start
 
@@ -165,4 +165,4 @@ The workspace enforces deny-level clippy lints across all crates — `unwrap_use
 
 ## License
 
-License: TBD. Phalanx will always be open source and free. The decision path and constraints are tracked in [docs/stewardship.md](docs/stewardship.md).
+Phalanx is licensed under the [Apache License, Version 2.0](LICENSE) (SPDX: `Apache-2.0`). It will always be open source and free.

@@ -207,10 +207,7 @@ Bluetooth/WiFi-Direct offline mesh exists only as an integration seam — no rad
 (`crates/phalanx-ffi/src/local_mesh.rs`); today the mesh runs over IP. Known rough edges are documented rather
 than hidden: the phone and Stronghold gossipsub topic defaults were misaligned until June 2026 — they now share
 canonical defaults pinned by a cross-crate regression test
-([docs/network.md §3](docs/network.md#3-topics-who-publishes-who-listens)) — the license is TBD with no LICENSE
-file yet (README § License), CI runs only on manual dispatch (`.github/workflows/ci.yml:3-4`), and a fresh
-clone currently lacks most of the Flutter app because of an overbroad `.gitignore` rule (`.gitignore:15-17`).
-And it has not been field-deployed. What is being pitched is not a finished product; it is a tested engine plus
+([docs/network.md §3](docs/network.md#3-topics-who-publishes-who-listens)). And it has not been field-deployed. What is being pitched is not a finished product; it is a tested engine plus
 a fully-costed, honestly-documented path to one ([docs/stewardship.md §7](docs/stewardship.md#7-the-productization-gap-list)).
 
 ## 7. Background

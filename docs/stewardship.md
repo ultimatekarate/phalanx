@@ -24,7 +24,7 @@ A steward inherits three kinds of artifact, and the worst handoff failures come 
 2. **Inherited intent** — implemented, tested code that no production path calls yet. It is not rot; it documents
    a deployment shape that was designed but never assembled. Each item needs a deliberate wire-it-or-delete-it
    decision, not silent deletion by a dead-code sweep. Catalogued in §5.
-3. **Honest gaps** — things that do not exist yet (radio implementations, an iOS app, a license file), stated
+3. **Honest gaps** — things that do not exist yet (radio implementations, an iOS app), stated
    plainly in the README status banner. Catalogued in §2, §6, and §7.
 
 Section 3 — the claims-to-evidence registry — is the table this document exists for. Every headline claim is
@@ -216,7 +216,7 @@ What a fresh `git clone` actually gets, as fix-plan rows. Effort: S (hours), M (
 | Issue | Current behavior | Anchors | Fix | Effort |
 |---|---|---|---|---|
 | ~~`.gitignore` excludes `flutter_app/*`~~ **(fixed)** | The blanket `flutter_app/*` rule was narrowed to build artifacts (`flutter_app/.dart_tool/`, `flutter_app/build/`). The app's Dart sources are now tracked (42 files, including the profile-picker additions), so a fresh clone gets a buildable app and search tools no longer skip the tree. | `.gitignore:15-16` | Done. | — |
-| No LICENSE file | README says "License: TBD. Phalanx will always be open source and free" — but with no license grant the repository is legally all-rights-reserved, which blocks every other adoption step. | README § License | Owner picks a license (the `software-transcode` patent-encumbered-codec boundary, `crates/phalanx-forensics/Cargo.toml:50-64`, is relevant input); add the file. | Decision M, mechanics S |
+| ~~No LICENSE file~~ **(fixed)** | The repository is licensed under Apache-2.0: a root `LICENSE` (verbatim Apache 2.0) plus `license = "Apache-2.0"` in `[workspace.package]`, inherited by all nine crates via `license.workspace = true`. Apache-2.0's explicit §3 patent grant suits the `software-transcode` patent-encumbered-codec boundary (`crates/phalanx-forensics/Cargo.toml:50-64`). | `LICENSE`, `Cargo.toml:20` | Done. | — |
 | ~~CI runs on manual dispatch only~~ **(fixed)** | Now triggers on push to `master` and every PR (plus manual); the expensive `bench` job stays gated to manual dispatch. | `.github/workflows/ci.yml:3-7` | Done. | — |
 | ~~CI `build-ios` cbindgen path is wrong~~ **(fixed)** | The generate step and the artifact upload now point at `crates/phalanx-ffi/` (both `--config` and `--output`). | `.github/workflows/ci.yml:96-113` | Done. | — |
 | ~~CI clippy omits `--all-targets`~~ **(fixed)** | The workspace clippy step now passes `--all-targets`, matching the local convention. | `.github/workflows/ci.yml:33-34` | Done. | — |
@@ -232,7 +232,7 @@ dependency, with the funding question made explicit.
 
 | Gap | Today | Done looks like | Anchor |
 | --- | --- | --- | --- |
-| License decision | No grant at all (§6) | LICENSE file + contribution policy | README § License |
+| License decision | ~~No grant at all~~ Apache-2.0 granted (§6) | LICENSE present; inbound contributions are under Apache-2.0 §5 (inbound = outbound) | `LICENSE`, README § License |
 | Repository completeness | §6 table | Clone-and-build on a clean machine, CI on every PR | §6 |
 | Hardware-keystore identity | Every mobile identity vault sealed under the fixed dev passphrase `phalanx-mobile-dev` in three flows | Android Keystore / iOS Keychain via the TODO's own plan | `flutter_app/lib/main.dart:58-62,116,129,166` |
 | On-device peer discovery validation | mDNS is unconditionally on in the transport, but the manifest lacks `CHANGE_WIFI_MULTICAST_STATE`; Android generally requires a MulticastLock to receive multicast, so on-device discovery needs hardware validation | Verified phone-to-phone discovery on real devices; add the permission + lock if confirmed | `crates/phalanx-transport/src/builder.rs:194`, `AndroidManifest.xml:5-16` |

@@ -2,6 +2,7 @@
 name = "phalanx-test-fixtures"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 authors.workspace = true
 description = "Phrasebook: pre-composed test Nouns for cross-crate testing. Dev-dependency only."
 
