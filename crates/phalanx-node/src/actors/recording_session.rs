@@ -18,7 +18,10 @@ use tokio::sync::{mpsc, watch};
 /// content-key channel signalled on every transition, recording-active flag
 /// kept in sync) cannot drift.
 pub struct RecordingSessionState {
-    active_recording_id: Option<RecordingId>,
+    /// Single source of truth for the active recording id, held as a watch so
+    /// the FFI handle can read it lock-free off-thread (`make_ble_challenge`
+    /// binds it into BLE challenges). `Some` ⇔ a recording is in progress.
+    active_recording_id: watch::Sender<Option<RecordingId>>,
     active_recording_key: Option<[u8; 32]>,
     proximity_witnesses: Vec<ProximityWitness>,
     /// Watch sender driving the per-recording content key for `MediaEgressActor`.
@@ -49,7 +52,7 @@ impl RecordingSessionState {
         proximity_tx: mpsc::Sender<ProximityWitness>,
     ) -> Self {
         Self {
-            active_recording_id: None,
+            active_recording_id: watch::channel(None).0,
             active_recording_key: None,
             proximity_witnesses: Vec::new(),
             content_key_tx,
@@ -61,13 +64,21 @@ impl RecordingSessionState {
     /// True when a recording is in progress (proximity-witness capture enabled).
     #[must_use]
     pub fn is_active(&self) -> bool {
-        self.active_recording_id.is_some()
+        self.active_recording_id.borrow().is_some()
     }
 
-    /// Borrow the active recording id, if any.
+    /// The active recording id, if any (cloned from the watch).
     #[must_use]
-    pub fn recording_id(&self) -> Option<&RecordingId> {
-        self.active_recording_id.as_ref()
+    pub fn recording_id(&self) -> Option<RecordingId> {
+        self.active_recording_id.borrow().clone()
+    }
+
+    /// A `watch::Receiver` on the active recording id, for the FFI handle.
+    /// `make_ble_challenge` reads it to bind a BLE challenge to the same
+    /// recording the witness will bind — engine-sourced, never plugin-supplied.
+    #[must_use]
+    pub fn recording_id_receiver(&self) -> watch::Receiver<Option<RecordingId>> {
+        self.active_recording_id.subscribe()
     }
 
     /// Mark a recording as active. If `key` is provided, also pushes it via
@@ -75,7 +86,7 @@ impl RecordingSessionState {
     /// per-recording encryption. The FFI's `phalanx_start_recording` may
     /// alternatively push the key directly via its own watch sender clone.
     pub fn start(&mut self, id: RecordingId, key: Option<[u8; 32]>) {
-        self.active_recording_id = Some(id);
+        self.active_recording_id.send_replace(Some(id));
         self.active_recording_key = key;
         if let Some(k) = key {
             let _ = self.content_key_tx.send(Some(SymmetricKey::from_bytes(k)));
@@ -91,7 +102,7 @@ impl RecordingSessionState {
     /// `MediaEgressActor` to revert to vault-key encryption (`None` on the watch
     /// channel).
     pub fn stop(&mut self) {
-        self.active_recording_id = None;
+        self.active_recording_id.send_replace(None);
         self.active_recording_key = None;
         let _ = self.content_key_tx.send(None);
         self.recording_active.store(false, Ordering::Release);

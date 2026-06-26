@@ -971,7 +971,7 @@ impl<I: IngressPort> MeshSentinel<I> {
         // ProximityWitness capture: if recording and this is LocalMesh,
         // log the co-location event for the Corroboration Gate.
         if transport == TransportClass::LocalMesh {
-            if let Some(rec_id) = self.session.recording_id().cloned() {
+            if let Some(rec_id) = self.session.recording_id() {
                 self.session
                     .push_witness(phalanx_proto::corroboration::ProximityWitness {
                         local_did: self.identity.did.clone(),

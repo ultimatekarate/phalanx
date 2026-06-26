@@ -11,6 +11,11 @@
 #include <stdlib.h>
 
 /**
+ * Length of a Phalanx swarm pre-shared key, in bytes.
+ */
+#define SWARM_KEY_LEN 32
+
+/**
  * Pixel format of the interleaved chroma plane from the camera.
  *
  * Android's Camera2 API delivers NV21 (VU interleaved).
@@ -180,49 +185,79 @@ typedef struct PhalanxHandle PhalanxHandle;
 typedef struct PlaybackSession PlaybackSession;
 
 /**
- * Sign a BLE auth challenge from a remote peer.
+ * Build a fresh BLE challenge bound to the node's *active recording*, for the
+ * platform plugin to relay to a discovered peer (challenger initiation).
  *
- * Flutter calls this when it receives a BLE challenge. Rust signs with the node's
- * Ed25519 key. Flutter sends the resulting signature back over BLE.
+ * The `recording_id` is read from the engine — NOT supplied by the plugin — so
+ * the recording the responder signs is exactly the one the resulting
+ * `ProximityWitness` binds (both engine-sourced). Returns `InvalidState` if no
+ * recording is active. The challenger keeps the returned blob to pair with the
+ * peer's `BleResponse` in `phalanx_ble_verify_and_admit`.
  *
- * # Parameters
- * * `handle` — valid PhalanxHandle pointer
- * * `challenger_did_ptr/len` — the remote peer's DID (UTF-8 bytes)
- * * `nonce_ptr` — pointer to exactly 32 bytes of challenge nonce
- * * `out_signature` — pointer to 64-byte buffer for the Ed25519 signature output
+ * The output is a postcard-serialized `BleChallenge`; the caller frees it with
+ * `phalanx_free_bytes`.
  *
  * # Safety
- * All pointers must be valid. `out_signature` must point to at least 64 writable bytes.
+ * * `handle` must be a valid pointer from `phalanx_create`.
+ * * `out_challenge`/`out_len` must be valid, writable pointers.
  */
 
-int32_t phalanx_sign_ble_challenge(const struct PhalanxHandle *handle,
-                                   const uint8_t *challenger_did_ptr,
-                                   uintptr_t challenger_did_len,
-                                   const uint8_t *nonce_ptr,
-                                   uint8_t *out_signature)
+int32_t phalanx_make_ble_challenge(const struct PhalanxHandle *handle,
+                                   uint8_t **out_challenge,
+                                   uint32_t *out_len)
 ;
 
 /**
- * Verify a BLE auth response from a remote peer.
+ * Sign a BLE auth challenge from a remote peer, returning a `BleResponse` blob.
  *
- * Flutter calls this after receiving a BLE auth response. Rust verifies the
- * Ed25519 signature. Returns 0 if verified, negative error code if not.
+ * Flutter calls this when it receives a `BleChallenge` blob over BLE. Rust
+ * deserializes it, signs the recording/time-bound message with the node's
+ * Ed25519 key, and returns a postcard-serialized `BleResponse` (the node's DID
+ * + the signature) for Flutter to relay back. The blob is OPAQUE — the plugin
+ * never assembles a response itself — and the challenger feeds it straight into
+ * `phalanx_ble_verify_and_admit`.
  *
  * # Parameters
- * * `handle` — valid PhalanxHandle pointer
- * * `responder_did_ptr/len` — the remote peer's DID (UTF-8 bytes)
- * * `our_nonce_ptr` — pointer to the 32-byte nonce we sent in our challenge
- * * `signature_ptr` — pointer to the 64-byte Ed25519 signature from the remote peer
+ * * `handle` — valid `PhalanxHandle` pointer.
+ * * `challenge_ptr`/`challenge_len` — postcard-serialized `BleChallenge`.
+ * * `out_response`/`out_len` — receive the leaked `BleResponse` blob; the
+ *   caller frees it with `phalanx_free_bytes`.
+ *
+ * # Safety
+ * All pointers must be valid; `challenge_ptr` must point to `challenge_len`
+ * readable bytes and `out_response`/`out_len` must be writable.
+ */
+
+int32_t phalanx_sign_ble_challenge(const struct PhalanxHandle *handle,
+                                   const uint8_t *challenge_ptr,
+                                   uintptr_t challenge_len,
+                                   uint8_t **out_response,
+                                   uint32_t *out_len)
+;
+
+/**
+ * Verify a BLE auth response against the challenge it answers.
+ *
+ * Pure signature check over the recording/time-bound message. Returns
+ * `PhalanxError::Ok` (0) if the signature is valid, `InvalidState` if not.
+ * This does NOT enforce freshness, single-use nonces, or admission — those
+ * live in `phalanx_ble_verify_and_admit`. Use this only where a bare crypto
+ * check is wanted (e.g. UI feedback before admission).
+ *
+ * # Parameters
+ * * `handle` — valid `PhalanxHandle` pointer.
+ * * `challenge_ptr`/`challenge_len` — postcard-serialized `BleChallenge` we issued.
+ * * `response_ptr`/`response_len` — postcard-serialized `BleResponse` received.
  *
  * # Safety
  * All pointers must be valid with the specified lengths.
  */
 
 int32_t phalanx_verify_ble_peer(const struct PhalanxHandle *handle,
-                                const uint8_t *responder_did_ptr,
-                                uintptr_t responder_did_len,
-                                const uint8_t *our_nonce_ptr,
-                                const uint8_t *signature_ptr)
+                                const uint8_t *challenge_ptr,
+                                uintptr_t challenge_len,
+                                const uint8_t *response_ptr,
+                                uintptr_t response_len)
 ;
 
 /**
@@ -912,17 +947,39 @@ struct PhalanxHandle *phalanx_restore_with_profile(const char *profile_name,
  void phalanx_destroy(struct PhalanxHandle *handle) ;
 
 /**
- * Pushes a peer discovery event from Flutter into the local mesh channel.
+ * Verify a BLE auth response and, only on success, admit the peer as an
+ * authenticated LocalMesh discovery. This is the Rust-side trust boundary for
+ * proximity corroboration.
  *
- * Called when BLE/WiFi Direct discovers a nearby device.
+ * A `PeerDiscovered{LocalMesh}` event — and therefore a `ProximityWitness` —
+ * is emitted ONLY when all four hold:
+ *   1. the responder's Ed25519 signature verifies over the recording/time-bound
+ *      message (`verify_ble_response`),
+ *   2. the challenge is fresh — within `BLE_CHALLENGE_MAX_AGE` of now,
+ *   3. the per-window LocalMesh admission cap is not yet reached — the
+ *      anti-sybil throttle for a co-located attacker minting valid handshakes,
+ *   4. the challenge nonce has not already been admitted (single-use).
+ *
+ * There is deliberately NO bare "push a discovered peer" entry point: the
+ * platform plugin cannot mint an unauthenticated LocalMesh peer, because the
+ * only path that emits the discovery runs this verification first. The DID the
+ * witness binds is the one whose signature just verified — not an
+ * FFI-supplied string the engine would otherwise trust blindly.
+ *
+ * `challenge` and `response` are opaque postcard blobs the plugin relays over
+ * BLE; it never constructs or parses them.
  *
  * # Safety
  * * `handle` must be a valid pointer from `phalanx_create`.
- * * `peer_id` must be a valid null-terminated C string.
+ * * `challenge_ptr`/`response_ptr` must point to the declared number of
+ *   readable bytes.
  */
 
-int32_t phalanx_local_mesh_push_peer_discovered(struct PhalanxHandle *handle,
-                                                const char *peer_id)
+int32_t phalanx_ble_verify_and_admit(struct PhalanxHandle *handle,
+                                     const uint8_t *challenge_ptr,
+                                     uintptr_t challenge_len,
+                                     const uint8_t *response_ptr,
+                                     uintptr_t response_len)
 ;
 
 /**
@@ -1269,6 +1326,31 @@ int32_t phalanx_recovery_status(const struct PhalanxHandle *handle,
  * * `handle` must be a valid pointer from `phalanx_create`.
  */
  int32_t phalanx_update_device_ram(struct PhalanxHandle *handle, uint64_t total_ram_bytes) ;
+
+/**
+ * Generate a fresh 32-byte swarm key, persist it to `{storage_path}/swarm.key`,
+ * and copy it into `out_key` for the founder to share out-of-band.
+ *
+ * Call this once on the founder device before `phalanx_create*`. Joiners
+ * receive the returned bytes (e.g. via QR) and pass them to
+ * `phalanx_import_swarm_key`.
+ *
+ * # Safety
+ * * `storage_path` must be a valid NUL-terminated C string.
+ * * `out_key` must point to at least `SWARM_KEY_LEN` (32) writable bytes.
+ */
+ int32_t phalanx_generate_swarm_key(const char *storage_path, uint8_t *out_key) ;
+
+/**
+ * Import a shared 32-byte swarm key (received from the group founder) and
+ * persist it to `{storage_path}/swarm.key`, so the next `phalanx_create*`
+ * joins the closed swarm.
+ *
+ * # Safety
+ * * `storage_path` must be a valid NUL-terminated C string.
+ * * `key` must point to exactly `key_len` readable bytes.
+ */
+ int32_t phalanx_import_swarm_key(const char *storage_path, const uint8_t *key, uintptr_t key_len) ;
 
 /**
  * Returns the peer list as a JSON array string.

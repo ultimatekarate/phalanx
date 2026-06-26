@@ -23,8 +23,12 @@
 
 use crate::error::PhalanxError;
 use crate::handle::PhalanxHandle;
+use phalanx_proto::identity::RecordingId;
 use phalanx_proto::network::{BleChallenge, BleResponse};
 use phalanx_proto::prelude::PhalanxIdentity;
+use phalanx_proto::time::PhalanxTimestamp;
+use rand::RngCore;
+use rand::rngs::OsRng;
 
 /// Produce a BLE auth signature over the recording/time-bound message.
 ///
@@ -48,34 +52,117 @@ pub(crate) fn sign_ble_challenge_inner(
     identity.keypair.sign(&msg).to_bytes()
 }
 
-/// Sign a BLE auth challenge from a remote peer.
+/// Build a `BleChallenge` for the active recording. Pure: no IO, no lock.
+/// Extracted from `phalanx_make_ble_challenge` so it is unit-testable.
+pub(crate) fn make_ble_challenge_inner(
+    identity: &PhalanxIdentity,
+    recording_id: RecordingId,
+    nonce: [u8; 32],
+    issued_at: PhalanxTimestamp,
+) -> BleChallenge {
+    BleChallenge {
+        sender_did: identity.did.clone(),
+        nonce,
+        recording_id,
+        issued_at,
+    }
+}
+
+/// Build a fresh BLE challenge bound to the node's *active recording*, for the
+/// platform plugin to relay to a discovered peer (challenger initiation).
+///
+/// The `recording_id` is read from the engine — NOT supplied by the plugin — so
+/// the recording the responder signs is exactly the one the resulting
+/// `ProximityWitness` binds (both engine-sourced). Returns `InvalidState` if no
+/// recording is active. The challenger keeps the returned blob to pair with the
+/// peer's `BleResponse` in `phalanx_ble_verify_and_admit`.
+///
+/// The output is a postcard-serialized `BleChallenge`; the caller frees it with
+/// `phalanx_free_bytes`.
+///
+/// # Safety
+/// * `handle` must be a valid pointer from `phalanx_create`.
+/// * `out_challenge`/`out_len` must be valid, writable pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn phalanx_make_ble_challenge(
+    handle: *const PhalanxHandle,
+    out_challenge: *mut *mut u8,
+    out_len: *mut u32,
+) -> i32 {
+    // SAFETY: caller upholds the # Safety contract on the parent
+    // `unsafe extern "C" fn`. `handle` is null-checked via `as_ref`;
+    // `out_challenge`/`out_len` are null-checked before the leaked buffer
+    // pointer and length are written through them by `leak_bytes_to_c`.
+    unsafe {
+        let Some(h) = handle.as_ref() else {
+            return PhalanxError::NullPointer.code();
+        };
+        if out_challenge.is_null() || out_len.is_null() {
+            return PhalanxError::NullPointer.code();
+        }
+
+        // recording_id is engine-sourced: bind the same recording the witness
+        // will bind. No active recording → no proximity challenge to make.
+        let Some(recording_id) = h.recording_id_rx.borrow().clone() else {
+            tracing::warn!(
+                target: "phalanx::ffi",
+                "make_ble_challenge rejected: no active recording to bind"
+            );
+            return PhalanxError::InvalidState.code();
+        };
+
+        let mut nonce = [0u8; 32];
+        let mut rng = OsRng;
+        rng.fill_bytes(&mut nonce);
+        let issued_at = PhalanxTimestamp::from_u64(crate::local_mesh::now_millis());
+
+        let challenge = make_ble_challenge_inner(&h.identity, recording_id, nonce, issued_at);
+        let bytes = match postcard::to_allocvec(&challenge) {
+            Ok(b) => b,
+            Err(_) => return PhalanxError::SerializationFailure.code(),
+        };
+        crate::memory::leak_bytes_to_c(bytes.into_boxed_slice(), out_challenge, out_len);
+        PhalanxError::Ok.code()
+    }
+}
+
+/// Sign a BLE auth challenge from a remote peer, returning a `BleResponse` blob.
 ///
 /// Flutter calls this when it receives a `BleChallenge` blob over BLE. Rust
 /// deserializes it, signs the recording/time-bound message with the node's
-/// Ed25519 key, and writes the 64-byte signature for Flutter to return.
+/// Ed25519 key, and returns a postcard-serialized `BleResponse` (the node's DID
+/// + the signature) for Flutter to relay back. The blob is OPAQUE — the plugin
+/// never assembles a response itself — and the challenger feeds it straight into
+/// `phalanx_ble_verify_and_admit`.
 ///
 /// # Parameters
 /// * `handle` — valid `PhalanxHandle` pointer.
 /// * `challenge_ptr`/`challenge_len` — postcard-serialized `BleChallenge`.
-/// * `out_signature` — pointer to at least 64 writable bytes for the signature.
+/// * `out_response`/`out_len` — receive the leaked `BleResponse` blob; the
+///   caller frees it with `phalanx_free_bytes`.
 ///
 /// # Safety
 /// All pointers must be valid; `challenge_ptr` must point to `challenge_len`
-/// readable bytes and `out_signature` to at least 64 writable bytes.
+/// readable bytes and `out_response`/`out_len` must be writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn phalanx_sign_ble_challenge(
     handle: *const PhalanxHandle,
     challenge_ptr: *const u8,
     challenge_len: usize,
-    out_signature: *mut u8,
+    out_response: *mut *mut u8,
+    out_len: *mut u32,
 ) -> i32 {
     // SAFETY: the caller upholds the `# Safety` contract. Every raw pointer is
     // null-checked before use; `handle` is read as `&*handle`, `challenge_ptr`
     // is read via `from_raw_parts` for the caller-declared `challenge_len`, and
-    // exactly 64 signature bytes are written into `out_signature`, which the
-    // caller guarantees points to at least that many writable bytes.
+    // the `BleResponse` blob is written through `out_response`/`out_len` by
+    // `leak_bytes_to_c`.
     unsafe {
-        if handle.is_null() || challenge_ptr.is_null() || out_signature.is_null() {
+        if handle.is_null()
+            || challenge_ptr.is_null()
+            || out_response.is_null()
+            || out_len.is_null()
+        {
             return PhalanxError::NullPointer.code();
         }
         let h = &*handle;
@@ -91,7 +178,15 @@ pub unsafe extern "C" fn phalanx_sign_ble_challenge(
         // lifetime, so an FFI `sentinel.lock().await` would deadlock — read the
         // identity from the handle directly instead.
         let sig_bytes = sign_ble_challenge_inner(&h.identity, &challenge);
-        std::ptr::copy_nonoverlapping(sig_bytes.as_ptr(), out_signature, 64);
+        let response = BleResponse {
+            responder_did: h.identity.did.clone(),
+            signature: sig_bytes.to_vec(),
+        };
+        let bytes = match postcard::to_allocvec(&response) {
+            Ok(b) => b,
+            Err(_) => return PhalanxError::SerializationFailure.code(),
+        };
+        crate::memory::leak_bytes_to_c(bytes.into_boxed_slice(), out_response, out_len);
 
         PhalanxError::Ok.code()
     }
@@ -204,6 +299,32 @@ mod tests {
 
         phalanx_forensics::identity::verify_ble_response(&challenge, &response)
             .expect("signature produced by sign_ble_challenge_inner must verify");
+    }
+
+    /// `make_ble_challenge_inner` builds a challenge a responder's signature
+    /// verifies against — the full make → sign → verify round-trip the
+    /// engine-sourced challenger path relies on. `sender_did` is the challenger.
+    #[test]
+    fn make_then_sign_roundtrips_with_verify_ble_response() {
+        let challenger = PhalanxIdentity::new_ephemeral();
+        let responder = PhalanxIdentity::new_ephemeral();
+
+        let challenge = make_ble_challenge_inner(
+            &challenger,
+            RecordingId::new("rec-make"),
+            [7u8; 32],
+            PhalanxTimestamp(2_000),
+        );
+        assert_eq!(challenge.sender_did, challenger.did);
+
+        let sig_bytes = sign_ble_challenge_inner(&responder, &challenge);
+        let response = BleResponse {
+            responder_did: responder.did.clone(),
+            signature: sig_bytes.to_vec(),
+        };
+
+        phalanx_forensics::identity::verify_ble_response(&challenge, &response)
+            .expect("make→sign→verify must round-trip");
     }
 
     /// Re-presenting a captured signature against a different recording id must

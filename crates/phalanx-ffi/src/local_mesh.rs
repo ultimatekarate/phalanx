@@ -25,7 +25,7 @@ use std::sync::atomic::Ordering;
 /// challenge freshness window. The verifier IS the challenger (it answers its
 /// own challenge), so this shares the local-time basis the challenge's
 /// `issued_at` was stamped with — the comparison holds even with no NTP.
-fn now_millis() -> u64 {
+pub(crate) fn now_millis() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

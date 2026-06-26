@@ -27,6 +27,7 @@ use phalanx_node::vitals::{HomeostaticConfig, SystemGovernor, ThermalThresholds}
 use phalanx_node::{EngineLifecycle, FileJournal, UnspawnedEngine};
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{AudioShard, ForensicMetrics, PrnuPosterior, VideoShard};
+use phalanx_proto::identity::RecordingId;
 use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::network::deployment::DeploymentProfile;
 use phalanx_proto::prelude::{Did, PhalanxIdentity};
@@ -121,6 +122,10 @@ pub struct PhalanxHandle {
     /// through `SentinelCommand::SetRecordingState`, so there is exactly
     /// one writer and no possibility of FFI/engine desync.
     pub(crate) recording_active: Arc<AtomicBool>,
+    /// Watch receiver on the engine's active recording id. `make_ble_challenge`
+    /// reads it to bind a BLE challenge to the same recording the witness binds
+    /// (engine-sourced, never plugin-supplied).
+    pub(crate) recording_id_rx: tokio::sync::watch::Receiver<Option<RecordingId>>,
     /// Local mesh inbound sender — FFI push functions send NetworkEvents here.
     pub(crate) local_mesh_tx: Option<mpsc::Sender<NetworkEvent>>,
     /// Local mesh outbound receiver — Flutter polls outbound packets from here.
@@ -871,6 +876,7 @@ async fn bootstrap_with_identity(
     // Single source of truth for "is a recording active" — owned by the
     // engine's RecordingSessionState, shared into the handle as an Arc.
     let recording_active = unspawned.recording_active();
+    let recording_id_rx = unspawned.recording_id_receiver();
 
     // Create a dummy runtime — will be replaced by the caller. This is the
     // same trick the old bootstrap used; we keep it to avoid restructuring
@@ -895,6 +901,7 @@ async fn bootstrap_with_identity(
         audio_tx,
         node_did,
         recording_active,
+        recording_id_rx,
         local_mesh_tx: Some(local_mesh_tx),
         local_mesh_outbound_rx: Mutex::new(Some(local_mesh_outbound_rx)),
         local_mesh_available,

@@ -26,6 +26,7 @@
 use crate::actors::meshsentinel::{MeshSentinel, SentinelCommand, SentinelDependencies};
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{AudioShard, VideoShard};
+use phalanx_proto::identity::RecordingId;
 use phalanx_proto::network::{EgressPort, IngressPort};
 use phalanx_proto::storage::TransientJournal;
 use std::error::Error;
@@ -109,6 +110,13 @@ impl<I: IngressPort + 'static> UnspawnedEngine<I> {
     #[must_use]
     pub fn recording_active(&self) -> Arc<AtomicBool> {
         self.sentinel.session.recording_active_handle()
+    }
+    /// Watch receiver on the active recording id, for the FFI handle.
+    /// `make_ble_challenge` reads it to bind a challenge to the recording the
+    /// witness will bind — engine-sourced, never plugin-supplied.
+    #[must_use]
+    pub fn recording_id_receiver(&self) -> watch::Receiver<Option<RecordingId>> {
+        self.sentinel.session.recording_id_receiver()
     }
 
     /// Spawn the engine's run loop on `runtime`, returning the channel

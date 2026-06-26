@@ -137,7 +137,8 @@ fn h1_sign_ble_challenge_does_not_deadlock_against_engine_run() {
             issued_at: phalanx_proto::time::PhalanxTimestamp::from_u64(1_000),
         };
         let challenge_blob = postcard::to_allocvec(&challenge).expect("serialize challenge");
-        let mut signature = [0u8; 64];
+        let mut out_data: *mut u8 = std::ptr::null_mut();
+        let mut out_len: u32 = 0;
 
         // The actual deadlock candidate: must return in milliseconds.
         let signing_start = std::time::Instant::now();
@@ -146,7 +147,8 @@ fn h1_sign_ble_challenge_does_not_deadlock_against_engine_run() {
                 handle,
                 challenge_blob.as_ptr(),
                 challenge_blob.len(),
-                signature.as_mut_ptr(),
+                &mut out_data,
+                &mut out_len,
             )
         };
         let elapsed = signing_start.elapsed();
@@ -155,11 +157,20 @@ fn h1_sign_ble_challenge_does_not_deadlock_against_engine_run() {
             elapsed < Duration::from_secs(1),
             "phalanx_sign_ble_challenge took {elapsed:?}; expected <1s (deadlock regression)"
         );
-        // Sanity: signature is non-zero (Ed25519 doesn't produce all-zero sigs).
+        // The response is an opaque postcard `BleResponse` blob: the node's DID
+        // + a non-zero Ed25519 signature (Ed25519 doesn't produce all-zero sigs).
         assert!(
-            signature.iter().any(|&b| b != 0),
-            "signature buffer must be populated"
+            !out_data.is_null() && out_len > 0,
+            "response blob must be populated"
         );
+        let blob = unsafe { std::slice::from_raw_parts(out_data, out_len as usize) }.to_vec();
+        let response: phalanx_proto::network::BleResponse =
+            postcard::from_bytes(&blob).expect("response deserializes as BleResponse");
+        assert!(
+            response.signature.iter().any(|&b| b != 0),
+            "signature must be populated"
+        );
+        unsafe { phalanx_ffi::memory::phalanx_free_bytes(out_data, out_len) };
 
         unsafe { cleanup(handle, genesis) }
     });
