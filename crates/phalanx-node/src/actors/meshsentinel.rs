@@ -631,7 +631,7 @@ impl<I: IngressPort> MeshSentinel<I> {
         match cmd {
             SentinelCommand::SetRecordingState { id, reply_to } => {
                 match id {
-                    Some(rec_id) => self.start_recording(rec_id, None),
+                    Some(rec_id) => self.start_recording(rec_id),
                     None => {
                         self.stop_recording();
                     }
@@ -695,11 +695,12 @@ impl<I: IngressPort> MeshSentinel<I> {
 
     // ── FFI facade methods ──────────────────────────────────────────────────
 
-    /// Mark a recording as active. Pushes the optional content key via the
-    /// session's watch channel; signals CanarySupervisor to clear watched state.
-    /// Called by FFI in response to user-initiated recording starts.
-    pub fn start_recording(&mut self, id: RecordingId, key: Option<[u8; 32]>) {
-        self.session.start(id.clone(), key);
+    /// Mark a recording as active and signal CanarySupervisor to clear watched
+    /// state. Called by FFI in response to user-initiated recording starts. The
+    /// content key is pushed separately by the FFI on its own `content_key_tx`
+    /// clone.
+    pub fn start_recording(&mut self, id: RecordingId) {
+        self.session.start(id.clone());
         let _ = self
             .canary_tx
             .try_send(CanaryCommand::RecordingStarted { recording_id: id });

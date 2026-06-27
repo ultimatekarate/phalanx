@@ -22,7 +22,6 @@ pub struct RecordingSessionState {
     /// the FFI handle can read it lock-free off-thread (`make_ble_challenge`
     /// binds it into BLE challenges). `Some` ⇔ a recording is in progress.
     active_recording_id: watch::Sender<Option<RecordingId>>,
-    active_recording_key: Option<[u8; 32]>,
     proximity_witnesses: Vec<ProximityWitness>,
     /// Watch sender driving the per-recording content key for `MediaEgressActor`.
     /// FFI also holds a clone of this sender so it can push the content key
@@ -53,7 +52,6 @@ impl RecordingSessionState {
     ) -> Self {
         Self {
             active_recording_id: watch::channel(None).0,
-            active_recording_key: None,
             proximity_witnesses: Vec::new(),
             content_key_tx,
             proximity_tx,
@@ -81,16 +79,12 @@ impl RecordingSessionState {
         self.active_recording_id.subscribe()
     }
 
-    /// Mark a recording as active. If `key` is provided, also pushes it via
-    /// the content-key watch channel so `MediaEgressActor` switches to
-    /// per-recording encryption. The FFI's `phalanx_start_recording` may
-    /// alternatively push the key directly via its own watch sender clone.
-    pub fn start(&mut self, id: RecordingId, key: Option<[u8; 32]>) {
+    /// Mark a recording as active. The content key is delivered to
+    /// `MediaEgressActor` separately by the FFI's `phalanx_start_recording`,
+    /// which pushes it on its own `content_key_tx` clone — so `start` only
+    /// flips the active-recording state.
+    pub fn start(&mut self, id: RecordingId) {
         self.active_recording_id.send_replace(Some(id));
-        self.active_recording_key = key;
-        if let Some(k) = key {
-            let _ = self.content_key_tx.send(Some(SymmetricKey::from_bytes(k)));
-        }
         self.recording_active.store(true, Ordering::Release);
     }
 
@@ -103,7 +97,6 @@ impl RecordingSessionState {
     /// channel).
     pub fn stop(&mut self) {
         self.active_recording_id.send_replace(None);
-        self.active_recording_key = None;
         let _ = self.content_key_tx.send(None);
         self.recording_active.store(false, Ordering::Release);
 
