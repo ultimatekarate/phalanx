@@ -95,7 +95,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Compute the local MeshAddress before moving `my_identity` into deps.
     // Production binds the libp2p PeerId base58 form so heartbeats' claimed
     // `sender` matches `propagation_source` on receive.
-    let local_mesh_address =
+    let mesh_identity_address =
         phalanx_transport::identity_ext::Libp2pExt::to_mesh_address(&my_identity);
     let dek_master = my_identity.dek_master.clone();
     let deps = SentinelDependencies {
@@ -116,13 +116,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ),
         vault_key,
         dek_master,
-        local_mesh: None, // NoOp — BLE/WiFi Direct injected during mobile integration
         egress,
         prnu_posterior: std::sync::Arc::new(std::sync::Mutex::new(
             phalanx_proto::evidence::PrnuPosterior::new_uninformed(),
         )),
         extra_community_ids: Vec::new(),
-        local_mesh_address,
+        mesh_identity_address,
     };
 
     let mut engine = MeshSentinel::new(deps).await?;

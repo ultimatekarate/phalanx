@@ -15,7 +15,6 @@ use phalanx_node::actors::media_egress::{MediaEgressActor, MediaEgressConfig};
 use phalanx_node::actors::shutdown::ShutdownSignal;
 use phalanx_node::clock::TrustedClock;
 use phalanx_node::vitals::SystemGovernor;
-use phalanx_proto::corroboration::ProximityWitness;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{AudioShard, VideoShard};
 use phalanx_proto::identity::{MeshAddress, PhalanxIdentity, WitnessId};
@@ -116,8 +115,7 @@ async fn build_media_egress<E: EgressPort + 'static>(
 }
 
 /// Build a MediaEgressActor with a configurable bundle size — used by the
-/// bundling tests to verify wire-format behavior at non-default values. Drops
-/// the proximity sender (these tests exercise the media path only).
+/// bundling tests to verify wire-format behavior at non-default values.
 async fn build_media_egress_with_bundle_size<E: EgressPort + 'static>(
     egress: E,
     symbol_bundle_size: phalanx_proto::types::SymbolBundleSize,
@@ -126,26 +124,8 @@ async fn build_media_egress_with_bundle_size<E: EgressPort + 'static>(
     mpsc::Sender<AudioShard>,
     tokio::task::JoinHandle<()>,
 ) {
-    let (video_tx, audio_tx, _proximity_tx, handle) =
-        build_media_egress_full(egress, symbol_bundle_size).await;
-    (video_tx, audio_tx, handle)
-}
-
-/// Build a MediaEgressActor, returning every input sender including the
-/// proximity-witness sender. The media-only helpers wrap this and drop the
-/// proximity sender; the proximity test uses it directly.
-async fn build_media_egress_full<E: EgressPort + 'static>(
-    egress: E,
-    symbol_bundle_size: phalanx_proto::types::SymbolBundleSize,
-) -> (
-    mpsc::Sender<VideoShard>,
-    mpsc::Sender<AudioShard>,
-    mpsc::Sender<ProximityWitness>,
-    tokio::task::JoinHandle<()>,
-) {
     let (video_tx, video_rx) = mpsc::channel(32);
     let (audio_tx, audio_rx) = mpsc::channel(32);
-    let (proximity_tx, proximity_rx) = mpsc::channel(32);
     let temp = tempdir().expect("Failed to create temp dir");
     let gov = Arc::new(SystemGovernor::new());
     let identity = Arc::new(PhalanxIdentity::new_ephemeral());
@@ -154,7 +134,6 @@ async fn build_media_egress_full<E: EgressPort + 'static>(
     let config = MediaEgressConfig {
         video_rx,
         audio_rx,
-        proximity_rx,
         video_topic: MeshTopic::new("/phalanx/video/test"),
         audio_topic: MeshTopic::new("/phalanx/audio/test"),
         symbol_size: SymbolSize::default(),
@@ -180,7 +159,7 @@ async fn build_media_egress_full<E: EgressPort + 'static>(
     std::mem::forget(temp);
 
     let handle = tokio::spawn(actor.run());
-    (video_tx, audio_tx, proximity_tx, handle)
+    (video_tx, audio_tx, handle)
 }
 
 fn make_video_shard(payload_bytes: usize) -> VideoShard {
@@ -448,44 +427,4 @@ async fn test_bundling_packs_multiple_chunks_per_publish() {
     drop(video_tx2);
     drop(_audio_tx2);
     let _ = tokio::time::timeout(Duration::from_secs(10), handle2).await;
-}
-
-// =====================================================================
-// Proximity: witnesses sealed and published with the recording
-// =====================================================================
-
-/// A proximity witness should be sealed into a signed `Evidence::Proximity`
-/// envelope, fountain-encoded, and published — the egress half of the
-/// corroboration path (the Stronghold's `collect_proximity` is the other half).
-#[tokio::test]
-async fn test_proximity_witness_published() {
-    let counter = Arc::new(AtomicUsize::new(0));
-    let (_video_tx, _audio_tx, proximity_tx, handle) = build_media_egress_full(
-        RecordingEgress::new(counter.clone()),
-        phalanx_proto::types::SymbolBundleSize::default(),
-    )
-    .await;
-
-    let witness = ProximityWitness {
-        local_did: phalanx_proto::identity::Did::new("did:key:zlocal"),
-        remote_did: phalanx_proto::identity::Did::new("did:key:zremote"),
-        recording_id: RecordingId::new("prox-test"),
-        observed_at: phalanx_proto::time::PhalanxTimestamp::from_millis(1_000),
-        transport: phalanx_proto::topology::TransportClass::LocalMesh,
-    };
-    proximity_tx.send(witness).await.unwrap();
-    // Give the actor time to seal + fountain encode + publish.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    let count = counter.load(Ordering::Relaxed);
-    assert!(
-        count > 0,
-        "Proximity witness should produce at least one published symbol, got {}",
-        count
-    );
-
-    drop(_video_tx);
-    drop(_audio_tx);
-    drop(proximity_tx);
-    let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
 }

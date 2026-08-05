@@ -16,7 +16,7 @@
 // and verifies that the corresponding defense holds.
 
 use phalanx_forensics::bloom::RotatingBloomFilter;
-use phalanx_forensics::topology_gate::{AnchorEligible, TopologyGate, TransportBalance};
+use phalanx_forensics::topology_gate::{AnchorEligible, TopologyGate};
 use phalanx_node::config::NodeConfig;
 use phalanx_proto::evidence::{ChunkType, ShardChunk};
 use phalanx_proto::identity::{MeshAddress, NodeRole};
@@ -292,7 +292,6 @@ fn eclipse_attack_limited_by_subnet_diversity() {
                 TrustLevel::Ignored,
                 attacker_subnet,
                 TransportClass::Internet,
-                TransportBalance::DEFAULT,
             )
             .is_ok()
         {
@@ -313,13 +312,7 @@ fn eclipse_attack_limited_by_subnet_diversity() {
         let peer = MeshAddress::new(format!("legit-{i}"));
         let bucket = SubnetBucket::test_bucket(100 + i);
         if gate
-            .try_admit(
-                peer,
-                TrustLevel::Verified,
-                bucket,
-                TransportClass::Internet,
-                TransportBalance::DEFAULT,
-            )
+            .try_admit(peer, TrustLevel::Verified, bucket, TransportClass::Internet)
             .is_ok()
         {
             legitimate_admitted += 1;
@@ -342,8 +335,8 @@ fn eclipse_attack_limited_by_subnet_diversity() {
 
 /// An attacker who anchors all their subnet-quota peers should not prevent
 /// legitimate higher-trust peers from joining the remaining capacity.
-/// With capacity=40 and 8 anchored attackers, the Internet quota (75% = 30)
-/// leaves 22 Internet slots for legitimate peers.
+/// With capacity=40 and 8 anchored attackers, 32 slots remain for
+/// legitimate peers.
 #[test]
 fn anchored_attacker_does_not_block_legitimate_admissions() {
     let mut gate = TopologyGate::new(40, SubnetQuota::DEFAULT, 8);
@@ -357,7 +350,6 @@ fn anchored_attacker_does_not_block_legitimate_admissions() {
             TrustLevel::Ignored,
             attacker_subnet,
             TransportClass::Internet,
-            TransportBalance::DEFAULT,
         )
         .unwrap();
         let proof = AnchorEligible::try_from_score(0.8).unwrap();
@@ -370,13 +362,7 @@ fn anchored_attacker_does_not_block_legitimate_admissions() {
         let peer = MeshAddress::new(format!("legit-{i}"));
         let bucket = SubnetBucket::test_bucket(50 + i);
         if gate
-            .try_admit(
-                peer,
-                TrustLevel::Verified,
-                bucket,
-                TransportClass::Internet,
-                TransportBalance::DEFAULT,
-            )
+            .try_admit(peer, TrustLevel::Verified, bucket, TransportClass::Internet)
             .is_ok()
         {
             admitted += 1;
@@ -709,29 +695,12 @@ async fn coordinated_kill_attempt() {
         sybil_nets.push(sybil_peer);
     }
 
-    // 1c. Simultaneous LocalMesh eclipse — attack both transport classes
-    for i in 0..100u32 {
-        let sybil_peer = MeshAddress::new(format!("sybil-local-{i}"));
-        let _ = harness
-            .inject_event(
-                &victim,
-                NetworkEvent::PeerDiscovered {
-                    peer: sybil_peer.clone(),
-                    source: phalanx_proto::telemetry::DiscoverySource::Mdns,
-                    bucket: SubnetBucket::local_mesh(),
-                    transport: TransportClass::LocalMesh,
-                },
-            )
-            .await;
-        sybil_nets.push(sybil_peer);
-    }
-
     harness.advance_time(Duration::from_secs(2)).await;
     tokio::task::yield_now().await;
 
     let stress_after_eclipse = governor.composite_stress();
     println!(
-        "[PHASE 1 - ECLIPSE] Stress after 900 Sybil peers (10 subnets + 500 diverse + 100 local): {:.4}",
+        "[PHASE 1 - ECLIPSE] Stress after 800 Sybil peers (10 subnets + 500 diverse): {:.4}",
         stress_after_eclipse
     );
 
@@ -1136,7 +1105,6 @@ fn black_hole_peer_detected_via_reciprocity_floor() {
         &PeerContribution {
             connected_secs: 900,
             contribution_integral: honest_contrib,
-            is_local_mesh: false,
         },
         &params,
         3,
@@ -1152,7 +1120,6 @@ fn black_hole_peer_detected_via_reciprocity_floor() {
         &PeerContribution {
             connected_secs: 900,
             contribution_integral: wolf_contrib,
-            is_local_mesh: false,
         },
         &params,
         3,
@@ -1168,7 +1135,6 @@ fn black_hole_peer_detected_via_reciprocity_floor() {
         &PeerContribution {
             connected_secs: 300,
             contribution_integral: new_contrib,
-            is_local_mesh: false,
         },
         &params,
         3,

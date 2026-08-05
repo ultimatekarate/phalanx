@@ -581,7 +581,7 @@ impl SystemGovernor {
 
         self.with_state_mut(|s| {
             match source {
-                DiscoverySource::Mdns | DiscoverySource::LocalMesh => {
+                DiscoverySource::Mdns => {
                     s.local_peer_count = s.local_peer_count.saturating_add(1);
                 }
                 DiscoverySource::Bootstrap

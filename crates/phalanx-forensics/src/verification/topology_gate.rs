@@ -59,11 +59,6 @@ pub enum AdmissionDenied {
         current: usize,
         limit: usize,
     },
-    TransportQuotaExceeded {
-        transport: TransportClass,
-        current: usize,
-        limit: usize,
-    },
     CapacityFull,
 }
 
@@ -75,56 +70,12 @@ impl std::fmt::Display for AdmissionDenied {
                 current,
                 limit,
             } => write!(f, "Subnet quota exceeded for {bucket}: {current}/{limit}"),
-            Self::TransportQuotaExceeded {
-                transport,
-                current,
-                limit,
-            } => write!(
-                f,
-                "Transport quota exceeded for {transport:?}: {current}/{limit}"
-            ),
             Self::CapacityFull => write!(f, "All peer slots full, no evictable peers"),
         }
     }
 }
 
 impl std::error::Error for AdmissionDenied {}
-
-// ─── Dynamic Transport Balance ─────────────────────────────────────
-
-/// Dynamic slot allocation between transport classes.
-/// Ratio is expressed as a fraction of total_capacity for local mesh (0.1–0.5).
-/// The Hands derive this from SystemGovernor signals; the Laboratory uses it.
-#[derive(Clone, Copy, Debug)]
-pub struct TransportBalance {
-    local_mesh_fraction: f32,
-}
-
-impl TransportBalance {
-    pub const DEFAULT: Self = Self {
-        local_mesh_fraction: 0.25,
-    };
-
-    /// Construct with clamping to [0.1, 0.5]. No panics possible.
-    pub fn new(fraction: f32) -> Self {
-        Self {
-            local_mesh_fraction: fraction.clamp(0.1, 0.5),
-        }
-    }
-
-    #[allow(clippy::cast_possible_truncation)] // f32→usize — small peer counts fit comfortably.
-    pub fn max_local_mesh(&self, total: usize) -> usize {
-        // total and local_mesh_fraction are non-negative; product is non-negative.
-        #[allow(clippy::cast_sign_loss)]
-        {
-            ((total as f32) * self.local_mesh_fraction).ceil() as usize
-        }
-    }
-
-    pub fn max_internet(&self, total: usize) -> usize {
-        total.saturating_sub(self.max_local_mesh(total))
-    }
-}
 
 // ─── Per-Peer Slot ─────────────────────────────────────────────────
 
@@ -194,7 +145,6 @@ impl TopologyGate {
         level: TrustLevel,
         bucket: SubnetBucket,
         transport: TransportClass,
-        balance: TransportBalance,
     ) -> Result<(AdmissionTicket, Option<MeshAddress>), AdmissionDenied> {
         // Idempotent: already admitted
         if self.peers.contains_key(&peer) {
@@ -208,8 +158,8 @@ impl TopologyGate {
             ));
         }
 
-        // Subnet diversity check (skip for local mesh — inherently proximity-limited)
-        if transport != TransportClass::LocalMesh {
+        // Subnet diversity check
+        {
             let current = self.subnet_counts.get(&bucket).copied().unwrap_or(0);
             let limit = self.subnet_quota.limit();
             if current >= limit {
@@ -219,29 +169,6 @@ impl TopologyGate {
                     limit,
                 });
             }
-        }
-
-        // Transport quota check
-        let (transport_count, transport_limit) = self.transport_usage_and_limit(transport, balance);
-        if transport_count >= transport_limit {
-            // IWFQ preemption: find lowest-trust, non-anchored peer in same transport pool
-            if let Some(evicted) = self.find_evictable(transport, level) {
-                self.remove_peer(&evicted);
-                self.insert_peer(peer.clone(), bucket, transport, level);
-                return Ok((
-                    AdmissionTicket {
-                        peer,
-                        transport,
-                        _seal: (),
-                    },
-                    Some(evicted),
-                ));
-            }
-            return Err(AdmissionDenied::TransportQuotaExceeded {
-                transport,
-                current: transport_count,
-                limit: transport_limit,
-            });
         }
 
         // Total capacity check
@@ -349,24 +276,6 @@ impl TopologyGate {
         }
     }
 
-    fn transport_usage_and_limit(
-        &self,
-        transport: TransportClass,
-        balance: TransportBalance,
-    ) -> (usize, usize) {
-        let count = self
-            .peers
-            .values()
-            .filter(|s| s.transport == transport)
-            .count();
-        let limit = match transport {
-            TransportClass::LocalMesh => balance.max_local_mesh(self.total_capacity),
-            TransportClass::Internet => balance.max_internet(self.total_capacity),
-            _ => self.total_capacity, // forward compat for non_exhaustive
-        };
-        (count, limit)
-    }
-
     /// Find the lowest-trust, non-anchored peer in the given transport pool
     /// that has strictly lower trust than `incoming_trust`.
     fn find_evictable(
@@ -412,7 +321,6 @@ mod tests {
                 TrustLevel::Ignored,
                 SubnetBucket::test_bucket(1),
                 TransportClass::Internet,
-                TransportBalance::DEFAULT,
             )
             .unwrap();
         assert_eq!(ticket.peer(), &net_id(1));
@@ -431,7 +339,6 @@ mod tests {
             TrustLevel::Ignored,
             SubnetBucket::test_bucket(1),
             TransportClass::Internet,
-            TransportBalance::DEFAULT,
         )
         .unwrap();
         // Admit same peer again — idempotent
@@ -441,7 +348,6 @@ mod tests {
                 TrustLevel::Ignored,
                 SubnetBucket::test_bucket(1),
                 TransportClass::Internet,
-                TransportBalance::DEFAULT,
             )
             .unwrap();
         assert!(evicted.is_none());
@@ -460,7 +366,6 @@ mod tests {
                 TrustLevel::Ignored,
                 bucket,
                 TransportClass::Internet,
-                TransportBalance::DEFAULT,
             )
             .unwrap();
         }
@@ -472,159 +377,70 @@ mod tests {
                 TrustLevel::Ignored,
                 bucket,
                 TransportClass::Internet,
-                TransportBalance::DEFAULT,
             )
             .unwrap_err();
         assert!(matches!(err, AdmissionDenied::SubnetQuotaExceeded { .. }));
     }
 
     #[test]
-    fn local_mesh_skips_subnet_check() {
-        let mut g = TopologyGate::new(100, SubnetQuota::DEFAULT, 4);
-        let bucket = SubnetBucket::local_mesh();
-
-        // Can add more than 8 local mesh peers with same bucket
-        for i in 0..25 {
-            g.try_admit(
-                net_id(i),
-                TrustLevel::Ignored,
-                bucket,
-                TransportClass::LocalMesh,
-                TransportBalance::DEFAULT,
-            )
-            .unwrap();
-        }
-        assert_eq!(g.peer_count(), 25);
-    }
-
-    #[test]
-    fn transport_quota_enforced() {
-        // 10 total, 25% local mesh = ceil(2.5) = 3 local mesh slots
-        let mut g = gate(10);
-        let balance = TransportBalance::DEFAULT;
-
-        for i in 0..3 {
-            g.try_admit(
-                net_id(i),
-                TrustLevel::Ignored,
-                SubnetBucket::local_mesh(),
-                TransportClass::LocalMesh,
-                balance,
-            )
-            .unwrap();
-        }
-
-        // 4th local mesh peer → TransportQuotaExceeded (no one to evict, all same trust)
-        let err = g
-            .try_admit(
-                net_id(99),
-                TrustLevel::Ignored,
-                SubnetBucket::local_mesh(),
-                TransportClass::LocalMesh,
-                balance,
-            )
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            AdmissionDenied::TransportQuotaExceeded { .. }
-        ));
-    }
-
-    #[test]
     fn iwfq_preemption_evicts_lower_trust() {
-        let mut g = gate(4); // 4 total, 75% internet = 3 internet slots
-        let balance = TransportBalance::DEFAULT;
+        let mut g = gate(4);
 
-        g.try_admit(
-            net_id(1),
-            TrustLevel::Ignored,
-            SubnetBucket::test_bucket(1),
-            TransportClass::Internet,
-            balance,
-        )
-        .unwrap();
-        g.try_admit(
-            net_id(2),
-            TrustLevel::Ignored,
-            SubnetBucket::test_bucket(2),
-            TransportClass::Internet,
-            balance,
-        )
-        .unwrap();
-        g.try_admit(
-            net_id(3),
-            TrustLevel::Ignored,
-            SubnetBucket::test_bucket(3),
-            TransportClass::Internet,
-            balance,
-        )
-        .unwrap();
+        for i in 1..=4u8 {
+            g.try_admit(
+                net_id(i),
+                TrustLevel::Ignored,
+                SubnetBucket::test_bucket(i),
+                TransportClass::Internet,
+            )
+            .unwrap();
+        }
+        assert_eq!(g.peer_count(), 4);
 
-        // Ally arrives — should evict one Ignored peer
+        // Ally arrives at capacity — should evict one Ignored peer
         let (_, evicted) = g
             .try_admit(
-                net_id(4),
+                net_id(5),
                 TrustLevel::Ally,
-                SubnetBucket::test_bucket(4),
+                SubnetBucket::test_bucket(5),
                 TransportClass::Internet,
-                balance,
             )
             .unwrap();
         assert!(evicted.is_some());
-        assert_eq!(g.peer_count(), 3);
-        assert!(g.is_admitted(&net_id(4)));
+        assert_eq!(g.peer_count(), 4);
+        assert!(g.is_admitted(&net_id(5)));
     }
 
     #[test]
     fn anchor_survives_eviction() {
-        let mut g = gate(4); // 4 total, 75% internet = 3 internet slots
-        let balance = TransportBalance::DEFAULT;
+        let mut g = gate(4); // max_anchors = 4
 
-        g.try_admit(
-            net_id(1),
-            TrustLevel::Ignored,
-            SubnetBucket::test_bucket(1),
-            TransportClass::Internet,
-            balance,
-        )
-        .unwrap();
-        g.try_admit(
-            net_id(2),
-            TrustLevel::Ignored,
-            SubnetBucket::test_bucket(2),
-            TransportClass::Internet,
-            balance,
-        )
-        .unwrap();
-        g.try_admit(
-            net_id(3),
-            TrustLevel::Ignored,
-            SubnetBucket::test_bucket(3),
-            TransportClass::Internet,
-            balance,
-        )
-        .unwrap();
+        for i in 1..=4u8 {
+            g.try_admit(
+                net_id(i),
+                TrustLevel::Ignored,
+                SubnetBucket::test_bucket(i),
+                TransportClass::Internet,
+            )
+            .unwrap();
+        }
 
-        // Anchor all three peers
-        for i in 1..=3 {
+        // Anchor all four peers
+        for i in 1..=4u8 {
             let proof = AnchorEligible::try_from_score(0.8).unwrap();
             g.promote_to_anchor(&net_id(i), proof);
         }
 
-        // Ally arrives — all anchored, no eviction possible
+        // Ally arrives at capacity — all anchored, no eviction possible
         let err = g
             .try_admit(
-                net_id(4),
+                net_id(5),
                 TrustLevel::Ally,
-                SubnetBucket::test_bucket(4),
+                SubnetBucket::test_bucket(5),
                 TransportClass::Internet,
-                balance,
             )
             .unwrap_err();
-        assert!(matches!(
-            err,
-            AdmissionDenied::TransportQuotaExceeded { .. } | AdmissionDenied::CapacityFull
-        ));
+        assert!(matches!(err, AdmissionDenied::CapacityFull));
     }
 
     #[test]
@@ -635,7 +451,6 @@ mod tests {
             TrustLevel::Verified,
             SubnetBucket::test_bucket(1),
             TransportClass::Internet,
-            TransportBalance::DEFAULT,
         )
         .unwrap();
 
@@ -660,15 +475,6 @@ mod tests {
     }
 
     #[test]
-    fn transport_balance_clamping() {
-        let b = TransportBalance::new(0.0);
-        assert_eq!(b.max_local_mesh(100), 10); // clamped to 0.1
-
-        let b = TransportBalance::new(1.0);
-        assert_eq!(b.max_local_mesh(100), 50); // clamped to 0.5
-    }
-
-    #[test]
     fn subnet_counts_decrement_on_release() {
         let mut g = gate(10);
         let bucket = SubnetBucket::test_bucket(5);
@@ -678,7 +484,6 @@ mod tests {
             TrustLevel::Ignored,
             bucket,
             TransportClass::Internet,
-            TransportBalance::DEFAULT,
         )
         .unwrap();
         assert_eq!(g.subnet_counts().get(&bucket), Some(&1));
@@ -705,7 +510,6 @@ mod tests {
                 TrustLevel::Ignored,
                 attacker_bucket,
                 TransportClass::Internet,
-                TransportBalance::DEFAULT,
             ) {
                 Ok(_) => admitted += 1,
                 Err(AdmissionDenied::SubnetQuotaExceeded { .. }) => denied += 1,
@@ -738,7 +542,6 @@ mod tests {
                 TrustLevel::Ignored,
                 attacker_bucket,
                 TransportClass::Internet,
-                TransportBalance::DEFAULT,
             );
         }
         let attacker_count = g.peer_count();
@@ -751,7 +554,6 @@ mod tests {
                 TrustLevel::Verified,
                 bucket,
                 TransportClass::Internet,
-                TransportBalance::DEFAULT,
             )
             .expect("Legitimate peer from unique subnet should be admitted");
         }
@@ -766,21 +568,19 @@ mod tests {
     /// even when the transport quota is full.
     #[test]
     fn high_trust_preempts_attacker_at_capacity() {
-        // gate(10) → Internet quota = ceil(10 * 0.75) = 7
         let mut g = gate(10);
 
-        // Fill 7 Internet slots with Ignored-trust peers
-        for i in 0..7u8 {
+        // Fill all 10 slots with Ignored-trust peers
+        for i in 0..10u8 {
             g.try_admit(
                 net_id(i),
                 TrustLevel::Ignored,
                 SubnetBucket::test_bucket(i),
                 TransportClass::Internet,
-                TransportBalance::DEFAULT,
             )
             .unwrap();
         }
-        assert_eq!(g.peer_count(), 7);
+        assert_eq!(g.peer_count(), 10);
 
         // Ally-trust peer arrives — should evict one Ignored peer
         let (_, evicted) = g
@@ -789,12 +589,11 @@ mod tests {
                 TrustLevel::Ally,
                 SubnetBucket::test_bucket(99),
                 TransportClass::Internet,
-                TransportBalance::DEFAULT,
             )
             .unwrap();
 
         assert!(evicted.is_some(), "Ally should evict an Ignored peer");
         assert!(g.is_admitted(&net_id(99)));
-        assert_eq!(g.peer_count(), 7); // Still at quota
+        assert_eq!(g.peer_count(), 10); // Still at capacity
     }
 }

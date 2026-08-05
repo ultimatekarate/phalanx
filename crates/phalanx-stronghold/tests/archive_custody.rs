@@ -64,12 +64,14 @@ async fn push(
 }
 
 /// Flush the actor's mailbox up to this point: the actor processes commands
-/// sequentially, so a round-tripped FetchProximity guarantees all prior
-/// fire-and-forget commands (RefreshRouting, SweepExpired) have been applied.
+/// sequentially, so a round-tripped FetchRecordings (empty id list) guarantees
+/// all prior fire-and-forget commands (RefreshRouting, SweepExpired) have been
+/// applied.
 async fn flush(tx: &mpsc::Sender<AggregationCommand>, community: CommunityId) {
     let (ptx, prx) = oneshot::channel();
-    tx.send(AggregationCommand::FetchProximity {
+    tx.send(AggregationCommand::FetchRecordings {
         community_id: community,
+        recording_ids: Vec::new(),
         reply_to: ptx,
     })
     .await

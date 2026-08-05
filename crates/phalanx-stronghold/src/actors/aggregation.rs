@@ -22,9 +22,8 @@ use phalanx_forensics::gate::PromotionGate;
 use phalanx_forensics::reassembler::ShardMold;
 use phalanx_forensics::unit::ForensicUnit;
 use phalanx_proto::community::CommunityId;
-use phalanx_proto::corroboration::ProximityWitness;
 use phalanx_proto::crypto::{SealedLocator, SymmetricKey};
-use phalanx_proto::evidence::{Evidence, Recording, WitnessEnvelope};
+use phalanx_proto::evidence::{Recording, WitnessEnvelope};
 use phalanx_proto::identity::{Did, PhalanxIdentity, RecordingId};
 use phalanx_proto::prelude::ShardChunk;
 use phalanx_proto::time::PhalanxTimestamp;
@@ -64,10 +63,6 @@ pub enum AggregationCommand {
         community_id: CommunityId,
         recording_ids: Vec<RecordingId>,
         reply_to: oneshot::Sender<Result<Vec<Recording>, StrongholdError>>,
-    },
-    FetchProximity {
-        community_id: CommunityId,
-        reply_to: oneshot::Sender<Result<Vec<ProximityWitness>, StrongholdError>>,
     },
     /// Refresh the community routing cache from CommunityActor.
     RefreshRouting {
@@ -159,7 +154,6 @@ pub struct AggregationActor {
     community_routing: HashMap<Did, Vec<CommunityId>>,
     governor: Arc<StrongholdGovernor>,
     replay_filter: RotatingBloomFilter,
-    proximity_log: Vec<ProximityWitness>,
     config: Arc<StrongholdConfig>,
     /// Per-owner storage fairness — the balancing ratio. Owned by the actor
     /// (single-threaded over its mailbox), so no lock is needed.
@@ -212,7 +206,6 @@ impl AggregationActor {
             community_routing: HashMap::new(),
             governor,
             replay_filter: RotatingBloomFilter::new(RotatingBloomFilter::DEFAULT_CAPACITY),
-            proximity_log: Vec::new(),
             config,
             custody_ledger: CustodyLedger::new(caps),
             custody_deadlines: HashMap::new(),
@@ -279,13 +272,6 @@ impl AggregationActor {
                 let result = self
                     .handle_fetch_recordings(community_id, recording_ids)
                     .await;
-                let _ = reply_to.send(result);
-            }
-            AggregationCommand::FetchProximity {
-                community_id,
-                reply_to,
-            } => {
-                let result = self.evidence_store.list_proximity(&community_id).await;
                 let _ = reply_to.send(result);
             }
             AggregationCommand::RefreshRouting { routing } => {
@@ -698,7 +684,7 @@ impl AggregationActor {
     /// Shared custody persist path used by BOTH the gossipsub ingest and the
     /// directed archive push: run the hard per-owner fairness gate, persist each
     /// envelope to every community the owner belongs to, record the bytes in the
-    /// fairness ledger, set a custody deadline, and collect proximity evidence.
+    /// fairness ledger, and set a custody deadline.
     ///
     /// Admission order (fail-closed): per-owner share → per-community → global,
     /// checked against EVERY community before any write (all-or-nothing).
@@ -712,15 +698,6 @@ impl AggregationActor {
                     .unwrap_or(0)
             })
             .sum()
-    }
-
-    /// Collect any proximity witnesses carried by a recording's envelopes.
-    fn collect_proximity(&mut self, artifacts: &[WitnessEnvelope]) {
-        for artifact in artifacts {
-            if let Evidence::Proximity(pw) = &artifact.evidence {
-                self.proximity_log.push(pw.clone());
-            }
-        }
     }
 
     async fn persist_and_account(
@@ -859,9 +836,6 @@ impl AggregationActor {
         self.governor
             .record_storage_pressure(disk_written, self.config.storage.max_storage_bytes);
 
-        // Proximity evidence collection.
-        self.collect_proximity(artifacts);
-
         let envelope_count = u32::try_from(artifacts.len()).unwrap_or(u32::MAX);
         ArchiveAdmit::Stored {
             envelope_count,
@@ -938,7 +912,7 @@ impl AggregationActor {
             return;
         }
 
-        // 9-10. Store and collect proximity evidence.
+        // 9-10. Store the assembled recording.
         self.store_recording(&recording, &communities).await;
     }
 

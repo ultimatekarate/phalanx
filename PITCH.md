@@ -203,8 +203,9 @@ debug signing, no background-recording service (`flutter_app/lib/main.dart:58-62
 including C2PA export. There is no iOS app (the core library cross-compiles; no app project exists), no app
 store presence, and mobile C2PA export currently returns a documented `NoEncoder` error because the software
 encoder is excluded from mobile builds by patent policy (`crates/phalanx-ffi/src/export.rs:232-237`). The
-Bluetooth/WiFi-Direct offline mesh exists only as an integration seam — no radio code has been written
-(`crates/phalanx-ffi/src/local_mesh.rs`); today the mesh runs over IP. Known rough edges are documented rather
+mesh runs over IP; off-grid operation means the same mesh over a local WiFi/hotspot link (a BLE seam was
+built, then deliberately excised in July 2026 — BLE could not carry video and its proximity witnesses were
+never load-bearing). Known rough edges are documented rather
 than hidden: the phone and Stronghold gossipsub topic defaults were misaligned until June 2026 — they now share
 canonical defaults pinned by a cross-crate regression test
 ([docs/network.md §3](docs/network.md#3-topics-who-publishes-who-listens)). And it has not been field-deployed. What is being pitched is not a finished product; it is a tested engine plus

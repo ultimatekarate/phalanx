@@ -54,7 +54,6 @@ pub mod atrace;
 pub mod logcat;
 mod observability;
 
-pub mod ble_auth;
 pub mod calibrate;
 pub mod capture;
 pub mod community;
@@ -62,7 +61,6 @@ pub mod error;
 pub mod export;
 pub mod forget;
 pub mod handle;
-pub mod local_mesh;
 pub mod memory;
 pub mod mnemonic;
 mod panic_safety;

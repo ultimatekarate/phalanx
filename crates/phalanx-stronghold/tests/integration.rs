@@ -150,7 +150,6 @@ fn make_corroboration_proof(proof_hash: [u8; 32]) -> CorroborationProof {
             ks_statistic: 0.95,
             p_value: 0.001,
         }],
-        proximity_evidence: vec![],
         producer_did: Did::new("did:key:zstronghold"),
         producer_signature: vec![0u8; 64],
         proof_hash,
@@ -628,12 +627,7 @@ async fn end_to_end_corroboration() {
     );
 
     // 7f. Verify proof_hash matches blake3 of the serialized proof body
-    let proof_body = (
-        &proof.event_window,
-        &proof.attestations,
-        &proof.divergences,
-        &proof.proximity_evidence,
-    );
+    let proof_body = (&proof.event_window, &proof.attestations, &proof.divergences);
     let body_bytes = postcard::to_allocvec(&proof_body).expect("proof body serialization failed");
     let expected_hash: [u8; 32] = blake3::hash(&body_bytes).into();
     assert_eq!(

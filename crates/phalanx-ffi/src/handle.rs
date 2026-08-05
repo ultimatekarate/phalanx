@@ -27,12 +27,9 @@ use phalanx_node::vitals::{HomeostaticConfig, SystemGovernor, ThermalThresholds}
 use phalanx_node::{EngineLifecycle, FileJournal, UnspawnedEngine};
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{AudioShard, ForensicMetrics, PrnuPosterior, VideoShard};
-use phalanx_proto::identity::RecordingId;
-use phalanx_proto::network::NetworkEvent;
 use phalanx_proto::network::deployment::DeploymentProfile;
 use phalanx_proto::prelude::{Did, PhalanxIdentity};
 use phalanx_proto::recovery::RecoveryStatus;
-use phalanx_transport::adapters::local_mesh::{LocalMeshAdapter, OutboundLocalPacket};
 use phalanx_transport::prelude::Libp2pIngress;
 use std::time::Duration;
 
@@ -104,7 +101,7 @@ pub struct PhalanxHandle {
     /// services these inside its own context, so FFI never needs to lock
     /// the sentinel itself. This is the structural replacement for the
     /// deadlock-prone `sentinel_ref.lock().await` pattern that the audit
-    /// found in `ble_auth`, `community::set_recording_state`, and
+    /// found in `community::set_recording_state` and
     /// `recovery::start_recovery`.
     pub(crate) sentinel_cmd_tx: mpsc::Sender<SentinelCommand>,
     /// Content key broadcast — per-recording encryption key for MediaEgressActor.
@@ -122,16 +119,6 @@ pub struct PhalanxHandle {
     /// through `SentinelCommand::SetRecordingState`, so there is exactly
     /// one writer and no possibility of FFI/engine desync.
     pub(crate) recording_active: Arc<AtomicBool>,
-    /// Watch receiver on the engine's active recording id. `make_ble_challenge`
-    /// reads it to bind a BLE challenge to the same recording the witness binds
-    /// (engine-sourced, never plugin-supplied).
-    pub(crate) recording_id_rx: tokio::sync::watch::Receiver<Option<RecordingId>>,
-    /// Local mesh inbound sender — FFI push functions send NetworkEvents here.
-    pub(crate) local_mesh_tx: Option<mpsc::Sender<NetworkEvent>>,
-    /// Local mesh outbound receiver — Flutter polls outbound packets from here.
-    pub(crate) local_mesh_outbound_rx: Mutex<Option<mpsc::Receiver<OutboundLocalPacket>>>,
-    /// Local mesh availability flag — shared with LocalMeshAdapter.
-    pub(crate) local_mesh_available: Arc<AtomicBool>,
     /// Vault key — retained for export decryption. The key also lives inside
     /// MeshSentinel's actors (Guardian, MediaEgressActor), but those are behind
     /// the actor boundary and inaccessible from FFI. This clone allows the
@@ -163,18 +150,6 @@ pub struct PhalanxHandle {
     /// handle without leaking. Aborted on FFI shutdown via `Drop` of the
     /// runtime.
     pub(crate) recovery_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// Single-use guard for admitted BLE-auth challenge nonces. Maps a consumed
-    /// nonce to the millisecond timestamp it was admitted at, so
-    /// `phalanx_ble_verify_and_admit` can reject replays of a valid
-    /// (challenge, response) pair. Pruned to the freshness window on each
-    /// admission, so it stays bounded by the live-challenge window.
-    pub(crate) ble_admitted_nonces: Mutex<std::collections::HashMap<[u8; 32], u64>>,
-    /// Rolling-window timestamps (ms) of admitted LocalMesh peers, for the
-    /// per-window anti-sybil admission cap. A co-located attacker minting
-    /// `did:key`s and completing valid handshakes is throttled to the cap even
-    /// though each handshake individually verifies. Front of the deque is
-    /// oldest; pruned to the window on each admission.
-    pub(crate) ble_admit_times: Mutex<std::collections::VecDeque<u64>>,
 }
 
 // =====================================================================
@@ -818,10 +793,6 @@ async fn bootstrap_with_identity(
         .with_queue_depth(egress.outbound_queue_depth()),
     );
 
-    // Local mesh adapter — channel bridge for BLE/WiFi Direct via Flutter FFI
-    let (local_mesh_adapter, local_mesh_tx, local_mesh_outbound_rx, local_mesh_available) =
-        LocalMeshAdapter::new(64);
-
     // Retain clones for FFI export path before deps consumes the originals.
     // vault_key: needed for shard decryption during C2PA export.
     // identity: needed for C2PA signing with the node's real DID.
@@ -829,11 +800,12 @@ async fn bootstrap_with_identity(
     let handle_identity = Arc::new(identity.clone());
 
     // Build SentinelDependencies (mirrors sentinel.rs lines 74-84)
-    // local_mesh_address: production binds the libp2p PeerId base58 form
+    // mesh_identity_address: production binds the libp2p PeerId base58 form
     // so heartbeats' claimed `sender` matches `propagation_source` on
     // receive. See the field doc on SentinelDependencies for why mixing
     // encodings silently breaks every heartbeat.
-    let local_mesh_address = phalanx_transport::identity_ext::Libp2pExt::to_mesh_address(&identity);
+    let mesh_identity_address =
+        phalanx_transport::identity_ext::Libp2pExt::to_mesh_address(&identity);
     let dek_master = identity.dek_master.clone();
     let deps = SentinelDependencies {
         config,
@@ -845,10 +817,9 @@ async fn bootstrap_with_identity(
         system_governor: governor.clone(),
         vault_key,
         dek_master,
-        local_mesh: Some(Box::new(local_mesh_adapter)),
         prnu_posterior: prnu_posterior.clone(),
         extra_community_ids: Vec::new(),
-        local_mesh_address,
+        mesh_identity_address,
     };
 
     // Build the engine via the public façade. `UnspawnedEngine` wraps the
@@ -876,7 +847,6 @@ async fn bootstrap_with_identity(
     // Single source of truth for "is a recording active" — owned by the
     // engine's RecordingSessionState, shared into the handle as an Arc.
     let recording_active = unspawned.recording_active();
-    let recording_id_rx = unspawned.recording_id_receiver();
 
     // Create a dummy runtime — will be replaced by the caller. This is the
     // same trick the old bootstrap used; we keep it to avoid restructuring
@@ -901,10 +871,6 @@ async fn bootstrap_with_identity(
         audio_tx,
         node_did,
         recording_active,
-        recording_id_rx,
-        local_mesh_tx: Some(local_mesh_tx),
-        local_mesh_outbound_rx: Mutex::new(Some(local_mesh_outbound_rx)),
-        local_mesh_available,
         vault_key: handle_vault_key,
         identity: handle_identity,
         calibration_metrics: Mutex::new(None),
@@ -912,8 +878,6 @@ async fn bootstrap_with_identity(
         recovery_status: Arc::new(Mutex::new(RecoveryStatus::default())),
         recovery_cancel: Mutex::new(None),
         recovery_handle: Mutex::new(None),
-        ble_admitted_nonces: Mutex::new(std::collections::HashMap::new()),
-        ble_admit_times: Mutex::new(std::collections::VecDeque::new()),
     })
 }
 

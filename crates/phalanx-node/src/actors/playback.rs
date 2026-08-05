@@ -125,7 +125,6 @@ impl<V: PlaybackSink, A: PlaybackSink> PlaybackCoordinator<V, A> {
                             }
                             Evidence::Gap(_)
                             | Evidence::Handover(_)
-                            | Evidence::Proximity(_)
                             | Evidence::ManifestEntry(_) => {
                                 self.current_sequence.0 += 1;
                                 continue;

@@ -53,7 +53,7 @@ pub struct VitalsActor {
     egress_tx: mpsc::Sender<EgressCommand>,
     control_topic: MeshTopic,
     /// The MeshAddress this node claims as `sender` on outbound heartbeats.
-    local_mesh_address: MeshAddress,
+    mesh_identity_address: MeshAddress,
     /// `config.storage.max_storage_bytes.as_u64()`, captured at construction.
     max_storage_bytes: u64,
 
@@ -72,7 +72,7 @@ impl VitalsActor {
         extra_community_ids: Vec<CommunityId>,
         egress_tx: mpsc::Sender<EgressCommand>,
         control_topic: MeshTopic,
-        local_mesh_address: MeshAddress,
+        mesh_identity_address: MeshAddress,
         max_storage_bytes: u64,
         rx: mpsc::Receiver<VitalsCommand>,
         shutdown: Arc<ShutdownSignal>,
@@ -85,7 +85,7 @@ impl VitalsActor {
             extra_community_ids,
             egress_tx,
             control_topic,
-            local_mesh_address,
+            mesh_identity_address,
             max_storage_bytes,
             rx,
             shutdown,
@@ -166,7 +166,7 @@ impl VitalsActor {
             let heartbeat_ms =
                 phalanx_proto::vitals::HeartbeatInterval(interval.as_millis() as u64).as_u64();
             let msg = ControlMessage {
-                sender: self.local_mesh_address.clone(),
+                sender: self.mesh_identity_address.clone(),
                 load_factor: load,
                 storage_remaining_mb,
                 heartbeat_ms,

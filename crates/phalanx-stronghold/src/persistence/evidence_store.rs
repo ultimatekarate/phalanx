@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use phalanx_proto::community::CommunityId;
-use phalanx_proto::corroboration::ProximityWitness;
 use phalanx_proto::evidence::{Evidence, ForensicGap, Recording, StorageSequence, WitnessEnvelope};
 use phalanx_proto::identity::RecordingId;
 use phalanx_proto::time::PhalanxTimestamp;
@@ -76,7 +75,6 @@ impl EvidenceStore {
             Evidence::Audio(a) => a.sequence_id,
             Evidence::Gap(g) => g.start_seq,
             Evidence::Handover(_) => StorageSequence(0),
-            Evidence::Proximity(_) => StorageSequence(0),
             Evidence::ManifestEntry(m) => m.sequence_id,
         }
     }
@@ -88,7 +86,6 @@ impl EvidenceStore {
             Evidence::Audio(a) => Some(a.recording_id.clone()),
             Evidence::Gap(g) => Some(g.recording_id.clone()),
             Evidence::Handover(_) => None,
-            Evidence::Proximity(p) => Some(p.recording_id.clone()),
             Evidence::ManifestEntry(m) => Some(m.recording_id.clone()),
         }
     }
@@ -446,61 +443,6 @@ impl EvidenceStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(e) => Err(e.into()),
         }
-    }
-
-    /// Load all stored proximity evidence for a community.
-    pub async fn list_proximity(
-        &self,
-        community_id: &CommunityId,
-    ) -> Result<Vec<ProximityWitness>, StrongholdError> {
-        let community_dir = self.community_path(community_id);
-
-        if !community_dir.exists() {
-            return Ok(Vec::new());
-        }
-
-        let mut witnesses = Vec::new();
-        let mut recording_dirs = tokio::fs::read_dir(&community_dir).await?;
-
-        while let Some(rec_entry) = recording_dirs.next_entry().await? {
-            if !rec_entry.file_type().await?.is_dir() {
-                continue;
-            }
-            let shards_dir = rec_entry.path().join("shards");
-            if !shards_dir.exists() {
-                continue;
-            }
-
-            let mut shard_entries = tokio::fs::read_dir(&shards_dir).await?;
-            while let Some(shard_entry) = shard_entries.next_entry().await? {
-                let path = shard_entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("bin") {
-                    continue;
-                }
-
-                let bytes = match tokio::fs::read(&path).await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        warn!(path = %path.display(), error = %e, "Failed to read shard");
-                        continue;
-                    }
-                };
-
-                let envelope: WitnessEnvelope = match postcard::from_bytes(&bytes) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        warn!(path = %path.display(), error = %e, "Failed to deserialize shard");
-                        continue;
-                    }
-                };
-
-                if let Evidence::Proximity(pw) = envelope.evidence {
-                    witnesses.push(pw);
-                }
-            }
-        }
-
-        Ok(witnesses)
     }
 }
 

@@ -156,7 +156,7 @@ libp2p swarm management, gossipsub, Kademlia DHT, QUIC transport, mDNS discovery
 | `phalanx-transport/src/factory.rs` | Swarm construction with persistent Kademlia store and gossipsub |
 | `phalanx-transport/src/kademlia.rs` | `KademliaGovernor` — reputation-weighted provider insertion with temporal decay |
 | `phalanx-transport/src/routing.rs` | Central switchboard routing `NetworkEvent`s to actors |
-| `phalanx-proto/src/network/events.rs` | `NetworkEvent`, `IngressPort`, `EgressPort`, `LocalMeshPort` trait contracts |
+| `phalanx-proto/src/network/events.rs` | `NetworkEvent`, `IngressPort`, `EgressPort` trait contracts |
 | `phalanx-proto/src/network/kademlia.rs` | DHT payload kinds and provider data structures |
 | `phalanx-forensics/src/kademlia.rs` | DHT timestamp conversion and expiration verification |
 | `phalanx-node/src/network/orchestrator.rs` | Transport stack factory for swarm construction |
@@ -253,18 +253,15 @@ Encrypted vault storage, append-only journals, WAL-backed retry queues, and redb
 
 ### Mobile & Hardware
 
-Camera and audio capture pipelines, BLE authentication, WiFi Direct, Flutter FFI bridges, and power-aware duty cycling.
+Camera and audio capture pipelines, Flutter FFI bridges, and power-aware duty cycling.
 
 | File | What it does |
 | ------ | ------------- |
 | `phalanx-node/src/hardware/camera.rs` | Adaptive video capture with JPEG compression, PRNU metrics, FPS duty cycling |
 | `phalanx-node/src/hardware/audio.rs` | PCM audio capture at configured sample rate and channel count |
 | `phalanx-node/src/vitals/hardware.rs` | Hardware capability detection and configuration |
-| `phalanx-transport/src/adapters/local_mesh.rs` | BLE and WiFi Direct adapters via FFI (mobile), no-op fallback (desktop) |
 | `phalanx-ffi/src/capture.rs` | FFI bridge for camera/audio capture from Flutter |
-| `phalanx-ffi/src/ble_auth.rs` | BLE proximity authentication |
 | `phalanx-ffi/src/probe.rs` | Hardware probe and capability detection |
-| `phalanx-ffi/src/local_mesh.rs` | FFI bridge for local mesh transport |
 | `phalanx-ffi/src/handle.rs` | FFI handle lifecycle management |
 | `phalanx-ffi/src/memory.rs` | Cross-FFI memory management |
 

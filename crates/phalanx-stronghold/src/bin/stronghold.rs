@@ -418,7 +418,6 @@ async fn cmd_corroborate(
     println!("  Proof hash:    {}", hex_encode(&proof.proof_hash));
     println!("  Attestations:  {}", proof.attestations.len());
     println!("  Divergences:   {}", proof.divergences.len());
-    println!("  Proximity:     {}", proof.proximity_evidence.len());
     println!("  Producer DID:  {}", proof.producer_did);
     Ok(())
 }

@@ -23,7 +23,7 @@ Phalanx is deliberately designed to look boring. When you open it, it looks like
 ## Capabilities
 
 - **Real-time capture-to-mesh pipeline** — The moment you hit record, every frame is analyzed for authenticity, encrypted, split into redundant shards, and distributed across the mesh. The pipeline adapts frame rate to device load, shedding capture rate rather than captured evidence
-- **Ad hoc mesh network** — Devices form a self-organizing peer-to-peer network over QUIC and TCP: zero-config on a shared LAN (mDNS), configured bootstrap peers across the internet. A Bluetooth/WiFi-Direct integration seam exists; the radios themselves are not yet implemented ([docs/network.md §6](docs/network.md#6-local-mesh-ble--wifi-direct))
+- **Ad hoc mesh network** — Devices form a self-organizing peer-to-peer network over QUIC and TCP: zero-config on a shared LAN (mDNS), configured bootstrap peers across the internet. Off-grid, the same mesh runs over a local WiFi/hotspot link with no internet upstream ([docs/network.md §6](docs/network.md#6-off-grid-operation))
 - **Trusted communities** — Groups of people who vouch for each other. A quorum of existing members must approve new members. Communities expire automatically and leave no trace when dissolved
 - **Selective sharing** — You control who can view your recordings. Access is granted per-recipient through key exchange — no central server decides who sees what. Data is encrypted separately in transit and at rest
 - **Fountain-coded sharding** — Recordings are split into redundant pieces so that any sufficient subset can reconstruct the original. That reconstruction is order-independent — formally proven in Lean 4

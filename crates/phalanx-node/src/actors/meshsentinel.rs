@@ -25,7 +25,7 @@ use crate::{StorageActor, trust::TrustRegistry};
 use phalanx_forensics::policy::{IngressGovernor, TrafficGovernor};
 use phalanx_forensics::prelude::*;
 use phalanx_proto::evidence::WitnessEnvelope;
-use phalanx_proto::network::{EgressPort, IngressPort, LocalMeshPort};
+use phalanx_proto::network::{EgressPort, IngressPort};
 use phalanx_proto::prelude::*;
 use phalanx_proto::storage::TransientJournal;
 use phalanx_proto::telemetry::DiscoverySource;
@@ -114,10 +114,6 @@ pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJourn
     /// from `identity.dek_master` so the construction order (identity →
     /// Guardian) doesn't have to grow a hidden coupling.
     pub dek_master: DekMaster,
-    /// Optional local mesh transport (BLE, WiFi Direct).
-    /// Default: `None` (desktop/non-BLE platforms).
-    /// When `Some`, MeshSentinel polls for local mesh events alongside network ingress.
-    pub local_mesh: Option<Box<dyn LocalMeshPort>>,
     /// Bayesian PRNU posterior — shared with the FFI capture path.
     /// MediaEgressActor reads this for luminance-conditioned provenance checks.
     pub prnu_posterior: Arc<Mutex<PrnuPosterior>>,
@@ -138,7 +134,7 @@ pub struct SentinelDependencies<I: IngressPort, E: EgressPort, J: TransientJourn
     ///   `z6Mk...`), matching what `SimulationWorld` routes with.
     /// The two encodings are different renderings of the same Ed25519
     /// public key; mixing them silently breaks every heartbeat.
-    pub local_mesh_address: MeshAddress,
+    pub mesh_identity_address: MeshAddress,
 }
 
 pub struct MeshSentinel<I: IngressPort> {
@@ -181,10 +177,6 @@ pub struct MeshSentinel<I: IngressPort> {
     // DHT: Receives (recording_id, sequence_id) from PlaybackCoordinator when it
     // discovers missing shards. Triggers `EgressCommand::FindProviders`.
     discovery_rx: mpsc::Receiver<(RecordingId, StorageSequence)>,
-
-    // Optional local mesh transport (BLE, WiFi Direct).
-    // When available, the select! loop polls for local mesh events.
-    local_mesh: Option<Box<dyn LocalMeshPort>>,
 
     // Lifecycle event receiver for mobile foreground/background transitions.
     // When a `Foregrounded` event arrives, immediately recalculate PowerState.
@@ -272,7 +264,7 @@ impl<I: IngressPort> MeshSentinel<I> {
     {
         // Captured early so the vitals task spawn block (later in this
         // function) can use it without reaching back into `deps`.
-        let local_mesh_address = deps.local_mesh_address.clone();
+        let mesh_identity_address = deps.mesh_identity_address.clone();
 
         // Shared cancellation signal — cloned into every spawned task so
         // `shutdown()` can signal them all at once. See ShutdownSignal docs
@@ -297,10 +289,6 @@ impl<I: IngressPort> MeshSentinel<I> {
 
         let (video_tx, video_rx) = mpsc::channel(deps.config.storage.max_video_buffer);
         let (audio_tx, audio_rx) = mpsc::channel(deps.config.storage.max_audio_buffer);
-        // Proximity-witness egress channel. RecordingSessionState drains
-        // witnesses on stop() and hands them to MediaEgressActor through this
-        // sender; MeshSentinel only wires it (no field, no witness logic here).
-        let (proximity_tx, proximity_rx) = mpsc::channel(phys_capacity);
 
         let (storage_tx, storage_rx) = mpsc::channel(phys_capacity);
         let (ingestion_tx, ingestion_rx) = mpsc::channel(phys_capacity);
@@ -437,7 +425,6 @@ impl<I: IngressPort> MeshSentinel<I> {
             MediaEgressConfig {
                 video_rx,
                 audio_rx,
-                proximity_rx,
                 video_topic: deps.config.network.video_topic.clone(),
                 audio_topic: deps.config.network.audio_topic.clone(),
                 symbol_size: deps.config.network.symbol_size,
@@ -462,14 +449,6 @@ impl<I: IngressPort> MeshSentinel<I> {
         let media_handle = tokio::spawn(media_actor.run());
 
         let config_arc = Arc::new(deps.config);
-
-        if let Some(ref mesh) = deps.local_mesh {
-            if mesh.is_available() {
-                tracing::info!("Local mesh transport is AVAILABLE");
-            } else {
-                tracing::debug!("Local mesh transport provided but not available");
-            }
-        }
 
         // Extract lifecycle event receiver from hardware probe.
         // Mobile implementations push OS lifecycle callbacks into this channel.
@@ -519,7 +498,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             &sentinel_trust_tx,
             &community_ids_rx,
             &extra_community_ids,
-            &local_mesh_address,
+            &mesh_identity_address,
         );
 
         // Drain order: Shield Wall senders first (eclipse leading), then the
@@ -548,7 +527,6 @@ impl<I: IngressPort> MeshSentinel<I> {
             discovery_tx,
             commit_notify_rx,
             discovery_rx,
-            local_mesh: deps.local_mesh,
             lifecycle_rx,
             providers_tx,
             playback_slot: None,
@@ -560,7 +538,7 @@ impl<I: IngressPort> MeshSentinel<I> {
             vitals_tx,
             archive_tx,
             revocation_tx,
-            session: RecordingSessionState::new(content_key_tx, proximity_tx),
+            session: RecordingSessionState::new(content_key_tx),
             clock: clock_handle.clone(),
             community_ids_rx,
             extra_community_ids,
@@ -580,17 +558,6 @@ impl<I: IngressPort> MeshSentinel<I> {
             let should_shutdown = tokio::select! {
                 Some(event) = self.ingress.next_event() => {
                     self.handle_network_event(event).await
-                }
-
-                // Poll local mesh transport for events (BLE, WiFi Direct).
-                Some(local_event) = async {
-                    match self.local_mesh.as_mut() {
-                        Some(mesh) if mesh.is_available() => mesh.next_local_event().await,
-                        _ => std::future::pending().await,
-                    }
-                } => {
-                    tracing::debug!(event = "local_mesh_event", "Received event from local transport");
-                    self.handle_network_event(local_event).await
                 }
 
                 Some(recording_id) = self.commit_notify_rx.recv() => {
@@ -706,9 +673,9 @@ impl<I: IngressPort> MeshSentinel<I> {
             .try_send(CanaryCommand::RecordingStarted { recording_id: id });
     }
 
-    /// Stop the active recording. The session seals and egresses any captured
-    /// proximity witnesses, clears the content-key watch channel (revert to
-    /// vault_key encryption), and signals CanarySupervisor to clear watched state.
+    /// Stop the active recording. Clears the content-key watch channel (revert
+    /// to vault_key encryption) and signals CanarySupervisor to clear watched
+    /// state.
     pub fn stop_recording(&mut self) {
         let _ = self.canary_tx.try_send(CanaryCommand::RecordingStopped);
         self.session.stop();
@@ -852,13 +819,6 @@ impl<I: IngressPort> MeshSentinel<I> {
                 self.handle_peer_disconnected(peer).await;
                 false
             }
-            NetworkEvent::BleAuthChallengeReceived { .. }
-            | NetworkEvent::BleAuthResponseReceived { .. } => {
-                tracing::debug!(
-                    "BLE auth event received — handled by Flutter FFI, not MeshSentinel"
-                );
-                false
-            }
             NetworkEvent::Shutdown => {
                 self.handle_shutdown().await;
                 true
@@ -929,8 +889,7 @@ impl<I: IngressPort> MeshSentinel<I> {
     }
 
     /// Network-event router for peer discovery: dispatches admission to
-    /// EclipseRouter, captures proximity witnesses on success, and triggers
-    /// revocation replay for first-time peers.
+    /// EclipseRouter and triggers revocation replay for first-time peers.
     async fn handle_peer_discovered(
         &mut self,
         peer: MeshAddress,
@@ -938,7 +897,6 @@ impl<I: IngressPort> MeshSentinel<I> {
         bucket: SubnetBucket,
         transport: TransportClass,
     ) {
-        let balance = self.compute_transport_balance();
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         if self
             .eclipse_tx
@@ -947,7 +905,6 @@ impl<I: IngressPort> MeshSentinel<I> {
                 source,
                 bucket,
                 transport,
-                transport_balance: balance,
                 reply_to: reply_tx,
             })
             .await
@@ -968,21 +925,6 @@ impl<I: IngressPort> MeshSentinel<I> {
         let _ = self
             .canary_tx
             .try_send(CanaryCommand::OnPeerReconnected { peer: peer.clone() });
-
-        // ProximityWitness capture: if recording and this is LocalMesh,
-        // log the co-location event for the Corroboration Gate.
-        if transport == TransportClass::LocalMesh {
-            if let Some(rec_id) = self.session.recording_id() {
-                self.session
-                    .push_witness(phalanx_proto::corroboration::ProximityWitness {
-                        local_did: self.identity.did.clone(),
-                        remote_did: phalanx_proto::identity::Did::new(peer.0.clone()),
-                        recording_id: rec_id,
-                        observed_at: self.clock.now().unwrap_or_default(),
-                        transport,
-                    });
-            }
-        }
 
         // First-time peer: trigger revocation replay so partitioned devices
         // catch up on deletions they missed.
@@ -1258,20 +1200,5 @@ impl<I: IngressPort> MeshSentinel<I> {
         };
 
         tokio::spawn(run_recovery(ctx, cancel_rx))
-    }
-
-    // ── Transport balance (orchestrator-side; passed to EclipseRouter on TryAdmit) ─
-
-    /// Derive dynamic transport balance from existing SystemGovernor signals.
-    /// Computed on the router side because it reads MeshSentinel-side `local_mesh`;
-    /// the result is passed to EclipseRouter via the `TryAdmit` command payload.
-    fn compute_transport_balance(&self) -> TransportBalance {
-        if self.local_mesh.is_none() {
-            return TransportBalance::new(0.1); // Minimum — no local mesh hardware
-        }
-        if !self.system_governor.internet_available() {
-            return TransportBalance::new(0.4); // Shift toward local mesh when internet is down
-        }
-        TransportBalance::DEFAULT // 0.25 when both transports healthy
     }
 }

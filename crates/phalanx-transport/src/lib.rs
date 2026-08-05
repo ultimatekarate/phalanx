@@ -7,7 +7,6 @@ use std::str::FromStr;
 // MODULE REGISTRY
 pub mod adapters {
     pub mod libp2p;
-    pub mod local_mesh;
     pub mod mock;
 }
 

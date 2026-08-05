@@ -6,7 +6,6 @@ use phalanx_forensics::crucible::EnvelopeHashExt;
 use phalanx_forensics::gate::{self, WitnessGate};
 use phalanx_forensics::judge::PayloadCipher;
 use phalanx_forensics::reassembler::FountainChunkifier;
-use phalanx_proto::corroboration::ProximityWitness;
 use phalanx_proto::crypto::SymmetricKey;
 use phalanx_proto::evidence::{
     AudioShard, ChunkType, Evidence, PrnuPosterior, SignatureHash, VideoShard,
@@ -24,10 +23,6 @@ use tokio::sync::mpsc;
 pub struct MediaEgressConfig {
     pub video_rx: mpsc::Receiver<VideoShard>,
     pub audio_rx: mpsc::Receiver<AudioShard>,
-    /// Proximity witnesses drained by `RecordingSessionState::stop`. Each is
-    /// sealed here into a signed `Evidence::Proximity` envelope and egressed
-    /// with the recording — see `process_proximity_egress`.
-    pub proximity_rx: mpsc::Receiver<ProximityWitness>,
     pub video_topic: MeshTopic,
     pub audio_topic: MeshTopic,
     pub symbol_size: SymbolSize,
@@ -68,7 +63,6 @@ pub struct MediaEgressActor<E: EgressPort> {
     egress: E,
     video_rx: mpsc::Receiver<VideoShard>,
     audio_rx: mpsc::Receiver<AudioShard>,
-    proximity_rx: mpsc::Receiver<ProximityWitness>,
     video_topic: MeshTopic,
     audio_topic: MeshTopic,
     identity: Arc<PhalanxIdentity>,
@@ -121,7 +115,6 @@ impl<E: EgressPort> MediaEgressActor<E> {
             egress,
             video_rx: config.video_rx,
             audio_rx: config.audio_rx,
-            proximity_rx: config.proximity_rx,
             video_topic: config.video_topic,
             audio_topic: config.audio_topic,
             identity,
@@ -149,7 +142,6 @@ impl<E: EgressPort> MediaEgressActor<E> {
         let mut retry_tick = tokio::time::interval(Duration::from_secs(5));
         let mut video_open = true;
         let mut audio_open = true;
-        let mut proximity_open = true;
         let mut cancelled = false;
 
         loop {
@@ -168,12 +160,6 @@ impl<E: EgressPort> MediaEgressActor<E> {
                     match result {
                         Some(shard) => self.process_media_egress(Evidence::Audio(shard), false).await,
                         None => audio_open = false,
-                    }
-                }
-                result = self.proximity_rx.recv(), if proximity_open => {
-                    match result {
-                        Some(witness) => self.process_proximity_egress(witness).await,
-                        None => proximity_open = false,
                     }
                 }
                 _ = retry_tick.tick() => {
@@ -272,71 +258,6 @@ impl<E: EgressPort> MediaEgressActor<E> {
 
         let class = if is_video { "video" } else { "audio" };
         self.publish_fountain_symbols(&topic, shard_id, chunks, class)
-            .await;
-    }
-
-    /// Seal a proximity witness as a standalone `Evidence::Proximity` envelope
-    /// and egress it on the recording's media path. Unlike media shards,
-    /// proximity is signed corroboration metadata, not secret payload: no
-    /// LensGate, no AEAD, no media hash-chain. Persisted locally (so it is
-    /// archived with the recording) and fountain-published on the video topic so
-    /// a custody Stronghold reassembles it and `collect_proximity` folds it into
-    /// the `CorroborationProof`.
-    #[allow(clippy::arithmetic_side_effects)] // Monotonic shard-id increment.
-    async fn process_proximity_egress(&mut self, witness: ProximityWitness) {
-        let envelope =
-            match Evidence::Proximity(witness).seal(&self.identity, self.local_id.clone(), None) {
-                Ok(env) => env,
-                Err(e) => {
-                    tracing::error!(event = "proximity_seal_failed", error = %e,
-                        "Failed to seal proximity witness");
-                    return;
-                }
-            };
-
-        // Persist locally so the witness is archived alongside the recording's
-        // shards (a directed archive push to a Stronghold includes it).
-        {
-            let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
-            let _ = self
-                .storage_tx
-                .try_send(crate::actors::storage::StorageCommand::WriteShard {
-                    envelope: envelope.clone(),
-                    reply_to: reply_tx,
-                });
-        }
-
-        let envelope_bytes = match postcard::to_allocvec(&envelope) {
-            Ok(data) => data,
-            Err(e) => {
-                tracing::error!(event = "proximity_serialize_failed", error = %e,
-                    "Failed to serialize proximity envelope");
-                return;
-            }
-        };
-
-        let shard_id = ShardId(self.next_shard_id);
-        self.next_shard_id += 1;
-
-        let now = self.clock.now().unwrap_or_default();
-        let chunks = match envelope_bytes.fountain_chunkify(
-            shard_id,
-            self.identity.did.clone(),
-            self.symbol_size,
-            ChunkType::Witnessed,
-            self.repair_ratio,
-            now,
-        ) {
-            Ok(chunks) => chunks,
-            Err(e) => {
-                tracing::error!(event = "fountain_encode_failed", error = %e,
-                    "Failed to fountain-encode proximity witness");
-                return;
-            }
-        };
-
-        let topic = self.video_topic.clone();
-        self.publish_fountain_symbols(&topic, shard_id, chunks, "proximity")
             .await;
     }
 

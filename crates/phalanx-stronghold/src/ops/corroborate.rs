@@ -130,33 +130,19 @@ pub async fn run_corroboration(
         }
     }
 
-    // ── 4. Collect proximity witnesses ────────────────────────────────
-
-    let proximity_log = evidence_store.list_proximity(community_id).await?;
-
-    // ── 5. Run the Corroboration Gate ─────────────────────────────────
+    // ── 4. Run the Corroboration Gate ─────────────────────────────────
 
     let recording_refs: Vec<&_> = recordings.iter().collect();
     let min_overlap = Duration::from_millis(config.min_overlap_ms);
 
-    let mut proof = corroborate(
-        &recording_refs,
-        &proximity_log,
-        min_overlap,
-        config.divergence_alpha,
-    )?;
+    let mut proof = corroborate(&recording_refs, min_overlap, config.divergence_alpha)?;
 
-    // ── 6. Sign the proof ─────────────────────────────────────────────
+    // ── 5. Sign the proof ─────────────────────────────────────────────
     //
-    // Serialize the proof body (event_window + attestations + divergences
-    // + proximity_evidence), hash with blake3, sign with Ed25519.
+    // Serialize the proof body (event_window + attestations + divergences),
+    // hash with blake3, sign with Ed25519.
 
-    let proof_body = (
-        &proof.event_window,
-        &proof.attestations,
-        &proof.divergences,
-        &proof.proximity_evidence,
-    );
+    let proof_body = (&proof.event_window, &proof.attestations, &proof.divergences);
 
     let body_bytes = postcard::to_allocvec(&proof_body).map_err(|e| {
         StrongholdError::Serialization(format!("Failed to serialize proof body: {e}"))
@@ -169,7 +155,7 @@ pub async fn run_corroboration(
     proof.producer_signature = signature.to_bytes().to_vec();
     proof.proof_hash = hash;
 
-    // ── 7. Store and return ───────────────────────────────────────────
+    // ── 6. Store and return ───────────────────────────────────────────
 
     proof_store.store_proof(community_id, &proof).await?;
 
@@ -177,7 +163,6 @@ pub async fn run_corroboration(
         proof_hash = %hex_hash(&proof.proof_hash),
         attestations = proof.attestations.len(),
         divergences = proof.divergences.len(),
-        proximity = proof.proximity_evidence.len(),
         "Corroboration proof signed and stored"
     );
 

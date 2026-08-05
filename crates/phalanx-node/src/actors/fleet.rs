@@ -66,7 +66,7 @@ pub(crate) fn spawn_shield_wall(
     trust_tx: &mpsc::Sender<TrustCommand>,
     community_ids_rx: &watch::Receiver<Vec<CommunityId>>,
     extra_community_ids: &[CommunityId],
-    local_mesh_address: &MeshAddress,
+    mesh_identity_address: &MeshAddress,
 ) -> ShieldWall {
     // EclipseRouter — topology / admission / eclipse remediation. Spawned FIRST
     // so it drains before its recipients (egress, trust, storage).
@@ -114,7 +114,7 @@ pub(crate) fn spawn_shield_wall(
         extra_community_ids.to_vec(),
         egress_tx.clone(),
         sh.config.network.control_topic.clone(),
-        local_mesh_address.clone(),
+        mesh_identity_address.clone(),
         sh.config.storage.max_storage_bytes.as_u64(),
         vitals_rx,
         sh.shutdown.clone(),

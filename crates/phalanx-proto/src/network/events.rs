@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::archive::{ArchiveReceipt, ArchiveRequest};
 use crate::evidence::WitnessEnvelope;
-use crate::identity::{Did, RecordingId};
+use crate::identity::RecordingId;
 use crate::prelude::{MeshAddress, MeshTopic};
 use crate::retrieval::{RecordingRequest, RecordingResponse};
 use crate::revocation::RevocationToken;
@@ -25,7 +25,7 @@ pub enum NetworkEvent {
     /// A new peer was discovered on the mesh.
     /// `source` indicates HOW it was discovered — mDNS (local) vs Kademlia/Bootstrap (internet).
     /// `bucket` is the /16 subnet bucket (populated from Multiaddr by the Hands).
-    /// `transport` classifies the discovery source as Internet or LocalMesh.
+    /// `transport` is the coarse transport class derived from the source.
     /// The MeshSentinel uses this to enforce topology-aware admission via TopologyGate.
     PeerDiscovered {
         peer: MeshAddress,
@@ -66,52 +66,7 @@ pub enum NetworkEvent {
     PeerDisconnected {
         peer: MeshAddress,
     },
-    /// BLE mutual auth: challenge received from a LocalMesh peer.
-    /// MeshSentinel should verify and respond, or drop the connection.
-    BleAuthChallengeReceived {
-        peer: MeshAddress,
-        challenge: BleChallenge,
-    },
-    /// BLE mutual auth: response received from a LocalMesh peer.
-    /// MeshSentinel should verify against the pending challenge nonce.
-    BleAuthResponseReceived {
-        peer: MeshAddress,
-        response: BleResponse,
-    },
     Shutdown,
-}
-
-// ── BLE Mutual Authentication ───────────────────────────────────────────
-
-/// BLE challenge: "I am A, recording R at time T — prove you're B."
-/// Sent as the first message in the 4-message handshake.
-///
-/// The `recording_id` and `issued_at` are signed by the responder, so a
-/// captured signature cannot be replayed to forge a `ProximityWitness` for a
-/// *different* recording or at a *later* time. The verifier additionally
-/// rejects stale challenges (max-age) and reused nonces.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BleChallenge {
-    pub sender_did: Did,
-    /// 32-byte random nonce for replay protection (single-use per verifier).
-    pub nonce: [u8; 32],
-    /// The challenger's active recording this proximity attestation binds to.
-    pub recording_id: RecordingId,
-    /// When the challenger issued this challenge. Verifiers reject challenges
-    /// older than the freshness window, defeating later replay.
-    pub issued_at: crate::time::PhalanxTimestamp,
-}
-
-/// BLE response: "I am B, here's proof."
-/// Ed25519 signature over (responder_did || challenger_did || nonce ||
-/// recording_id || issued_at).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BleResponse {
-    pub responder_did: Did,
-    /// Ed25519 signature proving DID ownership AND binding the attestation to
-    /// the challenge's recording and time.
-    /// Covers: responder_did || challenger_did || nonce || recording_id || issued_at.
-    pub signature: Vec<u8>,
 }
 
 // ── Silent Canary ─────────────────────────────────────────────────────────
@@ -224,24 +179,4 @@ pub trait EgressPort: Send + Sync + Clone {
     ) -> Result<(), String> {
         Err("archive protocol not supported by this transport".to_string())
     }
-}
-
-/// Abstraction for local peer-to-peer transports (BLE, WiFi Direct).
-///
-/// For truly disconnected scenarios (no WiFi network — outdoors, disaster zone, protest),
-/// each platform injects its own implementation via FFI during mobile integration.
-/// Desktop and non-BLE platforms use NoOpLocalMesh (always unavailable).
-#[async_trait]
-pub trait LocalMeshPort: Send {
-    /// Discover peers reachable via this local transport (BLE, WiFi Direct).
-    async fn discover_peers(&mut self) -> Vec<MeshAddress>;
-
-    /// Send data directly to a specific peer via the local transport.
-    async fn send_local(&self, target: &MeshAddress, data: Vec<u8>) -> Result<(), TransportError>;
-
-    /// Poll for the next inbound event from the local transport.
-    async fn next_local_event(&mut self) -> Option<NetworkEvent>;
-
-    /// Whether this local transport is available on the current platform.
-    fn is_available(&self) -> bool;
 }

@@ -114,7 +114,7 @@ When a type has only one constructor and it carries a semantic qualifier, the qu
 Types belong where the linguistic model places them, not where they are consumed most heavily.
 
 - **Temporal primitives are Tenses.** A monotonic clock, a timestamp, or a duration belongs with other time concepts, not in the module that uses it for bookkeeping. *Example:* `PhalanxTimestamp`, `MonotonicClock`, and the `TrustedClock` trait all live in `phalanx-proto/src/time.rs` — not in `phalanx-node` where they are consumed most heavily.
-- **Capability contracts are Nouns.** A trait that defines what a component *can do* (persist state, provide a clock, enforce wire bounds) is a contract — a shape of interaction. Contracts belong in the Dictionary alongside the types they operate on. *Example:* `TransientJournal` (persistence contract) is defined in `phalanx-proto/src/storage.rs`, not in `phalanx-node` where `FileJournal` implements it. `WireBound` (structural enforcement) is defined in `phalanx-proto/src/wire.rs`. `IngressPort`, `EgressPort`, and `LocalMeshPort` (network contracts) are defined in `phalanx-proto/src/network.rs`, not in `phalanx-transport` where `Libp2pAdapter` implements them.
+- **Capability contracts are Nouns.** A trait that defines what a component *can do* (persist state, provide a clock, enforce wire bounds) is a contract — a shape of interaction. Contracts belong in the Dictionary alongside the types they operate on. *Example:* `TransientJournal` (persistence contract) is defined in `phalanx-proto/src/storage.rs`, not in `phalanx-node` where `FileJournal` implements it. `WireBound` (structural enforcement) is defined in `phalanx-proto/src/wire.rs`. `IngressPort` and `EgressPort` (network contracts) are defined in `phalanx-proto/src/network.rs`, not in `phalanx-transport` where `Libp2pAdapter` implements them.
 - **Operational state is not a first-class Noun.** Retry queues, scheduling metadata, and actor-internal bookkeeping serve the implementation, not the domain model. They belong in their implementing crate, not in shared contracts. *Example:* `OutboundQueue` (WAL-backed retry queue for failed publishes) is defined in `phalanx-node/src/persistence/outbound.rs`. `PendingEgress` lives in `phalanx-proto/src/storage.rs` because it crosses the `TransientJournal` trait boundary, but it is explicitly excluded from the prelude — consumers import it directly from `phalanx_proto::storage::PendingEgress`.
 - **Consumer gravity is a drift pattern.** When a type is used heavily in one module, the temptation is to move it closer. Resist this — check the model first. If the type is a Tense, it stays with the Tenses regardless of who reads it most. *Example:* `PhalanxTimestamp` is used pervasively in `phalanx-node` (vault, outbound queue, actors) but remains defined in `phalanx-proto/src/time.rs`. Its `now()` constructor is `pub(crate)` — external consumers must obtain timestamps through a `TrustedClock` implementor, which reinforces the placement boundary.
 - **Trait signatures in the Dictionary should reference domain types, not runtime-specific types.** If a trait requires a runtime type in its signature, refactor the signature to use domain-shaped abstractions rather than exempting the trait from placement rules. *Example:* `EgressPort::publish()` takes `&MeshTopic` and `EgressPort::disconnect_peer()` takes `&MeshAddress` — domain types defined in the Dictionary. The trait never references `libp2p::PeerId` or `Multiaddr`; the `Libp2pAdapter` in `phalanx-transport` maps between domain types and runtime types at the boundary.
@@ -161,7 +161,7 @@ The following sections are a module-level inventory of each crate. The file list
 
 **Capability Contracts — Traits that define what a component can do:**
 
-- **network.rs:** `NetworkEvent` enum, `IngressPort`, `EgressPort`, `LocalMeshPort` traits. Defines the shape of network interaction without referencing runtime types.
+- **network.rs:** `NetworkEvent` enum, `IngressPort`, `EgressPort` traits. Defines the shape of network interaction without referencing runtime types.
 - **storage.rs:** `TransientJournal` trait (persistence contract), `PendingEgress` (egress salvage noun), `GuardianError`.
 - **wire.rs:** `WireBound` trait — post-deserialization structural constraint enforcement.
 - **playback.rs:** `PlaybackSink` trait — exit gate for decrypted forensic data to UI or C2PA files.
@@ -224,7 +224,6 @@ The following sections are a module-level inventory of each crate. The file list
 
 - **adapters/libp2p.rs:** `Libp2pAdapter` implementing mesh publish/subscribe and direct peer messaging. Translates `PeerId` to `MeshAddress` at the boundary.
 - **adapters/quic/:** Standalone QUIC transport for direct phone-to-Stronghold connections bypassing the libp2p mesh. Split into `client.rs`, `server.rs`, and `wire.rs`.
-- **adapters/local_mesh.rs:** BLE and WiFi Direct adapters via FFI (mobile) with no-op fallback (desktop).
 - **adapters/mock.rs:** Test double for transport-layer integration tests.
 
 **Wiring & Protocol Machinery:**

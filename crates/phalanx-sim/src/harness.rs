@@ -21,7 +21,6 @@ use phalanx_proto::network::{EgressPort, IngressPort};
 use phalanx_proto::prelude::*;
 use phalanx_proto::storage::{PendingEgress, TransientJournal};
 use phalanx_proto::telemetry::{ChaosMode, DiscoverySource, SimEvent};
-use phalanx_transport::adapters::local_mesh::LocalMeshAdapter;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -632,7 +631,6 @@ impl SimulationHarness {
             system_governor: governor,
             vault_key,
             dek_master,
-            local_mesh: None,
             prnu_posterior: std::sync::Arc::new(std::sync::Mutex::new(
                 phalanx_proto::evidence::PrnuPosterior::new_uninformed(),
             )),
@@ -641,7 +639,7 @@ impl SimulationHarness {
             // claimed `sender` matches `network_id` on receive (the form
             // used by `SimulationWorld`'s routing). See SentinelDependencies
             // field docs for why mixing encodings silently breaks heartbeats.
-            local_mesh_address: network_id.clone(),
+            mesh_identity_address: network_id.clone(),
         };
 
         let mut sentinel = MeshSentinel::new(deps).await.map_err(
@@ -775,121 +773,6 @@ impl SimulationHarness {
     /// heartbeats, retry ticks, and cleanup intervals deterministically.
     pub async fn advance_time(&self, duration: Duration) {
         VirtualClock::advance(duration).await;
-    }
-
-    /// Spawn a simulated node with a `LocalMeshAdapter` wired in.
-    ///
-    /// Same as `spawn_node()` but creates a `LocalMeshAdapter` channel bridge
-    /// and passes it into `SentinelDependencies`. Returns both the node's `Did`
-    /// and an `mpsc::Sender<NetworkEvent>` so test scripts can inject local mesh
-    /// events (BLE discovery, data received, peer disconnected) directly.
-    pub async fn spawn_node_with_local_mesh(
-        &mut self,
-        name: &str,
-        role: NodeRole,
-    ) -> Result<(Did, mpsc::Sender<NetworkEvent>), Box<dyn std::error::Error + Send + Sync>> {
-        // No community-id seeding here yet — local-mesh tests don't need
-        // heartbeat round-trip. If they ever do, mirror the
-        // `spawn_node_with_communities` parameter pattern.
-        let extra_community_ids: Vec<phalanx_proto::community::CommunityId> = Vec::new();
-        let identity = PhalanxIdentity::new_ephemeral();
-        let node_did = identity.did.clone();
-        // Sim has no real mesh transport, so its NetworkEvent and World keys
-        // use the same string as the witness identity.
-        let network_id = MeshAddress::new(identity.witness_id.0.clone());
-        let node_config = NodeConfig::default();
-
-        // Create the ingress channel for simulated network events
-        let (ingress_tx, ingress_rx) = mpsc::channel(256);
-
-        // Register in the simulation world routing table
-        {
-            let mut world = self.world.write().await;
-            world.register_node(node_did.clone(), network_id.clone(), ingress_tx);
-        }
-
-        tracing::info!(
-            node = %name,
-            did = %node_did,
-            network_id = %network_id,
-            "Spawning simulated node with local mesh"
-        );
-
-        // Build transport adapters
-        let sim_ingress = SimIngress { rx: ingress_rx };
-        let publish_log: PublishLog = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        self.publish_logs
-            .insert(node_did.clone(), publish_log.clone());
-        let sim_egress = SimEgress {
-            world: self.world.clone(),
-            source_did: node_did.clone(),
-            source_network_id: network_id.clone(),
-            telemetry_tx: self.telemetry_tx.clone(),
-            publish_log,
-        };
-
-        // Local mesh adapter — channel bridge for test injection
-        let (local_mesh_adapter, local_mesh_tx, _outbound_rx, _available) =
-            LocalMeshAdapter::new(64);
-
-        // Build the full MeshSentinel actor constellation
-        let vault_key = derive_vault_key(&identity, &[0u8; 32]);
-        let dek_master = identity.dek_master.clone();
-        let trust_registry = TrustRegistry::build(&node_config).await;
-
-        let governor = Arc::new(SystemGovernor::new());
-        self.governors.insert(node_did.clone(), governor.clone());
-
-        let deps = SentinelDependencies {
-            config: node_config,
-            identity,
-            ingress: sim_ingress,
-            egress: sim_egress,
-            journal: RecoveryJournal::new(vec![]),
-            trust_registry,
-            system_governor: governor,
-            vault_key,
-            dek_master,
-            local_mesh: Some(Box::new(local_mesh_adapter)),
-            prnu_posterior: std::sync::Arc::new(std::sync::Mutex::new(
-                phalanx_proto::evidence::PrnuPosterior::new_uninformed(),
-            )),
-            extra_community_ids: extra_community_ids.clone(),
-            // Sim binds the witness_id-derived MeshAddress so heartbeats'
-            // claimed `sender` matches `network_id` on receive (the form
-            // used by `SimulationWorld`'s routing). See SentinelDependencies
-            // field docs for why mixing encodings silently breaks heartbeats.
-            local_mesh_address: network_id.clone(),
-        };
-
-        let mut sentinel = MeshSentinel::new(deps).await.map_err(
-            |e| -> Box<dyn std::error::Error + Send + Sync> {
-                format!("Failed to initialize MeshSentinel: {}", e).into()
-            },
-        )?;
-
-        // Capture the storage command sender before the sentinel is moved.
-        let storage_tx = sentinel.storage_tx.clone();
-        self.storage_txs.insert(node_did.clone(), storage_tx);
-
-        // Detach sentinel execution
-        tokio::spawn(async move {
-            if let Err(e) = sentinel.run().await {
-                tracing::error!(error = %e, "Simulation node terminated unexpectedly");
-            }
-        });
-
-        // Emit telemetry: PeerDiscovered
-        let _ = self
-            .telemetry_tx
-            .send(SimEvent::PeerDiscovered {
-                peer: network_id,
-                source: DiscoverySource::Bootstrap,
-                role,
-            })
-            .await;
-
-        Ok((node_did, local_mesh_tx))
     }
 
     /// Retrieve the `SystemGovernor` for a spawned node.

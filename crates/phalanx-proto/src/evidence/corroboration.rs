@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use crate::identity::Did;
 use crate::time::PhalanxTimestamp;
-use crate::topology::TransportClass;
 
 // ── Event Window ────────────────────────────────────────────────────────
 
@@ -68,25 +67,6 @@ pub struct SensorDivergence {
     pub p_value: f64,
 }
 
-// ── Proximity Witness ───────────────────────────────────────────────────
-
-/// Evidence that two devices were on the same local mesh during recording.
-///
-/// Captured by the phone's MeshSentinel when a BLE/WiFi Direct peer is
-/// discovered during an active recording. With BLE mutual auth (Part 6),
-/// the remote DID is cryptographically verified.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProximityWitness {
-    pub local_did: Did,
-    pub remote_did: Did,
-    /// The recording that was active when proximity was observed.
-    pub recording_id: crate::identity::RecordingId,
-    /// Timestamp when the LocalMesh connection was observed.
-    pub observed_at: PhalanxTimestamp,
-    /// Transport type (LocalMesh = BLE/WiFi Direct, range-limited).
-    pub transport: TransportClass,
-}
-
 // ── Device Attestation ──────────────────────────────────────────────────
 
 /// One device's contribution to the corroboration proof.
@@ -112,8 +92,8 @@ pub struct DeviceAttestation {
 /// Consumed by the C2PA export path for court-admissible packaging.
 ///
 /// Proves: different physical sensors (PRNU divergence), same event
-/// (temporal overlap), physical co-location (proximity witnesses),
-/// intact custody chains, and non-coordination (distinct DIDs).
+/// (temporal overlap), intact custody chains, and non-coordination
+/// (distinct DIDs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorroborationProof {
     /// The event window this proof covers.
@@ -122,14 +102,11 @@ pub struct CorroborationProof {
     pub attestations: Vec<DeviceAttestation>,
     /// Pairwise sensor divergence results.
     pub divergences: Vec<SensorDivergence>,
-    /// Mesh co-location evidence captured during the event.
-    /// Supporting evidence — strengthens proof but not required.
-    pub proximity_evidence: Vec<ProximityWitness>,
     /// DID of the Stronghold that produced this proof.
     pub producer_did: Did,
     /// Ed25519 signature by the producer over the serialized proof body.
     pub producer_signature: Vec<u8>,
-    /// SHA-256 hash of the proof body (attestations + divergences + proximity + event_window).
+    /// SHA-256 hash of the proof body (event_window + attestations + divergences).
     pub proof_hash: [u8; 32],
 }
 

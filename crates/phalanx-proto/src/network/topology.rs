@@ -26,12 +26,6 @@ impl SubnetBucket {
         Self([hash[0], hash[1]])
     }
 
-    /// Sentinel bucket for local mesh (BLE/WiFi Direct) peers — no IP to bucket.
-    /// All local mesh peers land here; bounded by transport quota, not subnet quota.
-    pub fn local_mesh() -> Self {
-        Self([0xFF, 0xFF])
-    }
-
     /// Deterministic bucket from a single byte. Useful for testing.
     pub fn test_bucket(id: u8) -> Self {
         Self([id, 0])
@@ -72,7 +66,6 @@ impl SubnetQuota {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TransportClass {
     Internet,
-    LocalMesh,
 }
 
 impl TransportClass {
@@ -81,7 +74,6 @@ impl TransportClass {
     pub fn from_discovery_source(src: crate::telemetry::DiscoverySource) -> Self {
         use crate::telemetry::DiscoverySource;
         match src {
-            DiscoverySource::LocalMesh => Self::LocalMesh,
             DiscoverySource::Bootstrap
             | DiscoverySource::Kademlia
             | DiscoverySource::Mdns
@@ -138,12 +130,6 @@ mod tests {
     }
 
     #[test]
-    fn subnet_bucket_local_mesh_sentinel() {
-        let lm = SubnetBucket::local_mesh();
-        assert_eq!(lm.octets(), [0xFF, 0xFF]);
-    }
-
-    #[test]
     fn subnet_quota_zero_rejected() {
         assert!(SubnetQuota::new(0).is_none());
     }
@@ -151,15 +137,6 @@ mod tests {
     #[test]
     fn subnet_quota_default_is_eight() {
         assert_eq!(SubnetQuota::DEFAULT.limit(), 8);
-    }
-
-    #[test]
-    fn transport_class_local_mesh_mapping() {
-        use crate::telemetry::DiscoverySource;
-        assert_eq!(
-            TransportClass::from_discovery_source(DiscoverySource::LocalMesh),
-            TransportClass::LocalMesh
-        );
     }
 
     #[test]

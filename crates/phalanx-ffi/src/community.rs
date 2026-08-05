@@ -639,8 +639,7 @@ pub unsafe extern "C" fn phalanx_import_community(
 /// Set the active recording state on the MeshSentinel.
 ///
 /// Called by Flutter when recording starts (recording_id not null) or stops (null).
-/// When active, MeshSentinel captures ProximityWitness entries and auto-seals
-/// grants to the community Stronghold.
+/// While active, the engine auto-seals grants to the community Stronghold.
 ///
 /// # Safety
 /// * `handle` must be a valid `PhalanxHandle` pointer.

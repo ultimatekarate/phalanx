@@ -49,8 +49,6 @@ pub struct PeerContribution {
     pub connected_secs: u64,
     /// Current value of the peer's contribution integral.
     pub contribution_integral: f64,
-    /// Whether this peer is on a local mesh (BLE) transport.
-    pub is_local_mesh: bool,
 }
 
 /// Result of evaluating a peer's reciprocity.
@@ -80,12 +78,7 @@ pub fn evaluate_reciprocity(
     // Floor scales inversely with mesh size. Clamp denominator to ≥2
     // to avoid division issues in tiny meshes.
     let denominator = mesh_peer_count.max(2) as f64;
-    let mut floor = params.floor_base / denominator;
-
-    // LocalMesh (BLE) peers get 50% leniency — lower throughput expected.
-    if peer.is_local_mesh {
-        floor *= 0.5;
-    }
+    let floor = params.floor_base / denominator;
 
     if peer.contribution_integral >= floor {
         ReciprocityVerdict::Reciprocal
@@ -123,7 +116,6 @@ mod tests {
         let peer = PeerContribution {
             connected_secs: 300, // 5 min < 600s grace
             contribution_integral: 0.0,
-            is_local_mesh: false,
         };
         assert_eq!(
             evaluate_reciprocity(&peer, &default_params(), 3),
@@ -138,7 +130,6 @@ mod tests {
         let peer = PeerContribution {
             connected_secs: 900,
             contribution_integral: 2.0,
-            is_local_mesh: false,
         };
         assert_eq!(
             evaluate_reciprocity(&peer, &default_params(), 3),
@@ -152,7 +143,6 @@ mod tests {
         let peer = PeerContribution {
             connected_secs: 900, // 15 min > grace
             contribution_integral: 0.0,
-            is_local_mesh: false,
         };
         assert_eq!(
             evaluate_reciprocity(&peer, &default_params(), 3),
@@ -167,7 +157,6 @@ mod tests {
         let peer = PeerContribution {
             connected_secs: 900,
             contribution_integral: 0.8,
-            is_local_mesh: false,
         };
         match evaluate_reciprocity(&peer, &default_params(), 3) {
             ReciprocityVerdict::NonReciprocal { deficit } => {
@@ -188,7 +177,6 @@ mod tests {
         let peer = PeerContribution {
             connected_secs: 900,
             contribution_integral: 0.5,
-            is_local_mesh: false,
         };
         // Fails at 3 peers (0.5 < 1.0) but passes at 10 (0.5 > 0.3).
         assert!(matches!(
@@ -201,31 +189,6 @@ mod tests {
         );
     }
 
-    /// LocalMesh (BLE) peers get 50% leniency on the floor.
-    #[test]
-    fn reciprocity_local_mesh_leniency() {
-        // 3 peers: floor = 3.0/3 = 1.0, with leniency: 0.5
-        let peer = PeerContribution {
-            connected_secs: 900,
-            contribution_integral: 0.6,
-            is_local_mesh: true,
-        };
-        // 0.6 > 0.5 (LocalMesh floor) → passes
-        assert_eq!(
-            evaluate_reciprocity(&peer, &default_params(), 3),
-            ReciprocityVerdict::Reciprocal
-        );
-        // Same contribution on Internet → 0.6 < 1.0 → fails
-        let internet_peer = PeerContribution {
-            is_local_mesh: false,
-            ..peer
-        };
-        assert!(matches!(
-            evaluate_reciprocity(&internet_peer, &default_params(), 3),
-            ReciprocityVerdict::NonReciprocal { .. }
-        ));
-    }
-
     /// mesh_count=1 is clamped to 2 to prevent division weirdness.
     #[test]
     fn reciprocity_minimum_mesh_size_clamp() {
@@ -233,7 +196,6 @@ mod tests {
         let peer = PeerContribution {
             connected_secs: 900,
             contribution_integral: 0.0,
-            is_local_mesh: false,
         };
         match evaluate_reciprocity(&peer, &default_params(), 1) {
             ReciprocityVerdict::NonReciprocal { deficit } => {

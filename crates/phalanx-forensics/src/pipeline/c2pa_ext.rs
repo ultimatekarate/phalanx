@@ -60,8 +60,8 @@ impl C2paOrchestrator {
     /// Configures a C2PA Builder with corroboration proof assertions.
     ///
     /// Embeds the full corroboration evidence as structured C2PA assertions:
-    /// event window, device attestations, sensor divergences, proximity evidence,
-    /// and producer identity. Readable by any C2PA-compatible verification tool.
+    /// event window, device attestations, sensor divergences, and producer
+    /// identity. Readable by any C2PA-compatible verification tool.
     ///
     /// Pure logic — no signing, no disk IO.
     #[allow(clippy::cast_possible_truncation)] // Epoch millis fit in u64 for centuries.
@@ -136,12 +136,6 @@ impl C2paOrchestrator {
             })
             .collect();
         builder.add_assertion("phalanx.corroboration.divergences", &divergences)?;
-
-        // Proximity evidence count
-        builder.add_assertion(
-            "phalanx.corroboration.proximity_count",
-            &proof.proximity_evidence.len(),
-        )?;
 
         // Each contributing recording is a C2PA ingredient, referenced by its
         // encrypted evidence hash chain. This establishes the provenance link:

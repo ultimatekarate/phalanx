@@ -185,82 +185,6 @@ typedef struct PhalanxHandle PhalanxHandle;
 typedef struct PlaybackSession PlaybackSession;
 
 /**
- * Build a fresh BLE challenge bound to the node's *active recording*, for the
- * platform plugin to relay to a discovered peer (challenger initiation).
- *
- * The `recording_id` is read from the engine — NOT supplied by the plugin — so
- * the recording the responder signs is exactly the one the resulting
- * `ProximityWitness` binds (both engine-sourced). Returns `InvalidState` if no
- * recording is active. The challenger keeps the returned blob to pair with the
- * peer's `BleResponse` in `phalanx_ble_verify_and_admit`.
- *
- * The output is a postcard-serialized `BleChallenge`; the caller frees it with
- * `phalanx_free_bytes`.
- *
- * # Safety
- * * `handle` must be a valid pointer from `phalanx_create`.
- * * `out_challenge`/`out_len` must be valid, writable pointers.
- */
-
-int32_t phalanx_make_ble_challenge(const struct PhalanxHandle *handle,
-                                   uint8_t **out_challenge,
-                                   uint32_t *out_len)
-;
-
-/**
- * Sign a BLE auth challenge from a remote peer, returning a `BleResponse` blob.
- *
- * Flutter calls this when it receives a `BleChallenge` blob over BLE. Rust
- * deserializes it, signs the recording/time-bound message with the node's
- * Ed25519 key, and returns a postcard-serialized `BleResponse` (the node's DID
- * + the signature) for Flutter to relay back. The blob is OPAQUE — the plugin
- * never assembles a response itself — and the challenger feeds it straight into
- * `phalanx_ble_verify_and_admit`.
- *
- * # Parameters
- * * `handle` — valid `PhalanxHandle` pointer.
- * * `challenge_ptr`/`challenge_len` — postcard-serialized `BleChallenge`.
- * * `out_response`/`out_len` — receive the leaked `BleResponse` blob; the
- *   caller frees it with `phalanx_free_bytes`.
- *
- * # Safety
- * All pointers must be valid; `challenge_ptr` must point to `challenge_len`
- * readable bytes and `out_response`/`out_len` must be writable.
- */
-
-int32_t phalanx_sign_ble_challenge(const struct PhalanxHandle *handle,
-                                   const uint8_t *challenge_ptr,
-                                   uintptr_t challenge_len,
-                                   uint8_t **out_response,
-                                   uint32_t *out_len)
-;
-
-/**
- * Verify a BLE auth response against the challenge it answers.
- *
- * Pure signature check over the recording/time-bound message. Returns
- * `PhalanxError::Ok` (0) if the signature is valid, `InvalidState` if not.
- * This does NOT enforce freshness, single-use nonces, or admission — those
- * live in `phalanx_ble_verify_and_admit`. Use this only where a bare crypto
- * check is wanted (e.g. UI feedback before admission).
- *
- * # Parameters
- * * `handle` — valid `PhalanxHandle` pointer.
- * * `challenge_ptr`/`challenge_len` — postcard-serialized `BleChallenge` we issued.
- * * `response_ptr`/`response_len` — postcard-serialized `BleResponse` received.
- *
- * # Safety
- * All pointers must be valid with the specified lengths.
- */
-
-int32_t phalanx_verify_ble_peer(const struct PhalanxHandle *handle,
-                                const uint8_t *challenge_ptr,
-                                uintptr_t challenge_len,
-                                const uint8_t *response_ptr,
-                                uintptr_t response_len)
-;
-
-/**
  * Starts PRNU calibration. Allocates the frame buffer.
  *
  * Call this before pushing calibration frames. Returns error if calibration
@@ -644,8 +568,7 @@ int32_t phalanx_import_community(const struct PhalanxHandle *handle,
  * Set the active recording state on the MeshSentinel.
  *
  * Called by Flutter when recording starts (recording_id not null) or stops (null).
- * When active, MeshSentinel captures ProximityWitness entries and auto-seals
- * grants to the community Stronghold.
+ * While active, the engine auto-seals grants to the community Stronghold.
  *
  * # Safety
  * * `handle` must be a valid `PhalanxHandle` pointer.
@@ -945,108 +868,6 @@ struct PhalanxHandle *phalanx_restore_with_profile(const char *profile_name,
  * * Null is a safe no-op.
  */
  void phalanx_destroy(struct PhalanxHandle *handle) ;
-
-/**
- * Verify a BLE auth response and, only on success, admit the peer as an
- * authenticated LocalMesh discovery. This is the Rust-side trust boundary for
- * proximity corroboration.
- *
- * A `PeerDiscovered{LocalMesh}` event — and therefore a `ProximityWitness` —
- * is emitted ONLY when all four hold:
- *   1. the responder's Ed25519 signature verifies over the recording/time-bound
- *      message (`verify_ble_response`),
- *   2. the challenge is fresh — within `BLE_CHALLENGE_MAX_AGE` of now,
- *   3. the per-window LocalMesh admission cap is not yet reached — the
- *      anti-sybil throttle for a co-located attacker minting valid handshakes,
- *   4. the challenge nonce has not already been admitted (single-use).
- *
- * There is deliberately NO bare "push a discovered peer" entry point: the
- * platform plugin cannot mint an unauthenticated LocalMesh peer, because the
- * only path that emits the discovery runs this verification first. The DID the
- * witness binds is the one whose signature just verified — not an
- * FFI-supplied string the engine would otherwise trust blindly.
- *
- * `challenge` and `response` are opaque postcard blobs the plugin relays over
- * BLE; it never constructs or parses them.
- *
- * # Safety
- * * `handle` must be a valid pointer from `phalanx_create`.
- * * `challenge_ptr`/`response_ptr` must point to the declared number of
- *   readable bytes.
- */
-
-int32_t phalanx_ble_verify_and_admit(struct PhalanxHandle *handle,
-                                     const uint8_t *challenge_ptr,
-                                     uintptr_t challenge_len,
-                                     const uint8_t *response_ptr,
-                                     uintptr_t response_len)
-;
-
-/**
- * Pushes received data from a local mesh peer into the channel.
- *
- * Called when BLE/WiFi Direct receives data from a nearby device.
- *
- * # Safety
- * * `handle` must be a valid pointer from `phalanx_create`.
- * * `peer_id` must be a valid null-terminated C string.
- * * `topic` must be a valid null-terminated C string.
- * * `data` must point to `data_len` valid bytes.
- */
-
-int32_t phalanx_local_mesh_push_data_received(struct PhalanxHandle *handle,
-                                              const char *peer_id,
-                                              const char *topic,
-                                              const uint8_t *data,
-                                              uint32_t data_len)
-;
-
-/**
- * Pushes a peer disconnection event from Flutter into the local mesh channel.
- *
- * Called when a BLE/WiFi Direct peer goes out of range or disconnects.
- *
- * # Safety
- * * `handle` must be a valid pointer from `phalanx_create`.
- * * `peer_id` must be a valid null-terminated C string.
- */
-
-int32_t phalanx_local_mesh_push_peer_disconnected(struct PhalanxHandle *handle,
-                                                  const char *peer_id)
-;
-
-/**
- * Polls for the next outbound local mesh packet.
- *
- * Flutter calls this to retrieve data that Rust wants to send to a local peer.
- * Returns the target peer ID, data, and data length through output parameters.
- * If no packet is available, `*out_data` is set to null and returns Ok.
- *
- * Caller must free `*out_peer` with `phalanx_free_string` and `*out_data`
- * with `phalanx_free_bytes`.
- *
- * # Safety
- * * `handle` must be a valid pointer from `phalanx_create`.
- * * `out_peer`, `out_data`, and `out_len` must be valid pointers.
- */
-
-int32_t phalanx_local_mesh_poll_outbound(struct PhalanxHandle *handle,
-                                         char **out_peer,
-                                         uint8_t **out_data,
-                                         uint32_t *out_len)
-;
-
-/**
- * Sets the local mesh transport availability flag.
- *
- * Flutter calls this when BLE/WiFi Direct becomes available or unavailable.
- * The MeshSentinel's select! loop checks `is_available()` to decide whether
- * to poll the local mesh adapter.
- *
- * # Safety
- * * `handle` must be a valid pointer from `phalanx_create`.
- */
- int32_t phalanx_local_mesh_set_available(struct PhalanxHandle *handle, bool available) ;
 
 /**
  * Frees a null-terminated C string allocated by Rust.

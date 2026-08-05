@@ -54,17 +54,12 @@ pub enum EclipseCommand {
     /// Run topology admission for a newly-discovered peer. The reply
     /// channel returns the outcome (admitted/evicted/was_first_seen) so the
     /// orchestrator on `MeshSentinel` can fan out follow-on work
-    /// (proximity witness capture, revocation replay) without depending on
-    /// internal Eclipse state.
+    /// (revocation replay) without depending on internal Eclipse state.
     TryAdmit {
         peer: MeshAddress,
         source: phalanx_proto::telemetry::DiscoverySource,
         bucket: SubnetBucket,
         transport: TransportClass,
-        /// Computed by the orchestrator from `local_mesh` availability and
-        /// `system_governor.internet_available()`. Eclipse does not own
-        /// the inputs; the orchestrator passes the result through.
-        transport_balance: TransportBalance,
         reply_to: oneshot::Sender<AdmitOutcome>,
     },
     /// Tear down per-peer state on disconnect. Demotes anchor, releases
@@ -187,12 +182,9 @@ impl EclipseRouter {
                 source,
                 bucket,
                 transport,
-                transport_balance,
                 reply_to,
             } => {
-                let outcome = self
-                    .handle_try_admit(peer, source, bucket, transport, transport_balance)
-                    .await;
+                let outcome = self.handle_try_admit(peer, source, bucket, transport).await;
                 let _ = reply_to.send(outcome);
             }
             EclipseCommand::PeerDisconnected { peer } => {
@@ -213,7 +205,6 @@ impl EclipseRouter {
         source: phalanx_proto::telemetry::DiscoverySource,
         bucket: SubnetBucket,
         transport: TransportClass,
-        balance: TransportBalance,
     ) -> AdmitOutcome {
         // E6: Per-second rate limit on peer discovery processing.
         let now = Instant::now();
@@ -240,7 +231,6 @@ impl EclipseRouter {
             phalanx_proto::trust::TrustLevel::default(),
             bucket,
             transport,
-            balance,
         ) {
             Ok((_ticket, evicted)) => {
                 self.system_governor.record_peer_discovery(source);
@@ -478,15 +468,10 @@ impl EclipseRouter {
                 .unwrap_or(now_secs);
             let connected_secs = now_secs.saturating_sub(first_seen);
             let contribution = self.system_governor.peer_contribution_value(&peer_id.0);
-            let is_local_mesh = self
-                .topology_gate
-                .transport_class(peer_id)
-                .is_some_and(|tc| tc == TransportClass::LocalMesh);
 
             let snapshot = PeerContribution {
                 connected_secs,
                 contribution_integral: contribution,
-                is_local_mesh,
             };
 
             if let ReciprocityVerdict::NonReciprocal { deficit } =

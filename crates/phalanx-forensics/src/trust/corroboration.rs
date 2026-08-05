@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use phalanx_proto::corroboration::{
     CorroborationError, CorroborationProof, DeviceAttestation, EventWindow, PrnuProfile,
-    ProximityWitness, SensorDivergence,
+    SensorDivergence,
 };
 use phalanx_proto::evidence::{Evidence, Recording};
 use phalanx_proto::identity::Did;
@@ -199,13 +199,9 @@ const MIN_PRNU_FRAMES: u32 = 10;
 /// 2. All DIDs are distinct
 /// 3. All pairwise PRNU divergences have p-value < divergence_alpha
 /// 4. All chains have intact integrity (head + tail hashes present)
-///
-/// Proximity witnesses are attached as supporting evidence — not required,
-/// advisory only.
 #[allow(clippy::arithmetic_side_effects)] // Timestamp arithmetic for overlap computation.
 pub fn corroborate(
     recordings: &[&Recording],
-    proximity_log: &[ProximityWitness],
     min_overlap: Duration,
     divergence_alpha: f64,
 ) -> Result<CorroborationProof, CorroborationError> {
@@ -303,19 +299,11 @@ pub fn corroborate(
         divergences
     };
 
-    // 6. Proximity matching (supporting evidence, not required)
-    let proximity_evidence: Vec<ProximityWitness> = proximity_log
-        .iter()
-        .filter(|pw| pw.observed_at.0 >= overlap_start && pw.observed_at.0 <= overlap_end)
-        .cloned()
-        .collect();
-
-    // 7. Assemble proof (signature and hash filled by the Stronghold's Hands layer)
+    // 6. Assemble proof (signature and hash filled by the Stronghold's Hands layer)
     Ok(CorroborationProof {
         event_window,
         attestations,
         divergences,
-        proximity_evidence,
         producer_did: Did::new("pending:stronghold-signs-this"),
         producer_signature: Vec::new(),
         proof_hash: [0u8; 32], // Computed by Stronghold after signing
@@ -407,7 +395,7 @@ mod tests {
         let rec_a = make_recording("alice", 150.0, 1000, 30);
         let rec_b = make_recording("bob", 220.0, 1100, 30); // different PRNU baseline
 
-        let result = corroborate(&[&rec_a, &rec_b], &[], Duration::from_millis(100), 0.05);
+        let result = corroborate(&[&rec_a, &rec_b], Duration::from_millis(100), 0.05);
 
         assert!(
             result.is_ok(),
@@ -423,7 +411,7 @@ mod tests {
     #[test]
     fn corroborate_rejects_single_recording() {
         let rec = make_recording("alice", 150.0, 1000, 30);
-        let result = corroborate(&[&rec], &[], Duration::from_millis(100), 0.05);
+        let result = corroborate(&[&rec], Duration::from_millis(100), 0.05);
         assert!(matches!(
             result,
             Err(CorroborationError::InsufficientRecordings(1))
@@ -435,7 +423,7 @@ mod tests {
         let rec_a = make_recording("alice", 150.0, 1000, 30);
         let rec_b = make_recording("bob", 220.0, 50000, 30); // far in the future
 
-        let result = corroborate(&[&rec_a, &rec_b], &[], Duration::from_millis(100), 0.05);
+        let result = corroborate(&[&rec_a, &rec_b], Duration::from_millis(100), 0.05);
         assert!(matches!(result, Err(CorroborationError::NoTemporalOverlap)));
     }
 
@@ -444,44 +432,7 @@ mod tests {
         let rec_a = make_recording("alice", 150.0, 1000, 30);
         let rec_b = make_recording("alice", 220.0, 1100, 30); // same DID!
 
-        let result = corroborate(&[&rec_a, &rec_b], &[], Duration::from_millis(100), 0.05);
+        let result = corroborate(&[&rec_a, &rec_b], Duration::from_millis(100), 0.05);
         assert!(matches!(result, Err(CorroborationError::DuplicateDid(_))));
-    }
-
-    #[test]
-    fn corroborate_includes_proximity_within_window() {
-        let rec_a = make_recording("alice", 150.0, 1000, 30);
-        let rec_b = make_recording("bob", 220.0, 1100, 30);
-
-        let proximity = vec![
-            ProximityWitness {
-                local_did: Did::new("did:key:alice"),
-                remote_did: Did::new("did:key:bob"),
-                recording_id: RecordingId::new("rec-alice"),
-                observed_at: PhalanxTimestamp(1150), // within overlap
-                transport: phalanx_proto::topology::TransportClass::LocalMesh,
-            },
-            ProximityWitness {
-                local_did: Did::new("did:key:alice"),
-                remote_did: Did::new("did:key:carol"),
-                recording_id: RecordingId::new("rec-alice"),
-                observed_at: PhalanxTimestamp(99999), // outside overlap
-                transport: phalanx_proto::topology::TransportClass::LocalMesh,
-            },
-        ];
-
-        let proof = corroborate(
-            &[&rec_a, &rec_b],
-            &proximity,
-            Duration::from_millis(100),
-            0.05,
-        )
-        .unwrap();
-
-        assert_eq!(
-            proof.proximity_evidence.len(),
-            1,
-            "Only the witness within the overlap window should be included"
-        );
     }
 }

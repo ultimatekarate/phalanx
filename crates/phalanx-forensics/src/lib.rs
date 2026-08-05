@@ -79,6 +79,6 @@ pub mod prelude {
     // Eclipse & Topology
     pub use crate::eclipse::{EclipseProbe, MeshFingerprint};
     pub use crate::topology_gate::{
-        AdmissionDenied, AdmissionTicket, AnchorEligible, TopologyGate, TransportBalance,
+        AdmissionDenied, AdmissionTicket, AnchorEligible, TopologyGate,
     };
 }

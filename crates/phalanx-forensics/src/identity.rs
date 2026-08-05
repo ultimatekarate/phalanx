@@ -6,7 +6,6 @@ use phalanx_proto::community::{
     VouchRequestPreview, VouchResponse, VouchSignature,
 };
 use phalanx_proto::crypto::CryptoError;
-use phalanx_proto::network::{BleChallenge, BleResponse};
 use phalanx_proto::prelude::*;
 use phalanx_proto::time::PhalanxTimestamp;
 use phalanx_proto::trust::{PetName, TrustLevel};
@@ -585,90 +584,6 @@ pub fn verify_vouch_response(
     .map_err(|_| CeremonyError::FingerprintMismatch)
 }
 
-// ── BLE Challenge-Response Verification ─────────────────────────────────
-
-/// Maximum age of a BLE challenge before a verifier rejects it (the replay
-/// window). Proximity is a live, face-to-face event; 60 s is generous for the
-/// 4-message handshake yet tight enough to bound replay. The same value
-/// doubles as the allowed future-skew tolerance.
-pub const BLE_CHALLENGE_MAX_AGE: PhalanxTimestamp = PhalanxTimestamp(60_000);
-
-/// Build the message that must be signed for a BLE auth response.
-///
-/// `message = responder_did || challenger_did || recording_id || nonce || issued_at`
-///
-/// Binding `recording_id` and `issued_at` is what prevents a captured signature
-/// from being replayed to forge a `ProximityWitness` for a *different* recording
-/// or at a *later* time — the verifier rebuilds this exact message from the
-/// challenge it holds, so any change to either field breaks verification.
-pub fn ble_auth_message(
-    responder_did: &Did,
-    challenger_did: &Did,
-    challenge_nonce: &[u8; 32],
-    recording_id: &RecordingId,
-    issued_at: PhalanxTimestamp,
-) -> Vec<u8> {
-    let mut msg = Vec::new();
-    msg.extend_from_slice(responder_did.as_ref().as_bytes());
-    msg.extend_from_slice(challenger_did.as_ref().as_bytes());
-    msg.extend_from_slice(recording_id.0.as_bytes());
-    msg.extend_from_slice(challenge_nonce);
-    msg.extend_from_slice(&issued_at.as_u64().to_le_bytes());
-    msg
-}
-
-/// True if `issued_at` is within `max_age` of `now` (with a symmetric
-/// future-skew tolerance). Pure logic — the caller supplies `now` from its
-/// `TrustedClock`. Defeats *later* replay of an otherwise-valid signature; the
-/// caller must *also* enforce single-use nonces to defeat *immediate* replay.
-#[must_use]
-pub fn ble_challenge_is_fresh(
-    issued_at: PhalanxTimestamp,
-    now: PhalanxTimestamp,
-    max_age: PhalanxTimestamp,
-) -> bool {
-    let now = now.as_u64();
-    let issued = issued_at.as_u64();
-    let window = max_age.as_u64();
-    // Reject far-future timestamps (clock games) outside the skew tolerance.
-    if issued > now.saturating_add(window) {
-        return false;
-    }
-    now.saturating_sub(issued) <= window
-}
-
-/// Verify a BLE auth response: check that the responder's signature is valid
-/// over the recording/time-bound message. Pure logic — no IO. Freshness and
-/// nonce single-use are enforced separately by the caller (`ble_challenge_is_fresh`
-/// plus a seen-nonce guard) since they require a clock and per-verifier state.
-pub fn verify_ble_response(
-    challenge: &BleChallenge,
-    response: &BleResponse,
-) -> Result<(), CryptoError> {
-    let pk_bytes = resolve_did_public_key(&response.responder_did)?;
-    let verifying_key =
-        VerifyingKey::from_bytes(&pk_bytes).map_err(|_| CryptoError::DidResolutionFailure)?;
-
-    let sig_bytes: [u8; 64] = response
-        .signature
-        .as_slice()
-        .try_into()
-        .map_err(|_| CryptoError::InvalidKeyLength)?;
-    let signature = Signature::from_bytes(&sig_bytes);
-
-    let message = ble_auth_message(
-        &response.responder_did,
-        &challenge.sender_did,
-        &challenge.nonce,
-        &challenge.recording_id,
-        challenge.issued_at,
-    );
-
-    verifying_key
-        .verify(&message, &signature)
-        .map_err(|_| CryptoError::DecryptionFailure)
-}
-
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -772,100 +687,6 @@ mod tests {
 
         // Verify against wrong member DID — should fail
         assert!(verify_vouch(&vouch, &wrong_did, &community_id, joined_at).is_err());
-    }
-
-    #[test]
-    fn ble_auth_valid_response() {
-        let (challenger_did, _) = make_identity();
-        let (responder_did, responder_sk) = make_identity();
-
-        let challenge = BleChallenge {
-            sender_did: challenger_did.clone(),
-            nonce: [99u8; 32],
-            recording_id: RecordingId::new("rec-1"),
-            issued_at: PhalanxTimestamp(1_000),
-        };
-
-        let msg = ble_auth_message(
-            &responder_did,
-            &challenger_did,
-            &challenge.nonce,
-            &challenge.recording_id,
-            challenge.issued_at,
-        );
-        let sig = responder_sk.sign(&msg);
-
-        let response = BleResponse {
-            responder_did: responder_did.clone(),
-            signature: sig.to_bytes().to_vec(),
-        };
-
-        assert!(verify_ble_response(&challenge, &response).is_ok());
-    }
-
-    #[test]
-    fn ble_auth_rejects_replay_for_different_recording() {
-        let (challenger_did, _) = make_identity();
-        let (responder_did, responder_sk) = make_identity();
-
-        // Responder genuinely signs an attestation bound to recording "rec-A".
-        let signed = BleChallenge {
-            sender_did: challenger_did.clone(),
-            nonce: [7u8; 32],
-            recording_id: RecordingId::new("rec-A"),
-            issued_at: PhalanxTimestamp(1_000),
-        };
-        let msg = ble_auth_message(
-            &responder_did,
-            &challenger_did,
-            &signed.nonce,
-            &signed.recording_id,
-            signed.issued_at,
-        );
-        let response = BleResponse {
-            responder_did: responder_did.clone(),
-            signature: responder_sk.sign(&msg).to_bytes().to_vec(),
-        };
-
-        // The captured signature must NOT verify when re-presented against a
-        // different recording id — this is the cross-recording forgery gap 2
-        // closes (witness for a recording the responder never attested to).
-        let replayed = BleChallenge {
-            recording_id: RecordingId::new("rec-B"),
-            ..signed.clone()
-        };
-        assert!(verify_ble_response(&replayed, &response).is_err());
-
-        // ...and the original still verifies (binding is exact, not lossy).
-        assert!(verify_ble_response(&signed, &response).is_ok());
-    }
-
-    #[test]
-    fn ble_challenge_freshness_window() {
-        let issued = PhalanxTimestamp(10_000);
-        // At issue time and at the edge of the window: fresh.
-        assert!(ble_challenge_is_fresh(
-            issued,
-            PhalanxTimestamp(10_000),
-            BLE_CHALLENGE_MAX_AGE
-        ));
-        assert!(ble_challenge_is_fresh(
-            issued,
-            PhalanxTimestamp(70_000),
-            BLE_CHALLENGE_MAX_AGE
-        ));
-        // One millisecond past the window: stale.
-        assert!(!ble_challenge_is_fresh(
-            issued,
-            PhalanxTimestamp(70_001),
-            BLE_CHALLENGE_MAX_AGE
-        ));
-        // Far-future issue time (clock games): rejected.
-        assert!(!ble_challenge_is_fresh(
-            PhalanxTimestamp(10_000_000),
-            PhalanxTimestamp(10_000),
-            BLE_CHALLENGE_MAX_AGE
-        ));
     }
 
     // ── Community Assembly & Verification Tests ─────────────────────────
@@ -1431,36 +1252,6 @@ mod tests {
             &CommunityId([0u8; 32]),
             PhalanxTimestamp(0),
         )
-    }
-
-    #[test]
-    fn ble_auth_wrong_key_fails() {
-        let (challenger_did, _) = make_identity();
-        let (responder_did, _) = make_identity();
-        let (_, wrong_sk) = make_identity(); // different key!
-
-        let challenge = BleChallenge {
-            sender_did: challenger_did.clone(),
-            nonce: [99u8; 32],
-            recording_id: RecordingId::new("rec-1"),
-            issued_at: PhalanxTimestamp(1_000),
-        };
-
-        let msg = ble_auth_message(
-            &responder_did,
-            &challenger_did,
-            &challenge.nonce,
-            &challenge.recording_id,
-            challenge.issued_at,
-        );
-        let sig = wrong_sk.sign(&msg); // signed with wrong key
-
-        let response = BleResponse {
-            responder_did: responder_did.clone(),
-            signature: sig.to_bytes().to_vec(),
-        };
-
-        assert!(verify_ble_response(&challenge, &response).is_err());
     }
 
     // ── DID resolution hardening ────────────────────────────────────────

@@ -50,7 +50,6 @@ impl EvidenceExt for Evidence {
             Evidence::Audio(s) => &s.recording_id,
             Evidence::Handover(h) => &h.recording_id,
             Evidence::Gap(g) => &g.recording_id,
-            Evidence::Proximity(p) => &p.recording_id,
             Evidence::ManifestEntry(m) => &m.recording_id,
         }
     }
@@ -60,7 +59,6 @@ impl EvidenceExt for Evidence {
             Evidence::Audio(s) => s.sequence_id,
             Evidence::Handover(h) => h.sequence_id,
             Evidence::Gap(g) => g.start_seq,
-            Evidence::Proximity(_) => StorageSequence(u32::MAX), // metadata, not a frame
             Evidence::ManifestEntry(m) => m.sequence_id,
         }
     }

@@ -325,12 +325,6 @@ fn render_results(ui: &mut egui::Ui, state: &CorroborateState) {
                         });
                 },
             );
-
-            // Proximity
-            ui.label(format!(
-                "Proximity witnesses: {}",
-                proof.proximity_evidence.len()
-            ));
         }
         AsyncReply::Ready(Err(msg)) => {
             ui.separator();

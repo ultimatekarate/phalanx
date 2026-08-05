@@ -12,19 +12,19 @@
 //! Each function exercises one FFI entry point that used to deadlock
 //! against `engine.run()`'s long-held borrow on the sentinel:
 //!
-//! * **H1** — `phalanx_sign_ble_challenge` (was: `sentinel_ref.lock().await`
-//!   inside a `block_on`). Fixed by signing via `h.identity.keypair`
-//!   (past-tense) directly.
-//! * **H2** — `phalanx_set_recording_state` (same lock pattern). Fixed by
-//!   dispatching `SentinelCommand::SetRecordingState` through the
-//!   sentinel mailbox.
+//! * **H2** — `phalanx_set_recording_state` (was: `sentinel_ref.lock().await`
+//!   inside a `block_on`). Fixed by dispatching
+//!   `SentinelCommand::SetRecordingState` through the sentinel mailbox.
 //! * **H3** — `phalanx_start_recovery` (same lock pattern, but inside a
 //!   `tokio::spawn` so the function returned 0 immediately and the
 //!   recovery silently stalled in `Idle`). Fixed by
 //!   `SentinelCommand::SpawnRecovery`. The test must therefore assert
 //!   *progress*, not just return code.
 //!
-//! All three tests run under a hard timeout: deadlocks must fail loudly
+//! (H1 covered `phalanx_sign_ble_challenge`, removed with the BLE/local-mesh
+//! excision; H2/H3 still guard the same FFI-vs-engine deadlock class.)
+//!
+//! Both tests run under a hard timeout: deadlocks must fail loudly
 //! rather than hang CI.
 
 use phalanx_ffi::error::PhalanxError;
@@ -114,66 +114,6 @@ unsafe fn cleanup(
             phalanx_ffi::memory::phalanx_free_string(genesis);
         }
     }
-}
-
-/// **H1 regression**: signing a BLE challenge while the engine is
-/// running must complete in milliseconds, not deadlock against
-/// `engine.run()`. Pre-QW1 this hung forever because the FFI awaited
-/// `sentinel.lock()` inside `block_on`.
-#[test]
-fn h1_sign_ble_challenge_does_not_deadlock_against_engine_run() {
-    under_timeout(Duration::from_secs(60), || {
-        let env = TestEnv::new();
-        let (handle, genesis) = unsafe { create_and_start(&env) };
-
-        // The challenge is an opaque postcard blob at the FFI boundary; build
-        // one the way the plugin would relay it (recording/time-bound).
-        let challenge = phalanx_proto::network::BleChallenge {
-            sender_did: phalanx_proto::identity::Did::new(
-                "did:key:z6MkTestChallengerForH1Regression",
-            ),
-            nonce: [0xABu8; 32],
-            recording_id: phalanx_proto::identity::RecordingId::new("rec-h1"),
-            issued_at: phalanx_proto::time::PhalanxTimestamp::from_u64(1_000),
-        };
-        let challenge_blob = postcard::to_allocvec(&challenge).expect("serialize challenge");
-        let mut out_data: *mut u8 = std::ptr::null_mut();
-        let mut out_len: u32 = 0;
-
-        // The actual deadlock candidate: must return in milliseconds.
-        let signing_start = std::time::Instant::now();
-        let code = unsafe {
-            phalanx_ffi::ble_auth::phalanx_sign_ble_challenge(
-                handle,
-                challenge_blob.as_ptr(),
-                challenge_blob.len(),
-                &mut out_data,
-                &mut out_len,
-            )
-        };
-        let elapsed = signing_start.elapsed();
-        assert_eq!(code, 0, "phalanx_sign_ble_challenge must succeed");
-        assert!(
-            elapsed < Duration::from_secs(1),
-            "phalanx_sign_ble_challenge took {elapsed:?}; expected <1s (deadlock regression)"
-        );
-        // The response is an opaque postcard `BleResponse` blob: the node's DID
-        // + a non-zero Ed25519 signature (Ed25519 doesn't produce all-zero sigs).
-        assert!(
-            !out_data.is_null() && out_len > 0,
-            "response blob must be populated"
-        );
-        let blob = unsafe { std::slice::from_raw_parts(out_data, out_len as usize) }.to_vec();
-        let response: phalanx_proto::network::BleResponse =
-            postcard::from_bytes(&blob).expect("response deserializes as BleResponse");
-        assert!(
-            response.signature.iter().any(|&b| b != 0),
-            "signature must be populated"
-        );
-        unsafe { phalanx_ffi::memory::phalanx_free_bytes(out_data, out_len) };
-
-        unsafe { cleanup(handle, genesis) }
-    });
 }
 
 /// **H2 regression**: setting the recording state while the engine is

@@ -13,7 +13,7 @@ This document covers what each actor does, what messages it handles, how it conn
                     │                  MeshSentinel                  │
                     │   (orchestrator — spawns every actor, routes   │
                     │    events; holds no business logic or state)   │
-  Network ─Ingress──│  select!: ingress · local_mesh ·               │
+  Network ─Ingress──│  select!: ingress ·                            │
                     │           commit_notify_rx · discovery_rx ·    │
                     │           lifecycle_rx · sentinel_cmd_rx (FFI) │
                     └──┬──────────────────┬───────────────────┬──────┘
@@ -69,7 +69,7 @@ All actor channels follow the same pattern:
 
 The heuristic: **if a handler needs to read many things and write one thing, inline it in the router. If it needs to read one thing and do expensive work, give it an actor.**
 
-- `PeerDiscovered` reads topology + trust + health + eclipse state and emits a single admit/reject decision. This was once inline, but the topology state (admission gate, eclipse-fingerprint history, reciprocity ledgers, DID cache) is large and stateful, so it lives in **EclipseRouter**. The latency worry is resolved by a single `TryAdmit` → `AdmitOutcome` round-trip (one oneshot reply, not 4-5 queries): the orchestrator passes Eclipse the inputs and gets back the decision plus the follow-on flags (`was_first_seen`) it needs to fan out proximity-witness capture and revocation replay.
+- `PeerDiscovered` reads topology + trust + health + eclipse state and emits a single admit/reject decision. This was once inline, but the topology state (admission gate, eclipse-fingerprint history, reciprocity ledgers, DID cache) is large and stateful, so it lives in **EclipseRouter**. The latency worry is resolved by a single `TryAdmit` → `AdmitOutcome` round-trip (one oneshot reply, not 4-5 queries): the orchestrator passes Eclipse the inputs and gets back the decision plus the follow-on flags (`was_first_seen`) it needs to fan out revocation replay.
 - `Ingest` reads one shard but does gate checks + fountain reassembly + disk I/O → **actor** (IngestionActor + StorageActor). The work is expensive and must not block the event router.
 - `SecureRetrieval` reads one request but does auth verification + disk fetch + response sealing → **actor** (RetrievalActor).
 
@@ -90,7 +90,6 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 | Arm | Source | Action |
 | ----- | -------- | -------- |
 | `ingress.next_event()` | Network (QUIC / libp2p) | Route by `NetworkEvent` variant (see below) |
-| `local_mesh.next_event()` | BLE / WiFi Direct | Same routing as ingress |
 | `commit_notify_rx` | StorageActor | Forward `ArchiveCommand::StageRecording` → ArchiveCoordinator; `EgressCommand::AnnounceRecording` → EgressActor |
 | `discovery_rx` | PlaybackCoordinator | `EgressCommand::FindProviders` — ask DHT who has missing shards |
 | `lifecycle_rx` | Mobile OS | Recalculate `PowerState` on foreground/background transitions |
@@ -105,7 +104,7 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 | `DataReceived` (control topic) | VitalsActor | `VitalsCommand::InboundHeartbeat` (try_send) |
 | `DataReceived` (revocation topic) | RevocationActor | `RevocationCommand::InboundToken` (send().await) |
 | `DataReceived` (data topic) | IngestionActor | `IngestionCommand::ProcessChunk` |
-| `PeerDiscovered` | EclipseRouter (+ inline fan-out) | `EclipseCommand::TryAdmit`; on success: proximity-witness capture, `CanaryCommand::OnPeerReconnected`, `ReplayRevocations` |
+| `PeerDiscovered` | EclipseRouter (+ inline fan-out) | `EclipseCommand::TryAdmit`; on success: `CanaryCommand::OnPeerReconnected`, `ReplayRevocations` |
 | `RecordingRequested` | RetrievalActor | `RetrievalCommand::SecureRetrieval` |
 | `ProvidersDiscovered` | PlaybackCoordinator | `providers_tx` channel |
 | `ArchiveReceiptReceived` | ArchiveCoordinator | `ArchiveCommand::ReceiptReceived` |
@@ -115,7 +114,7 @@ An inline handler is *not* a code smell as long as it only mutates local router 
 **Retained inline state** (structural, not business logic):
 
 - **playback slot** — the at-most-one-playback `JoinHandle` invariant (`spawn_playback` / `spawn_recovery`)
-- **RecordingSessionState** — active recording id, content-key watch, proximity-witness buffer (drained to the egress actor on stop, sealed as `Evidence::Proximity`)
+- **RecordingSessionState** — active recording id, content-key watch, recording-active flag
 - **edge gates** in `handle_data_received` / `handle_data_chunk` — oversized-message rejection, bandwidth gating
 - writes the shared `Arc<HealthTracker>` (data-volume observation on inbound chunks; spectral-peer cleanup on disconnect)
 
@@ -425,7 +424,6 @@ EclipseRouter, CanarySupervisor, VitalsActor, ArchiveCoordinator, and Revocation
 | --------- | --------- |
 | `IngestChunk` | Main flow: reassemble → amalgamate → store |
 | `FetchRecordings` | Retrieve recordings by community + recording IDs |
-| `FetchProximity` | Retrieve proximity witnesses for corroboration |
 | `RefreshRouting` | Update DID-to-community cache from CommunityActor |
 | `Revoke` | Cryptographic forgetting |
 

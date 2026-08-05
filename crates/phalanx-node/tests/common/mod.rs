@@ -208,7 +208,8 @@ pub async fn build_mesh_test_deps(
     let dek_master = identity.dek_master.clone();
     let trust_registry = TrustRegistry::build(&config).await;
 
-    let local_mesh_address = phalanx_transport::identity_ext::Libp2pExt::to_mesh_address(&identity);
+    let mesh_identity_address =
+        phalanx_transport::identity_ext::Libp2pExt::to_mesh_address(&identity);
     let synthetic_peer = phalanx_transport::identity_ext::Libp2pExt::to_mesh_address(peer_identity);
 
     let mesh_egress = MeshTestEgress::new(ingress_tx.clone(), seeded_shards, synthetic_peer);
@@ -225,12 +226,11 @@ pub async fn build_mesh_test_deps(
         system_governor: Arc::new(SystemGovernor::new()),
         vault_key,
         dek_master,
-        local_mesh: None,
         prnu_posterior: Arc::new(std::sync::Mutex::new(
             phalanx_proto::evidence::PrnuPosterior::new_uninformed(),
         )),
         extra_community_ids: Vec::new(),
-        local_mesh_address,
+        mesh_identity_address,
     };
 
     MeshTestDeps {
@@ -273,7 +273,8 @@ pub async fn build_test_sentinel_with_communities(
     let dek_master = identity.dek_master.clone();
     let trust_registry = TrustRegistry::build(&config).await;
 
-    let local_mesh_address = phalanx_transport::identity_ext::Libp2pExt::to_mesh_address(&identity);
+    let mesh_identity_address =
+        phalanx_transport::identity_ext::Libp2pExt::to_mesh_address(&identity);
     let deps = SentinelDependencies {
         config,
         identity,
@@ -284,12 +285,11 @@ pub async fn build_test_sentinel_with_communities(
         system_governor: Arc::new(SystemGovernor::new()),
         vault_key,
         dek_master,
-        local_mesh: None,
         prnu_posterior: Arc::new(std::sync::Mutex::new(
             phalanx_proto::evidence::PrnuPosterior::new_uninformed(),
         )),
         extra_community_ids,
-        local_mesh_address,
+        mesh_identity_address,
     };
 
     (
